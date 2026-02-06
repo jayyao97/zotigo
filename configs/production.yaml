@@ -1,0 +1,274 @@
+# Zotigo Production Configuration
+# This configuration extends default.yaml for production environment
+
+# Production provider settings
+providers:
+  openai:
+    model: "gpt-4"
+    temperature: 0.7
+    timeout: "45s"  # Longer timeout for production stability
+  
+  claude:
+    model: "claude-3-sonnet-20240229"
+    temperature: 0.7
+    timeout: "45s"
+  
+  gemini:
+    model: "gemini-pro"
+    temperature: 0.7
+    timeout: "45s"
+
+# Production agent settings
+agent:
+  mode: "chat"
+  max_iterations: 15  # Allow more iterations in production
+  max_execution_time: "10m"
+  auto_save_session: true
+  
+  react:
+    max_thinking_time: "60s"
+    max_planning_steps: 25
+    enable_parallel_execution: true
+    retry_on_failure: true
+    max_retries: 5  # More retries for reliability
+
+# Enhanced security for production
+security:
+  sandbox_enabled: true
+  sandbox_timeout: "120s"
+  allowed_tools:
+    - "filesystem"
+    - "git"
+    - "web"
+    - "code_analysis"
+    - "test_runner"
+  
+  allowed_paths:
+    - "."
+    - "/tmp/zotigo"  # Specific temp directory
+  
+  blocked_paths:
+    - "/etc"
+    - "/usr"
+    - "/bin"
+    - "/sbin"
+    - "/var"
+    - "/root"
+    - "/home"  # Block home directories for security
+  
+  allowed_domains:
+    - "github.com"
+    - "gitlab.com"
+    - "stackoverflow.com"
+    - "docs.python.org"
+    - "pkg.go.dev"
+    - "developer.mozilla.org"
+    - "rust-lang.org"
+  
+  allowed_commands:
+    - "git"
+    - "npm"
+    - "pip"
+    - "go"
+    - "python"
+    - "python3"
+    - "node"
+    - "cargo"
+    - "mvn"
+    - "gradle"
+  
+  blocked_commands:
+    - "rm"
+    - "sudo"
+    - "su"
+    - "chmod"
+    - "chown"
+    - "curl"
+    - "wget"
+    - "ssh"
+    - "scp"
+    - "rsync"
+
+# Production UI settings
+ui:
+  theme: "auto"
+  progress_style: "bar"
+  streaming: true
+  show_thinking: false  # Hide internal thinking in production
+  show_metadata: false
+  colors:
+    primary: "#00D4AA"
+    secondary: "#6B7280"
+    success: "#10B981"
+    warning: "#F59E0B"
+    error: "#EF4444"
+    info: "#3B82F6"
+
+# Production session settings
+session:
+  auto_save: true
+  save_interval: "15s"  # More frequent saves
+  max_history: 200
+  compression_enabled: true
+  storage_path: "~/.zotigo/sessions"
+  
+  cleanup_enabled: true
+  max_age: "90d"  # Keep sessions longer in production
+  max_size: "500MB"
+
+# Production logging
+logging:
+  level: "info"
+  format: "json"
+  output: "file"
+  file_path: "~/.zotigo/logs/zotigo.log"
+  max_size: "50MB"
+  max_age: "30d"
+  max_backups: 10
+  
+  components:
+    agent: "info"
+    providers: "info"
+    tools: "warn"
+    mcp: "info"
+    protocol: "warn"
+
+# Production tool settings
+tools:
+  builtin:
+    filesystem:
+      enabled: true
+      max_file_size: "25MB"
+      allowed_extensions:
+        - ".txt"
+        - ".md"
+        - ".json"
+        - ".yaml"
+        - ".yml"
+        - ".py"
+        - ".js"
+        - ".ts"
+        - ".go"
+        - ".rs"
+        - ".java"
+        - ".cpp"
+        - ".c"
+        - ".h"
+        - ".css"
+        - ".html"
+        - ".xml"
+        - ".toml"
+        - ".ini"
+        - ".cfg"
+        - ".sh"
+        - ".bash"
+        - ".zsh"
+    
+    git:
+      enabled: true
+      auto_commit: false
+      default_branch: "main"
+      max_diff_size: "2MB"
+    
+    web:
+      enabled: true
+      max_page_size: "10MB"
+      timeout: "15s"
+      user_agent: "Zotigo/1.0 (+https://github.com/jayyao97/zotigo)"
+    
+    code_analysis:
+      enabled: true
+      languages:
+        - "python"
+        - "javascript"
+        - "typescript"
+        - "go"
+        - "rust"
+        - "java"
+        - "cpp"
+        - "c"
+    
+    test_runner:
+      enabled: true
+      timeout: "10m"
+      parallel: true
+
+# Production MCP settings
+mcp:
+  enabled: true
+  timeout: "45s"
+  max_connections: 20
+  
+  servers: []
+    # Production MCP servers should be configured per deployment
+
+# Production performance settings
+performance:
+  max_concurrent_requests: 3
+  max_concurrent_tools: 2
+  
+  cache_enabled: true
+  cache_size: "200MB"
+  cache_ttl: "2h"
+  
+  rate_limit:
+    requests_per_minute: 30
+    tokens_per_minute: 5000
+  
+  max_memory_usage: "2GB"
+  
+  default_timeout: "45s"
+  long_operation_timeout: "15m"
+
+# Production settings
+development:
+  debug_mode: false
+  profile_enabled: false
+  mock_providers: false
+  test_mode: false
+  hot_reload: false
+
+# Production telemetry (opt-in)
+telemetry:
+  enabled: false
+  endpoint: "https://telemetry.zotigo.dev/api/v1/events"
+  api_key_ref: "env:ZOTIGO_TELEMETRY_KEY"
+  
+  collect:
+    usage_stats: true
+    error_reports: true
+    performance_metrics: true
+    feature_usage: false  # Disable detailed feature tracking
+  
+  anonymize_data: true
+  exclude_sensitive_data: true
+
+# Production monitoring and health checks
+monitoring:
+  enabled: true
+  health_check_interval: "30s"
+  metrics_endpoint: "/metrics"
+  
+  alerts:
+    enabled: true
+    error_threshold: 5  # Alert after 5 errors in a row
+    latency_threshold: "10s"  # Alert if response takes longer than 10s
+    memory_threshold: "1.5GB"  # Alert if memory usage exceeds 1.5GB
+
+# Backup and recovery
+backup:
+  enabled: true
+  interval: "24h"
+  retention: "7d"
+  storage_path: "~/.zotigo/backups"
+  compression: true
+  
+  # What to backup
+  include:
+    - "sessions"
+    - "configurations"
+    - "logs"
+  
+  exclude:
+    - "cache"
+    - "temp"
