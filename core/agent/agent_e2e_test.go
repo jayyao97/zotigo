@@ -17,6 +17,8 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 
 	// Register providers
+	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 )
 
@@ -25,7 +27,7 @@ import (
 //
 // These tests may:
 // - Take longer to run
-// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY)
+// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY)
 // - Make real API calls
 
 func TestE2E_AgentLongConversation(t *testing.T) {
@@ -155,7 +157,7 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 
 	profileCfg := e2eCfg.GetProfileConfig()
 	if profileCfg.APIKey == "" {
-		t.Skip("No API key configured in config.json")
+		t.Skip("No API key configured in e2e.config.json (or legacy config.json)")
 	}
 
 	t.Logf("Using provider: %s, model: %s", profileCfg.Provider, profileCfg.Model)

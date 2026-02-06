@@ -13,6 +13,8 @@ import (
 	"github.com/jayyao97/zotigo/core/testutil"
 
 	// Register providers
+	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 )
 
@@ -21,7 +23,7 @@ import (
 //
 // These tests may:
 // - Take longer to run
-// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY)
+// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY)
 // - Make real API calls
 
 func TestE2E_RealWorldConversation(t *testing.T) {
@@ -287,7 +289,7 @@ func TestE2E_CompressionPerformance(t *testing.T) {
 	}
 }
 
-// TestE2E_WithRealSummarizer tests with a real LLM summarizer using config.json
+// TestE2E_WithRealSummarizer tests with a real LLM summarizer using e2e.config.json.
 func TestE2E_WithRealSummarizer(t *testing.T) {
 	cfg, err := testutil.LoadE2EConfig()
 	if err != nil {
@@ -296,7 +298,7 @@ func TestE2E_WithRealSummarizer(t *testing.T) {
 
 	profileCfg := cfg.GetProfileConfig()
 	if profileCfg.APIKey == "" {
-		t.Skip("No API key configured in config.json")
+		t.Skip("No API key configured in e2e.config.json (or legacy config.json)")
 	}
 
 	t.Logf("Using provider: %s, model: %s", profileCfg.Provider, profileCfg.Model)

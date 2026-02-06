@@ -100,7 +100,7 @@ zotigo/
 │   ├── tools/              # Built-in tools
 │   ├── lsp/                # Language server integration
 │   └── transport/          # Runner transport abstraction
-├── config.json             # Local runtime profile config (example)
+├── e2e.config.example.json # Example config for provider E2E tests
 └── zotigo_plan.md          # Planning and phase status notes
 ```
 

@@ -11,23 +11,29 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 )
 
-// ProviderConfig represents the provider-specific config in config.json
+const (
+	e2eConfigFileName       = "e2e.config.json"
+	legacyE2EConfigFileName = "config.json"
+)
+
+// ProviderConfig represents the provider-specific config in e2e.config.json.
 type ProviderConfig struct {
 	APIKey  string `json:"api_key"`
 	BaseURL string `json:"base_url"`
 	Model   string `json:"model"`
 }
 
-// E2EConfig represents the config.json structure for E2E tests
+// E2EConfig represents the E2E config structure.
 type E2EConfig struct {
 	Provider  string          `json:"provider"`
 	Streaming bool            `json:"streaming"`
 	UserID    string          `json:"user_id"`
 	OpenAI    *ProviderConfig `json:"openai,omitempty"`
 	Anthropic *ProviderConfig `json:"anthropic,omitempty"`
+	Gemini    *ProviderConfig `json:"gemini,omitempty"`
 }
 
-// LoadE2EConfig loads the config.json from project root
+// LoadE2EConfig loads e2e.config.json (or legacy config.json) from project root.
 func LoadE2EConfig() (*E2EConfig, error) {
 	configPath := findConfigPath()
 	data, err := os.ReadFile(configPath)
@@ -64,6 +70,15 @@ func (c *E2EConfig) GetProfileConfig() config.ProfileConfig {
 				BaseURL:  c.Anthropic.BaseURL,
 			}
 		}
+	case "gemini":
+		if c.Gemini != nil {
+			return config.ProfileConfig{
+				Provider: "gemini",
+				Model:    c.Gemini.Model,
+				APIKey:   c.Gemini.APIKey,
+				BaseURL:  c.Gemini.BaseURL,
+			}
+		}
 	}
 	return config.ProfileConfig{}
 }
@@ -77,11 +92,13 @@ func MustLoadE2EConfig() *E2EConfig {
 	return cfg
 }
 
-// findConfigPath finds config.json in project root
+// findConfigPath finds e2e.config.json (or legacy config.json) in project root.
 func findConfigPath() string {
 	// Try from current directory first
-	if _, err := os.Stat("config.json"); err == nil {
-		return "config.json"
+	for _, name := range []string{e2eConfigFileName, legacyE2EConfigFileName} {
+		if _, err := os.Stat(name); err == nil {
+			return name
+		}
 	}
 
 	// Try from project root (go up from source file)
@@ -89,14 +106,16 @@ func findConfigPath() string {
 	if ok {
 		dir := filepath.Dir(filename)
 		for i := 0; i < 5; i++ {
-			configPath := filepath.Join(dir, "config.json")
-			if _, err := os.Stat(configPath); err == nil {
-				return configPath
+			for _, name := range []string{e2eConfigFileName, legacyE2EConfigFileName} {
+				configPath := filepath.Join(dir, name)
+				if _, err := os.Stat(configPath); err == nil {
+					return configPath
+				}
 			}
 			dir = filepath.Dir(dir)
 		}
 	}
 
-	// Fallback: assume we're in project root
-	return "config.json"
+	// Fallback: prefer the new file name.
+	return e2eConfigFileName
 }

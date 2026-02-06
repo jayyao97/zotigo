@@ -20,7 +20,7 @@ This document guides any agent (AI coding agent, CLI assistant, etc.) working in
 - Debug: set `ZOTIGO_DEBUG=true` to enable verbose agent/provider logging.
 
 ## Configuration
-- Prefer local `config.json`; environment variables act as fallback.
+- Runtime config lives in `~/.zotigo/config.yaml`; E2E tests use `e2e.config.json` (legacy `config.json` is still supported).
 - Provider selection: explicit `provider` or auto-detect by available creds in order `claude` → `aws` → `openai`.
 - Never hardcode secrets; follow `core/config/config.go` and provider loaders.
 
@@ -67,7 +67,7 @@ This document guides any agent (AI coding agent, CLI assistant, etc.) working in
 - Keep patches atomic and reversible; ensure deletions have no remaining references.
 
 ## Quick Troubleshooting
-- Provider not selected: check `config.json`/env or set `provider` explicitly.
+- Provider not selected: check `~/.zotigo/config.yaml`/env or set `provider` explicitly.
 - Tools not firing: ensure registry registration, schema alignment with model output, and inspect debug logs.
 - Empty output/looping: enable `ZOTIGO_DEBUG=true`, verify tool results are appended and `task_complete` is emitted.
 

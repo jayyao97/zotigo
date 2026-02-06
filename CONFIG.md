@@ -1,83 +1,69 @@
-# Configuration Guide
+# E2E Configuration Guide
+
+This document is for real-provider E2E tests only.
+Runtime CLI config still uses `~/.zotigo/config.yaml`.
 
 ## Quick Start
 
-1. Copy the example configuration:
+1. Copy the example file:
    ```bash
-   cp config.example.json config.json
+   cp e2e.config.example.json e2e.config.json
    ```
 
-2. Edit `config.json` with your API key:
-   ```json
-   {
-     "anthropic": {
-       "api_key": "your-actual-anthropic-api-key-here",
-       "base_url": "https://api.anthropic.com/v1/messages",
-       "model": "claude-3-5-sonnet-20241022"
-     }
-   }
-   ```
+2. Edit `e2e.config.json` with your API keys and models.
 
-3. Run with Claude provider:
+3. Run E2E tests:
    ```bash
-   ./zotigo --provider claude
+   go test -tags=e2e ./core/providers -run TestE2E_ProviderSmoke -v
    ```
 
-## Configuration Options
-
-### For LiteLLM Proxy
-
-If you're using LiteLLM to forward requests:
+## Example (OpenRouter)
 
 ```json
 {
+  "provider": "openai",
+  "streaming": true,
+  "user_id": "local_test",
+  "openai": {
+    "api_key": "sk-or-v1-...",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "gpt-5.2-codex"
+  },
   "anthropic": {
-    "api_key": "your-actual-anthropic-api-key-here",
-    "base_url": "http://localhost:4000/v1/chat/completions",
-    "model": "claude-3-5-sonnet-20241022"
+    "api_key": "sk-or-v1-...",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "anthropic/claude-haiku-4.5"
+  },
+  "gemini": {
+    "api_key": "sk-or-v1-...",
+    "base_url": "https://openrouter.ai/api/v1",
+    "model": "google/gemini-3-flash-preview"
   }
 }
 ```
 
-### Available Models
+## File Resolution Order
 
-- `claude-3-5-sonnet-20241022` (recommended)
-- `claude-3-opus-20240229`
-- `claude-3-sonnet-20240229`
-- `claude-3-haiku-20240307`
+`LoadE2EConfig()` resolves config files in this order:
 
-## Priority Order
-
-Configuration values are resolved in this order:
-
-1. **Command line flags** (highest priority)
-2. **config.json file**
-3. **Environment variables** (fallback)
-4. **Default values** (lowest priority)
+1. `e2e.config.json` (preferred)
+2. `config.json` (legacy fallback)
 
 ## Security
 
-- `config.json` is automatically ignored by git
-- Never commit your API keys to version control
-- Keep your config.json file secure and private
+- `e2e.config.json` is ignored by git.
+- Never commit real API keys.
 
 ## Troubleshooting
 
-### "config.json not found"
-Create the config file using the example:
+### "No API key configured"
+
+Make sure the selected `provider` section has a non-empty `api_key`.
+
+### "E2E config file not found"
+
+Create the file from the example:
+
 ```bash
-cp config.example.json config.json
+cp e2e.config.example.json e2e.config.json
 ```
-
-### "API key is required"
-Make sure your `config.json` contains a valid API key:
-```json
-{
-  "anthropic": {
-    "api_key": "sk-ant-api03-..."
-  }
-}
-```
-
-### Invalid API key error
-Verify your API key is correct in the Anthropic Console.
