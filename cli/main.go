@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/session"
