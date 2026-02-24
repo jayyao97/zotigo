@@ -6,6 +6,7 @@ type Config struct {
 	Profiles       map[string]ProfileConfig `mapstructure:"profiles" yaml:"profiles"`
 	Security       SecurityConfig           `mapstructure:"security" yaml:"security"`
 	UI             UIConfig                 `mapstructure:"ui" yaml:"ui"`
+	Tools          ToolsConfig              `mapstructure:"tools" yaml:"tools"`
 }
 
 // ProfileConfig defines a specific configuration for an AI model usage.
@@ -29,6 +30,19 @@ type SecurityConfig struct {
 // UIConfig holds UI preferences.
 type UIConfig struct {
 	Theme string `mapstructure:"theme" yaml:"theme"`
+}
+
+// ToolsConfig holds configuration for built-in tools.
+type ToolsConfig struct {
+	Web WebToolsConfig `mapstructure:"web" yaml:"web"`
+}
+
+// WebToolsConfig holds configuration for web-related tools (web_search, web_fetch).
+type WebToolsConfig struct {
+	TavilyAPIKey string `mapstructure:"tavily_api_key" yaml:"tavily_api_key"`
+	UserAgent    string `mapstructure:"user_agent" yaml:"user_agent"`
+	TimeoutSec   int    `mapstructure:"timeout_sec" yaml:"timeout_sec"`
+	MaxPageSize  int    `mapstructure:"max_page_size" yaml:"max_page_size"`
 }
 
 // DefaultConfig returns the default configuration values.
@@ -55,6 +69,13 @@ func DefaultConfig() *Config {
 		},
 		UI: UIConfig{
 			Theme: "dark",
+		},
+		Tools: ToolsConfig{
+			Web: WebToolsConfig{
+				UserAgent:   "Zotigo/1.0",
+				TimeoutSec:  15,
+				MaxPageSize: 5 * 1024 * 1024, // 5MB
+			},
 		},
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/jayyao97/zotigo/cli/tui"
@@ -181,6 +182,16 @@ func main() {
 	lspManager := lsp.NewManager(cwd)
 	defer lspManager.StopAll()
 	ag.RegisterTool(builtin.NewLSPTool(lspManager))
+
+	// Web tools
+	webClient := builtin.NewWebClient(builtin.WebConfig{
+		TavilyAPIKey: cfg.Tools.Web.TavilyAPIKey,
+		UserAgent:    cfg.Tools.Web.UserAgent,
+		Timeout:      time.Duration(cfg.Tools.Web.TimeoutSec) * time.Second,
+		MaxPageSize:  cfg.Tools.Web.MaxPageSize,
+	})
+	ag.RegisterTool(builtin.NewWebSearchTool(webClient))
+	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
 
 	// 7. Run Main TUI
 	p := tea.NewProgram(
