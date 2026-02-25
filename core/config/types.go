@@ -16,7 +16,7 @@ type ProfileConfig struct {
 	Model    string `mapstructure:"model" yaml:"model"`       // e.g. "gpt-4o"
 	APIKey   string `mapstructure:"api_key" yaml:"api_key"`
 	BaseURL  string `mapstructure:"base_url,omitempty" yaml:"base_url,omitempty"`
-	
+
 	// Additional provider-specific params can be added here or in a generic map
 	Params map[string]any `mapstructure:"params,omitempty" yaml:"params,omitempty"`
 }
@@ -56,11 +56,11 @@ func DefaultConfig() *Config {
 			},
 			"claude-sonnet": {
 				Provider: "claude",
-				Model:    "claude-3-5-sonnet-latest",
+				Model:    "claude-4-6-sonnet-latest",
 			},
 			"gemini-pro": {
 				Provider: "gemini",
-				Model:    "gemini-1.5-pro-latest",
+				Model:    "gemini-3.0-pro-latest",
 			},
 		},
 		Security: SecurityConfig{
