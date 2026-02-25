@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // WebSearchTool searches the web using the Tavily Search API.
@@ -103,6 +104,10 @@ type tavilyResult struct {
 	URL     string  `json:"url"`
 	Content string  `json:"content"`
 	Score   float64 `json:"score"`
+}
+
+func (t *WebSearchTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *WebSearchTool) Execute(ctx context.Context, _ executor.Executor, argsJSON string) (any, error) {

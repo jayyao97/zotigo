@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // WebFetchTool fetches a web page and returns its content as readable text.
@@ -46,6 +47,10 @@ func (t *WebFetchTool) Schema() any {
 		},
 		"required": []string{"url"},
 	}
+}
+
+func (t *WebFetchTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *WebFetchTool) Execute(ctx context.Context, _ executor.Executor, argsJSON string) (any, error) {

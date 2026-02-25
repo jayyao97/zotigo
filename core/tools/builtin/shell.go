@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // ShellTool executes shell commands through the executor.
@@ -37,6 +38,10 @@ func (t *ShellTool) Schema() any {
 		},
 		"required": []string{"command"},
 	}
+}
+
+func (t *ShellTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false}
 }
 
 func (t *ShellTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

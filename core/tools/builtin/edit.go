@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // EditTool performs precise string replacement edits in files.
@@ -43,6 +44,10 @@ func (t *EditTool) Schema() any {
 		},
 		"required": []string{"path", "old_string", "new_string"},
 	}
+}
+
+func (t *EditTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
 }
 
 func (t *EditTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -139,6 +144,10 @@ func (t *PatchTool) Schema() any {
 		},
 		"required": []string{"path", "patch"},
 	}
+}
+
+func (t *PatchTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
 }
 
 func (t *PatchTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // --- ReadFile ---
@@ -26,6 +27,10 @@ func (t *ReadFileTool) Schema() any {
 		},
 		"required": []string{"path"},
 	}
+}
+
+func (t *ReadFileTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -65,6 +70,10 @@ func (t *WriteFileTool) Schema() any {
 	}
 }
 
+func (t *WriteFileTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
+}
+
 func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
 	var args struct {
 		Path    string `json:"path"`
@@ -97,6 +106,10 @@ func (t *ListDirTool) Schema() any {
 			},
 		},
 	}
+}
+
+func (t *ListDirTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
 }
 
 func (t *ListDirTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

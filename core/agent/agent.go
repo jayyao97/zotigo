@@ -2,7 +2,10 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -271,21 +274,56 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						// 5. Handle Tool Calls (The Decision Point)
 						if len(currentToolCalls) > 0 {
 							if a.policy == ApprovalPolicyManual {
-								a.mu.Lock()
-								a.state = StatePaused
+								// Split into safe (read-only in working dir) and unsafe tool calls
+								var safeCalls, unsafeCalls []*protocol.ToolCall
 								for _, tc := range currentToolCalls {
-									a.pendingActions = append(a.pendingActions, &PendingAction{
-										ToolCallID: tc.ID,
-										Name:       tc.Name,
-										Arguments:  tc.Arguments,
-										ToolCall:   tc,
-									})
+									if a.isToolCallSafe(tc) {
+										safeCalls = append(safeCalls, tc)
+									} else {
+										unsafeCalls = append(unsafeCalls, tc)
+									}
 								}
-								a.mu.Unlock()
-								// Emit custom finish reason for UI to trigger approval
-								// Wait, the loop will continue, check StatePaused, and emit "need_approval".
-								// So we just continue here.
-								continue 
+
+								// Auto-execute safe tool calls
+								if len(safeCalls) > 0 {
+									a.mu.Lock()
+									for _, tc := range safeCalls {
+										a.pendingActions = append(a.pendingActions, &PendingAction{
+											ToolCallID: tc.ID,
+											Name:       tc.Name,
+											Arguments:  tc.Arguments,
+											ToolCall:   tc,
+										})
+									}
+									a.mu.Unlock()
+
+									results, err := a.executePendingActions(ctx)
+									if err != nil {
+										outCh <- protocol.NewErrorEvent(err)
+										return
+									}
+									toolMsg := protocol.NewToolMessage(results)
+									a.mu.Lock()
+									a.history = append(a.history, toolMsg)
+									a.mu.Unlock()
+								}
+
+								// Pause for unsafe tool calls
+								if len(unsafeCalls) > 0 {
+									a.mu.Lock()
+									a.state = StatePaused
+									for _, tc := range unsafeCalls {
+										a.pendingActions = append(a.pendingActions, &PendingAction{
+											ToolCallID: tc.ID,
+											Name:       tc.Name,
+											Arguments:  tc.Arguments,
+											ToolCall:   tc,
+										})
+									}
+									a.mu.Unlock()
+								}
+
+								continue
 							} else {
 								// ... (Auto execution logic same as before) ...
 								a.mu.Lock()
@@ -424,4 +462,56 @@ func (a *Agent) buildContext() []protocol.Message {
 
 	msgs = append(msgs, history...)
 	return msgs
+}
+
+// isToolCallSafe checks if a tool call can be auto-approved based on the tool's Safety() declaration.
+func (a *Agent) isToolCallSafe(tc *protocol.ToolCall) bool {
+	tool, ok := a.tools[tc.Name]
+	if !ok {
+		return false
+	}
+
+	safety := tool.Safety()
+
+	// Non-read-only tools always require approval
+	if !safety.ReadOnly {
+		return false
+	}
+
+	// Read-only with no path args → always safe
+	if len(safety.PathArgs) == 0 {
+		return true
+	}
+
+	// Read-only with path args → check all paths are within the working directory
+	return a.allPathsInWorkDir(tc.Arguments, safety.PathArgs)
+}
+
+// allPathsInWorkDir checks that all path arguments are within the working directory.
+func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return false
+	}
+
+	workDir := a.executor.WorkDir()
+	for _, key := range pathArgs {
+		val, ok := args[key]
+		if !ok || val == nil {
+			continue // argument not present → tool uses default (typically cwd)
+		}
+		pathStr, ok := val.(string)
+		if !ok || pathStr == "" {
+			continue
+		}
+		absPath := pathStr
+		if !filepath.IsAbs(pathStr) {
+			absPath = filepath.Join(workDir, pathStr)
+		}
+		absPath = filepath.Clean(absPath)
+		if !strings.HasPrefix(absPath, workDir) {
+			return false
+		}
+	}
+	return true
 }

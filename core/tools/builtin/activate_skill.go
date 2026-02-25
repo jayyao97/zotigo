@@ -7,6 +7,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // ActivateSkillTool allows the LLM to activate skills during conversation
@@ -43,6 +44,10 @@ func (t *ActivateSkillTool) Schema() any {
 
 type activateSkillArgs struct {
 	Name string `json:"name"`
+}
+
+func (t *ActivateSkillTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *ActivateSkillTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -131,6 +136,10 @@ func (t *ListSkillsTool) Schema() any {
 		"type":       "object",
 		"properties": map[string]any{},
 	}
+}
+
+func (t *ListSkillsTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *ListSkillsTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
