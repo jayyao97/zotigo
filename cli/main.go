@@ -22,6 +22,13 @@ import (
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
 
+// Build-time variables set via -ldflags.
+var (
+	Version    = "dev"
+	BuildTime  = "unknown"
+	CommitHash = "unknown"
+)
+
 // KittyFilterWriter wraps *os.File to filter out unsupported Kitty keyboard protocol sequences.
 type KittyFilterWriter struct {
 	*os.File

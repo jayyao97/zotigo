@@ -49,6 +49,7 @@ type Model struct {
 	height          int
 	initialPrinted  bool
 	kittyChecked    bool
+	autoApprove     bool
 }
 
 type streamReadyMsg <-chan protocol.Event
@@ -76,13 +77,35 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string) Model {
 	styles.Blurred.CursorLine = lipgloss.NewStyle()
 	ta.SetStyles(styles)
 
-	return Model{
+	m := Model{
 		agent:      ag,
 		sessionMgr: sessMgr,
 		sessionID:  sessID,
 		ctx:        context.Background(),
 		input:      ta,
 	}
+
+	// If the agent was saved in a paused state with pending actions,
+	// restore the approval UI so the user can approve/deny.
+	snap := ag.Snapshot()
+	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
+		m.approving = true
+		m.approvalChoice = 0
+		var sb strings.Builder
+		if len(snap.PendingActions) > 1 {
+			sb.WriteString(fmt.Sprintf("%d tools:\n", len(snap.PendingActions)))
+		}
+		for _, act := range snap.PendingActions {
+			args := act.Arguments
+			if len(args) > 50 {
+				args = args[:47] + "..."
+			}
+			sb.WriteString(fmt.Sprintf("• %s %s\n", act.Name, args))
+		}
+		m.pendingToolName = strings.TrimSpace(sb.String())
+	}
+
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -179,21 +202,51 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		}
 
-		if m.approving {
-			if keyStr == "enter" {
-				return m.submitApproval(m.approvalChoice == 0)
+		if keyStr == "shift+tab" {
+			m.autoApprove = !m.autoApprove
+			if m.autoApprove {
+				m.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+			} else {
+				m.agent.SetApprovalPolicy(agent.ApprovalPolicyManual)
 			}
+			// Re-focus textarea to maintain cursor blink cycle
+			cmd := m.input.Focus()
+			return m, cmd
+		}
+
+		if m.approving {
 			switch keyStr {
-			case "left", "h":
-				m.approvalChoice = 0
-			case "right", "l", "tab":
-				if m.approvalChoice == 0 {
-					m.approvalChoice = 1
-				} else {
-					m.approvalChoice = 0
+			case "up", "k":
+				if m.approvalChoice > 0 {
+					m.approvalChoice--
+				}
+				return m, nil
+			case "down", "j":
+				if m.approvalChoice < 2 {
+					m.approvalChoice++
+				}
+				return m, nil
+			case "enter":
+				switch m.approvalChoice {
+				case 0: // Accept
+					return m.submitApproval(true)
+				case 1: // Deny → back to input
+					return m.denyAndReturn("")
+				case 2: // Feedback textarea → deny with text
+					v := m.input.Value()
+					if strings.TrimSpace(v) == "" {
+						return m, nil // empty text, do nothing
+					}
+					m.input.Reset()
+					return m.denyAndReturn(v)
 				}
 			}
-			return m, nil
+			// When approvalChoice==2, let other keys fall through to textarea update
+			if m.approvalChoice == 2 {
+				// fall through to bottom textarea update logic
+			} else {
+				return m, nil
+			}
 		}
 
 		if keyStr == "ctrl+v" {
@@ -370,7 +423,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Println(errStr)
 	}
 
-	if !m.approving {
+	if !m.approving || m.approvalChoice == 2 {
+		// Filter IME composition events: key press with no printable text
+		// and not a special/functional key. These are intermediate states
+		// from CJK input methods that cause cursor flickering.
+		if k, ok := msg.(tea.KeyPressMsg); ok {
+			if len(k.Text) == 0 && !isSpecialKey(k) {
+				return m, nil
+			}
+		}
+
 		// Before handling key input, predict line wrap and pre-grow the input height.
 		if k, ok := msg.(tea.KeyPressMsg); ok && len(k.Text) > 0 {
 			w := m.input.Width()
@@ -444,6 +506,58 @@ func (m Model) submitApproval(approved bool) (Model, tea.Cmd) {
 	return m, tea.Batch(tea.Println(approvalMsg), cmd)
 }
 
+func (m Model) denyAndReturn(feedback string) (Model, tea.Cmd) {
+	m.approving = false
+
+	reason := "User denied"
+	if feedback != "" {
+		reason = feedback
+	}
+
+	status := "🚫 Denied"
+	if feedback != "" {
+		status = fmt.Sprintf("🚫 Denied (feedback: %s)", feedback)
+	}
+	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
+
+	snap := m.agent.Snapshot()
+	var outputs []protocol.ToolResult
+	for _, act := range snap.PendingActions {
+		outputs = append(outputs, protocol.ToolResult{
+			ToolCallID: act.ToolCallID,
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     reason,
+		})
+	}
+
+	if feedback == "" {
+		// Simple deny: back to input mode
+		m.thinking = false
+		cmd := func() tea.Msg {
+			ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
+			if err != nil {
+				return errMsg(err)
+			}
+			// Drain the channel so agent settles, but don't continue the loop
+			for range ch {
+			}
+			return nil
+		}
+		return m, tea.Batch(tea.Println(approvalMsg), cmd)
+	}
+
+	// Deny with feedback: keep thinking, agent continues with user feedback
+	m.thinking = true
+	cmd := func() tea.Msg {
+		ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
+		if err != nil {
+			return errMsg(err)
+		}
+		return streamReadyMsg(ch)
+	}
+	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+}
+
 func waitForNextEvent(ch <-chan protocol.Event) tea.Cmd {
 	return func() tea.Msg {
 		if ch == nil {
@@ -474,24 +588,61 @@ func (m Model) View() tea.View {
 	}
 
 	if m.approving {
-		yesStyle := blurredButtonStyle
-		noStyle := blurredButtonStyle
-		if m.approvalChoice == 0 {
-			yesStyle = focusedButtonStyle
-		} else {
-			noStyle = focusedButtonStyle
-		}
-		buttons := lipgloss.JoinHorizontal(lipgloss.Top,
-			yesStyle.Render("Yes (Run All)"),
-			"  ",
-			noStyle.Render("No (Skip All)"),
-		)
-
 		info := warningStyle.Render("⚠️  Execute:")
 		list := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(m.pendingToolName)
 
-		sb.WriteString(fmt.Sprintf("%s\n%s\n\n%s", info, list, buttons))
+		focusedText := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+		blurredText := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+
+		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", info, list))
+
+		// Accept line
+		if m.approvalChoice == 0 {
+			sb.WriteString(fmt.Sprintf("%s %s\n", focusedText.Render(">"), focusedText.Render("Accept")))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s\n", blurredText.Render("Accept")))
+		}
+
+		// Deny line
+		if m.approvalChoice == 1 {
+			sb.WriteString(fmt.Sprintf("%s %s\n", focusedText.Render(">"), focusedText.Render("Deny")))
+		} else {
+			sb.WriteString(fmt.Sprintf("  %s\n", blurredText.Render("Deny")))
+		}
+
+		// Feedback input line
+		if m.approvalChoice == 2 {
+			// Selected: show bordered textarea, indent all lines to align with "> "
+			prefix := focusedText.Render("> ")
+			prefixWidth := lipgloss.Width(prefix)
+			pad := strings.Repeat(" ", prefixWidth)
+			taView := m.input.View()
+			feedbackBorder := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
+			boxRendered := feedbackBorder.Render(taView)
+			boxLines := strings.Split(boxRendered, "\n")
+			for i, line := range boxLines {
+				if i == 0 {
+					boxLines[i] = prefix + line
+				} else {
+					boxLines[i] = pad + line
+				}
+			}
+			sb.WriteString(strings.Join(boxLines, "\n"))
+		} else {
+			// Not selected: simple dim text
+			placeholder := "Send feedback..."
+			if v := m.input.Value(); v != "" {
+				placeholder = v
+			}
+			sb.WriteString(fmt.Sprintf("  %s", blurredText.Render(placeholder)))
+		}
 	} else {
+		// Only show indicator when auto-approve is on
+		if m.autoApprove {
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
+			sb.WriteString("\n")
+		}
+
 		// Prefix the first visual line with a prompt arrow, then pad wrapped lines equally.
 		prompt := promptStyle.Render("➜ ")
 		pad := strings.Repeat(" ", lipgloss.Width(prompt))
@@ -686,6 +837,26 @@ func (m *Model) storeImage(srcPath string) (string, error) {
 	}
 
 	return destPath, nil
+}
+
+func isSpecialKey(k tea.KeyPressMsg) bool {
+	// Keys that should always be forwarded to textarea even without Text:
+	// navigation, deletion, modifiers, function keys, etc.
+	s := k.String()
+	switch {
+	case strings.HasPrefix(s, "ctrl+"),
+		strings.HasPrefix(s, "alt+"),
+		strings.HasPrefix(s, "shift+"):
+		return true
+	}
+	switch k.Code {
+	case tea.KeyUp, tea.KeyDown, tea.KeyLeft, tea.KeyRight,
+		tea.KeyHome, tea.KeyEnd, tea.KeyPgUp, tea.KeyPgDown,
+		tea.KeyDelete, tea.KeyBackspace, tea.KeyTab,
+		tea.KeyEnter, tea.KeyEscape:
+		return true
+	}
+	return false
 }
 
 func (m *Model) pasteImageFromClipboard() (string, bool) {

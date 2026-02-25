@@ -79,6 +79,7 @@ build-all: ## Build for all supported platforms
 install: build ## Install the binary to GOPATH/bin
 	@echo "Installing $(BINARY_NAME) to $(GOPATH)/bin..."
 	@cp $(BUILD_DIR)/$(BINARY_NAME) $(GOPATH)/bin/
+	@codesign -s - $(GOPATH)/bin/$(BINARY_NAME) 2>/dev/null || true
 
 .PHONY: uninstall
 uninstall: ## Remove the binary from GOPATH/bin

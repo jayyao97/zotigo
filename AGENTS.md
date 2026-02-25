@@ -71,4 +71,7 @@ This document guides any agent (AI coding agent, CLI assistant, etc.) working in
 - Tools not firing: ensure registry registration, schema alignment with model output, and inspect debug logs.
 - Empty output/looping: enable `ZOTIGO_DEBUG=true`, verify tool results are appended and `task_complete` is emitted.
 
+## Testing
+- **Make sure you can validate the feature every time you add it, and keep it simple.**
+
 — This guide aims to keep agents consistent, safe, and effective in this repo.
