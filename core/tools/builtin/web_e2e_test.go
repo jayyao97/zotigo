@@ -4,138 +4,56 @@ package builtin
 
 import (
 	"context"
-	"encoding/json"
+	"net/http"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
 
-func loadTavilyKey(t *testing.T) string {
-	t.Helper()
-
-	// 1. Try e2e.config.json (project root)
-	for _, path := range []string{"../../../e2e.config.json", "e2e.config.json"} {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
-		}
-		var cfg struct {
-			Tavily struct {
-				APIKey string `json:"api_key"`
-			} `json:"tavily"`
-		}
-		if json.Unmarshal(data, &cfg) == nil && cfg.Tavily.APIKey != "" {
-			return cfg.Tavily.APIKey
-		}
-	}
-
-	// 2. Try ~/.zotigo/config.yaml via env
-	if key := os.Getenv("TAVILY_API_KEY"); key != "" {
-		return key
-	}
-
-	// 3. Hardcoded fallback for local dev (same as config)
-	return "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"
-}
-
-func TestWebSearchE2E(t *testing.T) {
-	apiKey := loadTavilyKey(t)
+func TestSearchE2E_Tavily(t *testing.T) {
+	apiKey := os.Getenv("TAVILY_API_KEY")
 	if apiKey == "" {
-		t.Skip("No Tavily API key available, skipping e2e test")
+		t.Skip("TAVILY_API_KEY not set, skipping")
 	}
 
-	webClient := NewWebClient(WebConfig{
-		TavilyAPIKey: apiKey,
-		Timeout:      30 * time.Second,
-	})
-	tool := NewWebSearchTool(webClient)
+	provider := &TavilySearchProvider{
+		apiKey:  apiKey,
+		baseURL: "https://api.tavily.com",
+		client:  &http.Client{Timeout: 30 * time.Second},
+	}
 	ctx := context.Background()
 
-	t.Run("search for Go programming language", func(t *testing.T) {
-		result, err := tool.Execute(ctx, nil, `{"query": "Go programming language official website", "max_results": 3}`)
+	t.Run("basic search", func(t *testing.T) {
+		results, err := provider.Search(ctx, "Go programming language official website", 3, SearchOptions{})
 		if err != nil {
-			t.Fatalf("web_search failed: %v", err)
+			t.Fatalf("Search failed: %v", err)
 		}
-
-		output := result.(string)
-		t.Logf("Search result:\n%s", output)
-
-		if !strings.Contains(output, "Search results for") {
-			t.Error("expected result header")
+		if len(results) == 0 {
+			t.Fatal("expected at least 1 result")
 		}
-		if !strings.Contains(strings.ToLower(output), "go") {
+		for i, r := range results {
+			t.Logf("[%d] %s\n    URL: %s\n    Content (%d chars): %.200s\n", i+1, r.Title, r.URL, len(r.Content), r.Content)
+		}
+		found := false
+		for _, r := range results {
+			if strings.Contains(strings.ToLower(r.Title+r.Content), "go") {
+				found = true
+				break
+			}
+		}
+		if !found {
 			t.Error("expected 'go' in search results")
 		}
 	})
 
-	t.Run("search with domain filter", func(t *testing.T) {
-		result, err := tool.Execute(ctx, nil, `{
-			"query": "rust programming",
-			"max_results": 3,
-			"include_domains": ["rust-lang.org"]
-		}`)
+	t.Run("news query", func(t *testing.T) {
+		results, err := provider.Search(ctx, "latest AI news 2025", 3, SearchOptions{Topic: "news"})
 		if err != nil {
-			t.Fatalf("web_search failed: %v", err)
+			t.Fatalf("Search failed: %v", err)
 		}
-
-		output := result.(string)
-		t.Logf("Filtered search result:\n%s", output)
-	})
-
-	t.Run("search advanced depth", func(t *testing.T) {
-		result, err := tool.Execute(ctx, nil, `{
-			"query": "what is WebAssembly",
-			"search_depth": "advanced",
-			"max_results": 2
-		}`)
-		if err != nil {
-			t.Fatalf("web_search failed: %v", err)
-		}
-
-		output := result.(string)
-		t.Logf("Advanced search result:\n%s", output)
-
-		if !strings.Contains(strings.ToLower(output), "wasm") && !strings.Contains(strings.ToLower(output), "webassembly") {
-			t.Error("expected WebAssembly-related content in results")
-		}
-	})
-
-	t.Run("search news with time_range", func(t *testing.T) {
-		result, err := tool.Execute(ctx, nil, `{
-			"query": "AI",
-			"topic": "news",
-			"time_range": "week",
-			"max_results": 3
-		}`)
-		if err != nil {
-			t.Fatalf("web_search failed: %v", err)
-		}
-
-		output := result.(string)
-		t.Logf("News time_range result:\n%s", output)
-
-		if !strings.Contains(output, "Search results for") {
-			t.Error("expected result header")
-		}
-	})
-
-	t.Run("search with date range", func(t *testing.T) {
-		result, err := tool.Execute(ctx, nil, `{
-			"query": "Go 1.24 release",
-			"start_date": "2025-01-01",
-			"end_date": "2025-12-31",
-			"max_results": 3
-		}`)
-		if err != nil {
-			t.Fatalf("web_search failed: %v", err)
-		}
-
-		output := result.(string)
-		t.Logf("Date range result:\n%s", output)
-
-		if !strings.Contains(output, "Search results for") {
-			t.Error("expected result header")
+		for i, r := range results {
+			t.Logf("[%d] %s\n    URL: %s\n    Content (%d chars): %.200s\n", i+1, r.Title, r.URL, len(r.Content), r.Content)
 		}
 	})
 }

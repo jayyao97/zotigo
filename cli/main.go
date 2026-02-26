@@ -215,7 +215,9 @@ func main() {
 		Timeout:      time.Duration(cfg.Tools.Web.TimeoutSec) * time.Second,
 		MaxPageSize:  cfg.Tools.Web.MaxPageSize,
 	})
-	ag.RegisterTool(builtin.NewWebSearchTool(webClient))
+	if sp := builtin.NewSearchProvider(webClient); sp != nil {
+		ag.RegisterTool(builtin.NewWebSearchTool(sp))
+	}
 	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
 
 	// 7. Init SkillManager

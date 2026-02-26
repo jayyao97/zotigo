@@ -15,14 +15,14 @@ type WebConfig struct {
 	MaxPageSize   int
 }
 
-// WebClient is a shared HTTP client for web_search and web_fetch tools.
+// WebClient is a shared HTTP client and config bundle for web tools.
 type WebClient struct {
 	config WebConfig
 	client *http.Client
 }
 
 // NewWebClient creates a new WebClient with the given configuration.
-// It falls back to the TAVILY_API_KEY environment variable if no API key is configured.
+// Use NewSearchProvider(wc) to obtain the search backend (nil if no key is set).
 func NewWebClient(cfg WebConfig) *WebClient {
 	if cfg.TavilyAPIKey == "" {
 		cfg.TavilyAPIKey = os.Getenv("TAVILY_API_KEY")
@@ -42,8 +42,6 @@ func NewWebClient(cfg WebConfig) *WebClient {
 
 	return &WebClient{
 		config: cfg,
-		client: &http.Client{
-			Timeout: cfg.Timeout,
-		},
+		client: &http.Client{Timeout: cfg.Timeout},
 	}
 }
