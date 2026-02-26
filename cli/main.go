@@ -171,13 +171,14 @@ func main() {
 		pb.DynamicContext.AddSection("project_context", string(data))
 	}
 
-	ag, err := agent.New(profile, exec)
+	ag, err := agent.New(profile, exec,
+		agent.WithSystemPromptBuilder(pb),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
+	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
 		os.Exit(1)
 	}
-	ag.SetSystemPromptBuilder(pb)
-	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
 
 	// Restore state if needed
 	if doResume {
