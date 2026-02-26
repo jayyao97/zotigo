@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -19,12 +20,13 @@ import (
 )
 
 type Agent struct {
-	cfg       config.ProfileConfig
-	provider  providers.Provider
-	executor  executor.Executor
-	tools     map[string]tools.Tool
-	policy    ApprovalPolicy
-	sysPrompt string
+	cfg           config.ProfileConfig
+	provider      providers.Provider
+	executor      executor.Executor
+	tools         map[string]tools.Tool
+	policy        ApprovalPolicy
+	promptBuilder *prompt.SystemPromptBuilder
+	userWrapper   *prompt.UserPromptWrapper
 
 	// Services
 	loopDetector *services.LoopDetector
@@ -37,9 +39,10 @@ type Agent struct {
 	pendingActions []*PendingAction
 }
 
-// New creates a new Agent with the given configuration, executor, and system prompt.
+// New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
-func New(cfg config.ProfileConfig, exec executor.Executor, sysPrompt string) (*Agent, error) {
+// Use SetSystemPromptBuilder and SetUserPromptWrapper to configure prompts.
+func New(cfg config.ProfileConfig, exec executor.Executor) (*Agent, error) {
 	p, err := providers.NewProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
@@ -51,12 +54,25 @@ func New(cfg config.ProfileConfig, exec executor.Executor, sysPrompt string) (*A
 		executor:     exec,
 		tools:        make(map[string]tools.Tool),
 		policy:       ApprovalPolicyManual,
-		sysPrompt:    sysPrompt,
 		state:        StateIdle,
 		history:      make([]protocol.Message, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:   services.NewCompressor(services.DefaultCompressorConfig()),
 	}, nil
+}
+
+// SetSystemPromptBuilder sets the system prompt builder for the agent.
+func (a *Agent) SetSystemPromptBuilder(pb *prompt.SystemPromptBuilder) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.promptBuilder = pb
+}
+
+// SetUserPromptWrapper sets the wrapper used to add context to user messages.
+func (a *Agent) SetUserPromptWrapper(uw *prompt.UserPromptWrapper) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.userWrapper = uw
 }
 
 // Executor returns the agent's executor
@@ -194,6 +210,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					a.skillManager.ProcessMentions(part.Text)
 				}
 			}
+		}
+
+		// Wrap user messages with context if wrapper is set
+		if msg.Role == protocol.RoleUser && a.userWrapper != nil {
+			msg = a.wrapUserMessage(msg)
 		}
 
 		a.history = append(a.history, msg)
@@ -429,14 +450,17 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 func (a *Agent) buildContext() []protocol.Message {
 	var msgs []protocol.Message
-	if a.sysPrompt != "" {
-		msgs = append(msgs, protocol.NewSystemMessage(a.sysPrompt))
+
+	// System prompt messages (static + dynamic, each as separate message)
+	if a.promptBuilder != nil {
+		for _, text := range a.promptBuilder.BuildMessages() {
+			msgs = append(msgs, protocol.NewSystemMessage(text))
+		}
 	}
 
-	// Inject activated skills as system messages
+	// Skill injections as separate system message
 	if a.skillManager != nil {
-		injection := a.skillManager.BuildAllInjections()
-		if injection != "" {
+		if injection := a.skillManager.BuildAllInjections(); injection != "" {
 			msgs = append(msgs, protocol.NewSystemMessage(injection))
 		}
 	}
@@ -462,6 +486,41 @@ func (a *Agent) buildContext() []protocol.Message {
 
 	msgs = append(msgs, history...)
 	return msgs
+}
+
+// wrapUserMessage applies the UserPromptWrapper to a user message.
+// It extracts text content, wraps it, and preserves non-text parts (images, etc.).
+func (a *Agent) wrapUserMessage(msg protocol.Message) protocol.Message {
+	var rawTexts []string
+	var nonTextParts []protocol.ContentPart
+	for _, p := range msg.Content {
+		if p.Type == protocol.ContentTypeText {
+			rawTexts = append(rawTexts, p.Text)
+		} else {
+			nonTextParts = append(nonTextParts, p)
+		}
+	}
+
+	if len(rawTexts) == 0 {
+		return msg
+	}
+
+	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"))
+
+	var newContent []protocol.ContentPart
+	newContent = append(newContent, protocol.ContentPart{
+		Type: protocol.ContentTypeText,
+		Text: wrapped,
+	})
+	newContent = append(newContent, nonTextParts...)
+
+	return protocol.Message{
+		ID:        msg.ID,
+		Role:      msg.Role,
+		Content:   newContent,
+		Metadata:  msg.Metadata,
+		CreatedAt: msg.CreatedAt,
+	}
 }
 
 // isToolCallSafe checks if a tool call can be auto-approved based on the tool's Safety() declaration.

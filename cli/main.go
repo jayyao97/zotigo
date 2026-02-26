@@ -5,12 +5,15 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
 	"github.com/jayyao97/zotigo/cli/tui"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
@@ -154,11 +157,23 @@ func main() {
 	}
 
 	// 5. Init Agent
-	ag, err := agent.New(profile, exec, "You are Zotigo, a helpful CLI software engineering agent.")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.DynamicContext.AddSection("environment", fmt.Sprintf(
+		"Working directory: %s\nPlatform: %s\nShell: %s",
+		cwd, runtime.GOOS, os.Getenv("SHELL"),
+	))
+
+	// Inject project context from ZOTIGO.md if present
+	if data, err := os.ReadFile(filepath.Join(cwd, "ZOTIGO.md")); err == nil {
+		pb.DynamicContext.AddSection("project_context", string(data))
+	}
+
+	ag, err := agent.New(profile, exec)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
 		os.Exit(1)
 	}
+	ag.SetSystemPromptBuilder(pb)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
 
 	// Restore state if needed

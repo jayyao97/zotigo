@@ -12,16 +12,20 @@ import (
 // convertToAnthropicParams converts internal protocol messages to Anthropic MessageNewParams.
 func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (anthropic.MessageNewParams, error) {
 	var anthropicMsgs []anthropic.MessageParam
-	var systemPrompt string
+	var systemTexts []string
 
 	for _, msg := range msgs {
 		switch msg.Role {
 		case protocol.RoleSystem:
-			// Anthropic uses a separate system parameter
+			// Collect each system message as a separate text (preserves multi-block structure)
+			var text string
 			for _, p := range msg.Content {
 				if p.Type == protocol.ContentTypeText {
-					systemPrompt += p.Text
+					text += p.Text
 				}
+			}
+			if text != "" {
+				systemTexts = append(systemTexts, text)
 			}
 
 		case protocol.RoleUser:
@@ -97,11 +101,17 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (
 		MaxTokens: 4096,
 	}
 
-	// Set system prompt if present
-	if systemPrompt != "" {
-		params.System = []anthropic.TextBlockParam{
-			{Text: systemPrompt},
+	// Set system prompt blocks — one per system message, cache_control on the first (static) block
+	if len(systemTexts) > 0 {
+		var blocks []anthropic.TextBlockParam
+		for i, text := range systemTexts {
+			block := anthropic.TextBlockParam{Text: text}
+			if i == 0 {
+				block.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+			blocks = append(blocks, block)
 		}
+		params.System = blocks
 	}
 
 	// Convert Tools
