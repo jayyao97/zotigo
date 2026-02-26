@@ -29,6 +29,8 @@ type Agent struct {
 	promptBuilder *prompt.SystemPromptBuilder
 	userWrapper   *prompt.UserPromptWrapper
 
+	reminderBuilder *prompt.ReminderBuilder
+
 	// Services
 	loopDetector *services.LoopDetector
 	compressor   *services.Compressor
@@ -78,6 +80,16 @@ func WithTools(ts ...tools.Tool) AgentOption {
 		for _, t := range ts {
 			a.tools[t.Name()] = t
 		}
+	}
+}
+
+// WithReminder registers a ReminderProvider that injects text into tool results.
+func WithReminder(provider prompt.ReminderProvider) AgentOption {
+	return func(a *Agent) {
+		if a.reminderBuilder == nil {
+			a.reminderBuilder = prompt.NewReminderBuilder()
+		}
+		a.reminderBuilder.Providers = append(a.reminderBuilder.Providers, provider)
 	}
 }
 
@@ -453,16 +465,42 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 		tool, ok := a.tools[action.Name]
 		if !ok {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 			continue
 		}
 		res, err := tool.Execute(ctx, exec, action.Arguments)
 		if err != nil {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 		} else {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 		}
 	}
+	// Inject reminders into the last tool result
+	if len(results) > 0 && a.reminderBuilder != nil {
+		pctx := prompt.PromptContext{
+			WorkDir:  a.executor.WorkDir(),
+			Platform: a.executor.Platform(),
+			Model:    a.cfg.Model,
+		}
+		tcResults := make([]prompt.ToolCallResult, len(results))
+		for i, r := range results {
+			tcResults[i] = prompt.ToolCallResult{
+				Name:    r.ToolName,
+				Result:  r.Text,
+				IsError: r.IsError,
+			}
+		}
+		if s := a.reminderBuilder.Build(pctx, tcResults); s != "" {
+			results[len(results)-1].Text += s
+		}
+	}
+
 	a.mu.Lock()
 	a.pendingActions = nil
 	a.mu.Unlock()

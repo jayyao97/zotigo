@@ -9,6 +9,63 @@ import (
 //go:embed system_prompt.md
 var StaticSystemPrompt string
 
+// ToolCallResult is a lightweight summary of an executed tool call.
+// Used by ReminderProvider to make decisions based on tool execution.
+type ToolCallResult struct {
+	Name    string
+	Result  string
+	IsError bool
+}
+
+// ReminderProvider returns reminder text to inject after tool execution.
+// Called with the current PromptContext and the tool results from this batch.
+// Return empty string to skip injection.
+type ReminderProvider func(PromptContext, []ToolCallResult) string
+
+// ReminderBuilder collects ReminderProviders and builds the injection text.
+type ReminderBuilder struct {
+	Providers []ReminderProvider
+}
+
+// ReminderOption configures a ReminderBuilder during construction.
+type ReminderOption func(*ReminderBuilder)
+
+// WithReminderProvider returns a ReminderOption that appends a provider.
+func WithReminderProvider(p ReminderProvider) ReminderOption {
+	return func(rb *ReminderBuilder) {
+		rb.Providers = append(rb.Providers, p)
+	}
+}
+
+// NewReminderBuilder creates a ReminderBuilder with the given options.
+func NewReminderBuilder(opts ...ReminderOption) *ReminderBuilder {
+	rb := &ReminderBuilder{}
+	for _, opt := range opts {
+		opt(rb)
+	}
+	return rb
+}
+
+// Build calls all providers and returns the combined reminder text
+// wrapped in <system-reminder> tags. Returns empty string if no
+// provider produces output.
+func (rb *ReminderBuilder) Build(ctx PromptContext, results []ToolCallResult) string {
+	if len(rb.Providers) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, rp := range rb.Providers {
+		if s := strings.TrimSpace(rp(ctx, results)); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return "\n\n<system-reminder>\n" +
+		strings.Join(parts, "\n\n") + "\n</system-reminder>"
+}
+
 // PromptContext carries per-request data available to lazy providers.
 type PromptContext struct {
 	WorkDir   string

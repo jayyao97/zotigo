@@ -2,9 +2,11 @@ package agent_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -264,6 +266,178 @@ func TestAgentResetLoopDetector(t *testing.T) {
 	stats := ag.GetContextStats()
 	if loopCalls, ok := stats["loop_total_calls"]; ok && loopCalls > 0 {
 		t.Logf("Loop stats after reset: %v", stats)
+	}
+}
+
+// ============ Reminder Provider Tests ============
+
+func TestAgent_ReminderAppendedToLastToolResult(t *testing.T) {
+	providers.Register("mock-reminder", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-reminder"}
+	ag, err := agent.New(cfg, exec,
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return "Remember: stay focused on the task."
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "What time is it?")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	// Inspect history for the tool message
+	snap := ag.Snapshot()
+	found := false
+	for _, msg := range snap.History {
+		if msg.Role != protocol.RoleTool {
+			continue
+		}
+		for _, cp := range msg.Content {
+			if cp.ToolResult == nil {
+				continue
+			}
+			if strings.Contains(cp.ToolResult.Text, "<system-reminder>") &&
+				strings.Contains(cp.ToolResult.Text, "Remember: stay focused on the task.") &&
+				strings.Contains(cp.ToolResult.Text, "</system-reminder>") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Expected <system-reminder> with reminder text in the last tool result")
+	}
+}
+
+func TestAgent_ReminderSkipsEmpty(t *testing.T) {
+	providers.Register("mock-reminder-empty", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-reminder-empty"}
+	ag, err := agent.New(cfg, exec,
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return ""
+		}),
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return "   "
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "What time is it?")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	snap := ag.Snapshot()
+	for _, msg := range snap.History {
+		if msg.Role != protocol.RoleTool {
+			continue
+		}
+		for _, cp := range msg.Content {
+			if cp.ToolResult == nil {
+				continue
+			}
+			if strings.Contains(cp.ToolResult.Text, "<system-reminder>") {
+				t.Fatal("Expected no <system-reminder> when all providers return empty")
+			}
+		}
+	}
+}
+
+func TestAgent_MultipleReminders(t *testing.T) {
+	providers.Register("mock-reminder-multi", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-reminder-multi"}
+	ag, err := agent.New(cfg, exec,
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return "Reminder A"
+		}),
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return "" // should be skipped
+		}),
+		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
+			return "Reminder B"
+		}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "What time is it?")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	snap := ag.Snapshot()
+	found := false
+	for _, msg := range snap.History {
+		if msg.Role != protocol.RoleTool {
+			continue
+		}
+		for _, cp := range msg.Content {
+			if cp.ToolResult == nil {
+				continue
+			}
+			if strings.Contains(cp.ToolResult.Text, "<system-reminder>") {
+				// Verify both reminders in single tag
+				if !strings.Contains(cp.ToolResult.Text, "Reminder A") {
+					t.Error("Expected 'Reminder A' in system-reminder")
+				}
+				if !strings.Contains(cp.ToolResult.Text, "Reminder B") {
+					t.Error("Expected 'Reminder B' in system-reminder")
+				}
+				// Count occurrences of <system-reminder> — should be exactly 1
+				count := strings.Count(cp.ToolResult.Text, "<system-reminder>")
+				if count != 1 {
+					t.Errorf("Expected exactly 1 <system-reminder> tag, got %d", count)
+				}
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("Expected <system-reminder> with multiple reminders in the last tool result")
 	}
 }
 
