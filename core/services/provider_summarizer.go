@@ -9,6 +9,26 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 )
 
+// conversationSummaryInstruction is the prompt for summarizing conversation history.
+const conversationSummaryInstruction = `Please summarize the following conversation. Focus on:
+- The user's main goals and intent
+- Key progress made
+- Important files, paths, or data mentioned
+- Any pending tasks or blockers
+
+Format your response as XML:
+<context_summary>
+  <goal>Main goal</goal>
+  <progress>Progress made</progress>
+  <current_state>Current state</current_state>
+  <pending>Pending tasks</pending>
+  <key_info>Important files/data</key_info>
+</context_summary>
+
+Conversation to summarize:
+
+`
+
 // ProviderSummarizer implements Summarizer using an LLM provider
 type ProviderSummarizer struct {
 	provider providers.Provider
@@ -23,23 +43,8 @@ func NewProviderSummarizer(provider providers.Provider) *ProviderSummarizer {
 
 // SummarizeMessages generates a structured summary of messages using the LLM
 func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (string, error) {
-	// Build the prompt with the messages to summarize
 	var sb strings.Builder
-	sb.WriteString("Please summarize the following conversation. ")
-	sb.WriteString("Focus on:\n")
-	sb.WriteString("- The user's main goals and intent\n")
-	sb.WriteString("- Key progress made\n")
-	sb.WriteString("- Important files, paths, or data mentioned\n")
-	sb.WriteString("- Any pending tasks or blockers\n\n")
-	sb.WriteString("Format your response as XML:\n")
-	sb.WriteString("<context_summary>\n")
-	sb.WriteString("  <goal>Main goal</goal>\n")
-	sb.WriteString("  <progress>Progress made</progress>\n")
-	sb.WriteString("  <current_state>Current state</current_state>\n")
-	sb.WriteString("  <pending>Pending tasks</pending>\n")
-	sb.WriteString("  <key_info>Important files/data</key_info>\n")
-	sb.WriteString("</context_summary>\n\n")
-	sb.WriteString("Conversation to summarize:\n\n")
+	sb.WriteString(conversationSummaryInstruction)
 
 	// Append message content
 	for _, msg := range messages {
