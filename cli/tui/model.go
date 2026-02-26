@@ -131,9 +131,9 @@ func (m Model) printInitialHistory(isRepaint bool) tea.Cmd {
 	if len(snap.History) > 0 {
 		headerText = "Welcome back to Zotigo CLI"
 	}
-	
+
 	header := headerStyle.Render("── " + headerText + " ──")
-	
+
 	var cmds []tea.Cmd
 	cmds = append(cmds, tea.Println(header))
 	if truncated {
@@ -173,7 +173,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.initialPrinted = true
 			return m, m.printInitialHistory(false)
 		}
-		
+
 		return m, nil
 
 	case tea.KeyboardEnhancementsMsg:
@@ -318,29 +318,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 
 				isImage := false
-			if isImagePath(path) {
-				if _, err := os.Stat(path); err == nil {
-					data, err := os.ReadFile(path)
-					if err == nil {
-						mime := "image/png"
-						ext := strings.ToLower(filepath.Ext(path))
-						if ext == ".jpg" || ext == ".jpeg" {
-							mime = "image/jpeg"
-						} else if ext == ".webp" {
-							mime = "image/webp"
-						}
-					msg.Content = append(msg.Content, protocol.ContentPart{
-							Type: protocol.ContentTypeImage,
-							Image: &protocol.MediaPart{
+				if isImagePath(path) {
+					if _, err := os.Stat(path); err == nil {
+						data, err := os.ReadFile(path)
+						if err == nil {
+							mime := "image/png"
+							ext := strings.ToLower(filepath.Ext(path))
+							if ext == ".jpg" || ext == ".jpeg" {
+								mime = "image/jpeg"
+							} else if ext == ".webp" {
+								mime = "image/webp"
+							}
+							msg.Content = append(msg.Content, protocol.ContentPart{
+								Type: protocol.ContentTypeImage,
+								Image: &protocol.MediaPart{
 									Data:      data,
 									MediaType: mime,
 								},
 							})
-						isImage = true
+							isImage = true
 						}
+					}
 				}
-			}
-			
+
 				if !isImage {
 					msg.Content = append(msg.Content, protocol.ContentPart{
 						Type: protocol.ContentTypeText,

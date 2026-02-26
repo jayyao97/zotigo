@@ -11,8 +11,8 @@ func TestTokenizer_Count(t *testing.T) {
 	}
 
 	tests := []struct {
-		name     string
-		text     string
+		name      string
+		text      string
 		minTokens int
 		maxTokens int
 	}{

@@ -45,11 +45,10 @@ func TestE2E_AgentLongConversation(t *testing.T) {
 	cfg := config.ProfileConfig{Provider: "e2e-verbose"}
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("You are a helpful assistant.")
-	ag, err := agent.New(cfg, exec)
+	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.SetSystemPromptBuilder(pb)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -115,11 +114,10 @@ func TestE2E_AgentWithToolCalls(t *testing.T) {
 	cfg := config.ProfileConfig{Provider: "e2e-tools"}
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("You are a coding assistant.")
-	ag, err := agent.New(cfg, exec)
+	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.SetSystemPromptBuilder(pb)
 
 	ag.RegisterTool(&MockReadFileTool{})
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto) // Auto-approve for E2E
@@ -177,11 +175,10 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("You are a helpful assistant. Keep responses brief.")
-	ag, err := agent.New(profileCfg, exec)
+	ag, err := agent.New(profileCfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.SetSystemPromptBuilder(pb)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -242,11 +239,10 @@ func TestE2E_MemoryUnderPressure(t *testing.T) {
 	cfg := config.ProfileConfig{Provider: "e2e-memory"}
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("System")
-	ag, err := agent.New(cfg, exec)
+	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.SetSystemPromptBuilder(pb)
 
 	ctx := context.Background()
 

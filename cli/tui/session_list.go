@@ -10,11 +10,11 @@ import (
 )
 
 var (
-	titleStyle      = lipgloss.NewStyle().MarginLeft(2).Bold(true).Foreground(lipgloss.Color("205"))
-	itemStyle       = lipgloss.NewStyle().PaddingLeft(4)
+	titleStyle        = lipgloss.NewStyle().MarginLeft(2).Bold(true).Foreground(lipgloss.Color("205"))
+	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
 	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("170")).Bold(true)
-	descStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	lockedStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red for locked
+	descStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	lockedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red for locked
 )
 
 type SessionSelectionModel struct {

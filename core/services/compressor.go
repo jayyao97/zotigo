@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"text/template"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 )
@@ -406,93 +407,135 @@ func (c *Compressor) countSingleMessage(msg protocol.Message) int {
 	return total
 }
 
-// simpleSummary creates a basic summary without using an LLM
-func (c *Compressor) simpleSummary(messages []protocol.Message) string {
-	var sb strings.Builder
-	sb.WriteString("<context_summary>\n")
+// summaryData holds extracted facts from a conversation for template rendering.
+type summaryData struct {
+	Goal    string
+	Tools   []string // e.g. "read_file (3 times)"
+	Files   []string
+	HasMore bool // true when files were truncated
+}
 
-	// Extract goals from user messages
-	goals := []string{}
-	toolsUsed := make(map[string]int)
-	filesAccessed := make(map[string]bool)
+// simpleSummaryTmpl renders summaryData into a <context_summary> XML block.
+var simpleSummaryTmpl = template.Must(template.New("summary").Parse(`<context_summary>
+  <goal>{{.Goal}}</goal>
+  <progress>
+{{- if .Tools}}
+{{- range .Tools}}
+    - Used {{.}}
+{{- end}}
+{{- else}}
+    - Discussion without tool usage
+{{- end}}
+  </progress>
+{{- if .Files}}
+  <key_info>
+{{- range .Files}}
+    - {{.}}
+{{- end}}
+{{- if .HasMore}}
+    - ... and more files
+{{- end}}
+  </key_info>
+{{- end}}
+</context_summary>`))
+
+// simpleSummary creates a basic summary without using an LLM.
+func (c *Compressor) simpleSummary(messages []protocol.Message) string {
+	data := c.extractSummaryData(messages)
+	var buf strings.Builder
+	if err := simpleSummaryTmpl.Execute(&buf, data); err != nil {
+		return "<context_summary><goal>General conversation</goal></context_summary>"
+	}
+	return buf.String()
+}
+
+// extractSummaryData walks messages and pulls out goals, tool usage, and file paths.
+func (c *Compressor) extractSummaryData(messages []protocol.Message) summaryData {
+	var goals []string
+	toolCounts := make(map[string]int)
+	fileSet := make(map[string]bool)
 
 	for _, msg := range messages {
 		for _, part := range msg.Content {
 			switch part.Type {
 			case protocol.ContentTypeText:
 				if msg.Role == protocol.RoleUser && len(part.Text) > 0 {
-					// Take first sentence as potential goal
-					text := part.Text
-					if idx := strings.Index(text, "."); idx > 0 && idx < 150 {
-						goals = append(goals, text[:idx+1])
-					} else if len(text) > 150 {
-						goals = append(goals, text[:150]+"...")
-					} else if len(text) > 0 {
-						goals = append(goals, text)
-					}
+					goals = append(goals, firstSentence(part.Text, 150))
 				}
 			case protocol.ContentTypeToolCall:
 				if part.ToolCall != nil {
-					toolsUsed[part.ToolCall.Name]++
-					// Extract file paths from arguments
-					if strings.Contains(part.ToolCall.Arguments, "path") {
-						// Simple extraction (not perfect but good enough)
-						args := part.ToolCall.Arguments
-						if idx := strings.Index(args, `"path"`); idx >= 0 {
-							rest := args[idx:]
-							if start := strings.Index(rest, `"`); start > 0 {
-								rest = rest[start+1:]
-								if end := strings.Index(rest, `"`); end > 0 {
-									filesAccessed[rest[:end]] = true
-								}
-							}
-						}
+					toolCounts[part.ToolCall.Name]++
+					if p := extractPath(part.ToolCall.Arguments); p != "" {
+						fileSet[p] = true
 					}
 				}
 			}
 		}
 	}
 
-	// Write goals
-	sb.WriteString("  <goal>")
+	// Build goal string
+	goal := "General conversation"
 	if len(goals) > 0 {
-		sb.WriteString(goals[0])
+		goal = goals[0]
 		if len(goals) > 1 {
-			sb.WriteString(" (and related requests)")
+			goal += " (and related requests)"
 		}
-	} else {
-		sb.WriteString("General conversation")
-	}
-	sb.WriteString("</goal>\n")
-
-	// Write progress (tools used)
-	sb.WriteString("  <progress>\n")
-	if len(toolsUsed) > 0 {
-		for tool, count := range toolsUsed {
-			sb.WriteString(fmt.Sprintf("    - Used %s (%d times)\n", tool, count))
-		}
-	} else {
-		sb.WriteString("    - Discussion without tool usage\n")
-	}
-	sb.WriteString("  </progress>\n")
-
-	// Write key info (files accessed)
-	if len(filesAccessed) > 0 {
-		sb.WriteString("  <key_info>\n")
-		count := 0
-		for file := range filesAccessed {
-			if count >= 10 {
-				sb.WriteString("    - ... and more files\n")
-				break
-			}
-			sb.WriteString(fmt.Sprintf("    - %s\n", file))
-			count++
-		}
-		sb.WriteString("  </key_info>\n")
 	}
 
-	sb.WriteString("</context_summary>")
-	return sb.String()
+	// Build sorted tool list
+	var toolList []string
+	for name, count := range toolCounts {
+		toolList = append(toolList, fmt.Sprintf("%s (%d times)", name, count))
+	}
+
+	// Collect files, cap at 10
+	const maxFiles = 10
+	var files []string
+	for f := range fileSet {
+		if len(files) >= maxFiles {
+			break
+		}
+		files = append(files, f)
+	}
+
+	return summaryData{
+		Goal:    goal,
+		Tools:   toolList,
+		Files:   files,
+		HasMore: len(fileSet) > maxFiles,
+	}
+}
+
+// firstSentence returns the first sentence of text, capped at maxLen.
+func firstSentence(text string, maxLen int) string {
+	if idx := strings.Index(text, "."); idx > 0 && idx < maxLen {
+		return text[:idx+1]
+	}
+	if len(text) > maxLen {
+		return text[:maxLen] + "..."
+	}
+	return text
+}
+
+// extractPath pulls a "path" value out of a JSON argument string.
+// Best-effort; returns empty string if not found.
+func extractPath(argsJSON string) string {
+	idx := strings.Index(argsJSON, `"path"`)
+	if idx < 0 {
+		return ""
+	}
+	rest := argsJSON[idx+len(`"path"`):]
+	// skip to the colon then the opening quote of the value
+	start := strings.Index(rest, `"`)
+	if start < 0 {
+		return ""
+	}
+	rest = rest[start+1:]
+	end := strings.Index(rest, `"`)
+	if end <= 0 {
+		return ""
+	}
+	return rest[:end]
 }
 
 // truncateText truncates text to approximately the given token count

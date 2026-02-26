@@ -60,4 +60,3 @@ func (t *ListSkillsTool) Execute(ctx context.Context, exec executor.Executor, ar
 		"count":  len(result),
 	}, nil
 }
-

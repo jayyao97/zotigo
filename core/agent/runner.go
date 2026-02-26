@@ -9,23 +9,46 @@ import (
 	"github.com/jayyao97/zotigo/core/transport"
 )
 
+// RunnerHooks allows callers to inject custom logic at key points in the
+// Runner event loop (e.g. session persistence, logging, metrics).
+type RunnerHooks struct {
+	// BeforeTurn is called before processing a user message.
+	BeforeTurn func(input transport.UserInput)
+	// AfterTurn is called after each complete agent turn (finish with stop).
+	AfterTurn func(snapshot Snapshot)
+	// OnPause is called when the agent pauses for tool approval.
+	OnPause func(snapshot Snapshot)
+	// OnError is called when an error occurs during execution.
+	OnError func(err error)
+}
+
 // Runner orchestrates the Agent and Transport for bidirectional communication.
 // It uses an event-driven, non-blocking design suitable for WebUI scenarios.
 type Runner struct {
 	agent     *Agent
 	transport transport.Transport
+	hooks     RunnerHooks
 
 	mu       sync.Mutex
 	running  bool
 	cancelFn context.CancelFunc
 }
 
+// RunnerOption configures a Runner.
+type RunnerOption func(*Runner)
+
+// WithHooks sets lifecycle hooks on the Runner.
+func WithHooks(hooks RunnerHooks) RunnerOption {
+	return func(r *Runner) { r.hooks = hooks }
+}
+
 // NewRunner creates a new Runner with the given agent and transport.
-func NewRunner(agent *Agent, tr transport.Transport) *Runner {
-	return &Runner{
-		agent:     agent,
-		transport: tr,
+func NewRunner(agent *Agent, tr transport.Transport, opts ...RunnerOption) *Runner {
+	r := &Runner{agent: agent, transport: tr}
+	for _, opt := range opts {
+		opt(r)
 	}
+	return r
 }
 
 // Agent returns the underlying agent.
@@ -69,6 +92,7 @@ func (r *Runner) Start(ctx context.Context) error {
 			}
 
 			if err := r.handleInput(ctx, input); err != nil {
+				r.fireOnError(err)
 				// Send error event but continue
 				r.transport.Send(ctx, protocol.NewErrorEvent(err))
 			}
@@ -174,10 +198,50 @@ func (r *Runner) GetPendingApprovals() []transport.PendingToolCall {
 	return pending
 }
 
+// safeCallHook runs fn with panic recovery. If fn panics, the panic is
+// forwarded to OnError so the caller can observe it. OnError itself is
+// called with its own recovery — if it also panics, the panic is silently
+// swallowed since there is no higher-level observer.
+func (r *Runner) safeCallHook(fn func()) {
+	defer func() {
+		if v := recover(); v != nil {
+			r.fireOnError(fmt.Errorf("hook panicked: %v", v))
+		}
+	}()
+	fn()
+}
+
+func (r *Runner) fireBeforeTurn(input transport.UserInput) {
+	if r.hooks.BeforeTurn != nil {
+		r.safeCallHook(func() { r.hooks.BeforeTurn(input) })
+	}
+}
+
+func (r *Runner) fireAfterTurn() {
+	if r.hooks.AfterTurn != nil {
+		r.safeCallHook(func() { r.hooks.AfterTurn(r.agent.Snapshot()) })
+	}
+}
+
+func (r *Runner) fireOnPause() {
+	if r.hooks.OnPause != nil {
+		r.safeCallHook(func() { r.hooks.OnPause(r.agent.Snapshot()) })
+	}
+}
+
+func (r *Runner) fireOnError(err error) {
+	if r.hooks.OnError == nil {
+		return
+	}
+	defer func() { recover() }() // OnError is the last resort; swallow its panic.
+	r.hooks.OnError(err)
+}
+
 // handleInput processes a single user input.
 func (r *Runner) handleInput(ctx context.Context, input transport.UserInput) error {
 	switch input.Type {
 	case transport.UserInputMessage:
+		r.fireBeforeTurn(input)
 		return r.handleMessage(ctx, input)
 	case transport.UserInputCommand:
 		return r.handleCommand(ctx, input)
@@ -229,7 +293,9 @@ func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event
 	for {
 		select {
 		case <-ctx.Done():
-			return ctx.Err()
+			err := ctx.Err()
+			r.fireOnError(err)
+			return err
 		case event, ok := <-eventCh:
 			if !ok {
 				return nil // Stream finished
@@ -237,13 +303,22 @@ func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event
 
 			// Forward event to transport
 			if err := r.transport.Send(ctx, event); err != nil {
+				r.fireOnError(err)
 				return err
 			}
 
-			// If need_approval, return immediately (non-blocking)
-			// Client should call SubmitApproval() to continue
-			if event.Type == protocol.EventTypeFinish && event.FinishReason == "need_approval" {
-				return nil
+			if event.Type == protocol.EventTypeFinish {
+				switch event.FinishReason {
+				case protocol.FinishReasonStop:
+					r.fireAfterTurn()
+				case "need_approval":
+					r.fireOnPause()
+				}
+				// If need_approval, return immediately (non-blocking)
+				// Client should call SubmitApproval() to continue
+				if event.FinishReason == "need_approval" {
+					return nil
+				}
 			}
 		}
 	}

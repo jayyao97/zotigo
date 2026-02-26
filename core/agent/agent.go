@@ -19,6 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
+// Agent orchestrates provider, tools, and conversation history.
 type Agent struct {
 	cfg           config.ProfileConfig
 	provider      providers.Provider
@@ -27,6 +28,8 @@ type Agent struct {
 	policy        ApprovalPolicy
 	promptBuilder *prompt.SystemPromptBuilder
 	userWrapper   *prompt.UserPromptWrapper
+
+	reminderBuilder *prompt.ReminderBuilder
 
 	// Services
 	loopDetector *services.LoopDetector
@@ -39,16 +42,66 @@ type Agent struct {
 	pendingActions []*PendingAction
 }
 
+// AgentOption configures an Agent during construction.
+type AgentOption func(*Agent)
+
+// WithSystemPromptBuilder sets the system prompt builder.
+func WithSystemPromptBuilder(pb *prompt.SystemPromptBuilder) AgentOption {
+	return func(a *Agent) { a.promptBuilder = pb }
+}
+
+// WithUserPromptWrapper sets the wrapper used to add context to user messages.
+func WithUserPromptWrapper(uw *prompt.UserPromptWrapper) AgentOption {
+	return func(a *Agent) { a.userWrapper = uw }
+}
+
+// WithApprovalPolicy sets the tool approval policy.
+func WithApprovalPolicy(p ApprovalPolicy) AgentOption {
+	return func(a *Agent) { a.policy = p }
+}
+
+// WithCompressorSummarizer sets the LLM summarizer for high-quality summaries.
+func WithCompressorSummarizer(s services.Summarizer) AgentOption {
+	return func(a *Agent) {
+		if a.compressor != nil {
+			a.compressor.SetSummarizer(s)
+		}
+	}
+}
+
+// WithSkillManager sets the skill manager.
+func WithSkillManager(sm *skills.SkillManager) AgentOption {
+	return func(a *Agent) { a.skillManager = sm }
+}
+
+// WithTools registers one or more tools.
+func WithTools(ts ...tools.Tool) AgentOption {
+	return func(a *Agent) {
+		for _, t := range ts {
+			a.tools[t.Name()] = t
+		}
+	}
+}
+
+// WithReminder registers a ReminderProvider that injects text into tool results.
+func WithReminder(provider prompt.ReminderProvider) AgentOption {
+	return func(a *Agent) {
+		if a.reminderBuilder == nil {
+			a.reminderBuilder = prompt.NewReminderBuilder()
+		}
+		a.reminderBuilder.Providers = append(a.reminderBuilder.Providers, provider)
+	}
+}
+
 // New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
-// Use SetSystemPromptBuilder and SetUserPromptWrapper to configure prompts.
-func New(cfg config.ProfileConfig, exec executor.Executor) (*Agent, error) {
+func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) (*Agent, error) {
 	p, err := providers.NewProvider(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 
-	return &Agent{
+	a := &Agent{
 		cfg:          cfg,
 		provider:     p,
 		executor:     exec,
@@ -58,38 +111,44 @@ func New(cfg config.ProfileConfig, exec executor.Executor) (*Agent, error) {
 		history:      make([]protocol.Message, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:   services.NewCompressor(services.DefaultCompressorConfig()),
-	}, nil
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a, nil
 }
 
-// SetSystemPromptBuilder sets the system prompt builder for the agent.
-func (a *Agent) SetSystemPromptBuilder(pb *prompt.SystemPromptBuilder) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.promptBuilder = pb
-}
-
-// SetUserPromptWrapper sets the wrapper used to add context to user messages.
-func (a *Agent) SetUserPromptWrapper(uw *prompt.UserPromptWrapper) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.userWrapper = uw
-}
-
-// Executor returns the agent's executor
-func (a *Agent) Executor() executor.Executor {
-	return a.executor
-}
-
+// RegisterTool adds a tool to the agent. Safe to call after construction.
 func (a *Agent) RegisterTool(t tools.Tool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.tools[t.Name()] = t
 }
 
+// SetApprovalPolicy changes the tool approval policy at runtime.
 func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.policy = p
+}
+
+// Executor returns the agent's executor.
+func (a *Agent) Executor() executor.Executor {
+	return a.executor
+}
+
+// SetSkillManager sets the skill manager at runtime.
+func (a *Agent) SetSkillManager(sm *skills.SkillManager) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.skillManager = sm
+}
+
+// SkillManager returns the agent's skill manager.
+func (a *Agent) SkillManager() *skills.SkillManager {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.skillManager
 }
 
 // ResetLoopDetector clears the loop detection history.
@@ -140,28 +199,7 @@ func (a *Agent) ForceCompress(ctx context.Context) (*services.CompressionResult,
 	return &result, nil
 }
 
-// SetCompressorSummarizer sets the LLM summarizer for high-quality summaries.
-func (a *Agent) SetCompressorSummarizer(s services.Summarizer) {
-	if a.compressor != nil {
-		a.compressor.SetSummarizer(s)
-	}
-}
-
-// SetSkillManager sets the skill manager for skill-based conversations.
-func (a *Agent) SetSkillManager(sm *skills.SkillManager) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.skillManager = sm
-}
-
-// SkillManager returns the agent's skill manager.
-func (a *Agent) SkillManager() *skills.SkillManager {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.skillManager
-}
-
-// ... Snapshot/Restore ... (omitted for brevity, keep existing)
+// Snapshot returns a deep copy of the agent's current state.
 func (a *Agent) Snapshot() Snapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
@@ -177,6 +215,7 @@ func (a *Agent) Snapshot() Snapshot {
 	}
 }
 
+// Restore replaces the agent's state with the given snapshot.
 func (a *Agent) Restore(s Snapshot) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -205,12 +244,17 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 		// Wrap user messages with context if wrapper is set
 		if msg.Role == protocol.RoleUser && a.userWrapper != nil {
-			msg = a.wrapUserMessage(msg)
+			pctx := prompt.PromptContext{
+				WorkDir:  a.executor.WorkDir(),
+				Platform: a.executor.Platform(),
+				Model:    a.cfg.Model,
+			}
+			msg = a.wrapUserMessage(msg, pctx)
 		}
 
 		a.history = append(a.history, msg)
 	}
-	
+
 	if a.state == StatePaused && len(a.pendingActions) > 0 {
 		a.mu.Unlock()
 		return nil, fmt.Errorf("agent is paused waiting for tool outputs")
@@ -223,13 +267,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 	go func() {
 		defer close(outCh)
-		
+
 		for {
 			a.mu.RLock()
 			state := a.state
-			toolsMap := a.tools // Copy reference
+			toolsMap := a.tools
 			a.mu.RUnlock()
-			
+
 			if state == StatePaused {
 				outCh <- protocol.Event{Type: protocol.EventTypeFinish, FinishReason: "need_approval"}
 				return
@@ -239,33 +283,31 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			msgs := a.buildContext()
 			a.mu.RUnlock()
 
-			// Prepare Tools List
+			// Prepare tools list
 			var toolList []tools.Tool
 			for _, t := range toolsMap {
 				toolList = append(toolList, t)
 			}
 
-			// Pass tools to StreamChat
 			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
 			if err != nil {
 				outCh <- protocol.NewErrorEvent(err)
 				return
 			}
 
-			// 3. Process Stream
+			// Process stream
 			var currentToolCalls []*protocol.ToolCall
 			var currentContent string
 			var providerFinishReason protocol.FinishReason
-			
+
 			for evt := range stream {
-				// Intercept Finish Event
 				if evt.Type == protocol.EventTypeFinish {
 					providerFinishReason = evt.FinishReason
 					continue
 				}
-				
+
 				outCh <- evt
-				
+
 				if evt.Type == protocol.EventTypeToolCallEnd && evt.ToolCall != nil {
 					currentToolCalls = append(currentToolCalls, evt.ToolCall)
 				}
@@ -273,109 +315,110 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					currentContent += evt.ContentPartDelta.Text
 				}
 			}
-			
+
 			asstMsg := protocol.NewAssistantMessage(currentContent)
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
 			}
-			
+
 			a.mu.Lock()
 			a.history = append(a.history, asstMsg)
 			a.mu.Unlock()
 
-						// 5. Handle Tool Calls (The Decision Point)
-						if len(currentToolCalls) > 0 {
-							if a.policy == ApprovalPolicyManual {
-								// Split into safe (read-only in working dir) and unsafe tool calls
-								var safeCalls, unsafeCalls []*protocol.ToolCall
-								for _, tc := range currentToolCalls {
-									if a.isToolCallSafe(tc) {
-										safeCalls = append(safeCalls, tc)
-									} else {
-										unsafeCalls = append(unsafeCalls, tc)
-									}
-								}
-
-								// Auto-execute safe tool calls
-								if len(safeCalls) > 0 {
-									a.mu.Lock()
-									for _, tc := range safeCalls {
-										a.pendingActions = append(a.pendingActions, &PendingAction{
-											ToolCallID: tc.ID,
-											Name:       tc.Name,
-											Arguments:  tc.Arguments,
-											ToolCall:   tc,
-										})
-									}
-									a.mu.Unlock()
-
-									results, err := a.executePendingActions(ctx)
-									if err != nil {
-										outCh <- protocol.NewErrorEvent(err)
-										return
-									}
-									toolMsg := protocol.NewToolMessage(results)
-									a.mu.Lock()
-									a.history = append(a.history, toolMsg)
-									a.mu.Unlock()
-								}
-
-								// Pause for unsafe tool calls
-								if len(unsafeCalls) > 0 {
-									a.mu.Lock()
-									a.state = StatePaused
-									for _, tc := range unsafeCalls {
-										a.pendingActions = append(a.pendingActions, &PendingAction{
-											ToolCallID: tc.ID,
-											Name:       tc.Name,
-											Arguments:  tc.Arguments,
-											ToolCall:   tc,
-										})
-									}
-									a.mu.Unlock()
-								}
-
-								continue
-							} else {
-								// ... (Auto execution logic same as before) ...
-								a.mu.Lock()
-								for _, tc := range currentToolCalls {
-									a.pendingActions = append(a.pendingActions, &PendingAction{
-										ToolCallID: tc.ID,
-										Name:       tc.Name,
-										Arguments:  tc.Arguments,
-										ToolCall:   tc,
-									})
-								}
-								a.mu.Unlock()
-								
-								results, err := a.executePendingActions(ctx)
-								if err != nil {
-									outCh <- protocol.NewErrorEvent(err)
-									return
-								}
-								
-								toolMsg := protocol.NewToolMessage(results)
-								a.mu.Lock()
-								a.history = append(a.history, toolMsg)
-								a.mu.Unlock()
-								continue 
-							}
+			// Handle tool calls
+			if len(currentToolCalls) > 0 {
+				if a.policy == ApprovalPolicyManual {
+					// Split into safe (read-only in working dir) and unsafe tool calls
+					var safeCalls, unsafeCalls []*protocol.ToolCall
+					for _, tc := range currentToolCalls {
+						if a.isToolCallSafe(tc) {
+							safeCalls = append(safeCalls, tc)
+						} else {
+							unsafeCalls = append(unsafeCalls, tc)
 						}
-						
-						// No tool calls -> Turn Finished
+					}
+
+					// Auto-execute safe tool calls
+					if len(safeCalls) > 0 {
 						a.mu.Lock()
-						a.state = StateIdle
+						for _, tc := range safeCalls {
+							a.pendingActions = append(a.pendingActions, &PendingAction{
+								ToolCallID: tc.ID,
+								Name:       tc.Name,
+								Arguments:  tc.Arguments,
+								ToolCall:   tc,
+							})
+						}
 						a.mu.Unlock()
-						
-						// Emit the actual finish event from provider (e.g. Stop)
-						outCh <- protocol.NewFinishEvent(providerFinishReason)
-						return
-					}	}()
+
+						results, err := a.executePendingActions(ctx)
+						if err != nil {
+							outCh <- protocol.NewErrorEvent(err)
+							return
+						}
+						toolMsg := protocol.NewToolMessage(results)
+						a.mu.Lock()
+						a.history = append(a.history, toolMsg)
+						a.mu.Unlock()
+					}
+
+					// Pause for unsafe tool calls
+					if len(unsafeCalls) > 0 {
+						a.mu.Lock()
+						a.state = StatePaused
+						for _, tc := range unsafeCalls {
+							a.pendingActions = append(a.pendingActions, &PendingAction{
+								ToolCallID: tc.ID,
+								Name:       tc.Name,
+								Arguments:  tc.Arguments,
+								ToolCall:   tc,
+							})
+						}
+						a.mu.Unlock()
+					}
+
+					continue
+				}
+
+				// Auto execution
+				a.mu.Lock()
+				for _, tc := range currentToolCalls {
+					a.pendingActions = append(a.pendingActions, &PendingAction{
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Arguments:  tc.Arguments,
+						ToolCall:   tc,
+					})
+				}
+				a.mu.Unlock()
+
+				results, err := a.executePendingActions(ctx)
+				if err != nil {
+					outCh <- protocol.NewErrorEvent(err)
+					return
+				}
+
+				toolMsg := protocol.NewToolMessage(results)
+				a.mu.Lock()
+				a.history = append(a.history, toolMsg)
+				a.mu.Unlock()
+				continue
+			}
+
+			// No tool calls -> turn finished
+			a.mu.Lock()
+			a.state = StateIdle
+			a.mu.Unlock()
+
+			outCh <- protocol.NewFinishEvent(providerFinishReason)
+			return
+		}
+	}()
 
 	return outCh, nil
 }
 
+// ApproveAndExecutePendingActions executes all pending tool calls and continues.
 func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan protocol.Event, error) {
 	results, err := a.executePendingActions(ctx)
 	if err != nil {
@@ -384,6 +427,7 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	return a.SubmitToolOutputs(ctx, results)
 }
 
+// SubmitToolOutputs submits tool results and resumes the agent loop.
 func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolResult) (<-chan protocol.Event, error) {
 	a.mu.Lock()
 	if a.state != StatePaused {
@@ -410,7 +454,6 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 		if a.loopDetector != nil {
 			status := a.loopDetector.RecordCall(action.Name, action.Arguments)
 			if status.IsLooping {
-				// Add warning to the result
 				results = append(results, protocol.NewTextToolResult(
 					action.ToolCallID,
 					fmt.Sprintf("Warning: Loop detected - %s\nSuggestion: %s\n\nProceeding with execution anyway...",
@@ -422,17 +465,42 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 		tool, ok := a.tools[action.Name]
 		if !ok {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 			continue
 		}
-		// Pass executor to tool.Execute
 		res, err := tool.Execute(ctx, exec, action.Arguments)
 		if err != nil {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 		} else {
-			results = append(results, protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false))
+			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false)
+			tr.ToolName = action.Name
+			results = append(results, tr)
 		}
 	}
+	// Inject reminders into the last tool result
+	if len(results) > 0 && a.reminderBuilder != nil {
+		pctx := prompt.PromptContext{
+			WorkDir:  a.executor.WorkDir(),
+			Platform: a.executor.Platform(),
+			Model:    a.cfg.Model,
+		}
+		tcResults := make([]prompt.ToolCallResult, len(results))
+		for i, r := range results {
+			tcResults[i] = prompt.ToolCallResult{
+				Name:    r.ToolName,
+				Result:  r.Text,
+				IsError: r.IsError,
+			}
+		}
+		if s := a.reminderBuilder.Build(pctx, tcResults); s != "" {
+			results[len(results)-1].Text += s
+		}
+	}
+
 	a.mu.Lock()
 	a.pendingActions = nil
 	a.mu.Unlock()
@@ -442,9 +510,15 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 func (a *Agent) buildContext() []protocol.Message {
 	var msgs []protocol.Message
 
+	pctx := prompt.PromptContext{
+		WorkDir:  a.executor.WorkDir(),
+		Platform: a.executor.Platform(),
+		Model:    a.cfg.Model,
+	}
+
 	// System prompt messages (static + dynamic, each as separate message)
 	if a.promptBuilder != nil {
-		for _, text := range a.promptBuilder.BuildMessages() {
+		for _, text := range a.promptBuilder.BuildMessages(pctx) {
 			msgs = append(msgs, protocol.NewSystemMessage(text))
 		}
 	}
@@ -461,12 +535,9 @@ func (a *Agent) buildContext() []protocol.Message {
 
 	// Check if compression is needed
 	if a.compressor != nil && a.compressor.NeedsCompression(history) {
-		// Compress history using intelligent partitioning
 		compressed, result, err := a.compressor.Compress(context.Background(), history)
 		if err == nil && result.Compressed {
 			history = compressed
-			// Update the agent's history with compressed version
-			// Note: This modifies history in place, which is safe since we hold the lock
 			a.history = history
 		}
 	}
@@ -482,7 +553,7 @@ func (a *Agent) buildContext() []protocol.Message {
 
 // wrapUserMessage applies the UserPromptWrapper to a user message.
 // It extracts text content, wraps it, and preserves non-text parts (images, etc.).
-func (a *Agent) wrapUserMessage(msg protocol.Message) protocol.Message {
+func (a *Agent) wrapUserMessage(msg protocol.Message, pctx prompt.PromptContext) protocol.Message {
 	var rawTexts []string
 	var nonTextParts []protocol.ContentPart
 	for _, p := range msg.Content {
@@ -497,7 +568,7 @@ func (a *Agent) wrapUserMessage(msg protocol.Message) protocol.Message {
 		return msg
 	}
 
-	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"))
+	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"), pctx)
 
 	var newContent []protocol.ContentPart
 	newContent = append(newContent, protocol.ContentPart{
@@ -549,7 +620,7 @@ func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
 	for _, key := range pathArgs {
 		val, ok := args[key]
 		if !ok || val == nil {
-			continue // argument not present → tool uses default (typically cwd)
+			continue
 		}
 		pathStr, ok := val.(string)
 		if !ok || pathStr == "" {

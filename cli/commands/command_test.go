@@ -83,10 +83,10 @@ func TestRegistry(t *testing.T) {
 
 func TestParse(t *testing.T) {
 	tests := []struct {
-		input   string
-		name    string
-		args    []string
-		ok      bool
+		input string
+		name  string
+		args  []string
+		ok    bool
 	}{
 		{"/help", "help", []string{}, true},
 		{"/model gpt-4", "model", []string{"gpt-4"}, true},

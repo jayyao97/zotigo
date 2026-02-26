@@ -11,10 +11,10 @@ import (
 type RiskLevel int
 
 const (
-	RiskLevelSafe     RiskLevel = iota // Command is safe to execute
-	RiskLevelNormal                    // Normal command, standard approval
-	RiskLevelHigh                      // High risk, requires extra confirmation
-	RiskLevelBlocked                   // Blocked, cannot execute
+	RiskLevelSafe    RiskLevel = iota // Command is safe to execute
+	RiskLevelNormal                   // Normal command, standard approval
+	RiskLevelHigh                     // High risk, requires extra confirmation
+	RiskLevelBlocked                  // Blocked, cannot execute
 )
 
 // String returns the string representation of RiskLevel.
@@ -61,15 +61,15 @@ func DefaultPolicy() *Policy {
 		BlockedPatterns: []string{
 			// Destructive file operations
 			`rm\s+(-[rf]+\s+)*/(etc|var|usr|bin|sbin|boot|lib|root|home)`,
-			`rm\s+-rf\s+/\s*$`,                     // rm -rf /
-			`rm\s+-rf\s+/\*`,                       // rm -rf /*
-			`rm\s+-rf\s+~`,                         // rm -rf ~
-			`>\s*/dev/(sd|hd|nvme|disk|vd)[a-z]`,   // overwrite disk devices
-			`dd\s+.*of=/dev/(sd|hd|nvme|disk|vd)`,  // dd to disk
-			`mkfs\.`,                               // format filesystem
-			`:(){ :|:& };:`,                        // fork bomb
-			`chmod\s+(-R\s+)?777\s+/`,              // chmod 777 /
-			`chown\s+(-R\s+)?.*\s+/`,               // chown /
+			`rm\s+-rf\s+/\s*$`,                    // rm -rf /
+			`rm\s+-rf\s+/\*`,                      // rm -rf /*
+			`rm\s+-rf\s+~`,                        // rm -rf ~
+			`>\s*/dev/(sd|hd|nvme|disk|vd)[a-z]`,  // overwrite disk devices
+			`dd\s+.*of=/dev/(sd|hd|nvme|disk|vd)`, // dd to disk
+			`mkfs\.`,                              // format filesystem
+			`:(){ :|:& };:`,                       // fork bomb
+			`chmod\s+(-R\s+)?777\s+/`,             // chmod 777 /
+			`chown\s+(-R\s+)?.*\s+/`,              // chown /
 		},
 		HighRiskPatterns: []string{
 			// Remote code execution

@@ -21,10 +21,10 @@ func TestConvertToChatParams_TextOnly(t *testing.T) {
 	if len(params.Messages) != 1 {
 		t.Fatalf("Expected 1 message, got %d", len(params.Messages))
 	}
-	
+
 	b, _ := json.Marshal(params.Messages[0])
 	jsonStr := string(b)
-	
+
 	if !contains(jsonStr, `"role":"user"`) {
 		t.Errorf("Expected role user, got json: %s", jsonStr)
 	}
@@ -45,7 +45,7 @@ func TestConvertToChatParams_ToolResult(t *testing.T) {
 	if len(params.Messages) != 1 {
 		t.Fatalf("Expected 1 message")
 	}
-	
+
 	b, _ := json.Marshal(params.Messages[0])
 	jsonStr := string(b)
 
@@ -65,12 +65,12 @@ func TestConvertToChatParams_Image(t *testing.T) {
 			{Type: protocol.ContentTypeImage, Image: &protocol.MediaPart{Data: data, MediaType: "image/jpeg"}},
 		},
 	}
-	
+
 	params, _ := convertToChatParams([]protocol.Message{msgData}, nil)
-	
+
 	b, _ := json.Marshal(params.Messages[0])
 	jsonStr := string(b)
-	
+
 	expectedB64 := base64.StdEncoding.EncodeToString(data)
 	if !contains(jsonStr, expectedB64) {
 		t.Errorf("Expected base64 data in json")

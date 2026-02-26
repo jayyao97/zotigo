@@ -28,9 +28,9 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	// `&ResponseProvider{ client: client }` expects `*Client`.
 	// If previous error said `cannot use client (variable of struct type Client)`, it means NewClient returned struct.
 	// I will take address `&client`.
-	
+
 	client := openai.NewClient(opts...)
-	
+
 	mode := "chat"
 	if m, ok := cfg.Params["mode"].(string); ok {
 		mode = m
@@ -46,7 +46,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	// `cannot use client (variable of struct type "github.com/openai/openai-go/v3".Client) as *"github.com/openai/openai-go/v3".Client`
 	// This CONFIRMS `client` variable IS A STRUCT.
 	// So `openai.NewClient` returns `Client` struct by value.
-	
+
 	switch mode {
 	case "response":
 		return &ResponseProvider{

@@ -9,7 +9,7 @@ import (
 
 func TestMessageSerialization(t *testing.T) {
 	userMsg := protocol.NewUserMessage("Hello world")
-	
+
 	data, err := json.Marshal(userMsg)
 	if err != nil {
 		t.Fatalf("Failed to marshal user message: %v", err)
@@ -37,10 +37,10 @@ func TestAssistantMessageWithToolCall(t *testing.T) {
 		Name:      "get_weather",
 		Arguments: `{"location": "Tokyo"}`,
 	}
-	
+
 	msg := protocol.NewAssistantMessage("Checking weather...")
 	msg.AddToolCall(tc)
-	
+
 	data, err := json.Marshal(msg)
 	if err != nil {
 		t.Fatalf("Failed to marshal assistant message: %v", err)
@@ -54,12 +54,12 @@ func TestAssistantMessageWithToolCall(t *testing.T) {
 	if unmarshaledMsg.Role != protocol.RoleAssistant {
 		t.Errorf("Expected role %s, got %s", protocol.RoleAssistant, unmarshaledMsg.Role)
 	}
-	
+
 	// Expect 2 parts: Text + ToolCall
 	if len(unmarshaledMsg.Content) != 2 {
 		t.Fatalf("Expected 2 content parts, got %d", len(unmarshaledMsg.Content))
 	}
-	
+
 	// Check Tool Call Part
 	found := false
 	for _, part := range unmarshaledMsg.Content {

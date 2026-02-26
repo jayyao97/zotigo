@@ -15,7 +15,7 @@ type ContentType string
 
 const (
 	ContentTypeText       ContentType = "text"
-	ContentTypeReasoning  ContentType = "reasoning"   // For CoT/Thinking models
+	ContentTypeReasoning  ContentType = "reasoning" // For CoT/Thinking models
 	ContentTypeImage      ContentType = "image"
 	ContentTypeAudio      ContentType = "audio"
 	ContentTypeVideo      ContentType = "video"

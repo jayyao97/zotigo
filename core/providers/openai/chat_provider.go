@@ -22,11 +22,11 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	if err != nil {
 		return nil, err
 	}
-	
+
 	params.Model = p.model
 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
-	
+
 	ch := make(chan protocol.Event)
 
 	go func() {
@@ -34,27 +34,27 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		defer stream.Close()
 
 		acc := openai.ChatCompletionAccumulator{}
-		
+
 		contentStarted := false
 		contentIndex := 0
 
 		for stream.Next() {
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
-			
+
 			for _, choice := range chunk.Choices {
 				if choice.Index != 0 {
 					continue
 				}
-				
+
 				delta := choice.Delta
 
 				// 1. Content Delta
 				if delta.Content != "" {
 					contentStarted = true
 					ch <- protocol.Event{
-						Type:  protocol.EventTypeContentDelta,
-						Index: contentIndex,
+						Type:             protocol.EventTypeContentDelta,
+						Index:            contentIndex,
 						ContentPartDelta: &protocol.ContentPartDelta{Text: delta.Content},
 					}
 				}
@@ -74,26 +74,26 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						}
 					}
 				}
-				
+
 				// 3. Accumulated Full Objects (End Events)
 				// Must be handled BEFORE FinishReason
 				if tool, ok := acc.JustFinishedToolCall(); ok {
 					idx := int(tool.Index)
-					
+
 					ptc := &protocol.ToolCall{
 						Index:     idx,
 						ID:        tool.ID,
 						Name:      tool.Name,
 						Arguments: tool.Arguments,
 					}
-					
+
 					ch <- protocol.Event{
 						Type:     protocol.EventTypeToolCallEnd,
 						Index:    idx,
 						ToolCall: ptc,
 					}
 				}
-				
+
 				if content, ok := acc.JustFinishedContent(); ok {
 					if contentStarted {
 						ch <- protocol.Event{
@@ -107,7 +107,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						contentStarted = false
 					}
 				}
-				
+
 				// 4. Finish Reason
 				if choice.FinishReason != "" {
 					if contentStarted {
@@ -117,7 +117,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						}
 						contentStarted = false
 					}
-					
+
 					reason := mapFinishReason(choice.FinishReason)
 					ch <- protocol.NewFinishEvent(reason)
 					return

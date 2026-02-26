@@ -41,9 +41,9 @@ type tavilyResult struct {
 
 func (p *TavilySearchProvider) Search(ctx context.Context, query string, maxResults int, opts SearchOptions) ([]searchResult, error) {
 	body, err := json.Marshal(tavilyRequest{
-		APIKey:            p.apiKey,
-		Query:             query,
-		MaxResults:        maxResults,
+		APIKey:        p.apiKey,
+		Query:         query,
+		MaxResults:    maxResults,
 		SearchDepth:   "advanced",
 		Topic:         opts.Topic,
 		TimeRange:     opts.TimeRange,

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"time"
 
 	tea "charm.land/bubbletea/v2"
@@ -160,24 +159,31 @@ func main() {
 	}
 
 	// 5. Init Agent
-	pb := prompt.NewSystemPromptBuilder()
-	pb.DynamicContext.AddSection("environment", fmt.Sprintf(
-		"Working directory: %s\nPlatform: %s\nShell: %s",
-		cwd, runtime.GOOS, os.Getenv("SHELL"),
-	))
-
-	// Inject project context from ZOTIGO.md if present
-	if data, err := os.ReadFile(filepath.Join(cwd, "ZOTIGO.md")); err == nil {
-		pb.DynamicContext.AddSection("project_context", string(data))
+	pbOpts := []prompt.SystemPromptOption{
+		prompt.WithDynamicSection("environment", func(ctx prompt.PromptContext) string {
+			return fmt.Sprintf("Working directory: %s\nPlatform: %s",
+				ctx.WorkDir, ctx.Platform)
+		}),
 	}
 
-	ag, err := agent.New(profile, exec)
+	// Inject project instructions from AGENTS.md if present
+	if data, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md")); err == nil {
+		content := string(data)
+		pbOpts = append(pbOpts, prompt.WithDynamicSection("project_instructions", func(_ prompt.PromptContext) string {
+			return content
+		}))
+	}
+
+	pb := prompt.NewSystemPromptBuilder(pbOpts...)
+
+	ag, err := agent.New(profile, exec,
+		agent.WithSystemPromptBuilder(pb),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
+	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
 		os.Exit(1)
 	}
-	ag.SetSystemPromptBuilder(pb)
-	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
 
 	// Restore state if needed
 	if doResume {

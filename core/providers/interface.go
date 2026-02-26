@@ -11,7 +11,7 @@ import (
 type Provider interface {
 	// StreamChat sends the conversation history and available tools to the model.
 	StreamChat(ctx context.Context, messages []protocol.Message, tools []tools.Tool) (<-chan protocol.Event, error)
-	
+
 	// Name returns the provider's name (e.g., "openai", "claude").
 	Name() string
 }

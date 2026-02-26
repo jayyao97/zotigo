@@ -9,7 +9,7 @@ import (
 type State string
 
 const (
-	StateIdle   State = "idle"
+	StateIdle    State = "idle"
 	StateRunning State = "running"
 	StatePaused  State = "paused" // Waiting for user input/tool approval
 )

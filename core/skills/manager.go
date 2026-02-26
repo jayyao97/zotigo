@@ -145,4 +145,3 @@ func (m *SkillManager) Count() int {
 	defer m.mu.RUnlock()
 	return len(m.skills)
 }
-
