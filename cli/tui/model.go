@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -50,6 +51,7 @@ type Model struct {
 	initialPrinted  bool
 	kittyChecked    bool
 	autoApprove     bool
+	streamFlushed   int // lines already committed to scrollback during streaming
 }
 
 type streamReadyMsg <-chan protocol.Event
@@ -169,15 +171,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.printInitialHistory(false)
 		}
 		
-		return m, tea.Sequence(
-			tea.ClearScreen, 
-			m.printInitialHistory(true),
-		)
+		return m, nil
 
 	case tea.KeyboardEnhancementsMsg:
 		if !m.kittyChecked {
 			m.kittyChecked = true
-			return m, func() tea.Msg { return tea.ClearScreen() }
 		}
 		return m, nil
 
@@ -342,6 +340,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case streamReadyMsg:
 		m.eventCh = msg
 		m.currentAsstMsg = ""
+		m.streamFlushed = 0
 		return m, waitForNextEvent(m.eventCh)
 
 	case protocol.Event:
@@ -349,16 +348,67 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case protocol.EventTypeContentDelta:
 			if msg.ContentPartDelta != nil {
 				m.currentAsstMsg += msg.ContentPartDelta.Text
+				if cmd := m.flushStreamedLines(); cmd != nil {
+					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+				}
 			}
 		case protocol.EventTypeToolCallDelta:
 			if msg.ToolCallDelta != nil && msg.ToolCallDelta.Name != "" {
-				m.currentAsstMsg += fmt.Sprintf("\n[Call Tool: %s...]", msg.ToolCallDelta.Name)
+				m.currentAsstMsg += fmt.Sprintf("\n🛠️  %s ...", msg.ToolCallDelta.Name)
+			}
+		case protocol.EventTypeToolCallEnd:
+			if msg.ToolCall != nil {
+				// Replace the "..." placeholder with the full summary
+				placeholder := fmt.Sprintf("\n🛠️  %s ...", msg.ToolCall.Name)
+				full := "\n" + formatToolCall(msg.ToolCall)
+				m.currentAsstMsg = strings.Replace(m.currentAsstMsg, placeholder, full, 1)
 			}
 		case protocol.EventTypeFinish:
 			m.thinking = false
-
-			formattedMsg := ""
 			snap := m.agent.Snapshot()
+
+			if m.streamFlushed > 0 {
+				// Lines were incrementally committed — just flush the remaining tail
+				var finishCmd tea.Cmd
+				if m.currentAsstMsg != "" {
+					finishCmd = tea.Println(m.currentAsstMsg)
+				}
+				m.currentAsstMsg = ""
+				m.streamFlushed = 0
+
+				if msg.FinishReason == "need_approval" {
+					m.approving = true
+					m.approvalChoice = 0
+					var sb strings.Builder
+					if len(snap.PendingActions) > 1 {
+						sb.WriteString(fmt.Sprintf("%d tools:\n", len(snap.PendingActions)))
+					}
+					for _, act := range snap.PendingActions {
+						args := act.Arguments
+						if len(args) > 50 {
+							args = args[:47] + "..."
+						}
+						sb.WriteString(fmt.Sprintf("• %s %s\n", act.Name, args))
+					}
+					m.pendingToolName = strings.TrimSpace(sb.String())
+					m.pendingToolArgs = ""
+					m.saveSession()
+					if finishCmd != nil {
+						return m, finishCmd
+					}
+					return m, nil
+				}
+
+				m.eventCh = nil
+				m.saveSession()
+				if finishCmd != nil {
+					return m, finishCmd
+				}
+				return m, nil
+			}
+
+			// Short reply — no incremental flush happened, use renderMessage
+			formattedMsg := ""
 			if len(snap.History) > 0 {
 				lastMsg := snap.History[len(snap.History)-1]
 				if lastMsg.Role == protocol.RoleAssistant {
@@ -571,6 +621,24 @@ func waitForNextEvent(ch <-chan protocol.Event) tea.Cmd {
 	}
 }
 
+func (m *Model) flushStreamedLines() tea.Cmd {
+	// Flush all complete lines (up to the last \n) to scrollback.
+	// Only the incomplete trailing fragment stays in View().
+	idx := strings.LastIndex(m.currentAsstMsg, "\n")
+	if idx < 0 {
+		return nil // no complete line yet
+	}
+	toCommit := m.currentAsstMsg[:idx]
+	m.currentAsstMsg = m.currentAsstMsg[idx+1:]
+
+	prefix := ""
+	if m.streamFlushed == 0 {
+		prefix = assistantStyle.Render("Zotigo: ")
+	}
+	m.streamFlushed++
+	return tea.Println(prefix + toCommit)
+}
+
 func (m Model) View() tea.View {
 	// Wait for WindowSizeMsg to initialize width.
 	if m.width == 0 {
@@ -580,7 +648,9 @@ func (m Model) View() tea.View {
 	var sb strings.Builder
 
 	if m.thinking && m.currentAsstMsg != "" {
-		sb.WriteString(assistantStyle.Render("Zotigo: "))
+		if m.streamFlushed == 0 {
+			sb.WriteString(assistantStyle.Render("Zotigo: "))
+		}
 		sb.WriteString(m.currentAsstMsg)
 		sb.WriteString("\n")
 	} else if m.thinking {
@@ -716,7 +786,7 @@ func renderMessage(msg protocol.Message) (string, bool) {
 	content := ""
 	if msg.Role == protocol.RoleAssistant {
 		var textParts []string
-		var toolNames []string
+		var toolSummaries []string
 
 		for _, p := range msg.Content {
 			switch p.Type {
@@ -724,17 +794,17 @@ func renderMessage(msg protocol.Message) (string, bool) {
 				textParts = append(textParts, p.Text)
 			case protocol.ContentTypeToolCall:
 				if p.ToolCall != nil {
-					toolNames = append(toolNames, p.ToolCall.Name)
+					toolSummaries = append(toolSummaries, formatToolCall(p.ToolCall))
 				}
 			}
 		}
 
 		content = strings.Join(textParts, "")
-		if len(toolNames) > 0 {
+		if len(toolSummaries) > 0 {
 			if content != "" {
 				content += "\n"
 			}
-			content += fmt.Sprintf("🛠️  Called: %s", strings.Join(toolNames, ", "))
+			content += strings.Join(toolSummaries, "\n")
 		}
 	} else {
 		content = msg.String()
@@ -904,4 +974,43 @@ func (m *Model) pasteImageFromClipboard() (string, bool) {
 	os.Remove(relPath)
 
 	return "", false
+}
+
+// largeValueKeys are argument names whose values are typically large and
+// should be shown as a character count rather than inlined.
+var largeValueKeys = map[string]bool{
+	"content":    true,
+	"old_string": true,
+	"new_string": true,
+	"patch":      true,
+}
+
+// formatToolCall returns a compact one-line summary of a tool call,
+// e.g. "🛠️  shell command="git status""
+func formatToolCall(tc *protocol.ToolCall) string {
+	var args map[string]any
+	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil || len(args) == 0 {
+		return fmt.Sprintf("🛠️  %s", tc.Name)
+	}
+
+	var parts []string
+	for k, v := range args {
+		s := fmt.Sprintf("%v", v)
+		if largeValueKeys[k] {
+			parts = append(parts, fmt.Sprintf("%s=(%d chars)", k, len(s)))
+			continue
+		}
+		// Truncate long values
+		if len(s) > 60 {
+			s = s[:57] + "..."
+		}
+		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
+	}
+
+	summary := fmt.Sprintf("🛠️  %s %s", tc.Name, strings.Join(parts, " "))
+	// Cap total length
+	if len(summary) > 120 {
+		summary = summary[:117] + "..."
+	}
+	return summary
 }
