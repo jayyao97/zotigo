@@ -95,7 +95,6 @@ Project skill instructions.
 	sm := &SkillManager{
 		skills:     make(map[string]*SkillDefinition),
 		aliases:    make(map[string]string),
-		activated:  make(map[string]bool),
 		projectDir: projectDir,
 		userDir:    userDir,
 	}
@@ -155,7 +154,6 @@ Project instructions.
 	sm := &SkillManager{
 		skills:     make(map[string]*SkillDefinition),
 		aliases:    make(map[string]string),
-		activated:  make(map[string]bool),
 		projectDir: projectDir,
 		userDir:    userDir,
 	}
@@ -177,48 +175,6 @@ Project instructions.
 	}
 }
 
-func TestSkillManager_Activation(t *testing.T) {
-	sm := NewSkillManager("")
-	sm.Load()
-
-	// Builtin skill should exist
-	skill, ok := sm.Get("skill-creator")
-	if !ok {
-		t.Fatal("Builtin skill-creator not found")
-	}
-
-	// Not activated initially
-	if sm.IsActivated("skill-creator") {
-		t.Error("Should not be activated initially")
-	}
-
-	// Activate
-	if err := sm.Activate("skill-creator"); err != nil {
-		t.Fatalf("Activate failed: %v", err)
-	}
-
-	if !sm.IsActivated("skill-creator") {
-		t.Error("Should be activated")
-	}
-
-	activated := sm.GetActivated()
-	if len(activated) != 1 {
-		t.Errorf("Expected 1 activated skill, got %d", len(activated))
-	}
-	if activated[0].Name != skill.Name {
-		t.Errorf("Expected activated skill '%s', got '%s'", skill.Name, activated[0].Name)
-	}
-
-	// Deactivate
-	if err := sm.Deactivate("skill-creator"); err != nil {
-		t.Fatalf("Deactivate failed: %v", err)
-	}
-
-	if sm.IsActivated("skill-creator") {
-		t.Error("Should be deactivated")
-	}
-}
-
 func TestSkillManager_Aliases(t *testing.T) {
 	sm := NewSkillManager("")
 	sm.Load()
@@ -230,14 +186,6 @@ func TestSkillManager_Aliases(t *testing.T) {
 	}
 	if skill.Name != "skill-creator" {
 		t.Errorf("Expected skill-creator, got %s", skill.Name)
-	}
-
-	// Activate by alias
-	if err := sm.Activate("new-skill"); err != nil {
-		t.Fatalf("Activate by alias failed: %v", err)
-	}
-	if !sm.IsActivated("skill-creator") {
-		t.Error("Should be activated via alias")
 	}
 }
 

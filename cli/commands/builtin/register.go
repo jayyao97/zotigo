@@ -24,6 +24,5 @@ func RegisterAll(registry *commands.Registry) {
 	registry.Register(NewSnapshotsCommand())
 
 	// Skills commands
-	registry.Register(NewSkillCommand())
 	registry.Register(NewSkillsCommand())
 }

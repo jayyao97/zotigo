@@ -5,19 +5,34 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
+	"runtime"
+	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/jayyao97/zotigo/cli/commands"
+	cmdbuiltin "github.com/jayyao97/zotigo/cli/commands/builtin"
 	"github.com/jayyao97/zotigo/cli/tui"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
+)
+
+// Build-time variables set via -ldflags.
+var (
+	Version    = "dev"
+	BuildTime  = "unknown"
+	CommitHash = "unknown"
 )
 
 // KittyFilterWriter wraps *os.File to filter out unsupported Kitty keyboard protocol sequences.
@@ -145,11 +160,23 @@ func main() {
 	}
 
 	// 5. Init Agent
-	ag, err := agent.New(profile, exec, "You are Zotigo, a helpful CLI software engineering agent.")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.DynamicContext.AddSection("environment", fmt.Sprintf(
+		"Working directory: %s\nPlatform: %s\nShell: %s",
+		cwd, runtime.GOOS, os.Getenv("SHELL"),
+	))
+
+	// Inject project context from ZOTIGO.md if present
+	if data, err := os.ReadFile(filepath.Join(cwd, "ZOTIGO.md")); err == nil {
+		pb.DynamicContext.AddSection("project_context", string(data))
+	}
+
+	ag, err := agent.New(profile, exec)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
 		os.Exit(1)
 	}
+	ag.SetSystemPromptBuilder(pb)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
 
 	// Restore state if needed
@@ -181,9 +208,32 @@ func main() {
 	defer lspManager.StopAll()
 	ag.RegisterTool(builtin.NewLSPTool(lspManager))
 
-	// 7. Run Main TUI
+	// Web tools
+	webClient := builtin.NewWebClient(builtin.WebConfig{
+		TavilyAPIKey: cfg.Tools.Web.TavilyAPIKey,
+		UserAgent:    cfg.Tools.Web.UserAgent,
+		Timeout:      time.Duration(cfg.Tools.Web.TimeoutSec) * time.Second,
+		MaxPageSize:  cfg.Tools.Web.MaxPageSize,
+	})
+	if sp := builtin.NewSearchProvider(webClient); sp != nil {
+		ag.RegisterTool(builtin.NewWebSearchTool(sp))
+	}
+	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
+
+	// 7. Init SkillManager
+	sm := skills.NewSkillManager(cwd)
+	if err := sm.Load(); err != nil {
+		fmt.Printf("Warning: failed to load skills: %v\n", err)
+	}
+	ag.SetSkillManager(sm)
+
+	// 8. Init Command Registry
+	cmdRegistry := commands.NewRegistry()
+	cmdbuiltin.RegisterAll(cmdRegistry)
+
+	// 9. Run Main TUI
 	p := tea.NewProgram(
-		tui.NewModel(ag, sessMgr, currentSession.ID),
+		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry),
 		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
 	)
 	if _, err := p.Run(); err != nil {

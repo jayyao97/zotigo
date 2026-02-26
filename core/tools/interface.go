@@ -6,6 +6,12 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 )
 
+// ToolSafety declares a tool's safety attributes for automatic approval decisions.
+type ToolSafety struct {
+	ReadOnly bool     // true = no side effects (no file writes, no command execution)
+	PathArgs []string // JSON argument names that contain file paths (for scope checking)
+}
+
 // Tool defines an executable capability available to the agent.
 type Tool interface {
 	// Name returns the unique name of the tool (e.g., "read_file").
@@ -23,4 +29,8 @@ type Tool interface {
 	// The executor parameter provides access to file operations and command execution.
 	// It returns the result (which will be serialized to JSON/Text) or an error.
 	Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error)
+
+	// Safety declares the tool's safety attributes.
+	// The agent uses this to decide whether a tool call can be auto-approved.
+	Safety() ToolSafety
 }

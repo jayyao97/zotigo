@@ -8,6 +8,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // LSPTool provides Language Server Protocol operations for code intelligence.
@@ -61,6 +62,10 @@ func (t *LSPTool) Schema() any {
 		},
 		"required": []string{"operation"},
 	}
+}
+
+func (t *LSPTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"file_path"}}
 }
 
 func (t *LSPTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

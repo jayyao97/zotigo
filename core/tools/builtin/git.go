@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // --- GitStatus ---
@@ -17,6 +18,10 @@ func (t *GitStatusTool) Name() string        { return "git_status" }
 func (t *GitStatusTool) Description() string { return "Show the working tree status" }
 func (t *GitStatusTool) Schema() any {
 	return map[string]any{"type": "object", "properties": map[string]any{}}
+}
+
+func (t *GitStatusTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *GitStatusTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -46,6 +51,10 @@ func (t *GitDiffTool) Schema() any {
 			},
 		},
 	}
+}
+
+func (t *GitDiffTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true}
 }
 
 func (t *GitDiffTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -88,6 +97,10 @@ func (t *GitCommitTool) Schema() any {
 	}
 }
 
+func (t *GitCommitTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false}
+}
+
 func (t *GitCommitTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
 	var args struct {
 		Message string `json:"message"`
@@ -128,6 +141,10 @@ func (t *GitAddTool) Schema() any {
 			},
 		},
 	}
+}
+
+func (t *GitAddTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: false}
 }
 
 func (t *GitAddTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

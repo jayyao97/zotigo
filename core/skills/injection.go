@@ -55,41 +55,15 @@ func BuildSkillInjection(skill *SkillDefinition) string {
 	return sb.String()
 }
 
-// ProcessMentions processes a text and activates any mentioned skills
-// Returns the list of newly activated skill names
-func (m *SkillManager) ProcessMentions(text string) []string {
-	mentions := DetectSkillMentions(text)
-	if len(mentions) == 0 {
-		return nil
-	}
-
-	var activated []string
-	for _, mention := range mentions {
-		skill, ok := m.Get(mention)
-		if !ok {
-			continue
-		}
-
-		// Only add if not already activated
-		if !m.IsActivated(skill.Name) {
-			if err := m.Activate(skill.Name); err == nil {
-				activated = append(activated, skill.Name)
-			}
-		}
-	}
-
-	return activated
-}
-
-// BuildAllInjections builds injection content for all activated skills
+// BuildAllInjections builds injection content for all loaded skills
 func (m *SkillManager) BuildAllInjections() string {
-	activated := m.GetActivated()
-	if len(activated) == 0 {
+	allSkills := m.List()
+	if len(allSkills) == 0 {
 		return ""
 	}
 
 	var parts []string
-	for _, skill := range activated {
+	for _, skill := range allSkills {
 		parts = append(parts, BuildSkillInjection(skill))
 	}
 

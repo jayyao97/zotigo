@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // GrepTool searches for patterns in files using ripgrep (rg) or fallback grep.
@@ -49,6 +50,10 @@ func (t *GrepTool) Schema() any {
 		},
 		"required": []string{"pattern"},
 	}
+}
+
+func (t *GrepTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
 }
 
 func (t *GrepTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

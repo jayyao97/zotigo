@@ -66,6 +66,7 @@ type TimeTool struct{}
 func (t *TimeTool) Name() string        { return "get_time" }
 func (t *TimeTool) Description() string { return "Returns current time" }
 func (t *TimeTool) Schema() any         { return nil }
+func (t *TimeTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "12:00", nil
 }
@@ -85,7 +86,7 @@ func TestAgentReActLoop(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "mock"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -144,7 +145,7 @@ func TestAgentGetContextStats(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "mock-stats"}
-	ag, err := agent.New(cfg, exec, "You are a helpful assistant.")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -188,7 +189,7 @@ func TestAgentForceCompress(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "mock-compress"}
-	ag, err := agent.New(cfg, exec, "System prompt")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -243,7 +244,7 @@ func TestAgentResetLoopDetector(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "mock-loop"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}

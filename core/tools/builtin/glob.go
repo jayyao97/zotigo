@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // GlobTool finds files matching patterns using fd or fallback find.
@@ -47,6 +48,10 @@ func (t *GlobTool) Schema() any {
 		},
 		"required": []string{"pattern"},
 	}
+}
+
+func (t *GlobTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
 }
 
 func (t *GlobTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

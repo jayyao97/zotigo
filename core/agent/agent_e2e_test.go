@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -17,6 +18,8 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 
 	// Register providers
+	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 )
 
@@ -25,7 +28,7 @@ import (
 //
 // These tests may:
 // - Take longer to run
-// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY)
+// - Require API keys (OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY)
 // - Make real API calls
 
 func TestE2E_AgentLongConversation(t *testing.T) {
@@ -40,10 +43,13 @@ func TestE2E_AgentLongConversation(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "e2e-verbose"}
-	ag, err := agent.New(cfg, exec, "You are a helpful assistant.")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.SetStaticPrompt("You are a helpful assistant.")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
+	ag.SetSystemPromptBuilder(pb)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -107,10 +113,13 @@ func TestE2E_AgentWithToolCalls(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "e2e-tools"}
-	ag, err := agent.New(cfg, exec, "You are a coding assistant.")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.SetStaticPrompt("You are a coding assistant.")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
+	ag.SetSystemPromptBuilder(pb)
 
 	ag.RegisterTool(&MockReadFileTool{})
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto) // Auto-approve for E2E
@@ -155,7 +164,7 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 
 	profileCfg := e2eCfg.GetProfileConfig()
 	if profileCfg.APIKey == "" {
-		t.Skip("No API key configured in config.json")
+		t.Skip("No API key configured in e2e.config.json (or legacy config.json)")
 	}
 
 	t.Logf("Using provider: %s, model: %s", profileCfg.Provider, profileCfg.Model)
@@ -166,10 +175,13 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	ag, err := agent.New(profileCfg, exec, "You are a helpful assistant. Keep responses brief.")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.SetStaticPrompt("You are a helpful assistant. Keep responses brief.")
+	ag, err := agent.New(profileCfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
+	ag.SetSystemPromptBuilder(pb)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
@@ -228,10 +240,13 @@ func TestE2E_MemoryUnderPressure(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "e2e-memory"}
-	ag, err := agent.New(cfg, exec, "System")
+	pb := prompt.NewSystemPromptBuilder()
+	pb.SetStaticPrompt("System")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
+	ag.SetSystemPromptBuilder(pb)
 
 	ctx := context.Background()
 

@@ -85,6 +85,7 @@ type MockTool struct{}
 func (t *MockTool) Name() string        { return "test_tool" }
 func (t *MockTool) Description() string { return "A test tool" }
 func (t *MockTool) Schema() any         { return nil }
+func (t *MockTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
 func (t *MockTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "tool result", nil
 }
@@ -101,7 +102,7 @@ func TestRunner_RunOnce(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "simple_mock"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -184,7 +185,7 @@ func TestRunner_ApprovalFlow(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "toolcall_mock"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -300,7 +301,7 @@ func TestRunner_Start(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "simple_mock"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -379,7 +380,7 @@ func TestRunner_Stop(t *testing.T) {
 	}
 
 	cfg := config.ProfileConfig{Provider: "simple_mock"}
-	ag, err := agent.New(cfg, exec, "")
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
