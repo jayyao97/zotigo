@@ -232,7 +232,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 		// Wrap user messages with context if wrapper is set
 		if msg.Role == protocol.RoleUser && a.userWrapper != nil {
-			msg = a.wrapUserMessage(msg)
+			pctx := prompt.PromptContext{
+				WorkDir:  a.executor.WorkDir(),
+				Platform: a.executor.Platform(),
+				Model:    a.cfg.Model,
+			}
+			msg = a.wrapUserMessage(msg, pctx)
 		}
 
 		a.history = append(a.history, msg)
@@ -467,9 +472,15 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 func (a *Agent) buildContext() []protocol.Message {
 	var msgs []protocol.Message
 
+	pctx := prompt.PromptContext{
+		WorkDir:  a.executor.WorkDir(),
+		Platform: a.executor.Platform(),
+		Model:    a.cfg.Model,
+	}
+
 	// System prompt messages (static + dynamic, each as separate message)
 	if a.promptBuilder != nil {
-		for _, text := range a.promptBuilder.BuildMessages() {
+		for _, text := range a.promptBuilder.BuildMessages(pctx) {
 			msgs = append(msgs, protocol.NewSystemMessage(text))
 		}
 	}
@@ -504,7 +515,7 @@ func (a *Agent) buildContext() []protocol.Message {
 
 // wrapUserMessage applies the UserPromptWrapper to a user message.
 // It extracts text content, wraps it, and preserves non-text parts (images, etc.).
-func (a *Agent) wrapUserMessage(msg protocol.Message) protocol.Message {
+func (a *Agent) wrapUserMessage(msg protocol.Message, pctx prompt.PromptContext) protocol.Message {
 	var rawTexts []string
 	var nonTextParts []protocol.ContentPart
 	for _, p := range msg.Content {
@@ -519,7 +530,7 @@ func (a *Agent) wrapUserMessage(msg protocol.Message) protocol.Message {
 		return msg
 	}
 
-	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"))
+	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"), pctx)
 
 	var newContent []protocol.ContentPart
 	newContent = append(newContent, protocol.ContentPart{
