@@ -16,6 +16,7 @@ import (
 	"charm.land/bubbles/v2/textarea"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/jayyao97/zotigo/cli/commands"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
@@ -36,6 +37,7 @@ type Model struct {
 	agent           *agent.Agent
 	sessionMgr      *session.Manager
 	sessionID       string
+	cmdRegistry     *commands.Registry
 	ctx             context.Context
 	input           textarea.Model
 	currentAsstMsg  string
@@ -57,7 +59,7 @@ type Model struct {
 type streamReadyMsg <-chan protocol.Event
 type errMsg error
 
-func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string) Model {
+func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Zotigo..."
 	ta.Focus()
@@ -80,11 +82,12 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string) Model {
 	ta.SetStyles(styles)
 
 	m := Model{
-		agent:      ag,
-		sessionMgr: sessMgr,
-		sessionID:  sessID,
-		ctx:        context.Background(),
-		input:      ta,
+		agent:       ag,
+		sessionMgr:  sessMgr,
+		sessionID:   sessID,
+		cmdRegistry: cmdRegistry,
+		ctx:         context.Background(),
+		input:       ta,
 	}
 
 	// If the agent was saved in a paused state with pending actions,
@@ -268,6 +271,30 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			v := m.input.Value()
 			if strings.TrimSpace(v) == "" {
 				return m, nil
+			}
+
+			// Slash command routing
+			if commands.IsCommand(v) {
+				cmdName, args, _ := commands.Parse(v)
+
+				// 1. Try builtin commands (e.g., /help, /clear, /model)
+				if cmd, ok := m.cmdRegistry.Get(cmdName); ok {
+					m.input.Reset()
+					var output strings.Builder
+					env := m.buildCmdEnv(&output)
+					err := cmd.Execute(m.ctx, env, args)
+					if err != nil {
+						return m, tea.Println(warningStyle.Render("Error: " + err.Error()))
+					}
+					if output.Len() > 0 {
+						return m, tea.Println(output.String())
+					}
+					return m, nil
+				}
+
+				// 2. Not a builtin command — send as user message to the model
+				// The model has all skill instructions injected and can handle
+				// slash-style invocations like "/commit fix bug" naturally.
 			}
 
 			// Parse input for @file references
@@ -518,6 +545,19 @@ func (m Model) startRun(msg protocol.Message) tea.Cmd {
 			return errMsg(err)
 		}
 		return streamReadyMsg(ch)
+	}
+}
+
+func (m *Model) buildCmdEnv(output *strings.Builder) *commands.Environment {
+	return &commands.Environment{
+		Agent:        m.agent,
+		SkillManager: m.agent.SkillManager(),
+		Output: func(format string, args ...interface{}) {
+			fmt.Fprintf(output, format+"\n", args...)
+		},
+		ClearHistory: func() {
+			m.agent.Restore(agent.Snapshot{})
+		},
 	}
 }
 

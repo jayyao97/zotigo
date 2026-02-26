@@ -11,6 +11,8 @@ import (
 	"time"
 
 	tea "charm.land/bubbletea/v2"
+	"github.com/jayyao97/zotigo/cli/commands"
+	cmdbuiltin "github.com/jayyao97/zotigo/cli/commands/builtin"
 	"github.com/jayyao97/zotigo/cli/tui"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/agent/prompt"
@@ -22,6 +24,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
 
@@ -215,9 +218,20 @@ func main() {
 	ag.RegisterTool(builtin.NewWebSearchTool(webClient))
 	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
 
-	// 7. Run Main TUI
+	// 7. Init SkillManager
+	sm := skills.NewSkillManager(cwd)
+	if err := sm.Load(); err != nil {
+		fmt.Printf("Warning: failed to load skills: %v\n", err)
+	}
+	ag.SetSkillManager(sm)
+
+	// 8. Init Command Registry
+	cmdRegistry := commands.NewRegistry()
+	cmdbuiltin.RegisterAll(cmdRegistry)
+
+	// 9. Run Main TUI
 	p := tea.NewProgram(
-		tui.NewModel(ag, sessMgr, currentSession.ID),
+		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry),
 		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
 	)
 	if _, err := p.Run(); err != nil {

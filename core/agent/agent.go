@@ -203,15 +203,6 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			return nil, fmt.Errorf("cannot add user input while agent is paused")
 		}
 
-		// Process $skill mentions in user messages
-		if msg.Role == protocol.RoleUser && a.skillManager != nil {
-			for _, part := range msg.Content {
-				if part.Type == protocol.ContentTypeText {
-					a.skillManager.ProcessMentions(part.Text)
-				}
-			}
-		}
-
 		// Wrap user messages with context if wrapper is set
 		if msg.Role == protocol.RoleUser && a.userWrapper != nil {
 			msg = a.wrapUserMessage(msg)
@@ -458,8 +449,9 @@ func (a *Agent) buildContext() []protocol.Message {
 		}
 	}
 
-	// Skill injections as separate system message
+	// Dynamically reload and inject all skills
 	if a.skillManager != nil {
+		a.skillManager.Load()
 		if injection := a.skillManager.BuildAllInjections(); injection != "" {
 			msgs = append(msgs, protocol.NewSystemMessage(injection))
 		}

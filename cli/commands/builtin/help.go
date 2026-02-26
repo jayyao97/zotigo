@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/cli/commands"
+	"github.com/jayyao97/zotigo/core/skills"
 )
 
 // HelpCommand shows available commands.
@@ -55,7 +56,23 @@ func (c *HelpCommand) showAllCommands(env *commands.Environment) error {
 		sb.WriteString(fmt.Sprintf("    %s\n\n", cmd.Description()))
 	}
 
-	sb.WriteString("Type /help <command> for more details.")
+	sb.WriteString("Type /help <command> for more details.\n")
+
+	// Append available skills if SkillManager is set
+	if sm, ok := env.SkillManager.(*skills.SkillManager); ok && sm != nil {
+		allSkills := sm.List()
+		if len(allSkills) > 0 {
+			sb.WriteString("\nSkills (use /<skill-name> [args]):\n\n")
+			for _, skill := range allSkills {
+				desc := skill.Description
+				if desc == "" {
+					desc = "(no description)"
+				}
+				sb.WriteString(fmt.Sprintf("  /%-18s %s\n", skill.Name, desc))
+			}
+		}
+	}
+
 	env.Output("%s", sb.String())
 	return nil
 }
