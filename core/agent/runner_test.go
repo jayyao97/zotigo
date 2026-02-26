@@ -368,6 +368,424 @@ collectLoop:
 	}
 }
 
+func TestRunner_Hooks_AfterTurn(t *testing.T) {
+	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &SimpleMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "simple_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	var gotSnapshot agent.Snapshot
+	called := false
+	hooks := agent.RunnerHooks{
+		AfterTurn: func(snap agent.Snapshot) {
+			called = true
+			gotSnapshot = snap
+		},
+	}
+
+	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	ctx := context.Background()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+	}()
+
+	// Drain events
+	timeout := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case event := <-tr.Events():
+			if event.Type == protocol.EventTypeFinish {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for events")
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunOnce error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for RunOnce")
+	}
+
+	if !called {
+		t.Fatal("AfterTurn hook was not called")
+	}
+	if len(gotSnapshot.History) == 0 {
+		t.Error("Expected non-empty history in snapshot")
+	}
+}
+
+func TestRunner_Hooks_OnPause(t *testing.T) {
+	mockProvider := &ToolCallMockProvider{}
+	providers.Register("toolcall_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return mockProvider, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "toolcall_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ag.RegisterTool(&MockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	var gotSnapshot agent.Snapshot
+	called := false
+	hooks := agent.RunnerHooks{
+		OnPause: func(snap agent.Snapshot) {
+			called = true
+			gotSnapshot = snap
+		},
+	}
+
+	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	ctx := context.Background()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Do something"))
+	}()
+
+	timeout := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case event := <-tr.Events():
+			if event.Type == protocol.EventTypeFinish {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for events")
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunOnce error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for RunOnce")
+	}
+
+	if !called {
+		t.Fatal("OnPause hook was not called")
+	}
+	if gotSnapshot.State != agent.StatePaused {
+		t.Errorf("Expected state paused, got %s", gotSnapshot.State)
+	}
+}
+
+func TestRunner_Hooks_BeforeTurn(t *testing.T) {
+	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &SimpleMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "simple_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	var gotInput transport.UserInput
+	called := false
+	hooks := agent.RunnerHooks{
+		BeforeTurn: func(input transport.UserInput) {
+			called = true
+			gotInput = input
+		},
+	}
+
+	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	err = tr.SendInput(ctx, transport.UserInput{
+		Type: transport.UserInputMessage,
+		Text: "Hello hooks",
+	})
+	if err != nil {
+		t.Fatalf("SendInput error: %v", err)
+	}
+
+	// Drain events
+	timeout := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case event := <-tr.Events():
+			if event.Type == protocol.EventTypeFinish {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for events")
+		}
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Start error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for runner to stop")
+	}
+
+	if !called {
+		t.Fatal("BeforeTurn hook was not called")
+	}
+	if gotInput.Text != "Hello hooks" {
+		t.Errorf("Expected input text 'Hello hooks', got '%s'", gotInput.Text)
+	}
+}
+
+func TestRunner_Hooks_OnError(t *testing.T) {
+	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &SimpleMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "simple_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	var gotErr error
+	hooks := agent.RunnerHooks{
+		OnError: func(err error) {
+			gotErr = err
+		},
+	}
+
+	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.Start(ctx)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+
+	// Send an unknown command to trigger handleInput error -> OnError
+	err = tr.SendInput(ctx, transport.UserInput{
+		Type:    transport.UserInputCommand,
+		Command: "/bogus",
+	})
+	if err != nil {
+		t.Fatalf("SendInput error: %v", err)
+	}
+
+	// Drain the error event the runner sends back
+	timeout := time.After(2 * time.Second)
+	select {
+	case <-tr.Events():
+	case <-timeout:
+		t.Fatal("Timeout waiting for error event")
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil && err != context.Canceled {
+			t.Fatalf("Start error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for runner to stop")
+	}
+
+	if gotErr == nil {
+		t.Fatal("OnError hook was not called")
+	}
+	if gotErr.Error() != "unknown command: /bogus" {
+		t.Errorf("Expected 'unknown command: /bogus', got '%s'", gotErr.Error())
+	}
+}
+
+func TestRunner_Hooks_PanicRecover(t *testing.T) {
+	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &SimpleMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "simple_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	var recoveredErr error
+	hooks := agent.RunnerHooks{
+		AfterTurn: func(snap agent.Snapshot) {
+			panic("boom")
+		},
+		OnError: func(err error) {
+			recoveredErr = err
+		},
+	}
+
+	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	ctx := context.Background()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+	}()
+
+	timeout := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case event := <-tr.Events():
+			if event.Type == protocol.EventTypeFinish {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for events")
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunOnce error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for RunOnce")
+	}
+
+	// AfterTurn panicked -> should be recovered and forwarded to OnError
+	if recoveredErr == nil {
+		t.Fatal("OnError was not called after AfterTurn panic")
+	}
+	if recoveredErr.Error() != "hook panicked: boom" {
+		t.Errorf("Expected 'hook panicked: boom', got '%s'", recoveredErr.Error())
+	}
+}
+
+func TestRunner_Hooks_Nil(t *testing.T) {
+	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &SimpleMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "simple_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	// No hooks — should not panic
+	runner := agent.NewRunner(ag, tr)
+
+	ctx := context.Background()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+	}()
+
+	timeout := time.After(2 * time.Second)
+drainLoop:
+	for {
+		select {
+		case event := <-tr.Events():
+			if event.Type == protocol.EventTypeFinish {
+				break drainLoop
+			}
+		case <-timeout:
+			t.Fatal("Timeout waiting for events")
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunOnce error: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Timeout waiting for RunOnce")
+	}
+}
+
 func TestRunner_Stop(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
