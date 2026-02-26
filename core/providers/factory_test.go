@@ -27,7 +27,7 @@ func (m *MockProvider) Name() string {
 
 func TestProviderRegistry(t *testing.T) {
 	const providerName = "mock_test"
-	
+
 	// Register the mock provider
 	providers.Register(providerName, func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &MockProvider{name: providerName}, nil
@@ -39,7 +39,7 @@ func TestProviderRegistry(t *testing.T) {
 		Model:    "test-model",
 		APIKey:   "dummy",
 	}
-	
+
 	p, err := providers.NewProvider(profile)
 	if err != nil {
 		t.Fatalf("Failed to create provider: %v", err)

@@ -28,7 +28,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 
 		case protocol.RoleUser:
 			var parts []openai.ChatCompletionContentPartUnionParam
-			
+
 			for _, p := range msg.Content {
 				switch p.Type {
 				case protocol.ContentTypeText:
@@ -62,7 +62,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 				} else if p.Type == protocol.ContentTypeToolCall && p.ToolCall != nil {
 					tcParam := openai.ChatCompletionMessageFunctionToolCallParam{
 						ID:   p.ToolCall.ID,
-						Type: "function", 
+						Type: "function",
 						Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{
 							Name:      p.ToolCall.Name,
 							Arguments: p.ToolCall.Arguments,
@@ -73,7 +73,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 					})
 				}
 			}
-			
+
 			paramUnion := openai.AssistantMessage(text)
 			if len(toolCalls) > 0 {
 				if paramUnion.OfAssistant != nil {
@@ -99,7 +99,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 							}
 						}
 					}
-					
+
 					oaMsgs = append(oaMsgs, openai.ToolMessage(contentStr, tr.ToolCallID))
 				}
 			}
@@ -115,13 +115,13 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 		var oaTools []openai.ChatCompletionToolUnionParam
 		for _, t := range toolsList {
 			schema := t.Schema()
-			
+
 			schemaMap, ok := schema.(map[string]any)
 			if !ok {
 				b, _ := json.Marshal(schema)
 				json.Unmarshal(b, &schemaMap)
 			}
-			
+
 			// Raw assignments, no openai.String/F
 			oaTools = append(oaTools, openai.ChatCompletionToolUnionParam{
 				OfFunction: &openai.ChatCompletionFunctionToolParam{

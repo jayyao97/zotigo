@@ -13,10 +13,10 @@ var _ executor.Executor = (*Guard)(nil)
 
 // CommandCheckResult contains the result of a command security check.
 type CommandCheckResult struct {
-	Allowed     bool
-	RiskLevel   RiskLevel
-	Reason      string // Why it was blocked or flagged
-	Suggestion  string // What the user can do
+	Allowed    bool
+	RiskLevel  RiskLevel
+	Reason     string // Why it was blocked or flagged
+	Suggestion string // What the user can do
 }
 
 // PathCheckResult contains the result of a path security check.

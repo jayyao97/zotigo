@@ -72,8 +72,8 @@ func TestCompressor_CountTokens(t *testing.T) {
 func TestCompressor_Compress(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		ContextWindowSize: 50,
-		TriggerRatio:      0.5,  // Trigger at 25 tokens
-		PreserveRatio:     0.3,  // Preserve 30%
+		TriggerRatio:      0.5, // Trigger at 25 tokens
+		PreserveRatio:     0.3, // Preserve 30%
 	})
 
 	// Create messages that exceed the threshold

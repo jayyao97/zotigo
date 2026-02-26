@@ -39,8 +39,10 @@ func (t *GitStatusTool) Execute(ctx context.Context, exec executor.Executor, arg
 
 type GitDiffTool struct{}
 
-func (t *GitDiffTool) Name() string        { return "git_diff" }
-func (t *GitDiffTool) Description() string { return "Show changes between commits, commit and working tree, etc" }
+func (t *GitDiffTool) Name() string { return "git_diff" }
+func (t *GitDiffTool) Description() string {
+	return "Show changes between commits, commit and working tree, etc"
+}
 func (t *GitDiffTool) Schema() any {
 	return map[string]any{
 		"type": "object",

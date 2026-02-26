@@ -66,15 +66,15 @@ type ToolCall struct {
 
 // ToolResult follows the Vercel AI SDK V3 spec structure (flattened for Go).
 type ToolResult struct {
-	ToolCallID string         `json:"tool_call_id"`
-	ToolName   string         `json:"tool_name,omitempty"`
-	
+	ToolCallID string `json:"tool_call_id"`
+	ToolName   string `json:"tool_name,omitempty"`
+
 	Type ToolResultType `json:"type"`
 
 	// Mutually exclusive fields based on Type
-	Text    string                `json:"text,omitempty"`    // For text, error-text
-	JSON    any                   `json:"json,omitempty"`    // For json, error-json
-	Reason  string                `json:"reason,omitempty"`  // For execution-denied
+	Text    string                  `json:"text,omitempty"`    // For text, error-text
+	JSON    any                     `json:"json,omitempty"`    // For json, error-json
+	Reason  string                  `json:"reason,omitempty"`  // For execution-denied
 	Content []ToolResultContentPart `json:"content,omitempty"` // For content (multi-modal)
 
 	IsError  bool           `json:"is_error,omitempty"`

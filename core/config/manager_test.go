@@ -12,7 +12,7 @@ func TestConfigDefaults(t *testing.T) {
 	if defaults.DefaultProfile != "gpt-4o" {
 		t.Errorf("Expected default profile 'gpt-4o', got '%s'", defaults.DefaultProfile)
 	}
-	
+
 	// Check if default profiles exist
 	if _, ok := defaults.Profiles["gpt-4o"]; !ok {
 		t.Error("Expected gpt-4o profile to exist")
@@ -55,7 +55,7 @@ ui:
 	if cfg.DefaultProfile != "my-custom-model" {
 		t.Errorf("Expected default profile override, got '%s'", cfg.DefaultProfile)
 	}
-	
+
 	// Verify custom profile loaded
 	profile, ok := cfg.Profiles["my-custom-model"]
 	if !ok {
@@ -64,7 +64,7 @@ ui:
 	if profile.Model != "gpt-4-turbo" {
 		t.Errorf("Expected model gpt-4-turbo, got %s", profile.Model)
 	}
-	
+
 	// Verify defaults preserved
 	if _, ok := cfg.Profiles["gpt-4o"]; !ok {
 		t.Error("Expected default profiles to be preserved")

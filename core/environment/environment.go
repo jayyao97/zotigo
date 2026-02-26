@@ -63,18 +63,18 @@ type Config struct {
 
 // E2BConfig holds E2B-specific configuration.
 type E2BConfig struct {
-	APIKey    string
-	Template  string
-	RedisURL  string // For session storage
+	APIKey   string
+	Template string
+	RedisURL string // For session storage
 }
 
 // DockerConfig holds Docker-specific configuration.
 type DockerConfig struct {
-	Image      string
-	Volumes    []string
-	Network    string
-	StoreType  string // "file" or "redis"
-	RedisURL   string // If StoreType is "redis"
+	Image     string
+	Volumes   []string
+	Network   string
+	StoreType string // "file" or "redis"
+	RedisURL  string // If StoreType is "redis"
 }
 
 // CustomConfig allows custom combination of executor and store.

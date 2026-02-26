@@ -67,7 +67,7 @@ func (dc *DynamicContext) Build(ctx PromptContext) string {
 
 // SystemPromptBuilder assembles system prompt messages.
 type SystemPromptBuilder struct {
-	StaticPrompt   string         // Part 1: cacheable, never changes
+	StaticPrompt   string          // Part 1: cacheable, never changes
 	DynamicContext *DynamicContext // Part 2: per-session context
 }
 

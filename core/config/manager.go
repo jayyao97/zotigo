@@ -98,10 +98,10 @@ func (m *Manager) Save(cfg *Config) error {
 	}
 
 	filePath := filepath.Join(configDir, ConfigFileName)
-	
+
 	vSave := viper.New()
 	vSave.SetConfigType("yaml")
-	
+
 	vSave.Set("default_profile", cfg.DefaultProfile)
 	vSave.Set("profiles", cfg.Profiles)
 	vSave.Set("security", cfg.Security)

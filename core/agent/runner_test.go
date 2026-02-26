@@ -82,9 +82,9 @@ func (p *ToolCallMockProvider) StreamChat(ctx context.Context, messages []protoc
 // MockTool is a simple test tool
 type MockTool struct{}
 
-func (t *MockTool) Name() string        { return "test_tool" }
-func (t *MockTool) Description() string { return "A test tool" }
-func (t *MockTool) Schema() any         { return nil }
+func (t *MockTool) Name() string             { return "test_tool" }
+func (t *MockTool) Description() string      { return "A test tool" }
+func (t *MockTool) Schema() any              { return nil }
 func (t *MockTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
 func (t *MockTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "tool result", nil
