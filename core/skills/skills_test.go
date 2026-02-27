@@ -218,30 +218,67 @@ func TestDetectSkillMentions(t *testing.T) {
 	}
 }
 
-func TestBuildSkillInjection(t *testing.T) {
-	skill := &SkillDefinition{
+func TestBuildSkillIndex(t *testing.T) {
+	sm := &SkillManager{
+		skills:  make(map[string]*SkillDefinition),
+		aliases: make(map[string]string),
+	}
+	sm.addSkill(&SkillDefinition{
 		Name:         "test-skill",
 		Description:  "A test skill",
 		Instructions: "Do something\nDo another thing",
 		Source:       SkillSourceUser,
+		Path:         "/home/user/.zotigo/skills/test-skill/SKILL.md",
+	})
+	sm.addSkill(&SkillDefinition{
+		Name:         "another-skill",
+		Description:  "Another skill",
+		Instructions: "Instructions here",
+		Source:       SkillSourceProject,
+		Path:         "/project/.zotigo/skills/another-skill/SKILL.md",
+	})
+
+	index := sm.BuildSkillIndex()
+
+	if index == "" {
+		t.Fatal("Index should not be empty")
+	}
+	// Should contain skill names and descriptions
+	if !contains(index, "test-skill") {
+		t.Error("Should contain skill name 'test-skill'")
+	}
+	if !contains(index, "A test skill") {
+		t.Error("Should contain skill description")
+	}
+	if !contains(index, "another-skill") {
+		t.Error("Should contain skill name 'another-skill'")
+	}
+	// Should contain file paths
+	if !contains(index, "/home/user/.zotigo/skills/test-skill/SKILL.md") {
+		t.Error("Should contain skill file path")
+	}
+	// Should contain How to use skills section
+	if !contains(index, "How to use skills") {
+		t.Error("Should contain 'How to use skills' section")
+	}
+	// Should NOT contain XML tags
+	if contains(index, "<instructions>") {
+		t.Error("Should not contain XML instructions tag")
+	}
+	if contains(index, "<skill") {
+		t.Error("Should not contain XML skill tag")
+	}
+}
+
+func TestBuildSkillIndex_Empty(t *testing.T) {
+	sm := &SkillManager{
+		skills:  make(map[string]*SkillDefinition),
+		aliases: make(map[string]string),
 	}
 
-	injection := BuildSkillInjection(skill)
-
-	if injection == "" {
-		t.Error("Injection should not be empty")
-	}
-	if !contains(injection, `<skill name="test-skill"`) {
-		t.Error("Should contain skill XML tag")
-	}
-	if !contains(injection, `source="user"`) {
-		t.Error("Should contain source attribute")
-	}
-	if !contains(injection, "<instructions>") {
-		t.Error("Should contain instructions tag")
-	}
-	if !contains(injection, "Do something") {
-		t.Error("Should contain instruction content")
+	index := sm.BuildSkillIndex()
+	if index != "" {
+		t.Error("Empty manager should return empty index")
 	}
 }
 

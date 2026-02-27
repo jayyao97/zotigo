@@ -564,11 +564,11 @@ func (a *Agent) buildContext() []protocol.Message {
 		}
 	}
 
-	// Dynamically reload and inject all skills
+	// Dynamically reload and inject skill index (progressive disclosure)
 	if a.skillManager != nil {
 		a.skillManager.Load()
-		if injection := a.skillManager.BuildAllInjections(); injection != "" {
-			msgs = append(msgs, protocol.NewSystemMessage(injection))
+		if index := a.skillManager.BuildSkillIndex(); index != "" {
+			msgs = append(msgs, protocol.NewSystemMessage(index))
 		}
 	}
 
@@ -646,18 +646,27 @@ func (a *Agent) isToolCallSafe(tc *protocol.ToolCall) bool {
 		return true
 	}
 
-	// Read-only with path args → check all paths are within the working directory
-	return a.allPathsInWorkDir(tc.Arguments, safety.PathArgs)
+	// Read-only with path args → check all paths are within safe directories
+	return a.allPathsInSafeDirs(tc.Arguments, safety.PathArgs)
 }
 
-// allPathsInWorkDir checks that all path arguments are within the working directory.
-func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
+// safeDirs returns all directories that are safe for auto-approved read access.
+func (a *Agent) safeDirs() []string {
+	dirs := []string{a.executor.WorkDir()}
+	if a.skillManager != nil {
+		dirs = append(dirs, a.skillManager.Dirs()...)
+	}
+	return dirs
+}
+
+// allPathsInSafeDirs checks that all path arguments are within any safe directory.
+func (a *Agent) allPathsInSafeDirs(argsJSON string, pathArgs []string) bool {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return false
 	}
 
-	workDir := a.executor.WorkDir()
+	safeDirs := a.safeDirs()
 	for _, key := range pathArgs {
 		val, ok := args[key]
 		if !ok || val == nil {
@@ -669,10 +678,18 @@ func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
 		}
 		absPath := pathStr
 		if !filepath.IsAbs(pathStr) {
-			absPath = filepath.Join(workDir, pathStr)
+			absPath = filepath.Join(a.executor.WorkDir(), pathStr)
 		}
 		absPath = filepath.Clean(absPath)
-		if !strings.HasPrefix(absPath, workDir) {
+
+		safe := false
+		for _, dir := range safeDirs {
+			if strings.HasPrefix(absPath, dir) {
+				safe = true
+				break
+			}
+		}
+		if !safe {
 			return false
 		}
 	}

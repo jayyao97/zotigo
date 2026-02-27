@@ -35,6 +35,9 @@ var (
 	blurredChoice   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	inputStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
 	promptStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+
+	// reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
+	reBlankRun = regexp.MustCompile(`\n{3,}`)
 )
 
 type Model struct {
@@ -1104,6 +1107,18 @@ func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
 		return resultStyle.Render("  ⎿  (No output)")
 	}
 
+	// Compress runs of 2+ blank lines into a single blank line for display.
+	text = reBlankRun.ReplaceAllString(text, "\n\n")
+	text = strings.TrimRight(text, " \t\n\r")
+
+	// Hard cap on total characters to handle single-line mega outputs (e.g. JSON blobs).
+	const maxDisplayChars = 300
+	charTruncated := false
+	if len(text) > maxDisplayChars {
+		text = text[:maxDisplayChars]
+		charTruncated = true
+	}
+
 	lines := strings.Split(text, "\n")
 	totalLines := len(lines)
 
@@ -1122,6 +1137,8 @@ func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
 
 	if maxLines > 0 && totalLines > maxLines {
 		sb.WriteString(fmt.Sprintf("\n     ... (%d lines total)", totalLines))
+	} else if charTruncated {
+		sb.WriteString("\n     ... (output truncated)")
 	}
 
 	return resultStyle.Render(sb.String())
