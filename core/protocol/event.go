@@ -9,8 +9,9 @@ const (
 	EventTypeContentEnd   EventType = "content_end"
 
 	// Tool Call Stream
-	EventTypeToolCallDelta EventType = "tool_call_delta"
-	EventTypeToolCallEnd   EventType = "tool_call_end"
+	EventTypeToolCallDelta  EventType = "tool_call_delta"
+	EventTypeToolCallEnd    EventType = "tool_call_end"
+	EventTypeToolResultDone EventType = "tool_result_done"
 
 	// Control
 	EventTypeFinish EventType = "finish"
@@ -26,6 +27,7 @@ type Event struct {
 
 	ContentPart *ContentPart `json:"content_part,omitempty"`
 	ToolCall    *ToolCall    `json:"tool_call,omitempty"`
+	ToolResult  *ToolResult  `json:"tool_result,omitempty"`
 
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Error        error        `json:"error,omitempty"`

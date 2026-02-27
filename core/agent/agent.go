@@ -356,6 +356,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 							outCh <- protocol.NewErrorEvent(err)
 							return
 						}
+						for i := range results {
+							outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+						}
 						toolMsg := protocol.NewToolMessage(results)
 						a.mu.Lock()
 						a.history = append(a.history, toolMsg)
@@ -397,6 +400,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					outCh <- protocol.NewErrorEvent(err)
 					return
 				}
+				for i := range results {
+					outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+				}
 
 				toolMsg := protocol.NewToolMessage(results)
 				a.mu.Lock()
@@ -424,7 +430,23 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	if err != nil {
 		return nil, err
 	}
-	return a.SubmitToolOutputs(ctx, results)
+	innerCh, err := a.SubmitToolOutputs(ctx, results)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prepend tool result events before the inner stream.
+	outCh := make(chan protocol.Event, len(results)+100)
+	for i := range results {
+		outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+	}
+	go func() {
+		defer close(outCh)
+		for evt := range innerCh {
+			outCh <- evt
+		}
+	}()
+	return outCh, nil
 }
 
 // SubmitToolOutputs submits tool results and resumes the agent loop.
@@ -476,7 +498,7 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		} else {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false)
+			tr := protocol.NewTextToolResult(action.ToolCallID, formatToolOutput(res), false)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		}
@@ -505,6 +527,25 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 	a.pendingActions = nil
 	a.mu.Unlock()
 	return results, nil
+}
+
+// formatToolOutput converts a tool's return value to a readable string.
+// Slices are joined with newlines instead of Go's default bracket format.
+func formatToolOutput(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []string:
+		return strings.Join(val, "\n")
+	case []any:
+		var lines []string
+		for _, item := range val {
+			lines = append(lines, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(lines, "\n")
+	default:
+		return fmt.Sprintf("%v", v)
+	}
 }
 
 func (a *Agent) buildContext() []protocol.Message {
