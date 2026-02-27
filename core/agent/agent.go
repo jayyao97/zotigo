@@ -356,6 +356,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 							outCh <- protocol.NewErrorEvent(err)
 							return
 						}
+						for i := range results {
+							outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+						}
 						toolMsg := protocol.NewToolMessage(results)
 						a.mu.Lock()
 						a.history = append(a.history, toolMsg)
@@ -397,6 +400,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					outCh <- protocol.NewErrorEvent(err)
 					return
 				}
+				for i := range results {
+					outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+				}
 
 				toolMsg := protocol.NewToolMessage(results)
 				a.mu.Lock()
@@ -424,7 +430,23 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	if err != nil {
 		return nil, err
 	}
-	return a.SubmitToolOutputs(ctx, results)
+	innerCh, err := a.SubmitToolOutputs(ctx, results)
+	if err != nil {
+		return nil, err
+	}
+
+	// Prepend tool result events before the inner stream.
+	outCh := make(chan protocol.Event, len(results)+100)
+	for i := range results {
+		outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+	}
+	go func() {
+		defer close(outCh)
+		for evt := range innerCh {
+			outCh <- evt
+		}
+	}()
+	return outCh, nil
 }
 
 // SubmitToolOutputs submits tool results and resumes the agent loop.
@@ -476,7 +498,7 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		} else {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("%v", res), false)
+			tr := protocol.NewTextToolResult(action.ToolCallID, formatToolOutput(res), false)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		}
@@ -507,6 +529,25 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 	return results, nil
 }
 
+// formatToolOutput converts a tool's return value to a readable string.
+// Slices are joined with newlines instead of Go's default bracket format.
+func formatToolOutput(v any) string {
+	switch val := v.(type) {
+	case string:
+		return val
+	case []string:
+		return strings.Join(val, "\n")
+	case []any:
+		var lines []string
+		for _, item := range val {
+			lines = append(lines, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(lines, "\n")
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
 func (a *Agent) buildContext() []protocol.Message {
 	var msgs []protocol.Message
 
@@ -523,11 +564,11 @@ func (a *Agent) buildContext() []protocol.Message {
 		}
 	}
 
-	// Dynamically reload and inject all skills
+	// Dynamically reload and inject skill index (progressive disclosure)
 	if a.skillManager != nil {
 		a.skillManager.Load()
-		if injection := a.skillManager.BuildAllInjections(); injection != "" {
-			msgs = append(msgs, protocol.NewSystemMessage(injection))
+		if index := a.skillManager.BuildSkillIndex(); index != "" {
+			msgs = append(msgs, protocol.NewSystemMessage(index))
 		}
 	}
 
@@ -605,18 +646,27 @@ func (a *Agent) isToolCallSafe(tc *protocol.ToolCall) bool {
 		return true
 	}
 
-	// Read-only with path args → check all paths are within the working directory
-	return a.allPathsInWorkDir(tc.Arguments, safety.PathArgs)
+	// Read-only with path args → check all paths are within safe directories
+	return a.allPathsInSafeDirs(tc.Arguments, safety.PathArgs)
 }
 
-// allPathsInWorkDir checks that all path arguments are within the working directory.
-func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
+// safeDirs returns all directories that are safe for auto-approved read access.
+func (a *Agent) safeDirs() []string {
+	dirs := []string{a.executor.WorkDir()}
+	if a.skillManager != nil {
+		dirs = append(dirs, a.skillManager.Dirs()...)
+	}
+	return dirs
+}
+
+// allPathsInSafeDirs checks that all path arguments are within any safe directory.
+func (a *Agent) allPathsInSafeDirs(argsJSON string, pathArgs []string) bool {
 	var args map[string]any
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return false
 	}
 
-	workDir := a.executor.WorkDir()
+	safeDirs := a.safeDirs()
 	for _, key := range pathArgs {
 		val, ok := args[key]
 		if !ok || val == nil {
@@ -628,10 +678,18 @@ func (a *Agent) allPathsInWorkDir(argsJSON string, pathArgs []string) bool {
 		}
 		absPath := pathStr
 		if !filepath.IsAbs(pathStr) {
-			absPath = filepath.Join(workDir, pathStr)
+			absPath = filepath.Join(a.executor.WorkDir(), pathStr)
 		}
 		absPath = filepath.Clean(absPath)
-		if !strings.HasPrefix(absPath, workDir) {
+
+		safe := false
+		for _, dir := range safeDirs {
+			if strings.HasPrefix(absPath, dir) {
+				safe = true
+				break
+			}
+		}
+		if !safe {
 			return false
 		}
 	}

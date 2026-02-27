@@ -2,6 +2,7 @@ package skills
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"sync"
 )
@@ -22,20 +23,40 @@ type SkillManager struct {
 	// userDir is the user skills directory
 	userDir string
 
+	// extraDirs are additional skill directories (for SDK users)
+	extraDirs []string
+
 	// loaded indicates if skills have been loaded
 	loaded bool
 }
 
+// SkillManagerOption configures a SkillManager during construction.
+type SkillManagerOption func(*SkillManager)
+
+// WithUserDir overrides the default user skills directory.
+func WithUserDir(dir string) SkillManagerOption {
+	return func(m *SkillManager) { m.userDir = dir }
+}
+
+// WithExtraDirs adds additional skill directories (loaded between user and project).
+func WithExtraDirs(dirs ...string) SkillManagerOption {
+	return func(m *SkillManager) { m.extraDirs = append(m.extraDirs, dirs...) }
+}
+
 // NewSkillManager creates a new skill manager
-func NewSkillManager(projectDir string) *SkillManager {
+func NewSkillManager(projectDir string, opts ...SkillManagerOption) *SkillManager {
 	userDir, _ := GetUserSkillsDir()
 
-	return &SkillManager{
+	m := &SkillManager{
 		skills:     make(map[string]*SkillDefinition),
 		aliases:    make(map[string]string),
 		projectDir: projectDir,
 		userDir:    userDir,
 	}
+	for _, opt := range opts {
+		opt(m)
+	}
+	return m
 }
 
 // Load discovers and loads all skills from builtin, user, and project sources
@@ -63,7 +84,21 @@ func (m *SkillManager) Load() error {
 		}
 	}
 
-	// 3. Load project skills (highest priority)
+	// 3. Load extra dirs (SDK-configurable, between user and project)
+	for _, dir := range m.extraDirs {
+		if dir == "" {
+			continue
+		}
+		extraSkills, err := DiscoverSkills(dir, SkillSourceUser)
+		if err != nil {
+			return fmt.Errorf("failed to load skills from %s: %w", dir, err)
+		}
+		for _, skill := range extraSkills {
+			m.addSkill(skill)
+		}
+	}
+
+	// 4. Load project skills (highest priority)
 	if m.projectDir != "" {
 		projectSkillsDir := GetProjectSkillsDir(m.projectDir)
 		projectSkills, err := DiscoverSkills(projectSkillsDir, SkillSourceProject)
@@ -144,4 +179,27 @@ func (m *SkillManager) Count() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.skills)
+}
+
+// Dirs returns all skill directories that actually exist on disk.
+// Used by the agent to whitelist these paths for auto-approved reads.
+func (m *SkillManager) Dirs() []string {
+	var dirs []string
+	for _, d := range []string{m.userDir, GetProjectSkillsDir(m.projectDir)} {
+		if d == "" {
+			continue
+		}
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			dirs = append(dirs, d)
+		}
+	}
+	for _, d := range m.extraDirs {
+		if d == "" {
+			continue
+		}
+		if info, err := os.Stat(d); err == nil && info.IsDir() {
+			dirs = append(dirs, d)
+		}
+	}
+	return dirs
 }

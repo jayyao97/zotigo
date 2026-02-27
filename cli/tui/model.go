@@ -23,14 +23,21 @@ import (
 )
 
 var (
-	focusedButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true).Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	blurredButtonStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Border(lipgloss.RoundedBorder()).Padding(0, 1)
-	warningStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true)
-	inputStyle         = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-	promptStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	assistantStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("86"))
-	userStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("212"))
-	headerStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Padding(0, 1).Bold(true)
+	userMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	asstMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+	toolMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	resultStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	timingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	warningStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true)
+	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	headerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Padding(0, 1)
+	focusedChoice   = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	blurredChoice   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	inputStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
+	promptStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+
+	// reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
+	reBlankRun = regexp.MustCompile(`\n{3,}`)
 )
 
 type Model struct {
@@ -54,6 +61,8 @@ type Model struct {
 	kittyChecked    bool
 	autoApprove     bool
 	streamFlushed   int // lines already committed to scrollback during streaming
+	turnStartTime   time.Time
+	needsAsstMarker bool // next text content block should get a ⏺ prefix
 }
 
 type streamReadyMsg <-chan protocol.Event
@@ -96,18 +105,7 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
 		m.approving = true
 		m.approvalChoice = 0
-		var sb strings.Builder
-		if len(snap.PendingActions) > 1 {
-			sb.WriteString(fmt.Sprintf("%d tools:\n", len(snap.PendingActions)))
-		}
-		for _, act := range snap.PendingActions {
-			args := act.Arguments
-			if len(args) > 50 {
-				args = args[:47] + "..."
-			}
-			sb.WriteString(fmt.Sprintf("• %s %s\n", act.Name, args))
-		}
-		m.pendingToolName = strings.TrimSpace(sb.String())
+		m.pendingToolName = formatPendingActions(snap.PendingActions)
 	}
 
 	return m
@@ -284,7 +282,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					env := m.buildCmdEnv(&output)
 					err := cmd.Execute(m.ctx, env, args)
 					if err != nil {
-						return m, tea.Println(warningStyle.Render("Error: " + err.Error()))
+						return m, tea.Println(errorStyle.Render("✗ ") + "Error: " + err.Error())
 					}
 					if output.Len() > 0 {
 						return m, tea.Println(output.String())
@@ -359,6 +357,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 			m.input.Reset()
 			m.thinking = true
+			m.turnStartTime = time.Now()
+			m.needsAsstMarker = true
 			m.currentAsstMsg = ""
 
 			userMsgStr, _ := renderMessage(msg)
@@ -368,12 +368,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.eventCh = msg
 		m.currentAsstMsg = ""
 		m.streamFlushed = 0
+		m.needsAsstMarker = true
 		return m, waitForNextEvent(m.eventCh)
 
 	case protocol.Event:
 		switch msg.Type {
 		case protocol.EventTypeContentDelta:
 			if msg.ContentPartDelta != nil {
+				if m.needsAsstMarker {
+					m.currentAsstMsg += asstMarkerStyle.Render("⏺ ")
+					m.needsAsstMarker = false
+				}
 				m.currentAsstMsg += msg.ContentPartDelta.Text
 				if cmd := m.flushStreamedLines(); cmd != nil {
 					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
@@ -381,24 +386,47 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case protocol.EventTypeToolCallDelta:
 			if msg.ToolCallDelta != nil && msg.ToolCallDelta.Name != "" {
-				m.currentAsstMsg += fmt.Sprintf("\n🛠️  %s ...", msg.ToolCallDelta.Name)
+				// Flush any pending text before the tool call
+				if m.currentAsstMsg != "" {
+					if !strings.HasSuffix(m.currentAsstMsg, "\n") {
+						m.currentAsstMsg += "\n"
+					}
+					if cmd := m.flushStreamedLines(); cmd != nil {
+						m.currentAsstMsg = fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCallDelta.Name))
+						return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+					}
+				}
+				m.currentAsstMsg = fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCallDelta.Name))
 			}
 		case protocol.EventTypeToolCallEnd:
 			if msg.ToolCall != nil {
-				// Replace the "..." placeholder with the full summary
-				placeholder := fmt.Sprintf("\n🛠️  %s ...", msg.ToolCall.Name)
-				full := "\n" + formatToolCall(msg.ToolCall)
+				placeholder := fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCall.Name))
+				full := toolMarkerStyle.Render("⏺ ") + formatToolCall(msg.ToolCall) + "\n"
 				m.currentAsstMsg = strings.Replace(m.currentAsstMsg, placeholder, full, 1)
+				m.needsAsstMarker = true
+				// Flush tool call to scrollback so next content starts fresh
+				if cmd := m.flushStreamedLines(); cmd != nil {
+					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+				}
+			}
+		case protocol.EventTypeToolResultDone:
+			if msg.ToolResult != nil {
+				rendered := formatToolResult(msg.ToolResult, 10)
+				m.currentAsstMsg += rendered + "\n"
+				if cmd := m.flushStreamedLines(); cmd != nil {
+					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+				}
 			}
 		case protocol.EventTypeFinish:
 			m.thinking = false
 			snap := m.agent.Snapshot()
+			timingSuffix := "\n" + timingStyle.Render("✻ Completed in "+formatDuration(time.Since(m.turnStartTime)))
 
 			if m.streamFlushed > 0 {
 				// Lines were incrementally committed — just flush the remaining tail
-				var finishCmd tea.Cmd
+				var batchCmds []tea.Cmd
 				if m.currentAsstMsg != "" {
-					finishCmd = tea.Println(m.currentAsstMsg)
+					batchCmds = append(batchCmds, tea.Println(m.currentAsstMsg))
 				}
 				m.currentAsstMsg = ""
 				m.streamFlushed = 0
@@ -406,32 +434,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.FinishReason == "need_approval" {
 					m.approving = true
 					m.approvalChoice = 0
-					var sb strings.Builder
-					if len(snap.PendingActions) > 1 {
-						sb.WriteString(fmt.Sprintf("%d tools:\n", len(snap.PendingActions)))
-					}
-					for _, act := range snap.PendingActions {
-						args := act.Arguments
-						if len(args) > 50 {
-							args = args[:47] + "..."
-						}
-						sb.WriteString(fmt.Sprintf("• %s %s\n", act.Name, args))
-					}
-					m.pendingToolName = strings.TrimSpace(sb.String())
+					m.pendingToolName = formatPendingActions(snap.PendingActions)
 					m.pendingToolArgs = ""
 					m.saveSession()
-					if finishCmd != nil {
-						return m, finishCmd
+					if len(batchCmds) > 0 {
+						return m, tea.Batch(batchCmds...)
 					}
 					return m, nil
 				}
 
+				batchCmds = append(batchCmds, tea.Println(timingSuffix))
 				m.eventCh = nil
 				m.saveSession()
-				if finishCmd != nil {
-					return m, finishCmd
-				}
-				return m, nil
+				return m, tea.Sequence(batchCmds...)
 			}
 
 			// Short reply — no incremental flush happened, use renderMessage
@@ -445,25 +460,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if formattedMsg == "" && m.currentAsstMsg != "" {
-				formattedMsg = "\n" + assistantStyle.Render("Zotigo: ") + m.currentAsstMsg
+				formattedMsg = "\n" + m.currentAsstMsg
 			}
 
 			if msg.FinishReason == "need_approval" {
 				m.approving = true
 				m.approvalChoice = 0
-
-				var sb strings.Builder
-				if len(snap.PendingActions) > 1 {
-					sb.WriteString(fmt.Sprintf("%d tools:\n", len(snap.PendingActions)))
-				}
-				for _, act := range snap.PendingActions {
-					args := act.Arguments
-					if len(args) > 50 {
-						args = args[:47] + "..."
-					}
-					sb.WriteString(fmt.Sprintf("• %s %s\n", act.Name, args))
-				}
-				m.pendingToolName = strings.TrimSpace(sb.String())
+				m.pendingToolName = formatPendingActions(snap.PendingActions)
 				m.pendingToolArgs = ""
 
 				m.currentAsstMsg = ""
@@ -478,14 +481,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.eventCh = nil
 			m.saveSession()
 			if formattedMsg != "" {
-				return m, tea.Println(formattedMsg)
+				return m, tea.Sequence(tea.Println(formattedMsg), tea.Println(timingSuffix))
 			}
-			return m, nil
+			return m, tea.Println(timingSuffix)
 
 		case protocol.EventTypeError:
 			m.err = msg.Error
 			m.thinking = false
-			errStr := fmt.Sprintf("\n❌ Error: %v", msg.Error)
+			errStr := "\n" + errorStyle.Render("✗ ") + "Error: " + fmt.Sprintf("%v", msg.Error)
 			return m, tea.Println(errStr)
 		}
 		return m, waitForNextEvent(m.eventCh)
@@ -496,7 +499,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = msg
 		m.thinking = false
-		errStr := fmt.Sprintf("\n❌ System Error: %v", msg)
+		errStr := "\n" + errorStyle.Render("✗ ") + "System Error: " + fmt.Sprintf("%v", msg)
 		return m, tea.Println(errStr)
 	}
 
@@ -569,6 +572,7 @@ func (m Model) submitApproval(approved bool) (Model, tea.Cmd) {
 	}
 	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
 	m.thinking = true
+	m.turnStartTime = time.Now()
 
 	cmd := func() tea.Msg {
 		var ch <-chan protocol.Event
@@ -638,6 +642,7 @@ func (m Model) denyAndReturn(feedback string) (Model, tea.Cmd) {
 
 	// Deny with feedback: keep thinking, agent continues with user feedback
 	m.thinking = true
+	m.turnStartTime = time.Now()
 	cmd := func() tea.Msg {
 		ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
 		if err != nil {
@@ -673,7 +678,7 @@ func (m *Model) flushStreamedLines() tea.Cmd {
 
 	prefix := ""
 	if m.streamFlushed == 0 {
-		prefix = assistantStyle.Render("Zotigo: ")
+		prefix = "\n"
 	}
 	m.streamFlushed++
 	return tea.Println(prefix + toCommit)
@@ -688,63 +693,38 @@ func (m Model) View() tea.View {
 	var sb strings.Builder
 
 	if m.thinking && m.currentAsstMsg != "" {
-		if m.streamFlushed == 0 {
-			sb.WriteString(assistantStyle.Render("Zotigo: "))
-		}
 		sb.WriteString(m.currentAsstMsg)
 		sb.WriteString("\n")
 	} else if m.thinking {
-		sb.WriteString("Thinking...\n")
+		sb.WriteString(asstMarkerStyle.Render("⏺ ") + "Thinking...\n")
 	}
 
 	if m.approving {
-		info := warningStyle.Render("⚠️  Execute:")
-		list := lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Render(m.pendingToolName)
-
-		focusedText := lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-		blurredText := lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-
-		sb.WriteString(fmt.Sprintf("%s\n%s\n\n", info, list))
+		sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
 
 		// Accept line
 		if m.approvalChoice == 0 {
-			sb.WriteString(fmt.Sprintf("%s %s\n", focusedText.Render(">"), focusedText.Render("Accept")))
+			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Accept")))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s\n", blurredText.Render("Accept")))
+			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Accept")))
 		}
 
 		// Deny line
 		if m.approvalChoice == 1 {
-			sb.WriteString(fmt.Sprintf("%s %s\n", focusedText.Render(">"), focusedText.Render("Deny")))
+			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Deny")))
 		} else {
-			sb.WriteString(fmt.Sprintf("  %s\n", blurredText.Render("Deny")))
+			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Deny")))
 		}
 
 		// Feedback input line
 		if m.approvalChoice == 2 {
-			// Selected: show bordered textarea, indent all lines to align with "> "
-			prefix := focusedText.Render("> ")
-			prefixWidth := lipgloss.Width(prefix)
-			pad := strings.Repeat(" ", prefixWidth)
-			taView := m.input.View()
-			feedbackBorder := lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("205")).Padding(0, 1)
-			boxRendered := feedbackBorder.Render(taView)
-			boxLines := strings.Split(boxRendered, "\n")
-			for i, line := range boxLines {
-				if i == 0 {
-					boxLines[i] = prefix + line
-				} else {
-					boxLines[i] = pad + line
-				}
-			}
-			sb.WriteString(strings.Join(boxLines, "\n"))
+			sb.WriteString("  " + focusedChoice.Render("> ") + m.input.View())
 		} else {
-			// Not selected: simple dim text
 			placeholder := "Send feedback..."
 			if v := m.input.Value(); v != "" {
 				placeholder = v
 			}
-			sb.WriteString(fmt.Sprintf("  %s", blurredText.Render(placeholder)))
+			sb.WriteString(fmt.Sprintf("    %s", blurredChoice.Render(placeholder)))
 		}
 	} else {
 		// Only show indicator when auto-approve is on
@@ -812,49 +792,48 @@ func (m Model) saveSession() {
 }
 
 func renderMessage(msg protocol.Message) (string, bool) {
-	if msg.Role == protocol.RoleTool {
-		return "", false
-	}
+	switch msg.Role {
+	case protocol.RoleUser:
+		text := msg.String()
+		if text == "" {
+			return "", false
+		}
+		return "\n" + userMarkerStyle.Render("❯ ") + text, true
 
-	role := "User"
-	style := userStyle
-	if msg.Role == protocol.RoleAssistant {
-		role = "Zotigo"
-		style = assistantStyle
-	}
-
-	content := ""
-	if msg.Role == protocol.RoleAssistant {
-		var textParts []string
-		var toolSummaries []string
-
+	case protocol.RoleAssistant:
+		var parts []string
 		for _, p := range msg.Content {
 			switch p.Type {
 			case protocol.ContentTypeText, protocol.ContentTypeReasoning:
-				textParts = append(textParts, p.Text)
+				if p.Text != "" {
+					parts = append(parts, "\n"+asstMarkerStyle.Render("⏺ ")+p.Text)
+				}
 			case protocol.ContentTypeToolCall:
 				if p.ToolCall != nil {
-					toolSummaries = append(toolSummaries, formatToolCall(p.ToolCall))
+					parts = append(parts, "\n"+toolMarkerStyle.Render("⏺ ")+formatToolCall(p.ToolCall))
 				}
 			}
 		}
-
-		content = strings.Join(textParts, "")
-		if len(toolSummaries) > 0 {
-			if content != "" {
-				content += "\n"
-			}
-			content += strings.Join(toolSummaries, "\n")
+		if len(parts) == 0 {
+			return "", false
 		}
-	} else {
-		content = msg.String()
-	}
+		return strings.Join(parts, ""), true
 
-	if content == "" {
+	case protocol.RoleTool:
+		var parts []string
+		for _, p := range msg.Content {
+			if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
+				parts = append(parts, formatToolResult(p.ToolResult, 10))
+			}
+		}
+		if len(parts) == 0 {
+			return "", false
+		}
+		return "\n" + strings.Join(parts, "\n"), true
+
+	default:
 		return "", false
 	}
-
-	return fmt.Sprintf("\n%s: %s", style.Render(role), content), true
 }
 
 func (m Model) inputLineCount() int {
@@ -1016,41 +995,164 @@ func (m *Model) pasteImageFromClipboard() (string, bool) {
 	return "", false
 }
 
-// largeValueKeys are argument names whose values are typically large and
-// should be shown as a character count rather than inlined.
-var largeValueKeys = map[string]bool{
-	"content":    true,
-	"old_string": true,
-	"new_string": true,
-	"patch":      true,
+// primaryArgKey maps tool names to the single most informative argument.
+var primaryArgKey = map[string]string{
+	"shell":           "command",
+	"bash":            "command",
+	"execute_command": "command",
+	"read_file":       "path",
+	"write_file":      "path",
+	"edit_file":       "path",
+	"create_file":     "path",
+	"delete_file":     "path",
+	"list_files":      "path",
+	"search_files":    "pattern",
+	"search":          "query",
+	"web_search":      "query",
+	"grep":            "pattern",
+	"find":            "pattern",
 }
 
-// formatToolCall returns a compact one-line summary of a tool call,
-// e.g. "🛠️  shell command="git status""
+// toPascalCase converts a snake_case name to PascalCase, e.g. "read_file" → "ReadFile".
+func toPascalCase(s string) string {
+	parts := strings.Split(s, "_")
+	for i, p := range parts {
+		if len(p) > 0 {
+			parts[i] = strings.ToUpper(p[:1]) + p[1:]
+		}
+	}
+	return strings.Join(parts, "")
+}
+
+// formatDuration formats a duration for the timing footer.
+func formatDuration(d time.Duration) string {
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	m := int(d.Minutes())
+	s := int(d.Seconds()) % 60
+	return fmt.Sprintf("%dm %ds", m, s)
+}
+
+// formatToolCall returns a compact summary like "Shell(git status)" or "ReadFile(path=src/main.go)".
 func formatToolCall(tc *protocol.ToolCall) string {
+	name := toPascalCase(tc.Name)
+
 	var args map[string]any
 	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil || len(args) == 0 {
-		return fmt.Sprintf("🛠️  %s", tc.Name)
+		return name + "()"
 	}
 
-	var parts []string
+	// Try the known primary arg first.
+	if key, ok := primaryArgKey[tc.Name]; ok {
+		if v, found := args[key]; found {
+			s := fmt.Sprintf("%v", v)
+			if len(s) > 80 {
+				s = s[:77] + "..."
+			}
+			return fmt.Sprintf("%s(%s)", name, s)
+		}
+	}
+
+	// Fallback: pick the first non-large arg.
 	for k, v := range args {
 		s := fmt.Sprintf("%v", v)
-		if largeValueKeys[k] {
-			parts = append(parts, fmt.Sprintf("%s=(%d chars)", k, len(s)))
-			continue
+		if len(s) > 200 {
+			continue // skip large values
 		}
-		// Truncate long values
-		if len(s) > 60 {
-			s = s[:57] + "..."
+		if len(s) > 80 {
+			s = s[:77] + "..."
 		}
-		parts = append(parts, fmt.Sprintf("%s=%s", k, s))
+		return fmt.Sprintf("%s(%s=%s)", name, k, s)
 	}
 
-	summary := fmt.Sprintf("🛠️  %s %s", tc.Name, strings.Join(parts, " "))
-	// Cap total length
-	if len(summary) > 120 {
-		summary = summary[:117] + "..."
+	return name + "(...)"
+}
+
+// formatToolResult renders tool result lines with ⎿ prefix and indentation.
+func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
+	if tr.IsError || tr.Type == protocol.ToolResultTypeErrorText || tr.Type == protocol.ToolResultTypeErrorJSON {
+		errText := tr.Text
+		if errText == "" {
+			errText = fmt.Sprintf("%v", tr.JSON)
+		}
+		if len(errText) > 200 {
+			errText = errText[:197] + "..."
+		}
+		return "  " + errorStyle.Render("⎿  Error: "+errText)
 	}
-	return summary
+
+	text := tr.Text
+	if text == "" && tr.JSON != nil {
+		// If JSON is a slice/array, join elements as lines for readability.
+		switch arr := tr.JSON.(type) {
+		case []any:
+			var lines []string
+			for _, item := range arr {
+				lines = append(lines, fmt.Sprintf("%v", item))
+			}
+			text = strings.Join(lines, "\n")
+		case []string:
+			text = strings.Join(arr, "\n")
+		default:
+			b, _ := json.Marshal(tr.JSON)
+			text = string(b)
+		}
+	}
+	if tr.Type == protocol.ToolResultTypeExecutionDenied {
+		text = "Denied: " + tr.Reason
+	}
+
+	if text == "" {
+		return resultStyle.Render("  ⎿  (No output)")
+	}
+
+	// Compress runs of 2+ blank lines into a single blank line for display.
+	text = reBlankRun.ReplaceAllString(text, "\n\n")
+	text = strings.TrimRight(text, " \t\n\r")
+
+	// Hard cap on total characters to handle single-line mega outputs (e.g. JSON blobs).
+	const maxDisplayChars = 300
+	charTruncated := false
+	if len(text) > maxDisplayChars {
+		text = text[:maxDisplayChars]
+		charTruncated = true
+	}
+
+	lines := strings.Split(text, "\n")
+	totalLines := len(lines)
+
+	if maxLines > 0 && totalLines > maxLines {
+		lines = lines[:maxLines]
+	}
+
+	var sb strings.Builder
+	for i, line := range lines {
+		if i == 0 {
+			sb.WriteString("  ⎿  " + line)
+		} else {
+			sb.WriteString("\n     " + line)
+		}
+	}
+
+	if maxLines > 0 && totalLines > maxLines {
+		sb.WriteString(fmt.Sprintf("\n     ... (%d lines total)", totalLines))
+	} else if charTruncated {
+		sb.WriteString("\n     ... (output truncated)")
+	}
+
+	return resultStyle.Render(sb.String())
+}
+
+// formatPendingActions builds the approval header string from pending tool actions.
+func formatPendingActions(actions []*agent.PendingAction) string {
+	var parts []string
+	for _, act := range actions {
+		tc := act.ToolCall
+		if tc == nil {
+			tc = &protocol.ToolCall{Name: act.Name, Arguments: act.Arguments}
+		}
+		parts = append(parts, formatToolCall(tc))
+	}
+	return strings.Join(parts, "\n")
 }

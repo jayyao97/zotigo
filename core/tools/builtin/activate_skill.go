@@ -24,7 +24,7 @@ func (t *ListSkillsTool) Name() string {
 }
 
 func (t *ListSkillsTool) Description() string {
-	return "Lists all available skills. All skills are automatically enabled and their instructions are injected into the system prompt."
+	return "Lists all available skills. The skill index is in the system prompt; read a skill's SKILL.md file for full instructions."
 }
 
 func (t *ListSkillsTool) Schema() any {
