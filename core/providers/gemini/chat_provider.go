@@ -141,11 +141,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				reason := mapFinishReason(candidate.FinishReason)
 				finishEvt := protocol.NewFinishEvent(reason)
 				if lastUsageMetadata != nil {
-					finishEvt.Usage = &protocol.Usage{
-						InputTokens:  int(lastUsageMetadata.PromptTokenCount),
-						OutputTokens: int(lastUsageMetadata.CandidatesTokenCount),
-						TotalTokens:  int(lastUsageMetadata.TotalTokenCount),
-					}
+					finishEvt.Usage = geminiUsage(lastUsageMetadata)
 				}
 				ch <- finishEvt
 				return
@@ -161,16 +157,21 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		}
 		finishEvt := protocol.NewFinishEvent(protocol.FinishReasonStop)
 		if lastUsageMetadata != nil {
-			finishEvt.Usage = &protocol.Usage{
-				InputTokens:  int(lastUsageMetadata.PromptTokenCount),
-				OutputTokens: int(lastUsageMetadata.CandidatesTokenCount),
-				TotalTokens:  int(lastUsageMetadata.TotalTokenCount),
-			}
+			finishEvt.Usage = geminiUsage(lastUsageMetadata)
 		}
 		ch <- finishEvt
 	}()
 
 	return ch, nil
+}
+
+func geminiUsage(m *genai.GenerateContentResponseUsageMetadata) *protocol.Usage {
+	return &protocol.Usage{
+		InputTokens:          int(m.PromptTokenCount),
+		OutputTokens:         int(m.CandidatesTokenCount),
+		TotalTokens:          int(m.TotalTokenCount),
+		CacheReadInputTokens: int(m.CachedContentTokenCount),
+	}
 }
 
 func mapFinishReason(fr genai.FinishReason) protocol.FinishReason {
