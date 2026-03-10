@@ -2,6 +2,8 @@ zotigo
 .idea
 config.json
 e2e.config.json
+zotigo.e2e.yaml
+zotigo.e2e.yml
 .gemini-clipboard
 .claude
 .zotigo

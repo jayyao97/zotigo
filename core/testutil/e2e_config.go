@@ -3,37 +3,28 @@
 package testutil
 
 import (
-	"encoding/json"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 
 	"github.com/jayyao97/zotigo/core/config"
+	"gopkg.in/yaml.v3"
 )
 
-const (
-	e2eConfigFileName       = "e2e.config.json"
-	legacyE2EConfigFileName = "config.json"
-)
-
-// ProviderConfig represents the provider-specific config in e2e.config.json.
-type ProviderConfig struct {
-	APIKey  string `json:"api_key"`
-	BaseURL string `json:"base_url"`
-	Model   string `json:"model"`
+// Config file names in priority order.
+var e2eConfigFileNames = []string{
+	"zotigo.e2e.yaml",
+	"zotigo.e2e.yml",
 }
 
-// E2EConfig represents the E2E config structure.
+// E2EConfig mirrors the main config structure for e2e testing.
 type E2EConfig struct {
-	Provider  string          `json:"provider"`
-	Streaming bool            `json:"streaming"`
-	UserID    string          `json:"user_id"`
-	OpenAI    *ProviderConfig `json:"openai,omitempty"`
-	Anthropic *ProviderConfig `json:"anthropic,omitempty"`
-	Gemini    *ProviderConfig `json:"gemini,omitempty"`
+	DefaultProfile string                          `yaml:"default_profile"`
+	Profiles       map[string]config.ProfileConfig `yaml:"profiles"`
 }
 
-// LoadE2EConfig loads e2e.config.json (or legacy config.json) from project root.
+// LoadE2EConfig loads zotigo.e2e.yaml from project root.
 func LoadE2EConfig() (*E2EConfig, error) {
 	configPath := findConfigPath()
 	data, err := os.ReadFile(configPath)
@@ -42,48 +33,43 @@ func LoadE2EConfig() (*E2EConfig, error) {
 	}
 
 	var cfg E2EConfig
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
 		return nil, err
 	}
-
 	return &cfg, nil
 }
 
-// GetProfileConfig returns the profile config for the default provider
+// GetProfileConfig returns the config for the default profile.
 func (c *E2EConfig) GetProfileConfig() config.ProfileConfig {
-	switch c.Provider {
-	case "openai":
-		if c.OpenAI != nil {
-			return config.ProfileConfig{
-				Provider: "openai",
-				Model:    c.OpenAI.Model,
-				APIKey:   c.OpenAI.APIKey,
-				BaseURL:  c.OpenAI.BaseURL,
-			}
-		}
-	case "anthropic":
-		if c.Anthropic != nil {
-			return config.ProfileConfig{
-				Provider: "anthropic",
-				Model:    c.Anthropic.Model,
-				APIKey:   c.Anthropic.APIKey,
-				BaseURL:  c.Anthropic.BaseURL,
-			}
-		}
-	case "gemini":
-		if c.Gemini != nil {
-			return config.ProfileConfig{
-				Provider: "gemini",
-				Model:    c.Gemini.Model,
-				APIKey:   c.Gemini.APIKey,
-				BaseURL:  c.Gemini.BaseURL,
-			}
-		}
+	if p, ok := c.Profiles[c.DefaultProfile]; ok {
+		return p
 	}
 	return config.ProfileConfig{}
 }
 
-// MustLoadE2EConfig loads config and panics on error (for test setup)
+// GetProfile returns the config for a named profile.
+func (c *E2EConfig) GetProfile(name string) (config.ProfileConfig, bool) {
+	p, ok := c.Profiles[name]
+	return p, ok
+}
+
+// AllProfiles returns all configured profiles.
+func (c *E2EConfig) AllProfiles() map[string]config.ProfileConfig {
+	return c.Profiles
+}
+
+// ProfilesByProvider returns profiles matching a specific provider.
+func (c *E2EConfig) ProfilesByProvider(provider string) map[string]config.ProfileConfig {
+	result := make(map[string]config.ProfileConfig)
+	for name, p := range c.Profiles {
+		if p.Provider == provider {
+			result[name] = p
+		}
+	}
+	return result
+}
+
+// MustLoadE2EConfig loads config and panics on error (for test setup).
 func MustLoadE2EConfig() *E2EConfig {
 	cfg, err := LoadE2EConfig()
 	if err != nil {
@@ -92,10 +78,10 @@ func MustLoadE2EConfig() *E2EConfig {
 	return cfg
 }
 
-// findConfigPath finds e2e.config.json (or legacy config.json) in project root.
+// findConfigPath finds the e2e config file from project root.
 func findConfigPath() string {
 	// Try from current directory first
-	for _, name := range []string{e2eConfigFileName, legacyE2EConfigFileName} {
+	for _, name := range e2eConfigFileNames {
 		if _, err := os.Stat(name); err == nil {
 			return name
 		}
@@ -106,7 +92,7 @@ func findConfigPath() string {
 	if ok {
 		dir := filepath.Dir(filename)
 		for i := 0; i < 5; i++ {
-			for _, name := range []string{e2eConfigFileName, legacyE2EConfigFileName} {
+			for _, name := range e2eConfigFileNames {
 				configPath := filepath.Join(dir, name)
 				if _, err := os.Stat(configPath); err == nil {
 					return configPath
@@ -116,6 +102,10 @@ func findConfigPath() string {
 		}
 	}
 
-	// Fallback: prefer the new file name.
-	return e2eConfigFileName
+	return e2eConfigFileNames[0]
+}
+
+func isYAMLFile(path string) bool {
+	ext := strings.ToLower(filepath.Ext(path))
+	return ext == ".yaml" || ext == ".yml"
 }

@@ -1,0 +1,26 @@
+# Zotigo E2E Test Configuration
+#
+# Copy this file to zotigo.e2e.yaml and fill in your API keys.
+# Uses the same profiles format as ~/.zotigo/config.yaml
+#
+# Run e2e tests: go test -tags=e2e ./tests/e2e/...
+
+default_profile: gpt-4o
+
+profiles:
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    api_key: "your-openai-api-key"
+    base_url: "https://api.openai.com/v1"
+
+  claude-sonnet:
+    provider: anthropic
+    model: claude-sonnet-4-20250514
+    api_key: "your-anthropic-api-key"
+    base_url: "https://api.anthropic.com"
+
+  gemini-flash:
+    provider: gemini
+    model: gemini-2.5-flash
+    api_key: "your-gemini-api-key"

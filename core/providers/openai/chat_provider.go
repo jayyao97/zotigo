@@ -37,10 +37,20 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 		contentStarted := false
 		contentIndex := 0
+		var finishReason string
+		var lastUsage *openai.CompletionUsage
 
 		for stream.Next() {
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
+
+			// The final chunk (with empty choices) carries full usage including
+			// PromptTokensDetails. The SDK accumulator doesn't accumulate nested
+			// detail fields, so we capture the raw usage from the last chunk.
+			if chunk.Usage.TotalTokens > 0 {
+				u := chunk.Usage
+				lastUsage = &u
+			}
 
 			for _, choice := range chunk.Choices {
 				if choice.Index != 0 {
@@ -108,7 +118,8 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 				}
 
-				// 4. Finish Reason
+				// 4. Finish Reason — save it but don't return yet;
+				// the usage chunk (with empty choices) arrives after this.
 				if choice.FinishReason != "" {
 					if contentStarted {
 						ch <- protocol.Event{
@@ -117,17 +128,28 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						}
 						contentStarted = false
 					}
-
-					reason := mapFinishReason(choice.FinishReason)
-					ch <- protocol.NewFinishEvent(reason)
-					return
+					finishReason = choice.FinishReason
 				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
 			ch <- protocol.NewErrorEvent(err)
+			return
 		}
+
+		// Emit finish event after stream ends with usage from the final chunk
+		reason := mapFinishReason(finishReason)
+		finishEvt := protocol.NewFinishEvent(reason)
+		if lastUsage != nil {
+			finishEvt.Usage = &protocol.Usage{
+				InputTokens:          int(lastUsage.PromptTokens),
+				OutputTokens:         int(lastUsage.CompletionTokens),
+				TotalTokens:          int(lastUsage.TotalTokens),
+				CacheReadInputTokens: int(lastUsage.PromptTokensDetails.CachedTokens),
+			}
+		}
+		ch <- finishEvt
 	}()
 
 	return ch, nil

@@ -44,6 +44,8 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		contentIndex := 0
 		toolCallIndex := 0
 
+		var lastUsageMetadata *genai.GenerateContentResponseUsageMetadata
+
 		for resp, err := range p.client.Models.GenerateContentStream(ctx, p.model, contents, config) {
 			if err != nil {
 				ch <- protocol.NewErrorEvent(err)
@@ -52,6 +54,11 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 			if resp == nil || len(resp.Candidates) == 0 {
 				continue
+			}
+
+			// Track usage metadata from each chunk (last one has final counts)
+			if resp.UsageMetadata != nil {
+				lastUsageMetadata = resp.UsageMetadata
 			}
 
 			candidate := resp.Candidates[0]
@@ -132,7 +139,11 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 				reason := mapFinishReason(candidate.FinishReason)
-				ch <- protocol.NewFinishEvent(reason)
+				finishEvt := protocol.NewFinishEvent(reason)
+				if lastUsageMetadata != nil {
+					finishEvt.Usage = geminiUsage(lastUsageMetadata)
+				}
+				ch <- finishEvt
 				return
 			}
 		}
@@ -144,10 +155,23 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				Index: contentIndex,
 			}
 		}
-		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		finishEvt := protocol.NewFinishEvent(protocol.FinishReasonStop)
+		if lastUsageMetadata != nil {
+			finishEvt.Usage = geminiUsage(lastUsageMetadata)
+		}
+		ch <- finishEvt
 	}()
 
 	return ch, nil
+}
+
+func geminiUsage(m *genai.GenerateContentResponseUsageMetadata) *protocol.Usage {
+	return &protocol.Usage{
+		InputTokens:          int(m.PromptTokenCount),
+		OutputTokens:         int(m.CandidatesTokenCount),
+		TotalTokens:          int(m.TotalTokenCount),
+		CacheReadInputTokens: int(m.CachedContentTokenCount),
+	}
 }
 
 func mapFinishReason(fr genai.FinishReason) protocol.FinishReason {

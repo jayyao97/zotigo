@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -283,11 +284,15 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			msgs := a.buildContext()
 			a.mu.RUnlock()
 
-			// Prepare tools list
+			// Prepare tools list (sorted by name for deterministic ordering,
+			// which is required for Anthropic prompt caching to work)
 			var toolList []tools.Tool
 			for _, t := range toolsMap {
 				toolList = append(toolList, t)
 			}
+			sort.Slice(toolList, func(i, j int) bool {
+				return toolList[i].Name() < toolList[j].Name()
+			})
 
 			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
 			if err != nil {
@@ -299,10 +304,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var currentToolCalls []*protocol.ToolCall
 			var currentContent string
 			var providerFinishReason protocol.FinishReason
+			var providerUsage *protocol.Usage
 
 			for evt := range stream {
 				if evt.Type == protocol.EventTypeFinish {
 					providerFinishReason = evt.FinishReason
+					providerUsage = evt.Usage
 					continue
 				}
 
@@ -319,6 +326,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			asstMsg := protocol.NewAssistantMessage(currentContent)
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
+			}
+			if providerUsage != nil {
+				if asstMsg.Metadata == nil {
+					asstMsg.Metadata = &protocol.MessageMetadata{}
+				}
+				asstMsg.Metadata.Usage = providerUsage
 			}
 
 			a.mu.Lock()
