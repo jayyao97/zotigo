@@ -39,10 +39,26 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		currentToolCall := &protocol.ToolCall{}
 		inToolUse := false
 
+		// Track usage across events:
+		// message_start has input tokens; message_delta has output tokens
+		var usage protocol.Usage
+
 		for stream.Next() {
 			event := stream.Current()
 
 			switch event.Type {
+			case "message_start":
+				// Capture input token counts from the initial message
+				if event.Message.Usage.InputTokens > 0 {
+					usage.InputTokens = int(event.Message.Usage.InputTokens)
+				}
+				if event.Message.Usage.CacheCreationInputTokens > 0 {
+					usage.CacheCreationInputTokens = int(event.Message.Usage.CacheCreationInputTokens)
+				}
+				if event.Message.Usage.CacheReadInputTokens > 0 {
+					usage.CacheReadInputTokens = int(event.Message.Usage.CacheReadInputTokens)
+				}
+
 			case "content_block_start":
 				if event.ContentBlock.Type == "tool_use" {
 					// Start of a tool use block
@@ -111,16 +127,15 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 			case "message_delta":
+				// Capture output tokens from message_delta
+				if event.Usage.OutputTokens > 0 {
+					usage.OutputTokens = int(event.Usage.OutputTokens)
+				}
 				// Message is complete
 				if event.Delta.StopReason != "" {
 					reason := mapStopReason(event.Delta.StopReason)
 					finishEvt := protocol.NewFinishEvent(reason)
-					finishEvt.Usage = &protocol.Usage{
-						InputTokens:              int(event.Usage.InputTokens),
-						OutputTokens:             int(event.Usage.OutputTokens),
-						CacheCreationInputTokens: int(event.Usage.CacheCreationInputTokens),
-						CacheReadInputTokens:     int(event.Usage.CacheReadInputTokens),
-					}
+					finishEvt.Usage = &usage
 					ch <- finishEvt
 					return
 				}

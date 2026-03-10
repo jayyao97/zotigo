@@ -37,6 +37,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 		contentStarted := false
 		contentIndex := 0
+		var finishReason string
 
 		for stream.Next() {
 			chunk := stream.Current()
@@ -108,7 +109,8 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 				}
 
-				// 4. Finish Reason
+				// 4. Finish Reason — save it but don't return yet;
+				// the usage chunk (with empty choices) arrives after this.
 				if choice.FinishReason != "" {
 					if contentStarted {
 						ch <- protocol.Event{
@@ -117,26 +119,28 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						}
 						contentStarted = false
 					}
-
-					reason := mapFinishReason(choice.FinishReason)
-					finishEvt := protocol.NewFinishEvent(reason)
-					if acc.Usage.TotalTokens > 0 {
-						finishEvt.Usage = &protocol.Usage{
-							InputTokens:          int(acc.Usage.PromptTokens),
-							OutputTokens:         int(acc.Usage.CompletionTokens),
-							TotalTokens:          int(acc.Usage.TotalTokens),
-							CacheReadInputTokens: int(acc.Usage.PromptTokensDetails.CachedTokens),
-						}
-					}
-					ch <- finishEvt
-					return
+					finishReason = choice.FinishReason
 				}
 			}
 		}
 
 		if err := stream.Err(); err != nil {
 			ch <- protocol.NewErrorEvent(err)
+			return
 		}
+
+		// Emit finish event after stream ends so acc.Usage is fully populated
+		reason := mapFinishReason(finishReason)
+		finishEvt := protocol.NewFinishEvent(reason)
+		if acc.Usage.TotalTokens > 0 {
+			finishEvt.Usage = &protocol.Usage{
+				InputTokens:          int(acc.Usage.PromptTokens),
+				OutputTokens:         int(acc.Usage.CompletionTokens),
+				TotalTokens:          int(acc.Usage.TotalTokens),
+				CacheReadInputTokens: int(acc.Usage.PromptTokensDetails.CachedTokens),
+			}
+		}
+		ch <- finishEvt
 	}()
 
 	return ch, nil
