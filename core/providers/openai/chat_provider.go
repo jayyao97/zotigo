@@ -119,7 +119,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 
 					reason := mapFinishReason(choice.FinishReason)
-					ch <- protocol.NewFinishEvent(reason)
+					finishEvt := protocol.NewFinishEvent(reason)
+					if acc.Usage.TotalTokens > 0 {
+						finishEvt.Usage = &protocol.Usage{
+							InputTokens:          int(acc.Usage.PromptTokens),
+							OutputTokens:         int(acc.Usage.CompletionTokens),
+							TotalTokens:          int(acc.Usage.TotalTokens),
+							CacheReadInputTokens: int(acc.Usage.PromptTokensDetails.CachedTokens),
+						}
+					}
+					ch <- finishEvt
 					return
 				}
 			}

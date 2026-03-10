@@ -31,6 +31,7 @@ type Event struct {
 
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Error        error        `json:"error,omitempty"`
+	Usage        *Usage       `json:"usage,omitempty"`
 }
 
 type ContentPartDelta struct {

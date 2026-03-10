@@ -299,10 +299,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var currentToolCalls []*protocol.ToolCall
 			var currentContent string
 			var providerFinishReason protocol.FinishReason
+			var providerUsage *protocol.Usage
 
 			for evt := range stream {
 				if evt.Type == protocol.EventTypeFinish {
 					providerFinishReason = evt.FinishReason
+					providerUsage = evt.Usage
 					continue
 				}
 
@@ -319,6 +321,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			asstMsg := protocol.NewAssistantMessage(currentContent)
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
+			}
+			if providerUsage != nil {
+				if asstMsg.Metadata == nil {
+					asstMsg.Metadata = &protocol.MessageMetadata{}
+				}
+				asstMsg.Metadata.Usage = providerUsage
 			}
 
 			a.mu.Lock()

@@ -148,6 +148,13 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (
 				},
 			})
 		}
+		// Cache tool definitions — they don't change within a session
+		if len(anthropicTools) > 0 {
+			last := anthropicTools[len(anthropicTools)-1].OfTool
+			if last != nil {
+				last.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			}
+		}
 		params.Tools = anthropicTools
 	}
 

@@ -108,6 +108,9 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 
 	params := openai.ChatCompletionNewParams{
 		Messages: oaMsgs,
+		StreamOptions: openai.ChatCompletionStreamOptionsParam{
+			IncludeUsage: openai.Bool(true),
+		},
 	}
 
 	// Convert Tools

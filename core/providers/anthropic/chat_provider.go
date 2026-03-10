@@ -114,7 +114,14 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				// Message is complete
 				if event.Delta.StopReason != "" {
 					reason := mapStopReason(event.Delta.StopReason)
-					ch <- protocol.NewFinishEvent(reason)
+					finishEvt := protocol.NewFinishEvent(reason)
+					finishEvt.Usage = &protocol.Usage{
+						InputTokens:              int(event.Usage.InputTokens),
+						OutputTokens:             int(event.Usage.OutputTokens),
+						CacheCreationInputTokens: int(event.Usage.CacheCreationInputTokens),
+						CacheReadInputTokens:     int(event.Usage.CacheReadInputTokens),
+					}
+					ch <- finishEvt
 					return
 				}
 
