@@ -52,6 +52,9 @@ func (c *CompressCommand) Execute(ctx context.Context, env *commands.Environment
 	env.Output("Saved:  ~%d tokens (%.1f%% reduction)",
 		result.OriginalTokens-result.CompressedTokens,
 		float64(result.OriginalTokens-result.CompressedTokens)/float64(result.OriginalTokens)*100)
+	if result.TranscriptPath != "" {
+		env.Output("\nTranscript saved to: %s", result.TranscriptPath)
+	}
 
 	return nil
 }

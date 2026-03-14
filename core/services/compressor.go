@@ -2,10 +2,14 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"text/template"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 )
@@ -53,6 +57,10 @@ type CompressorConfig struct {
 
 	// TokenCounter is an optional custom token counter
 	TokenCounter TokenCounter
+
+	// TranscriptDir is the directory for saving compressed message transcripts.
+	// If empty, transcripts are not saved (backward-compatible default).
+	TranscriptDir string
 }
 
 // DefaultCompressorConfig returns sensible defaults
@@ -107,6 +115,13 @@ func (c *Compressor) SetSummarizer(s Summarizer) {
 	c.summarizer = s
 }
 
+// SetTranscriptDir sets the directory for saving compressed message transcripts.
+func (c *Compressor) SetTranscriptDir(dir string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.config.TranscriptDir = dir
+}
+
 // CompressionResult contains the result of a compression operation
 type CompressionResult struct {
 	OriginalTokens   int
@@ -115,7 +130,8 @@ type CompressionResult struct {
 	MessagesAfter    int
 	Summary          string
 	Compressed       bool
-	PartitionIndex   int // Index where messages were split
+	PartitionIndex   int    // Index where messages were split
+	TranscriptPath   string // Path to the saved transcript file, empty if not saved
 }
 
 // NeedsCompression checks if the messages need compression
@@ -194,6 +210,10 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 	toCompress := conversationMsgs[:partitionIdx]
 	toPreserve := conversationMsgs[partitionIdx:]
 
+	// Save transcript of compressed messages (best-effort)
+	transcriptPath := c.saveTranscript(toCompress)
+	result.TranscriptPath = transcriptPath
+
 	// Generate summary
 	var summary string
 	var err error
@@ -211,13 +231,18 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 	// Summarize long tool outputs in preserved messages
 	toPreserve = c.summarizeToolOutputs(ctx, toPreserve)
 
-	// Create summary message
+	// Create summary message with optional transcript path reference
+	summaryText := "[Previous conversation summary]\n" + summary
+	if transcriptPath != "" {
+		summaryText += fmt.Sprintf("\n\nIf you need specific details from before compaction, read the full transcript at: %s", transcriptPath)
+	}
+
 	summaryMsg := protocol.Message{
 		Role: protocol.RoleUser,
 		Content: []protocol.ContentPart{
 			{
 				Type: protocol.ContentTypeText,
-				Text: "[Previous conversation summary]\n" + summary,
+				Text: summaryText,
 			},
 		},
 	}
@@ -234,6 +259,36 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 	result.Compressed = true
 
 	return compressed, result, nil
+}
+
+// saveTranscript writes the compressed messages to a JSONL file for later retrieval.
+// Returns the file path, or empty string if saving is disabled or fails.
+func (c *Compressor) saveTranscript(messages []protocol.Message) string {
+	if c.config.TranscriptDir == "" {
+		return ""
+	}
+
+	if err := os.MkdirAll(c.config.TranscriptDir, 0755); err != nil {
+		return ""
+	}
+
+	filename := fmt.Sprintf("transcript_%d.jsonl", time.Now().UnixNano())
+	path := filepath.Join(c.config.TranscriptDir, filename)
+
+	f, err := os.Create(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+
+	enc := json.NewEncoder(f)
+	for _, msg := range messages {
+		if err := enc.Encode(msg); err != nil {
+			return ""
+		}
+	}
+
+	return path
 }
 
 // findSafePartitionPoint finds a partition index that doesn't break tool call chains.

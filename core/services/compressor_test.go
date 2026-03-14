@@ -1,9 +1,14 @@
 package services
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 )
@@ -707,6 +712,367 @@ func TestCompressor_LargeToolOutput(t *testing.T) {
 	}
 	if !strings.Contains(resultText, "truncated") {
 		t.Error("Should indicate truncation")
+	}
+}
+
+// ============ Transcript Persistence Tests ============
+
+// buildCompressibleMessages creates messages that will trigger compression
+// with the given config. Returns system + multiple user/assistant turns.
+func buildCompressibleMessages() []protocol.Message {
+	msgs := []protocol.Message{
+		{Role: protocol.RoleSystem, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "System prompt"},
+		}},
+	}
+	for i := 0; i < 5; i++ {
+		msgs = append(msgs,
+			protocol.Message{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("old user message ", 20)},
+			}},
+			protocol.Message{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("old assistant response ", 20)},
+			}},
+		)
+	}
+	// Recent messages (will be preserved)
+	msgs = append(msgs,
+		protocol.Message{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "Recent question"},
+		}},
+		protocol.Message{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "Recent answer"},
+		}},
+	)
+	return msgs
+}
+
+func TestCompressor_SavesTranscript(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.3,
+		TranscriptDir:     dir,
+	})
+
+	msgs := buildCompressibleMessages()
+	ctx := context.Background()
+
+	compressed, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+
+	// TranscriptPath should be set
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty")
+	}
+	if !strings.HasSuffix(result.TranscriptPath, ".jsonl") {
+		t.Errorf("TranscriptPath should end with .jsonl, got %s", result.TranscriptPath)
+	}
+
+	// File should exist and be readable
+	data, err := os.ReadFile(result.TranscriptPath)
+	if err != nil {
+		t.Fatalf("Failed to read transcript: %v", err)
+	}
+
+	// Parse JSONL - each line should be a valid Message
+	scanner := bufio.NewScanner(strings.NewReader(string(data)))
+	lineCount := 0
+	for scanner.Scan() {
+		var msg protocol.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			t.Fatalf("Line %d is not valid JSON: %v", lineCount+1, err)
+		}
+		lineCount++
+	}
+	if lineCount == 0 {
+		t.Error("Transcript should have at least one message")
+	}
+	// lineCount should equal the number of compressed messages (partition index)
+	if lineCount != result.PartitionIndex {
+		t.Errorf("Transcript lines (%d) should equal partition index (%d)", lineCount, result.PartitionIndex)
+	}
+
+	// Summary message should contain the transcript path
+	summaryMsg := compressed[1] // [0]=system, [1]=summary
+	summaryText := summaryMsg.Content[0].Text
+	if !strings.Contains(summaryText, "read the full transcript at:") {
+		t.Error("Summary should contain transcript path reference")
+	}
+	if !strings.Contains(summaryText, result.TranscriptPath) {
+		t.Error("Summary should contain the actual transcript path")
+	}
+}
+
+func TestCompressor_NoTranscriptWithoutDir(t *testing.T) {
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.3,
+		// TranscriptDir intentionally empty
+	})
+
+	msgs := buildCompressibleMessages()
+	ctx := context.Background()
+
+	compressed, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+
+	if result.TranscriptPath != "" {
+		t.Errorf("TranscriptPath should be empty, got %s", result.TranscriptPath)
+	}
+
+	// Summary should NOT contain transcript reference
+	summaryMsg := compressed[1]
+	if strings.Contains(summaryMsg.Content[0].Text, "read the full transcript at:") {
+		t.Error("Summary should not contain transcript reference when dir is empty")
+	}
+}
+
+func TestCompressor_MultipleCompressions_DifferentFiles(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.3,
+		TranscriptDir:     dir,
+	})
+	ctx := context.Background()
+
+	// First compression
+	msgs1 := buildCompressibleMessages()
+	_, result1, err := c.Compress(ctx, msgs1)
+	if err != nil {
+		t.Fatalf("First compress failed: %v", err)
+	}
+	if !result1.Compressed {
+		t.Fatal("First compression should have compressed")
+	}
+
+	// Small delay to ensure different nanosecond timestamp
+	time.Sleep(time.Millisecond)
+
+	// Second compression with different messages
+	msgs2 := buildCompressibleMessages()
+	_, result2, err := c.Compress(ctx, msgs2)
+	if err != nil {
+		t.Fatalf("Second compress failed: %v", err)
+	}
+	if !result2.Compressed {
+		t.Fatal("Second compression should have compressed")
+	}
+
+	// Paths should be different
+	if result1.TranscriptPath == result2.TranscriptPath {
+		t.Errorf("Two compressions should produce different files, both got %s", result1.TranscriptPath)
+	}
+
+	// Both files should exist
+	if _, err := os.Stat(result1.TranscriptPath); err != nil {
+		t.Errorf("First transcript file should exist: %v", err)
+	}
+	if _, err := os.Stat(result2.TranscriptPath); err != nil {
+		t.Errorf("Second transcript file should exist: %v", err)
+	}
+
+	// Directory should have exactly 2 files
+	entries, _ := os.ReadDir(dir)
+	jsonlCount := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonlCount++
+		}
+	}
+	if jsonlCount != 2 {
+		t.Errorf("Expected 2 jsonl files, got %d", jsonlCount)
+	}
+}
+
+func TestCompressor_TranscriptContent_Fidelity(t *testing.T) {
+	dir := t.TempDir()
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.2,
+		TranscriptDir:     dir,
+	})
+
+	// Build messages with various content types
+	msgs := []protocol.Message{
+		{Role: protocol.RoleSystem, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "System"},
+		}},
+		{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: strings.Repeat("user text ", 30)},
+		}},
+		{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeToolCall, ToolCall: &protocol.ToolCall{
+				ID: "call_1", Name: "read_file", Arguments: `{"path":"main.go"}`,
+			}},
+		}},
+		{Role: protocol.RoleTool, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{
+				ToolCallID: "call_1", Type: protocol.ToolResultTypeText, Text: strings.Repeat("file content ", 30),
+			}},
+		}},
+		{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "Recent"},
+		}},
+		{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "Done"},
+		}},
+	}
+
+	ctx := context.Background()
+	_, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty")
+	}
+
+	// Read transcript and verify content fidelity
+	f, err := os.Open(result.TranscriptPath)
+	if err != nil {
+		t.Fatalf("Failed to open transcript: %v", err)
+	}
+	defer f.Close()
+
+	var saved []protocol.Message
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var msg protocol.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			t.Fatalf("Invalid JSONL line: %v", err)
+		}
+		saved = append(saved, msg)
+	}
+
+	// The compressed messages are conversation messages (not system) before partition
+	// Verify roles match what we'd expect
+	if len(saved) == 0 {
+		t.Fatal("Saved messages should not be empty")
+	}
+
+	// Verify saved messages have correct roles and content is intact
+	for _, msg := range saved {
+		if msg.Role == protocol.RoleSystem {
+			t.Error("System messages should not be in transcript (they're separated)")
+		}
+		for _, part := range msg.Content {
+			if part.Type == protocol.ContentTypeText && part.Text == "" {
+				t.Error("Text content should not be empty")
+			}
+			// If tool call/result are in the compressed partition, verify fidelity
+			if part.Type == protocol.ContentTypeToolCall && part.ToolCall != nil {
+				if part.ToolCall.Name != "read_file" {
+					t.Errorf("Tool call name should be 'read_file', got %s", part.ToolCall.Name)
+				}
+			}
+			if part.Type == protocol.ContentTypeToolResult && part.ToolResult != nil {
+				if part.ToolResult.ToolCallID != "call_1" {
+					t.Errorf("Tool result ID should be 'call_1', got %s", part.ToolResult.ToolCallID)
+				}
+			}
+		}
+	}
+
+	// Verify at least user messages are in the transcript
+	hasUser := false
+	for _, msg := range saved {
+		if msg.Role == protocol.RoleUser {
+			hasUser = true
+			break
+		}
+	}
+	if !hasUser {
+		t.Error("Transcript should contain at least user messages")
+	}
+}
+
+func TestCompressor_TranscriptDir_CreatesMissingDirs(t *testing.T) {
+	base := t.TempDir()
+	deepDir := filepath.Join(base, "a", "b", "c")
+
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.3,
+		TranscriptDir:     deepDir,
+	})
+
+	msgs := buildCompressibleMessages()
+	ctx := context.Background()
+
+	_, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty")
+	}
+
+	// Verify the deep directory was created
+	info, err := os.Stat(deepDir)
+	if err != nil {
+		t.Fatalf("Deep directory should exist: %v", err)
+	}
+	if !info.IsDir() {
+		t.Error("Should be a directory")
+	}
+
+	// File should be readable
+	if _, err := os.ReadFile(result.TranscriptPath); err != nil {
+		t.Fatalf("Transcript file should be readable: %v", err)
+	}
+}
+
+func TestCompressor_SetTranscriptDir(t *testing.T) {
+	// Create compressor without TranscriptDir
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100,
+		TriggerRatio:      0.1,
+		PreserveRatio:     0.3,
+	})
+
+	// Set it via setter
+	dir := t.TempDir()
+	c.SetTranscriptDir(dir)
+
+	msgs := buildCompressibleMessages()
+	ctx := context.Background()
+
+	_, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty after SetTranscriptDir")
+	}
+	if _, err := os.Stat(result.TranscriptPath); err != nil {
+		t.Fatalf("Transcript file should exist: %v", err)
 	}
 }
 

@@ -176,9 +176,14 @@ func main() {
 
 	pb := prompt.NewSystemPromptBuilder(pbOpts...)
 
+	// Transcript directory for compressed conversation persistence
+	home, _ := os.UserHomeDir()
+	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
+		agent.WithTranscriptDir(transcriptDir),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
