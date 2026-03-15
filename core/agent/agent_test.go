@@ -441,6 +441,225 @@ func TestAgent_MultipleReminders(t *testing.T) {
 	}
 }
 
+// ============ SafeDirs & AddSafeDirs Tests ============
+
+// ReadFileMockTool simulates a read-only tool with path arguments.
+type ReadFileMockTool struct {
+	LastPath string
+}
+
+func (t *ReadFileMockTool) Name() string        { return "read_file" }
+func (t *ReadFileMockTool) Description() string { return "Read a file" }
+func (t *ReadFileMockTool) Schema() any         { return nil }
+func (t *ReadFileMockTool) Safety() tools.ToolSafety {
+	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+}
+func (t *ReadFileMockTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	t.LastPath = args
+	return "file content", nil
+}
+
+// PathCallMockProvider generates a tool call to read_file with a specific path.
+type PathCallMockProvider struct {
+	Path string
+	Step int
+}
+
+func (p *PathCallMockProvider) Name() string { return "path-call-mock" }
+
+func (p *PathCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 10)
+	go func() {
+		defer close(ch)
+		p.Step++
+		if p.Step == 1 {
+			args := `{"path":"` + p.Path + `"}`
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallDelta,
+				Index: 0,
+				ToolCallDelta: &protocol.ToolCallDelta{
+					ID:   "call_read",
+					Name: "read_file",
+				},
+			}
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallEnd,
+				Index: 0,
+				ToolCall: &protocol.ToolCall{
+					ID:        "call_read",
+					Name:      "read_file",
+					Arguments: args,
+				},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+		} else {
+			ch <- protocol.NewTextDeltaEvent("Done")
+			ch <- protocol.Event{
+				Type:        protocol.EventTypeContentEnd,
+				ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "Done"},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		}
+	}()
+	return ch, nil
+}
+
+func TestAgent_SafeDir_AutoApprovesReadInWorkDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	filePath := tmpDir + "/test.txt"
+
+	providers.Register("mock-safedir-workdir", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &PathCallMockProvider{Path: filePath}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-safedir-workdir"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&ReadFileMockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "Read the file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	// Read-only tool in workDir should be auto-approved, not paused
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+
+	// Should complete without needing approval (auto-approved + response)
+	if lastEvent.FinishReason == "need_approval" {
+		t.Error("Read-only tool in workDir should be auto-approved, not need_approval")
+	}
+}
+
+func TestAgent_SafeDir_BlocksReadOutsideWorkDir(t *testing.T) {
+	tmpDir := t.TempDir()
+	outsidePath := "/etc/passwd"
+
+	providers.Register("mock-safedir-outside", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &PathCallMockProvider{Path: outsidePath}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-safedir-outside"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&ReadFileMockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "Read the file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+
+	// Path outside workDir should require approval
+	if lastEvent.FinishReason != "need_approval" {
+		t.Errorf("Read-only tool outside workDir should need approval, got %s", lastEvent.FinishReason)
+	}
+}
+
+func TestAgent_AddSafeDirs_ExpandsAutoApproval(t *testing.T) {
+	workDir := t.TempDir()
+	extraDir := t.TempDir()
+	filePath := extraDir + "/data.txt"
+
+	providers.Register("mock-safedir-extra", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &PathCallMockProvider{Path: filePath}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-safedir-extra"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&ReadFileMockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	// Register the extra dir as safe
+	ag.AddSafeDirs(extraDir)
+
+	events, err := ag.Run(context.Background(), "Read the file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+
+	// Should be auto-approved because extraDir was registered
+	if lastEvent.FinishReason == "need_approval" {
+		t.Error("Read-only tool in AddSafeDirs directory should be auto-approved")
+	}
+}
+
+func TestAgent_WithTranscriptDir_RegistersSafeDir(t *testing.T) {
+	workDir := t.TempDir()
+	transcriptDir := t.TempDir()
+	filePath := transcriptDir + "/transcript_123.jsonl"
+
+	providers.Register("mock-safedir-transcript", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &PathCallMockProvider{Path: filePath}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-safedir-transcript"}
+	ag, err := agent.New(cfg, exec,
+		agent.WithTranscriptDir(transcriptDir),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&ReadFileMockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "Read the transcript")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+
+	// Should be auto-approved because WithTranscriptDir registers the dir as safe
+	if lastEvent.FinishReason == "need_approval" {
+		t.Error("Read-only tool in transcript dir should be auto-approved via WithTranscriptDir")
+	}
+}
+
 // --- Additional Mock Providers ---
 
 type StatsMockProvider struct{}

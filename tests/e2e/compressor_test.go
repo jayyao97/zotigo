@@ -3,7 +3,10 @@
 package e2e
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -330,5 +333,247 @@ func TestE2E_WithRealSummarizer(t *testing.T) {
 		if len(compressed) < 3 {
 			t.Error("Should have at least system, summary, and some preserved messages")
 		}
+	}
+}
+
+// ============ Transcript Persistence E2E Tests ============
+
+func TestE2E_TranscriptPersistence(t *testing.T) {
+	cfg, err := testutil.LoadE2EConfig()
+	if err != nil {
+		t.Fatalf("Failed to load e2e config: %v", err)
+	}
+
+	profileCfg := cfg.GetProfileConfig()
+	if profileCfg.APIKey == "" {
+		t.Skip("No API key configured")
+	}
+
+	t.Logf("Using provider: %s, model: %s", profileCfg.Provider, profileCfg.Model)
+
+	provider, err := providers.NewProvider(profileCfg)
+	if err != nil {
+		t.Fatalf("Failed to create provider: %v", err)
+	}
+
+	dir := t.TempDir()
+	c := services.NewCompressor(services.CompressorConfig{
+		ContextWindowSize:   500,
+		TriggerRatio:        0.5,
+		PreserveRatio:       0.3,
+		ToolOutputThreshold: 100,
+		TranscriptDir:       dir,
+	})
+	c.SetSummarizer(services.NewProviderSummarizer(provider))
+
+	msgs := buildRealisticConversation()
+	t.Logf("Conversation: %d messages", len(msgs))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	compressed, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+
+	if !result.Compressed {
+		t.Fatal("Should have compressed")
+	}
+
+	// Verify transcript was saved
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty")
+	}
+	t.Logf("Transcript saved to: %s", result.TranscriptPath)
+
+	// Read and verify transcript
+	f, err := os.Open(result.TranscriptPath)
+	if err != nil {
+		t.Fatalf("Failed to open transcript: %v", err)
+	}
+	defer f.Close()
+
+	lineCount := 0
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var msg protocol.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			t.Fatalf("Line %d invalid JSON: %v", lineCount+1, err)
+		}
+		lineCount++
+	}
+	t.Logf("Transcript contains %d messages", lineCount)
+	if lineCount == 0 {
+		t.Error("Transcript should have at least one message")
+	}
+
+	// Verify summary includes transcript path
+	summaryMsg := compressed[1] // [0]=system, [1]=summary
+	if !strings.Contains(summaryMsg.Content[0].Text, result.TranscriptPath) {
+		t.Error("Summary message should contain transcript file path")
+	}
+
+	// Verify compression still reduces tokens
+	if result.CompressedTokens >= result.OriginalTokens {
+		t.Error("Compression should reduce token count")
+	}
+
+	t.Logf("Tokens: %d -> %d (%.1f%% reduction)",
+		result.OriginalTokens, result.CompressedTokens,
+		float64(result.OriginalTokens-result.CompressedTokens)/float64(result.OriginalTokens)*100)
+}
+
+func TestE2E_TranscriptWithToolChains(t *testing.T) {
+	dir := t.TempDir()
+	c := services.NewCompressor(services.CompressorConfig{
+		ContextWindowSize:   2000,
+		TriggerRatio:        0.5,
+		PreserveRatio:       0.4,
+		ToolOutputThreshold: 500,
+		TranscriptDir:       dir,
+	})
+
+	msgs := buildConversationWithToolChains()
+	ctx := context.Background()
+
+	compressed, result, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Compress failed: %v", err)
+	}
+
+	if !result.Compressed {
+		t.Log("No compression needed for this test case")
+		return
+	}
+
+	// Verify transcript saved
+	if result.TranscriptPath == "" {
+		t.Fatal("TranscriptPath should be non-empty")
+	}
+
+	// Read transcript and check role sequence
+	f, err := os.Open(result.TranscriptPath)
+	if err != nil {
+		t.Fatalf("Failed to open transcript: %v", err)
+	}
+	defer f.Close()
+
+	var savedRoles []string
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		var msg protocol.Message
+		if err := json.Unmarshal(scanner.Bytes(), &msg); err != nil {
+			t.Fatalf("Invalid JSONL: %v", err)
+		}
+		savedRoles = append(savedRoles, string(msg.Role))
+	}
+	t.Logf("Transcript roles: %v", savedRoles)
+
+	// Verify preserved messages still have intact tool chains
+	var pendingToolCalls []string
+	for i, msg := range compressed {
+		for _, part := range msg.Content {
+			if part.Type == protocol.ContentTypeToolCall && part.ToolCall != nil {
+				pendingToolCalls = append(pendingToolCalls, part.ToolCall.ID)
+			}
+			if part.Type == protocol.ContentTypeToolResult && part.ToolResult != nil {
+				found := false
+				for j, id := range pendingToolCalls {
+					if id == part.ToolResult.ToolCallID {
+						pendingToolCalls = append(pendingToolCalls[:j], pendingToolCalls[j+1:]...)
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Errorf("Tool result at message %d has no matching tool call: %s",
+						i, part.ToolResult.ToolCallID)
+				}
+			}
+		}
+	}
+	if len(pendingToolCalls) > 0 {
+		t.Errorf("Orphaned tool calls: %v", pendingToolCalls)
+	}
+}
+
+func TestE2E_MultipleCompressionRounds(t *testing.T) {
+	dir := t.TempDir()
+	c := services.NewCompressor(services.CompressorConfig{
+		ContextWindowSize: 1000,
+		TriggerRatio:      0.3,
+		PreserveRatio:     0.3,
+		TranscriptDir:     dir,
+	})
+	ctx := context.Background()
+
+	// Round 1: build conversation, compress
+	msgs := make([]protocol.Message, 0, 50)
+	msgs = append(msgs, protocol.Message{
+		Role:    protocol.RoleSystem,
+		Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "System prompt"}},
+	})
+	for i := 0; i < 20; i++ {
+		msgs = append(msgs,
+			protocol.Message{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("round one message ", 10)},
+			}},
+			protocol.Message{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("round one response ", 10)},
+			}},
+		)
+	}
+
+	compressed1, result1, err := c.Compress(ctx, msgs)
+	if err != nil {
+		t.Fatalf("Round 1 compress failed: %v", err)
+	}
+	if !result1.Compressed {
+		t.Fatal("Round 1 should have compressed")
+	}
+	t.Logf("Round 1: %d -> %d messages, transcript: %s",
+		result1.MessagesBefore, result1.MessagesAfter, result1.TranscriptPath)
+
+	// Round 2: add more messages to compressed result, compress again
+	time.Sleep(time.Millisecond) // ensure different timestamp
+	for i := 0; i < 20; i++ {
+		compressed1 = append(compressed1,
+			protocol.Message{Role: protocol.RoleUser, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("round two message ", 10)},
+			}},
+			protocol.Message{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("round two response ", 10)},
+			}},
+		)
+	}
+
+	_, result2, err := c.Compress(ctx, compressed1)
+	if err != nil {
+		t.Fatalf("Round 2 compress failed: %v", err)
+	}
+	if !result2.Compressed {
+		t.Fatal("Round 2 should have compressed")
+	}
+	t.Logf("Round 2: %d -> %d messages, transcript: %s",
+		result2.MessagesBefore, result2.MessagesAfter, result2.TranscriptPath)
+
+	// Verify different files
+	if result1.TranscriptPath == result2.TranscriptPath {
+		t.Error("Two rounds should produce different transcript files")
+	}
+
+	// Verify directory has 2 jsonl files
+	entries, _ := os.ReadDir(dir)
+	jsonlCount := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".jsonl") {
+			jsonlCount++
+		}
+	}
+	if jsonlCount != 2 {
+		t.Errorf("Expected 2 transcript files, got %d", jsonlCount)
 	}
 }
