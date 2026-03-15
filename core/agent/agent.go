@@ -36,7 +36,7 @@ type Agent struct {
 	loopDetector  *services.LoopDetector
 	compressor    *services.Compressor
 	skillManager  *skills.SkillManager
-	transcriptDir string
+	extraSafeDirs []string
 
 	mu             sync.RWMutex
 	state          State
@@ -85,12 +85,20 @@ func WithTools(ts ...tools.Tool) AgentOption {
 	}
 }
 
+// AddSafeDirs registers additional directories as safe for auto-approved read access.
+// Components should call this when they produce files the agent may need to read.
+func (a *Agent) AddSafeDirs(dirs ...string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.extraSafeDirs = append(a.extraSafeDirs, dirs...)
+}
+
 // WithTranscriptDir sets the directory for saving compressed message transcripts.
 // When set, the compressor saves the original messages to a JSONL file before
 // discarding them, and injects the file path into the summary for later retrieval.
 func WithTranscriptDir(dir string) AgentOption {
 	return func(a *Agent) {
-		a.transcriptDir = dir
+		a.extraSafeDirs = append(a.extraSafeDirs, dir)
 		if a.compressor != nil {
 			a.compressor.SetTranscriptDir(dir)
 		}
@@ -156,6 +164,7 @@ func (a *Agent) SetSkillManager(sm *skills.SkillManager) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.skillManager = sm
+	a.extraSafeDirs = append(a.extraSafeDirs, sm.Dirs()...)
 }
 
 // SkillManager returns the agent's skill manager.
@@ -678,13 +687,9 @@ func (a *Agent) isToolCallSafe(tc *protocol.ToolCall) bool {
 
 // safeDirs returns all directories that are safe for auto-approved read access.
 func (a *Agent) safeDirs() []string {
-	dirs := []string{a.executor.WorkDir()}
-	if a.skillManager != nil {
-		dirs = append(dirs, a.skillManager.Dirs()...)
-	}
-	if a.transcriptDir != "" {
-		dirs = append(dirs, a.transcriptDir)
-	}
+	dirs := make([]string, 0, 1+len(a.extraSafeDirs))
+	dirs = append(dirs, a.executor.WorkDir())
+	dirs = append(dirs, a.extraSafeDirs...)
 	return dirs
 }
 
