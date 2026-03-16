@@ -17,6 +17,14 @@ type ProfileConfig struct {
 	APIKey   string `mapstructure:"api_key" yaml:"api_key"`
 	BaseURL  string `mapstructure:"base_url,omitempty" yaml:"base_url,omitempty"`
 
+	// ThinkingLevel enables extended thinking/reasoning mode.
+	// Values: "" (disabled), "low", "medium", "high".
+	// Providers map this to their native thinking config:
+	//   Anthropic: budget_tokens (low=2048, medium=8192, high=32768)
+	//   OpenAI: reasoning_effort (low, medium, high)
+	//   Gemini: ThinkingLevel (LOW, MEDIUM, HIGH)
+	ThinkingLevel string `mapstructure:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
+
 	// Additional provider-specific params can be added here or in a generic map
 	Params map[string]any `mapstructure:"params,omitempty" yaml:"params,omitempty"`
 }

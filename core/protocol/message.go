@@ -34,6 +34,7 @@ type Usage struct {
 type ContentPart struct {
 	Type       ContentType `json:"type"`
 	Text       string      `json:"text,omitempty"`
+	Signature  string      `json:"signature,omitempty"` // For reasoning blocks (Anthropic thinking signature)
 	Image      *MediaPart  `json:"image,omitempty"`
 	Audio      *MediaPart  `json:"audio,omitempty"`
 	Video      *MediaPart  `json:"video,omitempty"`

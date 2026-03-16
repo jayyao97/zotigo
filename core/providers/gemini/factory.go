@@ -32,8 +32,9 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	}
 
 	p := &ChatProvider{
-		client: client,
-		model:  cfg.Model,
+		client:        client,
+		model:         cfg.Model,
+		thinkingLevel: cfg.ThinkingLevel,
 	}
 
 	if temp, ok := cfg.Params["temperature"]; ok {

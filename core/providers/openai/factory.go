@@ -55,8 +55,9 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 		}, nil
 	default:
 		return &ChatProvider{
-			client: &client,
-			model:  cfg.Model,
+			client:          &client,
+			model:           cfg.Model,
+			reasoningEffort: cfg.ThinkingLevel,
 		}, nil
 	}
 }

@@ -24,8 +24,21 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 
 	client := anthropic.NewClient(opts...)
 
-	return &ChatProvider{
-		client: &client,
-		model:  cfg.Model,
-	}, nil
+	p := &ChatProvider{
+		client:        &client,
+		model:         cfg.Model,
+		thinkingLevel: cfg.ThinkingLevel,
+	}
+
+	// Allow explicit budget override via params
+	if bt, ok := cfg.Params["thinking_budget_tokens"]; ok {
+		switch v := bt.(type) {
+		case int:
+			p.thinkingBudget = int64(v)
+		case float64:
+			p.thinkingBudget = int64(v)
+		}
+	}
+
+	return p, nil
 }

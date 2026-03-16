@@ -35,7 +35,8 @@ type Event struct {
 }
 
 type ContentPartDelta struct {
-	Text string `json:"text,omitempty"`
+	Type ContentType `json:"type,omitempty"` // empty defaults to text; set to ContentTypeReasoning for thinking blocks
+	Text string      `json:"text,omitempty"`
 }
 
 type ToolCallDeltaType string
@@ -63,6 +64,13 @@ func NewTextDeltaEvent(text string) Event {
 	return Event{
 		Type:             EventTypeContentDelta,
 		ContentPartDelta: &ContentPartDelta{Text: text},
+	}
+}
+
+func NewReasoningDeltaEvent(text string) Event {
+	return Event{
+		Type:             EventTypeContentDelta,
+		ContentPartDelta: &ContentPartDelta{Type: ContentTypeReasoning, Text: text},
 	}
 }
 
