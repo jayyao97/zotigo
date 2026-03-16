@@ -185,6 +185,46 @@ func TestConvertToGeminiParams_Image(t *testing.T) {
 	}
 }
 
+func TestConvertToGeminiParams_ReasoningBlock(t *testing.T) {
+	msg := protocol.Message{
+		Role: protocol.RoleAssistant,
+		Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeReasoning, Text: "Let me think step by step..."},
+			{Type: protocol.ContentTypeText, Text: "The answer is 42."},
+		},
+	}
+
+	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(contents) != 1 {
+		t.Fatalf("Expected 1 content, got %d", len(contents))
+	}
+	if len(contents[0].Parts) != 2 {
+		t.Fatalf("Expected 2 parts, got %d", len(contents[0].Parts))
+	}
+
+	// First part: reasoning with Thought=true
+	reasoningPart := contents[0].Parts[0]
+	if reasoningPart.Text != "Let me think step by step..." {
+		t.Errorf("Expected reasoning text, got '%s'", reasoningPart.Text)
+	}
+	if !reasoningPart.Thought {
+		t.Error("Reasoning part should have Thought=true")
+	}
+
+	// Second part: regular text without Thought
+	textPart := contents[0].Parts[1]
+	if textPart.Text != "The answer is 42." {
+		t.Errorf("Expected text, got '%s'", textPart.Text)
+	}
+	if textPart.Thought {
+		t.Error("Text part should not have Thought=true")
+	}
+}
+
 // mockTool implements tools.Tool for testing.
 type mockTool struct {
 	name        string
