@@ -325,6 +325,8 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// Process stream
 			var currentToolCalls []*protocol.ToolCall
 			var currentContent string
+			var currentReasoning string
+			var reasoningSignature string
 			var providerFinishReason protocol.FinishReason
 			var providerUsage *protocol.Usage
 
@@ -341,11 +343,33 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					currentToolCalls = append(currentToolCalls, evt.ToolCall)
 				}
 				if evt.Type == protocol.EventTypeContentDelta && evt.ContentPartDelta != nil {
-					currentContent += evt.ContentPartDelta.Text
+					if evt.ContentPartDelta.Type == protocol.ContentTypeReasoning {
+						currentReasoning += evt.ContentPartDelta.Text
+					} else {
+						currentContent += evt.ContentPartDelta.Text
+					}
+				}
+				// Capture reasoning signature from ContentEnd events
+				if evt.Type == protocol.EventTypeContentEnd && evt.ContentPart != nil &&
+					evt.ContentPart.Type == protocol.ContentTypeReasoning {
+					reasoningSignature = evt.ContentPart.Signature
+					// Use the complete text from the end event if available
+					if evt.ContentPart.Text != "" {
+						currentReasoning = evt.ContentPart.Text
+					}
 				}
 			}
 
 			asstMsg := protocol.NewAssistantMessage(currentContent)
+			// Prepend reasoning block if present (thinking comes before text)
+			if currentReasoning != "" {
+				reasoningPart := protocol.ContentPart{
+					Type:      protocol.ContentTypeReasoning,
+					Text:      currentReasoning,
+					Signature: reasoningSignature,
+				}
+				asstMsg.Content = append([]protocol.ContentPart{reasoningPart}, asstMsg.Content...)
+			}
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
 			}

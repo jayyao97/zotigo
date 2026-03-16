@@ -10,12 +10,31 @@ import (
 )
 
 type ChatProvider struct {
-	client *anthropic.Client
-	model  string
+	client         *anthropic.Client
+	model          string
+	thinkingLevel  string // "", "low", "medium", "high"
+	thinkingBudget int64  // explicit override; 0 = use level default
 }
 
 func (p *ChatProvider) Name() string {
 	return "anthropic-chat"
+}
+
+// thinkingBudgetTokens returns the budget_tokens for the given thinking level.
+func (p *ChatProvider) thinkingBudgetTokens() int64 {
+	if p.thinkingBudget > 0 {
+		return p.thinkingBudget
+	}
+	switch p.thinkingLevel {
+	case "low":
+		return 2048
+	case "medium":
+		return 8192
+	case "high":
+		return 32768
+	default:
+		return 0
+	}
 }
 
 func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
@@ -25,6 +44,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}
 
 	params.Model = anthropic.Model(p.model)
+
+	// Configure thinking
+	budget := p.thinkingBudgetTokens()
+	if budget > 0 {
+		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
+		// MaxTokens must exceed budget; set a reasonable total
+		if params.MaxTokens < budget+4096 {
+			params.MaxTokens = budget + 4096
+		}
+	}
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
@@ -38,6 +67,9 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		toolCallIndex := 0
 		currentToolCall := &protocol.ToolCall{}
 		inToolUse := false
+		inThinking := false
+		var thinkingText string
+		var thinkingSignature string
 
 		// Track usage across events:
 		// message_start has input tokens; message_delta has output tokens
@@ -61,7 +93,6 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 			case "content_block_start":
 				if event.ContentBlock.Type == "tool_use" {
-					// Start of a tool use block
 					inToolUse = true
 					currentToolCall = &protocol.ToolCall{
 						Index: toolCallIndex,
@@ -84,18 +115,24 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 							Name: event.ContentBlock.Name,
 						},
 					}
+				} else if event.ContentBlock.Type == "thinking" {
+					inThinking = true
+					thinkingText = ""
 				}
 
 			case "content_block_delta":
-				if event.Delta.Type == "text_delta" {
-					// Text content delta
+				if event.Delta.Type == "thinking_delta" {
+					thinkingText += event.Delta.Thinking
+					ch <- protocol.NewReasoningDeltaEvent(event.Delta.Thinking)
+				} else if event.Delta.Type == "signature_delta" {
+					thinkingSignature += event.Delta.Signature
+				} else if event.Delta.Type == "text_delta" {
 					ch <- protocol.Event{
 						Type:             protocol.EventTypeContentDelta,
 						Index:            contentIndex,
 						ContentPartDelta: &protocol.ContentPartDelta{Text: event.Delta.Text},
 					}
 				} else if event.Delta.Type == "input_json_delta" {
-					// Tool input delta
 					ch <- protocol.Event{
 						Type:  protocol.EventTypeToolCallDelta,
 						Index: toolCallIndex,
@@ -109,7 +146,6 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 			case "content_block_stop":
 				if inToolUse {
-					// End of tool use block
 					ch <- protocol.Event{
 						Type:     protocol.EventTypeToolCallEnd,
 						Index:    toolCallIndex,
@@ -117,8 +153,20 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 					toolCallIndex++
 					inToolUse = false
+				} else if inThinking {
+					ch <- protocol.Event{
+						Type:  protocol.EventTypeContentEnd,
+						Index: contentIndex,
+						ContentPart: &protocol.ContentPart{
+							Type:      protocol.ContentTypeReasoning,
+							Text:      thinkingText,
+							Signature: thinkingSignature,
+						},
+					}
+					contentIndex++
+					inThinking = false
+					thinkingSignature = ""
 				} else {
-					// End of text content
 					ch <- protocol.Event{
 						Type:  protocol.EventTypeContentEnd,
 						Index: contentIndex,
@@ -127,11 +175,9 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 			case "message_delta":
-				// Capture output tokens from message_delta
 				if event.Usage.OutputTokens > 0 {
 					usage.OutputTokens = int(event.Usage.OutputTokens)
 				}
-				// Message is complete
 				if event.Delta.StopReason != "" {
 					reason := mapStopReason(event.Delta.StopReason)
 					finishEvt := protocol.NewFinishEvent(reason)
@@ -141,7 +187,6 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 			case "message_stop":
-				// Final stop event
 				return
 			}
 		}

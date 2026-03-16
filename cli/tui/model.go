@@ -23,46 +23,49 @@ import (
 )
 
 var (
-	userMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	asstMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
-	toolMarkerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
-	resultStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	timingStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	warningStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true)
-	errorStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
-	headerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Padding(0, 1)
-	focusedChoice   = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-	blurredChoice   = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	inputStyle      = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
-	promptStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	userMarkerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	asstMarkerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("86")).Bold(true)
+	toolMarkerStyle     = lipgloss.NewStyle().Foreground(lipgloss.Color("75")).Bold(true)
+	reasoningStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true)
+	reasoningLabelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("243")).Italic(true).Bold(true)
+	resultStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	timingStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
+	warningStyle        = lipgloss.NewStyle().Foreground(lipgloss.Color("202")).Bold(true)
+	errorStyle          = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	headerStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).Bold(true).Padding(0, 1)
+	focusedChoice       = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
+	blurredChoice       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
+	inputStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
+	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 
 	// reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
 	reBlankRun = regexp.MustCompile(`\n{3,}`)
 )
 
 type Model struct {
-	agent           *agent.Agent
-	sessionMgr      *session.Manager
-	sessionID       string
-	cmdRegistry     *commands.Registry
-	ctx             context.Context
-	input           textarea.Model
-	currentAsstMsg  string
-	thinking        bool
-	approving       bool
-	approvalChoice  int
-	pendingToolName string
-	pendingToolArgs string
-	err             error
-	eventCh         <-chan protocol.Event
-	width           int
-	height          int
-	initialPrinted  bool
-	kittyChecked    bool
-	autoApprove     bool
-	streamFlushed   int // lines already committed to scrollback during streaming
-	turnStartTime   time.Time
-	needsAsstMarker bool // next text content block should get a ⏺ prefix
+	agent              *agent.Agent
+	sessionMgr         *session.Manager
+	sessionID          string
+	cmdRegistry        *commands.Registry
+	ctx                context.Context
+	input              textarea.Model
+	currentAsstMsg     string
+	thinking           bool
+	approving          bool
+	approvalChoice     int
+	pendingToolName    string
+	pendingToolArgs    string
+	err                error
+	eventCh            <-chan protocol.Event
+	width              int
+	height             int
+	initialPrinted     bool
+	kittyChecked       bool
+	autoApprove        bool
+	streamFlushed      int // lines already committed to scrollback during streaming
+	turnStartTime      time.Time
+	needsAsstMarker    bool // next text content block should get a ⏺ prefix
+	streamingReasoning bool // currently streaming reasoning content
 }
 
 type streamReadyMsg <-chan protocol.Event
@@ -375,13 +378,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		switch msg.Type {
 		case protocol.EventTypeContentDelta:
 			if msg.ContentPartDelta != nil {
-				if m.needsAsstMarker {
+				isReasoning := msg.ContentPartDelta.Type == protocol.ContentTypeReasoning
+				var pendingFlush tea.Cmd
+
+				// Transition: start reasoning block
+				if isReasoning && !m.streamingReasoning {
+					m.streamingReasoning = true
+					m.currentAsstMsg += reasoningLabelStyle.Render("⏺ Thinking...") + "\n"
+					m.needsAsstMarker = true // reset for when text starts
+				}
+				// Transition: reasoning ended, text started
+				if !isReasoning && m.streamingReasoning {
+					m.streamingReasoning = false
+					if !strings.HasSuffix(m.currentAsstMsg, "\n") {
+						m.currentAsstMsg += "\n"
+					}
+					pendingFlush = m.flushStreamedLines()
+				}
+
+				if !isReasoning && m.needsAsstMarker {
 					m.currentAsstMsg += asstMarkerStyle.Render("⏺ ")
 					m.needsAsstMarker = false
 				}
-				m.currentAsstMsg += msg.ContentPartDelta.Text
+				if isReasoning {
+					m.currentAsstMsg += reasoningStyle.Render(msg.ContentPartDelta.Text)
+				} else {
+					m.currentAsstMsg += msg.ContentPartDelta.Text
+				}
 				if cmd := m.flushStreamedLines(); cmd != nil {
+					if pendingFlush != nil {
+						return m, tea.Batch(pendingFlush, cmd, waitForNextEvent(m.eventCh))
+					}
 					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+				}
+				if pendingFlush != nil {
+					return m, tea.Batch(pendingFlush, waitForNextEvent(m.eventCh))
 				}
 			}
 		case protocol.EventTypeToolCallDelta:
@@ -419,6 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case protocol.EventTypeFinish:
 			m.thinking = false
+			m.streamingReasoning = false
 			snap := m.agent.Snapshot()
 			timingSuffix := "\n" + timingStyle.Render("✻ Completed in "+formatDuration(time.Since(m.turnStartTime)))
 
@@ -804,9 +836,13 @@ func renderMessage(msg protocol.Message) (string, bool) {
 		var parts []string
 		for _, p := range msg.Content {
 			switch p.Type {
-			case protocol.ContentTypeText, protocol.ContentTypeReasoning:
+			case protocol.ContentTypeText:
 				if p.Text != "" {
 					parts = append(parts, "\n"+asstMarkerStyle.Render("⏺ ")+p.Text)
+				}
+			case protocol.ContentTypeReasoning:
+				if p.Text != "" {
+					parts = append(parts, "\n"+reasoningLabelStyle.Render("⏺ Thinking: ")+reasoningStyle.Render(p.Text))
 				}
 			case protocol.ContentTypeToolCall:
 				if p.ToolCall != nil {

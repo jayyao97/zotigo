@@ -61,6 +61,10 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (
 					if p.Text != "" {
 						parts = append(parts, anthropic.NewTextBlock(p.Text))
 					}
+				case protocol.ContentTypeReasoning:
+					if p.Text != "" {
+						parts = append(parts, anthropic.NewThinkingBlock(p.Signature, p.Text))
+					}
 				case protocol.ContentTypeToolCall:
 					if p.ToolCall != nil {
 						tc := p.ToolCall

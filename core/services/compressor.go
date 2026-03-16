@@ -446,7 +446,7 @@ func (c *Compressor) countSingleMessage(msg protocol.Message) int {
 
 	for _, part := range msg.Content {
 		switch part.Type {
-		case protocol.ContentTypeText:
+		case protocol.ContentTypeText, protocol.ContentTypeReasoning:
 			total += c.counter(part.Text)
 		case protocol.ContentTypeToolCall:
 			if part.ToolCall != nil {

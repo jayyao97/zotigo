@@ -9,8 +9,9 @@ import (
 )
 
 type ChatProvider struct {
-	client *openai.Client
-	model  string
+	client          *openai.Client
+	model           string
+	reasoningEffort string // "", "low", "medium", "high"
 }
 
 func (p *ChatProvider) Name() string {
@@ -18,7 +19,7 @@ func (p *ChatProvider) Name() string {
 }
 
 func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
-	params, err := convertToChatParams(messages, toolsList)
+	params, err := convertToChatParams(messages, toolsList, p.reasoningEffort)
 	if err != nil {
 		return nil, err
 	}

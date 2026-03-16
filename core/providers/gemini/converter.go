@@ -56,9 +56,13 @@ func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool) ([]*
 			var parts []*genai.Part
 			for _, p := range msg.Content {
 				switch p.Type {
-				case protocol.ContentTypeText, protocol.ContentTypeReasoning:
+				case protocol.ContentTypeText:
 					if p.Text != "" {
 						parts = append(parts, genai.NewPartFromText(p.Text))
+					}
+				case protocol.ContentTypeReasoning:
+					if p.Text != "" {
+						parts = append(parts, &genai.Part{Text: p.Text, Thought: true})
 					}
 				case protocol.ContentTypeToolCall:
 					if p.ToolCall != nil {

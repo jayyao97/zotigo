@@ -12,7 +12,7 @@ import (
 )
 
 // convertToChatParams converts internal protocol messages to OpenAI ChatCompletionNewParams.
-func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (openai.ChatCompletionNewParams, error) {
+func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reasoningEffort ...string) (openai.ChatCompletionNewParams, error) {
 	var oaMsgs []openai.ChatCompletionMessageParamUnion
 
 	for _, msg := range msgs {
@@ -111,6 +111,18 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool) (opena
 		StreamOptions: openai.ChatCompletionStreamOptionsParam{
 			IncludeUsage: openai.Bool(true),
 		},
+	}
+
+	// Set reasoning effort if provided
+	if len(reasoningEffort) > 0 && reasoningEffort[0] != "" {
+		switch reasoningEffort[0] {
+		case "low":
+			params.ReasoningEffort = shared.ReasoningEffortLow
+		case "medium":
+			params.ReasoningEffort = shared.ReasoningEffortMedium
+		case "high":
+			params.ReasoningEffort = shared.ReasoningEffortHigh
+		}
 	}
 
 	// Convert Tools

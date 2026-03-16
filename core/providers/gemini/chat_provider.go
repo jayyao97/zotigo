@@ -12,10 +12,11 @@ import (
 
 // ChatProvider implements providers.Provider for Google Gemini.
 type ChatProvider struct {
-	client      *genai.Client
-	model       string
-	temperature *float32
-	maxTokens   int32
+	client        *genai.Client
+	model         string
+	temperature   *float32
+	maxTokens     int32
+	thinkingLevel string // "", "low", "medium", "high"
 }
 
 func (p *ChatProvider) Name() string {
@@ -33,6 +34,20 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}
 	if p.maxTokens > 0 {
 		config.MaxOutputTokens = p.maxTokens
+	}
+
+	// Configure thinking
+	if p.thinkingLevel != "" {
+		tc := &genai.ThinkingConfig{IncludeThoughts: true}
+		switch p.thinkingLevel {
+		case "low":
+			tc.ThinkingLevel = genai.ThinkingLevelLow
+		case "medium":
+			tc.ThinkingLevel = genai.ThinkingLevelMedium
+		case "high":
+			tc.ThinkingLevel = genai.ThinkingLevelHigh
+		}
+		config.ThinkingConfig = tc
 	}
 
 	ch := make(chan protocol.Event)
@@ -65,6 +80,12 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 			if candidate.Content != nil {
 				for _, part := range candidate.Content.Parts {
+					// Thinking/reasoning content (Gemini thought parts)
+					if part.Thought && part.Text != "" {
+						ch <- protocol.NewReasoningDeltaEvent(part.Text)
+						continue
+					}
+
 					// Text content
 					if part.Text != "" {
 						contentStarted = true

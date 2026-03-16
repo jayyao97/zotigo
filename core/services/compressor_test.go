@@ -1076,6 +1076,37 @@ func TestCompressor_SetTranscriptDir(t *testing.T) {
 	}
 }
 
+func TestCompressor_CountTokens_IncludesReasoning(t *testing.T) {
+	c := NewCompressor(DefaultCompressorConfig())
+
+	reasoningText := strings.Repeat("thinking step ", 50)
+	msgsWithReasoning := []protocol.Message{
+		{
+			Role: protocol.RoleAssistant,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeReasoning, Text: reasoningText},
+				{Type: protocol.ContentTypeText, Text: "The answer is 42."},
+			},
+		},
+	}
+	msgsTextOnly := []protocol.Message{
+		{
+			Role: protocol.RoleAssistant,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: "The answer is 42."},
+			},
+		},
+	}
+
+	tokensWithReasoning := c.CountTokens(msgsWithReasoning)
+	tokensTextOnly := c.CountTokens(msgsTextOnly)
+
+	if tokensWithReasoning <= tokensTextOnly {
+		t.Errorf("Reasoning tokens should be counted: with=%d, without=%d",
+			tokensWithReasoning, tokensTextOnly)
+	}
+}
+
 func TestCompressor_AccurateTokenCounting(t *testing.T) {
 	// Create compressor with default (accurate) tokenizer
 	c := NewCompressor(DefaultCompressorConfig())
