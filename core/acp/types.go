@@ -12,9 +12,11 @@ const (
 	MethodSessionLoad    = "session/load"
 	MethodSessionList    = "session/list"
 	MethodSessionPrompt  = "session/prompt"
-	MethodSessionCancel  = "session/cancel"
 	MethodSessionSetMode = "session/set_mode"
 	MethodSessionSetCfg  = "session/set_config_option"
+
+	// Client → Agent notifications
+	MethodSessionCancel = "session/cancel"
 
 	// Agent → Client notifications
 	MethodSessionUpdate = "session/update"
@@ -30,66 +32,98 @@ const (
 	MethodRequestPerm     = "session/request_permission"
 )
 
+// StopReason values per ACP spec.
+const (
+	StopReasonEndTurn         = "end_turn"
+	StopReasonMaxTokens       = "max_tokens"
+	StopReasonMaxTurnRequests = "max_turn_requests"
+	StopReasonRefusal         = "refusal"
+	StopReasonCancelled       = "cancelled"
+)
+
+// ToolCallStatus values per ACP spec.
+const (
+	ToolCallStatusPending    = "pending"
+	ToolCallStatusInProgress = "in_progress"
+	ToolCallStatusCompleted  = "completed"
+	ToolCallStatusFailed     = "failed"
+)
+
 // --- Initialize ---
 
 type InitializeParams struct {
-	ProtocolVersion int                `json:"protocolVersion"`
-	ClientInfo      ClientInfo         `json:"clientInfo"`
-	Capabilities    ClientCapabilities `json:"capabilities"`
+	ProtocolVersion    int                `json:"protocolVersion"`
+	ClientInfo         *Implementation    `json:"clientInfo,omitempty"`
+	ClientCapabilities ClientCapabilities `json:"clientCapabilities"`
 }
 
-type ClientInfo struct {
+type Implementation struct {
 	Name    string `json:"name"`
 	Version string `json:"version,omitempty"`
+	Title   string `json:"title,omitempty"`
 }
 
 type ClientCapabilities struct {
-	Filesystem *FSCapabilities       `json:"filesystem,omitempty"`
-	Terminal   *TerminalCapabilities `json:"terminal,omitempty"`
+	FS       FSCapabilities `json:"fs"`
+	Terminal bool           `json:"terminal"`
 }
 
 type FSCapabilities struct {
-	ReadTextFile  bool `json:"readTextFile,omitempty"`
-	WriteTextFile bool `json:"writeTextFile,omitempty"`
-}
-
-type TerminalCapabilities struct {
-	Create bool `json:"create,omitempty"`
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
 }
 
 type InitializeResult struct {
-	ProtocolVersion int               `json:"protocolVersion"`
-	AgentInfo       AgentInfo         `json:"agentInfo"`
-	Capabilities    AgentCapabilities `json:"capabilities"`
-}
-
-type AgentInfo struct {
-	Name    string `json:"name"`
-	Version string `json:"version,omitempty"`
+	ProtocolVersion    int               `json:"protocolVersion"`
+	AgentInfo          *Implementation   `json:"agentInfo,omitempty"`
+	AgentCapabilities  AgentCapabilities `json:"agentCapabilities"`
+	AuthMethods        []AuthMethod      `json:"authMethods,omitempty"`
 }
 
 type AgentCapabilities struct {
-	LoadSession      bool     `json:"loadSession,omitempty"`
-	AvailableModes   []string `json:"availableModes,omitempty"`
-	SupportedPrompts []string `json:"supportedPrompts,omitempty"`
+	LoadSession        bool                `json:"loadSession"`
+	PromptCapabilities *PromptCapabilities `json:"promptCapabilities,omitempty"`
+}
+
+type PromptCapabilities struct {
+	Audio           bool `json:"audio"`
+	EmbeddedContext bool `json:"embeddedContext"`
+	Image           bool `json:"image"`
+}
+
+type AuthMethod struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
 }
 
 // --- Authentication ---
 
 type AuthenticateParams struct {
-	Token string `json:"token,omitempty"`
+	MethodID string `json:"methodId"`
 }
 
-type AuthenticateResult struct {
-	Success bool   `json:"success"`
-	Message string `json:"message,omitempty"`
-}
+type AuthenticateResult struct{}
 
 // --- Session ---
 
 type SessionNewParams struct {
-	WorkingDirectory string   `json:"workingDirectory"`
-	MCPServers       []string `json:"mcpServers,omitempty"`
+	Cwd        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
+}
+
+type MCPServer struct {
+	Name    string        `json:"name"`
+	Type    string        `json:"type,omitempty"` // "http", "sse"; absent for stdio
+	Command string        `json:"command,omitempty"`
+	Args    []string      `json:"args,omitempty"`
+	URL     string        `json:"url,omitempty"`
+	Env     []EnvVariable `json:"env,omitempty"`
+}
+
+type EnvVariable struct {
+	Name  string `json:"name"`
+	Value string `json:"value"`
 }
 
 type SessionNewResult struct {
@@ -97,45 +131,51 @@ type SessionNewResult struct {
 }
 
 type SessionLoadParams struct {
-	SessionID string `json:"sessionId"`
+	SessionID  string      `json:"sessionId"`
+	Cwd        string      `json:"cwd"`
+	MCPServers []MCPServer `json:"mcpServers"`
 }
 
-type SessionLoadResult struct {
-	SessionID string `json:"sessionId"`
+type SessionLoadResult struct{}
+
+type SessionListParams struct {
+	Cursor string `json:"cursor,omitempty"`
+	Cwd    string `json:"cwd,omitempty"`
 }
 
 type SessionListResult struct {
-	Sessions []SessionInfo `json:"sessions"`
+	Sessions   []SessionInfo `json:"sessions"`
+	NextCursor string        `json:"nextCursor,omitempty"`
 }
 
 type SessionInfo struct {
-	SessionID  string `json:"sessionId"`
-	Title      string `json:"title,omitempty"`
-	WorkingDir string `json:"workingDirectory,omitempty"`
-	CreatedAt  string `json:"createdAt,omitempty"`
+	SessionID string `json:"sessionId"`
+	Title     string `json:"title,omitempty"`
+	Cwd       string `json:"cwd,omitempty"`
 }
 
 // --- Prompt ---
 
 type SessionPromptParams struct {
 	SessionID string         `json:"sessionId"`
-	Content   []ContentBlock `json:"content"`
+	Prompt    []ContentBlock `json:"prompt"`
 }
 
-// ContentBlock is a union type for prompt content.
+// ContentBlock is a union type for prompt content (discriminated on Type).
 type ContentBlock struct {
 	Type string `json:"type"` // "text", "image", "audio", "resource_link", "resource"
 	// Text fields
 	Text string `json:"text,omitempty"`
-	// Image fields
+	// Image/Audio fields
 	Data     string `json:"data,omitempty"`
 	MimeType string `json:"mimeType,omitempty"`
 	// Resource fields
-	URI string `json:"uri,omitempty"`
+	URI  string `json:"uri,omitempty"`
+	Name string `json:"name,omitempty"`
 }
 
 type SessionPromptResult struct {
-	// empty — actual response comes via session/update notifications
+	StopReason string `json:"stopReason"`
 }
 
 // --- Session Update (Agent → Client notification) ---
@@ -145,50 +185,35 @@ type SessionUpdateParams struct {
 	Update    SessionUpdate `json:"update"`
 }
 
-type SessionUpdate struct {
-	Type string `json:"type"` // discriminator
+// SessionUpdate is sent as the "update" field in session/update notifications.
+// It is a discriminated union keyed on "sessionUpdate".
+// We represent it as a map to avoid Go struct tag collisions between variants.
+type SessionUpdate = map[string]any
 
-	// agent_message_chunk
-	MessageChunk *MessageChunk `json:"messageChunk,omitempty"`
-
-	// tool_call_update
-	ToolCallUpdate *ToolCallUpdate `json:"toolCallUpdate,omitempty"`
-
-	// agent_plan
-	Plan *AgentPlan `json:"plan,omitempty"`
-
-	// session_info_update
-	SessionInfo *SessionInfoUpdate `json:"sessionInfo,omitempty"`
-}
-
-type MessageChunk struct {
-	Role    string `json:"role"` // "assistant"
-	Content string `json:"content"`
-}
-
-type ToolCallUpdate struct {
-	ID        string `json:"id"`
-	Name      string `json:"name,omitempty"`
-	Arguments string `json:"arguments,omitempty"`
-	Status    string `json:"status,omitempty"` // "running", "completed", "failed"
-	Result    string `json:"result,omitempty"`
-}
-
-type AgentPlan struct {
-	Entries []PlanEntry `json:"entries"`
+type ToolCallContent struct {
+	Type string `json:"type"` // "content", "diff", "terminal"
+	// content variant
+	ContentBlock *ContentBlock `json:"content,omitempty"`
+	// diff variant
+	Path    string `json:"path,omitempty"`
+	NewText string `json:"newText,omitempty"`
+	OldText string `json:"oldText,omitempty"`
+	// terminal variant
+	TerminalID string `json:"terminalId,omitempty"`
 }
 
 type PlanEntry struct {
-	Title    string `json:"title"`
-	Status   string `json:"status,omitempty"` // "pending", "in_progress", "completed"
-	Priority string `json:"priority,omitempty"`
+	Content  string `json:"content"`
+	Status   string `json:"status"`   // "pending", "in_progress", "completed"
+	Priority string `json:"priority"` // "high", "medium", "low"
 }
 
-type SessionInfoUpdate struct {
-	Title string `json:"title,omitempty"`
+type SessionInfoUpdateData struct {
+	Title     string `json:"title,omitempty"`
+	UpdatedAt string `json:"updatedAt,omitempty"`
 }
 
-// --- Cancel ---
+// --- Cancel (Client → Agent notification) ---
 
 type SessionCancelParams struct {
 	SessionID string `json:"sessionId"`
@@ -198,17 +223,18 @@ type SessionCancelParams struct {
 
 type SessionSetModeParams struct {
 	SessionID string `json:"sessionId"`
-	Mode      string `json:"mode"`
+	ModeID    string `json:"modeId"`
 }
 
-type SessionSetModeResult struct {
-	Mode string `json:"mode"`
-}
+type SessionSetModeResult struct{}
 
 // --- Filesystem (Agent → Client) ---
 
 type FSReadTextFileParams struct {
-	Path string `json:"path"`
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Limit     int    `json:"limit,omitempty"`
+	Line      int    `json:"line,omitempty"`
 }
 
 type FSReadTextFileResult struct {
@@ -216,21 +242,22 @@ type FSReadTextFileResult struct {
 }
 
 type FSWriteTextFileParams struct {
-	Path    string `json:"path"`
-	Content string `json:"content"`
+	SessionID string `json:"sessionId"`
+	Path      string `json:"path"`
+	Content   string `json:"content"`
 }
 
-type FSWriteTextFileResult struct {
-	Success bool `json:"success"`
-}
+type FSWriteTextFileResult struct{}
 
 // --- Terminal (Agent → Client) ---
 
 type TerminalCreateParams struct {
-	Command string   `json:"command"`
-	Args    []string `json:"args,omitempty"`
-	Cwd     string   `json:"cwd,omitempty"`
-	Env     []string `json:"env,omitempty"`
+	SessionID       string        `json:"sessionId"`
+	Command         string        `json:"command"`
+	Args            []string      `json:"args,omitempty"`
+	Cwd             string        `json:"cwd,omitempty"`
+	Env             []EnvVariable `json:"env,omitempty"`
+	OutputByteLimit int           `json:"outputByteLimit,omitempty"`
 }
 
 type TerminalCreateResult struct {
@@ -238,47 +265,75 @@ type TerminalCreateResult struct {
 }
 
 type TerminalOutputParams struct {
+	SessionID  string `json:"sessionId"`
 	TerminalID string `json:"terminalId"`
 }
 
 type TerminalOutputResult struct {
-	Output string `json:"output"`
+	Output     string              `json:"output"`
+	Truncated  bool                `json:"truncated"`
+	ExitStatus *TerminalExitStatus `json:"exitStatus,omitempty"`
+}
+
+type TerminalExitStatus struct {
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Signal   string `json:"signal,omitempty"`
 }
 
 type TerminalWaitParams struct {
+	SessionID  string `json:"sessionId"`
 	TerminalID string `json:"terminalId"`
 }
 
 type TerminalWaitResult struct {
-	ExitCode int `json:"exitCode"`
+	ExitCode *int   `json:"exitCode,omitempty"`
+	Signal   string `json:"signal,omitempty"`
 }
 
 type TerminalKillParams struct {
+	SessionID  string `json:"sessionId"`
 	TerminalID string `json:"terminalId"`
 }
 
+type TerminalKillResult struct{}
+
 type TerminalReleaseParams struct {
+	SessionID  string `json:"sessionId"`
 	TerminalID string `json:"terminalId"`
 }
+
+type TerminalReleaseResult struct{}
 
 // --- Permission (Agent → Client) ---
 
 type RequestPermissionParams struct {
-	SessionID   string             `json:"sessionId"`
-	Permissions []PermissionDetail `json:"permissions"`
+	SessionID string           `json:"sessionId"`
+	ToolCall  ToolCallData     `json:"toolCall"`
+	Options   []PermissionOption `json:"options"`
 }
 
-type PermissionDetail struct {
-	ID          string `json:"id"`
-	Title       string `json:"title"`
-	Description string `json:"description,omitempty"`
+type ToolCallData struct {
+	ToolCallID string            `json:"toolCallId"`
+	Title      string            `json:"title"`
+	Kind       string            `json:"kind,omitempty"`
+	Status     string            `json:"status,omitempty"`
+	Content    []ToolCallContent `json:"content,omitempty"`
+	RawInput   any               `json:"rawInput,omitempty"`
+	RawOutput  any               `json:"rawOutput,omitempty"`
+}
+
+type PermissionOption struct {
+	OptionID string `json:"optionId"`
+	Name     string `json:"name"`
+	Kind     string `json:"kind"` // "allow_once", "allow_always", "reject_once", "reject_always"
 }
 
 type RequestPermissionResult struct {
-	Decisions []PermissionDecision `json:"decisions"`
+	Outcome PermissionOutcome `json:"outcome"`
 }
 
-type PermissionDecision struct {
-	ID   string `json:"id"`
-	Kind string `json:"kind"` // "allow_once", "allow_always", "reject_once", "reject_always"
+// PermissionOutcome is a discriminated union on the Outcome field.
+type PermissionOutcome struct {
+	Outcome  string `json:"outcome"`  // "selected" or "cancelled"
+	OptionID string `json:"optionId,omitempty"` // only for "selected"
 }

@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/acp"
@@ -57,6 +58,7 @@ func main() {
 		session  *acp.Session
 		cancelFn context.CancelFunc
 	}
+	var sessionsMu sync.RWMutex
 	sessions := make(map[string]*sessionState)
 
 	// stdio as ReadWriteCloser
@@ -66,12 +68,12 @@ func main() {
 
 	acpServer = acp.NewServer(rwc,
 		acp.OnInitialized(func(caps acp.ClientCapabilities) {
-			log.Printf("Client connected, fs=%v, terminal=%v",
-				caps.Filesystem != nil, caps.Terminal != nil)
+			log.Printf("Client connected, fs.read=%v, fs.write=%v, terminal=%v",
+				caps.FS.ReadTextFile, caps.FS.WriteTextFile, caps.Terminal)
 		}),
 
 		acp.OnSessionNew(func(ctx context.Context, params acp.SessionNewParams) (string, error) {
-			workDir := params.WorkingDirectory
+			workDir := params.Cwd
 			if workDir == "" {
 				workDir, _ = os.Getwd()
 			}
@@ -79,7 +81,7 @@ func main() {
 			sessionID := fmt.Sprintf("acp-%d", time.Now().UnixNano())
 
 			// Create remote executor that delegates to the editor
-			exec := acp.NewRemoteExecutor(acpServer, workDir)
+			exec := acp.NewRemoteExecutor(acpServer, sessionID, workDir)
 
 			// System prompt
 			pb := prompt.NewSystemPromptBuilder(
@@ -119,19 +121,25 @@ func main() {
 			sess := acp.NewSession(sessionID, workDir)
 			acpServer.RegisterSession(sessionID, sess)
 
+			sessionsMu.Lock()
 			sessions[sessionID] = &sessionState{
 				runner:  r,
 				session: sess,
 			}
+			sessionsMu.Unlock()
 
 			log.Printf("Session created: %s (workDir=%s)", sessionID, workDir)
 			return sessionID, nil
 		}),
 
-		acp.OnSessionPrompt(func(ctx context.Context, sessionID string, text string, images []acp.ContentBlock) error {
+		// OnSessionPrompt blocks until the turn finishes and returns a PromptResult
+		// with stopReason, so the JSON-RPC response carries the correct stop reason.
+		acp.OnSessionPrompt(func(ctx context.Context, sessionID string, text string, images []acp.ContentBlock) acp.PromptResult {
+			sessionsMu.RLock()
 			state, ok := sessions[sessionID]
+			sessionsMu.RUnlock()
 			if !ok {
-				return fmt.Errorf("session %q not found", sessionID)
+				return acp.PromptResult{Err: fmt.Errorf("session %q not found", sessionID)}
 			}
 
 			// Cancel previous processing if any
@@ -158,17 +166,29 @@ func main() {
 
 			// RunFullTurn handles the entire conversation turn including
 			// approval loops. Events are sent to the editor via the ACP
-			// transport automatically — no manual channel relay needed.
-			if err := state.runner.RunFullTurn(promptCtx, msg); err != nil {
-				log.Printf("RunFullTurn error: %v", err)
+			// transport automatically.
+			err := state.runner.RunFullTurn(promptCtx, msg)
+
+			// Check promptCtx (not the parent ctx) to detect cancellation,
+			// since session/cancel calls cancel() on promptCtx.
+			cancelled := promptCtx.Err() != nil
+			cancel()
+
+			if err != nil {
+				if cancelled {
+					return acp.PromptResult{StopReason: acp.StopReasonCancelled}
+				}
+				return acp.PromptResult{Err: err}
 			}
 
-			cancel()
-			return nil
+			return acp.PromptResult{StopReason: acp.StopReasonEndTurn}
 		}),
 
 		acp.OnSessionCancel(func(_ context.Context, sessionID string) {
-			if state, ok := sessions[sessionID]; ok {
+			sessionsMu.RLock()
+			state, ok := sessions[sessionID]
+			sessionsMu.RUnlock()
+			if ok {
 				state.session.Cancel()
 			}
 		}),

@@ -157,11 +157,10 @@ func (r *Runner) SubmitApproval(ctx context.Context, results []transport.Approva
 	}
 
 	allApproved := true
-	approvedMap := make(map[string]bool)
 	for _, result := range results {
-		approvedMap[result.ToolCallID] = result.Approved
 		if !result.Approved {
 			allApproved = false
+			break
 		}
 	}
 
@@ -171,21 +170,18 @@ func (r *Runner) SubmitApproval(ctx context.Context, results []transport.Approva
 	if allApproved {
 		eventCh, err = r.agent.ApproveAndExecutePendingActions(ctx)
 	} else {
-		var outputs []protocol.ToolResult
-		for _, action := range snap.PendingActions {
-			if !approvedMap[action.ToolCallID] {
-				outputs = append(outputs, protocol.ToolResult{
-					ToolCallID: action.ToolCallID,
-					Type:       protocol.ToolResultTypeExecutionDenied,
-					Reason:     "User denied",
-				})
+		// Any denial → deny all pending actions (consistent with drainWithApprovalLoop).
+		// The agent doesn't support partial approval natively.
+		outputs := make([]protocol.ToolResult, len(snap.PendingActions))
+		for i, action := range snap.PendingActions {
+			outputs[i] = protocol.ToolResult{
+				ToolCallID: action.ToolCallID,
+				Type:       protocol.ToolResultTypeExecutionDenied,
+				Reason:     "User denied permission",
+				IsError:    true,
 			}
 		}
-		if len(outputs) < len(snap.PendingActions) {
-			eventCh, err = r.agent.ApproveAndExecutePendingActions(ctx)
-		} else {
-			eventCh, err = r.agent.SubmitToolOutputs(ctx, outputs)
-		}
+		eventCh, err = r.agent.SubmitToolOutputs(ctx, outputs)
 	}
 
 	if err != nil {

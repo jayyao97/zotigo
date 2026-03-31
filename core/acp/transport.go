@@ -43,48 +43,50 @@ func (t *Transport) Send(ctx context.Context, event protocol.Event) error {
 
 	switch event.Type {
 	case protocol.EventTypeContentDelta:
-		if event.ContentPartDelta != nil && event.ContentPartDelta.Type != protocol.ContentTypeReasoning {
+		if event.ContentPartDelta != nil {
+			if event.ContentPartDelta.Type == protocol.ContentTypeReasoning {
+				return t.server.SendThoughtChunk(ctx, t.sessionID, event.ContentPartDelta.Text)
+			}
 			return t.server.SendTextChunk(ctx, t.sessionID, event.ContentPartDelta.Text)
 		}
-		// Skip reasoning deltas for now (ACP doesn't have a standard for this)
 
 	case protocol.EventTypeToolCallEnd:
 		if event.ToolCall != nil {
-			return t.server.SendToolCallUpdate(ctx, t.sessionID, ToolCallUpdate{
-				ID:     event.ToolCall.ID,
-				Name:   event.ToolCall.Name,
-				Status: "running",
-			})
+			// Tool has been proposed by the model but not yet approved/executed.
+			return t.server.SendToolCall(ctx, t.sessionID,
+				event.ToolCall.ID,
+				event.ToolCall.Name,
+				"other",
+				ToolCallStatusPending,
+			)
 		}
 
 	case protocol.EventTypeToolResultDone:
 		if event.ToolResult != nil {
-			status := "completed"
+			status := ToolCallStatusCompleted
 			if event.ToolResult.IsError {
-				status = "failed"
+				status = ToolCallStatusFailed
 			}
-			return t.server.SendToolCallUpdate(ctx, t.sessionID, ToolCallUpdate{
-				ID:     event.ToolResult.ToolCallID,
-				Name:   event.ToolResult.ToolName,
-				Status: status,
-				Result: event.ToolResult.Text,
+			return t.server.SendToolCallUpdate(ctx, t.sessionID, event.ToolResult.ToolCallID, map[string]any{
+				"title":  event.ToolResult.ToolName,
+				"status": status,
+				"content": []ToolCallContent{{
+					Type: "content",
+					ContentBlock: &ContentBlock{
+						Type: "text",
+						Text: event.ToolResult.Text,
+					},
+				}},
 			})
 		}
-
-	case protocol.EventTypeFinish:
-		// Send a final empty chunk to signal completion
-		return t.server.SendUpdate(ctx, t.sessionID, SessionUpdate{
-			Type: "agent_message_chunk",
-			MessageChunk: &MessageChunk{
-				Role:    "assistant",
-				Content: "",
-			},
-		})
 
 	case protocol.EventTypeError:
 		if event.Error != nil {
 			return t.server.SendTextChunk(ctx, t.sessionID, fmt.Sprintf("Error: %v", event.Error))
 		}
+
+	case protocol.EventTypeFinish:
+		// No special notification needed — the prompt response carries the stopReason.
 	}
 
 	return nil
@@ -97,27 +99,47 @@ func (t *Transport) Receive(_ context.Context) <-chan transport.UserInput {
 
 // RequestApproval asks the editor client for permission via ACP request_permission.
 func (t *Transport) RequestApproval(ctx context.Context, pending []transport.PendingToolCall) ([]transport.ApprovalResult, error) {
-	perms := make([]PermissionDetail, len(pending))
-	for i, p := range pending {
-		perms[i] = PermissionDetail{
-			ID:          p.ID,
-			Title:       fmt.Sprintf("%s: %s", p.Name, p.Description),
-			Description: p.Arguments,
+	results := make([]transport.ApprovalResult, 0, len(pending))
+
+	for _, p := range pending {
+		toolCall := ToolCallData{
+			ToolCallID: p.ID,
+			Title:      fmt.Sprintf("%s: %s", p.Name, p.Description),
+			Kind:       "other",
+			Status:     ToolCallStatusPending,
+			RawInput:   p.Arguments,
 		}
+
+		options := []PermissionOption{
+			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
+			{OptionID: "allow_always", Name: "Allow always", Kind: "allow_always"},
+			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
+		}
+
+		outcome, err := t.server.RequestPermission(ctx, t.sessionID, toolCall, options)
+		if err != nil {
+			return nil, err
+		}
+
+		approved := false
+		if outcome.Outcome == "selected" {
+			approved = outcome.OptionID == "allow_once" || outcome.OptionID == "allow_always"
+		}
+
+		// Transition tool call to in_progress once approved, so the client
+		// sees pending → in_progress → completed/failed without regression.
+		if approved {
+			_ = t.server.SendToolCallUpdate(ctx, t.sessionID, p.ID, map[string]any{
+				"status": ToolCallStatusInProgress,
+			})
+		}
+
+		results = append(results, transport.ApprovalResult{
+			ToolCallID: p.ID,
+			Approved:   approved,
+		})
 	}
 
-	decisions, err := t.server.RequestPermission(ctx, t.sessionID, perms)
-	if err != nil {
-		return nil, err
-	}
-
-	results := make([]transport.ApprovalResult, len(decisions))
-	for i, d := range decisions {
-		results[i] = transport.ApprovalResult{
-			ToolCallID: d.ID,
-			Approved:   d.Kind == "allow_once" || d.Kind == "allow_always",
-		}
-	}
 	return results, nil
 }
 

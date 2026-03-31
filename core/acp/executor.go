@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io/fs"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"time"
@@ -14,22 +15,24 @@ import (
 // RemoteExecutor implements executor.Executor by delegating operations
 // to the editor client via ACP's fs/* and terminal/* JSON-RPC methods.
 type RemoteExecutor struct {
-	server   *Server
-	workDir  string
-	platform string
+	server    *Server
+	sessionID string
+	workDir   string
+	platform  string
 }
 
 // NewRemoteExecutor creates an executor that delegates to the ACP client.
-func NewRemoteExecutor(server *Server, workDir string) *RemoteExecutor {
+func NewRemoteExecutor(server *Server, sessionID, workDir string) *RemoteExecutor {
 	return &RemoteExecutor{
-		server:   server,
-		workDir:  workDir,
-		platform: runtime.GOOS,
+		server:    server,
+		sessionID: sessionID,
+		workDir:   workDir,
+		platform:  runtime.GOOS,
 	}
 }
 
 func (e *RemoteExecutor) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	content, err := e.server.ReadTextFile(ctx, path)
+	content, err := e.server.ReadTextFile(ctx, e.sessionID, path)
 	if err != nil {
 		return nil, err
 	}
@@ -37,17 +40,21 @@ func (e *RemoteExecutor) ReadFile(ctx context.Context, path string) ([]byte, err
 }
 
 func (e *RemoteExecutor) WriteFile(ctx context.Context, path string, content []byte, _ fs.FileMode) error {
-	return e.server.WriteTextFile(ctx, path, string(content))
+	return e.server.WriteTextFile(ctx, e.sessionID, path, string(content))
 }
 
 func (e *RemoteExecutor) ListDir(ctx context.Context, path string) ([]executor.FileInfo, error) {
-	// Use terminal to run ls/dir since ACP doesn't have a native listdir
-	cmd := fmt.Sprintf("ls -la %q", path)
-	if e.platform == "windows" {
-		cmd = fmt.Sprintf("dir %q", path)
-	}
+	shell, shellArg := e.shellCmd()
 
-	output, exitCode, err := e.server.TerminalExec(ctx, "sh", []string{"-c", cmd}, e.workDir, nil)
+	if e.platform == "windows" {
+		return e.listDirWindows(ctx, shell, shellArg, path)
+	}
+	return e.listDirUnix(ctx, shell, shellArg, path)
+}
+
+func (e *RemoteExecutor) listDirUnix(ctx context.Context, shell, shellArg, path string) ([]executor.FileInfo, error) {
+	cmd := fmt.Sprintf("ls -la %q", path)
+	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -55,7 +62,6 @@ func (e *RemoteExecutor) ListDir(ctx context.Context, path string) ([]executor.F
 		return nil, fmt.Errorf("ls failed (exit %d): %s", exitCode, output)
 	}
 
-	// Parse ls output into FileInfo entries (simplified)
 	var entries []executor.FileInfo
 	for _, line := range strings.Split(output, "\n") {
 		line = strings.TrimSpace(line)
@@ -76,10 +82,49 @@ func (e *RemoteExecutor) ListDir(ctx context.Context, path string) ([]executor.F
 	return entries, nil
 }
 
+func (e *RemoteExecutor) listDirWindows(ctx context.Context, shell, shellArg, path string) ([]executor.FileInfo, error) {
+	// Use /B for bare format (one name per line) and /AD or /A-D to split dirs and files.
+	// First get directories, then files.
+	cmd := fmt.Sprintf("dir /B /AD %q 2>nul & echo --- & dir /B /A-D %q 2>nul", path, path)
+	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
+	if err != nil {
+		return nil, err
+	}
+	// exitCode may be non-zero if dir is empty; we still parse what we got.
+	_ = exitCode
+
+	var entries []executor.FileInfo
+	isFilesSection := false
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "---" {
+			isFilesSection = true
+			continue
+		}
+		if line == "" {
+			continue
+		}
+		entries = append(entries, executor.FileInfo{
+			Name:  line,
+			IsDir: !isFilesSection,
+		})
+	}
+	return entries, nil
+}
+
 func (e *RemoteExecutor) Stat(ctx context.Context, path string) (*executor.FileInfo, error) {
-	// Use terminal to stat
+	shell, shellArg := e.shellCmd()
+
+	if e.platform == "windows" {
+		return e.statWindows(ctx, shell, shellArg, path)
+	}
+	return e.statUnix(ctx, shell, shellArg, path)
+}
+
+func (e *RemoteExecutor) statUnix(ctx context.Context, shell, shellArg, path string) (*executor.FileInfo, error) {
+	// Try GNU stat first, fall back to BSD stat (macOS).
 	cmd := fmt.Sprintf("stat -c '%%n %%s %%F' %q 2>/dev/null || stat -f '%%N %%z %%HT' %q", path, path)
-	output, exitCode, err := e.server.TerminalExec(ctx, "sh", []string{"-c", cmd}, e.workDir, nil)
+	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -106,9 +151,34 @@ func (e *RemoteExecutor) Stat(ctx context.Context, path string) (*executor.FileI
 	}, nil
 }
 
+func (e *RemoteExecutor) statWindows(ctx context.Context, shell, shellArg, path string) (*executor.FileInfo, error) {
+	// On Windows, check if path is a directory with "if exist <path>\* ..."
+	// and check existence with "if exist <path> ...".
+	cmd := fmt.Sprintf("if exist %q\\* (echo DIR) else if exist %q (echo FILE) else (echo NOTFOUND)", path, path)
+	output, _, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	result := strings.TrimSpace(output)
+	switch result {
+	case "DIR":
+		return &executor.FileInfo{Name: filepath.Base(path), IsDir: true}, nil
+	case "FILE":
+		return &executor.FileInfo{Name: filepath.Base(path), IsDir: false}, nil
+	default:
+		return nil, fmt.Errorf("path not found: %s", path)
+	}
+}
+
 func (e *RemoteExecutor) MkdirAll(ctx context.Context, path string, _ fs.FileMode) error {
 	cmd := fmt.Sprintf("mkdir -p %q", path)
-	_, exitCode, err := e.server.TerminalExec(ctx, "sh", []string{"-c", cmd}, e.workDir, nil)
+	shell, shellArg := e.shellCmd()
+	if e.platform == "windows" {
+		cmd = fmt.Sprintf("mkdir %q", path)
+	}
+
+	_, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
 	if err != nil {
 		return err
 	}
@@ -119,8 +189,13 @@ func (e *RemoteExecutor) MkdirAll(ctx context.Context, path string, _ fs.FileMod
 }
 
 func (e *RemoteExecutor) Remove(ctx context.Context, path string) error {
-	cmd := fmt.Sprintf("rm -rf %q", path)
-	_, exitCode, err := e.server.TerminalExec(ctx, "sh", []string{"-c", cmd}, e.workDir, nil)
+	cmd := fmt.Sprintf("rm %q", path)
+	shell, shellArg := e.shellCmd()
+	if e.platform == "windows" {
+		cmd = fmt.Sprintf("del %q", path)
+	}
+
+	_, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
 	if err != nil {
 		return err
 	}
@@ -136,9 +211,9 @@ func (e *RemoteExecutor) Exec(ctx context.Context, cmd string, opts executor.Exe
 		cwd = e.workDir
 	}
 
-	var env []string
+	var env []EnvVariable
 	for k, v := range opts.Env {
-		env = append(env, fmt.Sprintf("%s=%s", k, v))
+		env = append(env, EnvVariable{Name: k, Value: v})
 	}
 
 	if opts.Timeout > 0 {
@@ -147,8 +222,10 @@ func (e *RemoteExecutor) Exec(ctx context.Context, cmd string, opts executor.Exe
 		defer cancel()
 	}
 
+	shell, shellArg := e.shellCmd()
+
 	start := time.Now()
-	output, exitCode, err := e.server.TerminalExec(ctx, "sh", []string{"-c", cmd}, cwd, env)
+	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, cwd, env)
 	duration := time.Since(start)
 	if err != nil {
 		return nil, err
@@ -166,6 +243,14 @@ func (e *RemoteExecutor) Platform() string { return e.platform }
 
 func (e *RemoteExecutor) Init(_ context.Context) error { return nil }
 func (e *RemoteExecutor) Close() error                 { return nil }
+
+// shellCmd returns the shell executable and its flag for running a command string.
+func (e *RemoteExecutor) shellCmd() (shell, flag string) {
+	if e.platform == "windows" {
+		return "cmd", "/C"
+	}
+	return "sh", "-c"
+}
 
 // Ensure RemoteExecutor implements executor.Executor.
 var _ executor.Executor = (*RemoteExecutor)(nil)
