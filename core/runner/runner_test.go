@@ -1,4 +1,4 @@
-package agent_test
+package runner_test
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/runner"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/transport"
 )
@@ -110,14 +111,14 @@ func TestRunner_RunOnce(t *testing.T) {
 	tr := transport.NewChannelTransport(10)
 	defer tr.Close()
 
-	runner := agent.NewRunner(ag, tr)
+	r := runner.New(ag, tr)
 
 	ctx := context.Background()
 
 	// Run in goroutine since RunOnce sends events
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
 	}()
 
 	// Collect events
@@ -196,13 +197,13 @@ func TestRunner_ApprovalFlow(t *testing.T) {
 	tr := transport.NewChannelTransport(10)
 	defer tr.Close()
 
-	runner := agent.NewRunner(ag, tr)
+	r := runner.New(ag, tr)
 	ctx := context.Background()
 
 	// Step 1: Run and expect need_approval
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Do something"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Do something"))
 	}()
 
 	// Collect events until need_approval
@@ -238,7 +239,7 @@ collectLoop1:
 	}
 
 	// Verify GetPendingApprovals returns the pending tool calls
-	pending := runner.GetPendingApprovals()
+	pending := r.GetPendingApprovals()
 	if len(pending) != 1 {
 		t.Fatalf("Expected 1 pending approval, got %d", len(pending))
 	}
@@ -248,7 +249,7 @@ collectLoop1:
 
 	// Step 2: Submit approval
 	go func() {
-		done <- runner.SubmitApproval(ctx, []transport.ApprovalResult{
+		done <- r.SubmitApproval(ctx, []transport.ApprovalResult{
 			{ToolCallID: "call_1", Approved: true},
 		})
 	}()
@@ -283,7 +284,7 @@ collectLoop2:
 	}
 
 	// No more pending approvals
-	pending = runner.GetPendingApprovals()
+	pending = r.GetPendingApprovals()
 	if pending != nil {
 		t.Errorf("Expected no pending approvals, got %d", len(pending))
 	}
@@ -309,7 +310,7 @@ func TestRunner_Start(t *testing.T) {
 	tr := transport.NewChannelTransport(10)
 	defer tr.Close()
 
-	runner := agent.NewRunner(ag, tr)
+	r := runner.New(ag, tr)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -317,7 +318,7 @@ func TestRunner_Start(t *testing.T) {
 	// Start runner in goroutine
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.Start(ctx)
+		done <- r.Start(ctx)
 	}()
 
 	// Give runner time to start
@@ -390,19 +391,19 @@ func TestRunner_Hooks_AfterTurn(t *testing.T) {
 
 	var gotSnapshot agent.Snapshot
 	called := false
-	hooks := agent.RunnerHooks{
+	hooks := runner.Hooks{
 		AfterTurn: func(snap agent.Snapshot) {
 			called = true
 			gotSnapshot = snap
 		},
 	}
 
-	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithHooks(hooks))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
 	}()
 
 	// Drain events
@@ -462,19 +463,19 @@ func TestRunner_Hooks_OnPause(t *testing.T) {
 
 	var gotSnapshot agent.Snapshot
 	called := false
-	hooks := agent.RunnerHooks{
+	hooks := runner.Hooks{
 		OnPause: func(snap agent.Snapshot) {
 			called = true
 			gotSnapshot = snap
 		},
 	}
 
-	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithHooks(hooks))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Do something"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Do something"))
 	}()
 
 	timeout := time.After(2 * time.Second)
@@ -529,21 +530,21 @@ func TestRunner_Hooks_BeforeTurn(t *testing.T) {
 
 	var gotInput transport.UserInput
 	called := false
-	hooks := agent.RunnerHooks{
+	hooks := runner.Hooks{
 		BeforeTurn: func(input transport.UserInput) {
 			called = true
 			gotInput = input
 		},
 	}
 
-	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithHooks(hooks))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.Start(ctx)
+		done <- r.Start(ctx)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -610,20 +611,20 @@ func TestRunner_Hooks_OnError(t *testing.T) {
 	defer tr.Close()
 
 	var gotErr error
-	hooks := agent.RunnerHooks{
+	hooks := runner.Hooks{
 		OnError: func(err error) {
 			gotErr = err
 		},
 	}
 
-	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithHooks(hooks))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.Start(ctx)
+		done <- r.Start(ctx)
 	}()
 
 	time.Sleep(50 * time.Millisecond)
@@ -685,7 +686,7 @@ func TestRunner_Hooks_PanicRecover(t *testing.T) {
 	defer tr.Close()
 
 	var recoveredErr error
-	hooks := agent.RunnerHooks{
+	hooks := runner.Hooks{
 		AfterTurn: func(snap agent.Snapshot) {
 			panic("boom")
 		},
@@ -694,12 +695,12 @@ func TestRunner_Hooks_PanicRecover(t *testing.T) {
 		},
 	}
 
-	runner := agent.NewRunner(ag, tr, agent.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithHooks(hooks))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
 	}()
 
 	timeout := time.After(2 * time.Second)
@@ -754,13 +755,13 @@ func TestRunner_Hooks_Nil(t *testing.T) {
 	defer tr.Close()
 
 	// No hooks — should not panic
-	runner := agent.NewRunner(ag, tr)
+	r := runner.New(ag, tr)
 
 	ctx := context.Background()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
 	}()
 
 	timeout := time.After(2 * time.Second)
@@ -806,21 +807,21 @@ func TestRunner_Stop(t *testing.T) {
 	tr := transport.NewChannelTransport(10)
 	defer tr.Close()
 
-	runner := agent.NewRunner(ag, tr)
+	r := runner.New(ag, tr)
 
 	ctx := context.Background()
 
 	// Start runner
 	done := make(chan error, 1)
 	go func() {
-		done <- runner.Start(ctx)
+		done <- r.Start(ctx)
 	}()
 
 	// Give runner time to start
 	time.Sleep(50 * time.Millisecond)
 
 	// Stop runner
-	runner.Stop()
+	r.Stop()
 
 	// Wait for runner to stop
 	select {
