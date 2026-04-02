@@ -220,6 +220,14 @@ func (s *Server) TerminalExec(ctx context.Context, sessionID, command string, ar
 
 	tid := createResult.TerminalID
 
+	// Ensure terminal is released even if wait or output fails.
+	defer func() {
+		_ = s.conn.Notify(ctx, MethodTerminalRelease, TerminalReleaseParams{
+			SessionID:  sessionID,
+			TerminalID: tid,
+		})
+	}()
+
 	// Wait for exit
 	var waitResult TerminalWaitResult
 	_, err = s.conn.Call(ctx, MethodTerminalWait, TerminalWaitParams{
@@ -244,12 +252,6 @@ func (s *Server) TerminalExec(ctx context.Context, sessionID, command string, ar
 	if err != nil {
 		return "", exitCode, fmt.Errorf("terminal/output: %w", err)
 	}
-
-	// Release
-	_ = s.conn.Notify(ctx, MethodTerminalRelease, TerminalReleaseParams{
-		SessionID:  sessionID,
-		TerminalID: tid,
-	})
 
 	return outResult.Output, exitCode, nil
 }
@@ -351,9 +353,22 @@ func (s *Server) handleSessionPrompt(ctx context.Context, reply jsonrpc2.Replier
 	// Per ACP spec, the session/prompt request stays open until the turn
 	// finishes. AsyncHandler already runs each request in its own goroutine,
 	// so we can safely block here without stalling other message processing.
-	result := s.onSessionPrompt(s.serverCtx, params.SessionID, text, images)
+	//
+	// We derive a context that cancels if either the server shuts down
+	// (serverCtx) or the request is cancelled (ctx, e.g. client disconnects).
+	promptCtx, promptCancel := context.WithCancel(s.serverCtx)
+	go func() {
+		select {
+		case <-ctx.Done():
+			promptCancel()
+		case <-promptCtx.Done():
+		}
+	}()
+	defer promptCancel()
+
+	result := s.onSessionPrompt(promptCtx, params.SessionID, text, images)
 	if result.Err != nil {
-		_ = s.SendTextChunk(s.serverCtx, params.SessionID, fmt.Sprintf("Error: %v", result.Err))
+		_ = s.SendTextChunk(promptCtx, params.SessionID, fmt.Sprintf("Error: %v", result.Err))
 		return reply(ctx, SessionPromptResult{StopReason: StopReasonEndTurn}, nil)
 	}
 	stopReason := result.StopReason

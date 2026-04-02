@@ -54,10 +54,23 @@ func main() {
 
 	// State: maps sessionID → runner + session
 	type sessionState struct {
-		runner   *runner.Runner
-		session  *acp.Session
+		mu      sync.Mutex // protects cancelFn
+		runner  *runner.Runner
+		session *acp.Session
+
 		cancelFn context.CancelFunc
 	}
+
+	// cancelPrompt safely cancels any in-flight prompt for a session.
+	cancelPrompt := func(s *sessionState) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if s.cancelFn != nil {
+			s.cancelFn()
+			s.cancelFn = nil
+		}
+	}
+
 	var sessionsMu sync.RWMutex
 	sessions := make(map[string]*sessionState)
 
@@ -142,12 +155,17 @@ func main() {
 				return acp.PromptResult{Err: fmt.Errorf("session %q not found", sessionID)}
 			}
 
-			// Cancel previous processing if any
-			if state.cancelFn != nil {
-				state.cancelFn()
-			}
+			// Cancel previous processing if any (mutex-protected)
+			cancelPrompt(state)
+
+			// Derive promptCtx from both the server ctx and the request ctx,
+			// so cancellation from either side (session/cancel or transport close)
+			// propagates to the agent.
 			promptCtx, cancel := context.WithCancel(ctx)
+
+			state.mu.Lock()
 			state.cancelFn = cancel
+			state.mu.Unlock()
 			state.session.SetCancel(cancel)
 
 			// Build user message
@@ -189,7 +207,7 @@ func main() {
 			state, ok := sessions[sessionID]
 			sessionsMu.RUnlock()
 			if ok {
-				state.session.Cancel()
+				cancelPrompt(state)
 			}
 		}),
 	)
