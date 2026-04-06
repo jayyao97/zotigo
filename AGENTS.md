@@ -16,7 +16,7 @@ This document guides any agent (AI coding agent, CLI assistant, etc.) working in
 - Build: `make build`
 - Dev mode: `make dev`
 - Tests (if available): `make test`, `make test-integration`, `make test-e2e`
-- Run CLI: `go run .` or use the built binary `./zotigo`
+- Run CLI: `go run ./cmd/zotigo` or use the built binary under `./build/zotigo`
 - Debug: set `ZOTIGO_DEBUG=true` to enable verbose agent/provider logging.
 
 ## Configuration

@@ -46,7 +46,7 @@ help: ## Show this help message
 .PHONY: dev
 dev: ## Run in development mode with hot reload
 	@echo "Starting development mode..."
-	@go run ./cli/main.go --config configs/development.yaml
+	@go run ./cmd/zotigo
 
 .PHONY: install-tools
 install-tools: ## Install development tools
@@ -61,17 +61,17 @@ install-tools: ## Install development tools
 build: ## Build the binary
 	@echo "Building $(BINARY_NAME)..."
 	@mkdir -p $(BUILD_DIR)
-	@go build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cli
+	@go build $(BUILD_FLAGS) -o $(BUILD_DIR)/$(BINARY_NAME) ./cmd/zotigo
 
 .PHONY: build-all
 build-all: ## Build for all supported platforms
 	@echo "Building for all platforms..."
 	@mkdir -p $(DIST_DIR)
-	@GOOS=linux GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 ./cli
-	@GOOS=linux GOARCH=arm64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 ./cli
-	@GOOS=darwin GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 ./cli
-	@GOOS=darwin GOARCH=arm64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 ./cli
-	@GOOS=windows GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cli
+	@GOOS=linux GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-amd64 ./cmd/zotigo
+	@GOOS=linux GOARCH=arm64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-linux-arm64 ./cmd/zotigo
+	@GOOS=darwin GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-amd64 ./cmd/zotigo
+	@GOOS=darwin GOARCH=arm64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-darwin-arm64 ./cmd/zotigo
+	@GOOS=windows GOARCH=amd64 go build $(BUILD_FLAGS) -o $(DIST_DIR)/$(BINARY_NAME)-windows-amd64.exe ./cmd/zotigo
 	@echo "Built binaries:"
 	@ls -la $(DIST_DIR)/
 
@@ -105,7 +105,7 @@ test-integration: ## Run integration tests only
 .PHONY: test-e2e
 test-e2e: ## Run end-to-end tests only
 	@echo "Running e2e tests..."
-	@go test -timeout $(TEST_TIMEOUT) -race -v ./test/e2e/...
+	@go test -timeout $(TEST_TIMEOUT) -race -v ./tests/e2e/...
 
 .PHONY: test-bench
 test-bench: ## Run benchmark tests
