@@ -95,41 +95,35 @@ zotigo/
 ## Installation
 
 ```bash
-go install github.com/jayyao97/zotigo@latest
+go install github.com/jayyao97/zotigo/cmd/zotigo@latest
 ```
 
 ## Configuration
 
-On first run (`go run ./cli`), Zotigo creates the default config at `~/.zotigo/config.json` if it does not exist.
+On first run (`go run ./cmd/zotigo`), Zotigo creates the default config at `~/.zotigo/config.yaml` if it does not exist.
 
-```json
-{
-  "default_profile": "gpt-4o",
-  "profiles": {
-    "gpt-4o": {
-      "provider": "openai",
-      "model": "gpt-4o",
-      "api_key": "sk-..."
-    },
-    "claude-sonnet": {
-      "provider": "anthropic",
-      "model": "claude-sonnet-4-20250514",
-      "api_key": "sk-ant-..."
-    },
-    "gemini": {
-      "provider": "gemini",
-      "model": "gemini-2.5-flash",
-      "api_key": "..."
-    }
-  }
-}
+```yaml
+default_profile: gpt-4o
+profiles:
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    api_key: sk-...
+  claude-sonnet:
+    provider: claude
+    model: claude-4-6-sonnet-latest
+    api_key: sk-ant-...
+  gemini-pro:
+    provider: gemini
+    model: gemini-3.0-pro-latest
+    api_key: ...
 ```
 
 Run:
 ```bash
-go run ./cli
+go run ./cmd/zotigo
 ```
 
 Note:
-- `go run .` executes the root placeholder `main.go` used for bootstrap/testing.
-- The interactive CLI entrypoint is `./cli/main.go`.
+- `go install github.com/jayyao97/zotigo/cmd/zotigo@latest` and `go run ./cmd/zotigo` start the same interactive CLI.
+- `go run ./cli` remains available as an alternate entrypoint for local development.
