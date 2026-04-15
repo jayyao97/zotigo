@@ -1015,7 +1015,11 @@ func (a *Agent) ensureSnapshotForActions(ctx context.Context, exec executor.Exec
 	// degrade gracefully: mark the turn as unsnapshotted but do not abort
 	// the user's action. The same pattern is used in
 	// cli/commands/builtin/snapshot.go for explicit /snapshot invocations.
-	if err != nil && isCommandNotFound(err, result) {
+	//
+	// LocalExecutor swallows *exec.ExitError (so a missing binary surfaces
+	// as err=nil, exit=127, stderr contains "command not found") while other
+	// executors may surface it as a non-nil error. Check both paths.
+	if isCommandNotFound(err, result) {
 		a.setTurnSnapshot(SnapshotStatusFailed, "snap-commit not installed")
 		return nil
 	}
