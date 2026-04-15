@@ -2,7 +2,10 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
 	"io/fs"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -1202,6 +1205,147 @@ func TestAgent_NonGitWorkspaceDoesNotSnapshot(t *testing.T) {
 	if turns[0].SnapshotStatus != agent.SnapshotStatusMissingGitRepo {
 		t.Fatalf("Expected missing_git_repo snapshot status, got %s", turns[0].SnapshotStatus)
 	}
+}
+
+// TestAgent_SnapshotNotInstalledDegradesGracefully verifies that when the
+// optional snap-commit binary is not on PATH, the agent marks the turn as
+// failed-with-reason but lets the user's action proceed instead of aborting.
+func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
+	providers.Register("mock-snapshot-notfound", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	baseExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	exec := NewSnapshotTestExecutor(baseExec, true)
+	// Simulate "command not found" — the executor returns an err containing the
+	// canonical substring, as os/exec would for a missing binary.
+	exec.snapshotErr = fmt.Errorf("exec: \"snap-commit\": executable file not found in $PATH")
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-notfound"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("Approve should succeed when snap-commit is missing; got %v", err)
+	}
+	for range resumed {
+	}
+
+	// The write should still have happened.
+	if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+		t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
+	}
+
+	turns := ag.AuditTurns()
+	if len(turns) == 0 {
+		t.Fatal("Expected at least one turn")
+	}
+	if turns[0].SnapshotStatus != agent.SnapshotStatusFailed {
+		t.Fatalf("Expected failed snapshot status, got %s", turns[0].SnapshotStatus)
+	}
+}
+
+// TestAgent_CaptureRawAuditContext verifies that when the operator opts in
+// via config, classifier-sourced audit events carry a bounded raw context
+// dump; otherwise the field stays empty.
+func TestAgent_CaptureRawAuditContext(t *testing.T) {
+	providers.Register("mock-raw-audit", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch a file"}, nil
+	})
+
+	run := func(t *testing.T, capture bool) []agent.AuditEvent {
+		t.Helper()
+		tmpDir := t.TempDir()
+		exec, err := executor.NewLocalExecutor(tmpDir)
+		if err != nil {
+			t.Fatalf("Failed to create executor: %v", err)
+		}
+
+		cfg := config.ProfileConfig{
+			Provider: "mock-raw-audit",
+			Safety: config.SafetyProfileConfig{
+				Classifier: config.SafetyClassifierConfig{
+					Enabled:                config.BoolPtr(true),
+					CaptureRawAuditContext: capture,
+					MaxAuditContextChars:   500,
+				},
+			},
+		}
+		ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{
+				Decision: agent.SafetyClassifierDecisionAskUser,
+				Reason:   "review before executing",
+			},
+		}))
+		if err != nil {
+			t.Fatalf("Failed to create agent: %v", err)
+		}
+		ag.RegisterTool(&builtin.ShellTool{})
+
+		events, err := ag.Run(context.Background(), "please touch a file")
+		if err != nil {
+			t.Fatalf("Run error: %v", err)
+		}
+		for range events {
+		}
+
+		turns := ag.AuditTurns()
+		if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
+			t.Fatal("Expected safety events")
+		}
+		return turns[0].SafetyEvents
+	}
+
+	t.Run("disabled keeps raw context empty", func(t *testing.T) {
+		events := run(t, false)
+		for _, e := range events {
+			if e.RawContext != "" {
+				t.Errorf("RawContext should be empty when CaptureRawAuditContext=false, got %q", e.RawContext)
+			}
+		}
+	})
+
+	t.Run("enabled captures bounded raw context on classifier events", func(t *testing.T) {
+		events := run(t, true)
+		var found bool
+		for _, e := range events {
+			if e.DecisionSource != agent.SafetyDecisionSourceClassifier {
+				continue
+			}
+			found = true
+			if e.RawContext == "" {
+				t.Error("Expected RawContext to be populated for classifier event")
+			}
+			if !strings.Contains(e.RawContext, "tool:") {
+				t.Errorf("RawContext should contain tool name, got: %q", e.RawContext)
+			}
+			if len(e.RawContext) > 520 {
+				t.Errorf("RawContext exceeds bounded limit: len=%d", len(e.RawContext))
+			}
+		}
+		if !found {
+			t.Fatal("Expected at least one classifier-sourced safety event")
+		}
+	})
 }
 
 func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {

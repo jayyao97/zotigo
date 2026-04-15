@@ -41,6 +41,10 @@ type ActionDecision struct {
 	Reason           string
 	RiskLevel        string
 	RequiresSnapshot bool
+	// RawContext carries a bounded textual dump of the classifier request when
+	// SafetyClassifierConfig.CaptureRawAuditContext is true. It is intended for
+	// audit persistence only and is left empty otherwise.
+	RawContext string
 }
 
 // SafetyClassifierRequest is the bounded input sent to the classifier.

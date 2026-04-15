@@ -438,6 +438,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 							UserPrompt: a.turnSafety.CurrentUserPrompt,
 							Trigger:    decision.Reason,
 						},
+						RawContext: decision.RawContext,
 					})
 
 					action := &PendingAction{
@@ -872,7 +873,7 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 		}, true
 	}
 
-	resp, err := a.classifier.Classify(SafetyClassifierRequest{
+	req := SafetyClassifierRequest{
 		UserPrompt:    a.turnSafety.CurrentUserPrompt,
 		ToolName:      tc.Name,
 		ToolArguments: tc.Arguments,
@@ -880,13 +881,27 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 		IsGitRepo:     a.isGitRepository(context.Background(), a.executor),
 		HasSnapshot:   a.turnSafety.SnapshotCreated,
 		RecentActions: a.recentActionsForClassifier(),
-	})
+	}
+
+	// Capture a bounded dump of the classifier request for audit when the
+	// operator has explicitly opted in. Never attached otherwise.
+	var rawCtx string
+	if a.cfg.Safety.Classifier.CaptureRawAuditContext {
+		limit := a.cfg.Safety.Classifier.MaxAuditContextChars
+		if limit <= 0 {
+			limit = 1200
+		}
+		rawCtx = summarizeClassifierRequest(req, limit)
+	}
+
+	resp, err := a.classifier.Classify(req)
 	if err != nil {
 		return ActionDecision{
-			Decision:  ExecutionDecisionRequireApproval,
-			Source:    SafetyDecisionSourceClassifier,
-			Reason:    fmt.Sprintf("classifier error: %v; falling back to user approval", err),
-			RiskLevel: riskLevel,
+			Decision:   ExecutionDecisionRequireApproval,
+			Source:     SafetyDecisionSourceClassifier,
+			Reason:     fmt.Sprintf("classifier error: %v; falling back to user approval", err),
+			RiskLevel:  riskLevel,
+			RawContext: rawCtx,
 		}, true
 	}
 
@@ -899,6 +914,7 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 				Reason:           resp.Reason,
 				RiskLevel:        riskLevel,
 				RequiresSnapshot: resp.RequiresSnapshot,
+				RawContext:       rawCtx,
 			}, true
 		}
 		return ActionDecision{
@@ -907,13 +923,15 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 			Reason:           resp.Reason,
 			RiskLevel:        riskLevel,
 			RequiresSnapshot: resp.RequiresSnapshot,
+			RawContext:       rawCtx,
 		}, true
 	case SafetyClassifierDecisionDeny:
 		return ActionDecision{
-			Decision:  ExecutionDecisionBlock,
-			Source:    SafetyDecisionSourceClassifier,
-			Reason:    resp.Reason,
-			RiskLevel: riskLevel,
+			Decision:   ExecutionDecisionBlock,
+			Source:     SafetyDecisionSourceClassifier,
+			Reason:     resp.Reason,
+			RiskLevel:  riskLevel,
+			RawContext: rawCtx,
 		}, true
 	case SafetyClassifierDecisionAskUser:
 		return ActionDecision{
@@ -922,10 +940,35 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 			Reason:           resp.Reason,
 			RiskLevel:        riskLevel,
 			RequiresSnapshot: resp.RequiresSnapshot,
+			RawContext:       rawCtx,
 		}, true
 	default:
 		return ActionDecision{}, false
 	}
+}
+
+// summarizeClassifierRequest renders a bounded textual dump of a classifier
+// request for audit persistence. It is only used when the operator has
+// enabled CaptureRawAuditContext.
+func summarizeClassifierRequest(req SafetyClassifierRequest, limit int) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "user_prompt: %s\n", summarizeText(req.UserPrompt, 400))
+	fmt.Fprintf(&sb, "tool: %s\n", req.ToolName)
+	fmt.Fprintf(&sb, "args: %s\n", summarizeText(req.ToolArguments, 400))
+	fmt.Fprintf(&sb, "risk_level: %s\n", req.RiskLevel)
+	fmt.Fprintf(&sb, "is_git_repo: %t\n", req.IsGitRepo)
+	fmt.Fprintf(&sb, "has_snapshot: %t\n", req.HasSnapshot)
+	if len(req.RecentActions) > 0 {
+		sb.WriteString("recent_actions:\n")
+		for _, a := range req.RecentActions {
+			status := "ok"
+			if a.IsError {
+				status = "error"
+			}
+			fmt.Fprintf(&sb, "- [%s] %s: %s\n", status, a.ToolName, summarizeText(a.Result, 120))
+		}
+	}
+	return summarizeText(sb.String(), limit)
 }
 
 func (a *Agent) recentActionsForClassifier() []RecentAction {
@@ -967,14 +1010,54 @@ func (a *Agent) ensureSnapshotForActions(ctx context.Context, exec executor.Exec
 
 	a.turnSafety.SnapshotAttempted = true
 	result, err := exec.Exec(ctx, `snap-commit store -m "zotigo pre-action snapshot"`, executor.ExecOptions{})
-	if err != nil || !result.Success() {
+
+	// snap-commit is an optional external binary. If it isn't installed,
+	// degrade gracefully: mark the turn as unsnapshotted but do not abort
+	// the user's action. The same pattern is used in
+	// cli/commands/builtin/snapshot.go for explicit /snapshot invocations.
+	if err != nil && isCommandNotFound(err, result) {
+		a.setTurnSnapshot(SnapshotStatusFailed, "snap-commit not installed")
+		return nil
+	}
+	if err != nil {
 		a.setTurnSnapshot(SnapshotStatusFailed, "")
 		return fmt.Errorf("failed to create pre-action snapshot: %w", err)
+	}
+	if !result.Success() {
+		a.setTurnSnapshot(SnapshotStatusFailed, "")
+		stderr := strings.TrimSpace(string(result.Stderr))
+		if stderr == "" {
+			stderr = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return fmt.Errorf("failed to create pre-action snapshot: %s", stderr)
 	}
 
 	snapshotID := summarizeText(strings.TrimSpace(string(result.Stdout)), 120)
 	a.setTurnSnapshot(SnapshotStatusCreated, snapshotID)
 	return nil
+}
+
+// isCommandNotFound reports whether an exec error / result pair indicates the
+// snap-commit binary is missing from PATH, as opposed to snap-commit itself
+// failing with a non-zero exit.
+func isCommandNotFound(err error, result *executor.ExecResult) bool {
+	if err != nil {
+		msg := strings.ToLower(err.Error())
+		if strings.Contains(msg, "not found") || strings.Contains(msg, "executable file not found") {
+			return true
+		}
+	}
+	if result != nil {
+		stderr := strings.ToLower(string(result.Stderr))
+		if strings.Contains(stderr, "command not found") || strings.Contains(stderr, "not found") {
+			return true
+		}
+		// POSIX shells return 127 when the command does not exist
+		if result.ExitCode == 127 {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *Agent) isGitRepository(ctx context.Context, exec executor.Executor) bool {
