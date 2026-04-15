@@ -246,6 +246,92 @@ profiles:
 	}
 }
 
+func TestProjectConfigMerge_CustomProfileGetsClassifierDefaults(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+
+	// A user-defined profile with no safety block at all. Before the fix,
+	// this profile would load with Enabled=nil and IsEnabled() would return
+	// false — silently disabling the classifier.
+	projectConfigContent := []byte(`
+profiles:
+  my-ollama:
+    provider: openai
+    model: llama3
+    base_url: http://localhost:11434
+`)
+	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+		t.Fatalf("Failed to write project config: %v", err)
+	}
+
+	mgr := config.NewManager()
+	cfg, err := mgr.Load()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	classifier := cfg.Profiles["my-ollama"].Safety.Classifier
+	if !classifier.IsEnabled() {
+		t.Error("Custom profile should get classifier default Enabled=true; got disabled")
+	}
+	if classifier.Mode == "" {
+		t.Error("Custom profile should get classifier default Mode")
+	}
+	if classifier.TimeoutMs == 0 {
+		t.Error("Custom profile should get classifier default TimeoutMs")
+	}
+	if classifier.MaxRecentActions == 0 {
+		t.Error("Custom profile should get classifier default MaxRecentActions")
+	}
+}
+
+func TestProjectConfigMerge_CustomProfilePartialClassifier(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	originalWd, _ := os.Getwd()
+	defer os.Chdir(originalWd)
+	if err := os.Chdir(tmpDir); err != nil {
+		t.Fatalf("Failed to chdir: %v", err)
+	}
+
+	// A user-defined profile with partial classifier config. Fields not set
+	// should inherit defaults; explicit fields should be preserved.
+	projectConfigContent := []byte(`
+profiles:
+  my-ollama:
+    provider: openai
+    model: llama3
+    safety:
+      classifier:
+        timeout_ms: 7500
+`)
+	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+		t.Fatalf("Failed to write project config: %v", err)
+	}
+
+	mgr := config.NewManager()
+	cfg, err := mgr.Load()
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	classifier := cfg.Profiles["my-ollama"].Safety.Classifier
+	if classifier.TimeoutMs != 7500 {
+		t.Errorf("Expected user override timeout=7500, got %d", classifier.TimeoutMs)
+	}
+	if !classifier.IsEnabled() {
+		t.Error("Partial override must not disable the classifier; Enabled should inherit default=true")
+	}
+	if classifier.Mode == "" {
+		t.Error("Mode should inherit default for partial override")
+	}
+}
+
 func TestResolveClassifierProfile_DefaultsToActiveProfile(t *testing.T) {
 	cfg := config.DefaultConfig()
 

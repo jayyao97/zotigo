@@ -81,39 +81,40 @@ func (m *Manager) Load() (*Config, error) {
 	for name, profile := range defaults.Profiles {
 		if _, exists := cfg.Profiles[name]; !exists {
 			cfg.Profiles[name] = profile
-			continue
 		}
+	}
 
-		merged := cfg.Profiles[name]
-
-		// If the user omitted the entire classifier block, adopt defaults wholesale.
-		// Otherwise merge field-by-field, inheriting defaults for zero-valued fields
-		// including booleans.
+	// Apply safety.classifier defaults to EVERY profile, including user-defined
+	// ones. Without this, a custom profile (e.g. "my-ollama") would load with
+	// Classifier.Enabled == nil, and IsEnabled() would silently return false —
+	// contradicting the documented default.
+	classifierDefaults := defaultSafetyClassifierConfig()
+	for name, profile := range cfg.Profiles {
+		merged := profile
 		userOmittedClassifier := merged.Safety.Classifier == (SafetyClassifierConfig{})
 		if userOmittedClassifier {
-			merged.Safety.Classifier = profile.Safety.Classifier
+			merged.Safety.Classifier = classifierDefaults
 		} else {
-			def := profile.Safety.Classifier
 			c := &merged.Safety.Classifier
 			// *bool nil means "not set" — inherit default.
 			// Non-nil means the user explicitly chose true or false.
 			if c.Enabled == nil {
-				c.Enabled = def.Enabled
+				c.Enabled = classifierDefaults.Enabled
 			}
 			if c.Mode == "" {
-				c.Mode = def.Mode
+				c.Mode = classifierDefaults.Mode
 			}
 			if c.Profile == "" {
-				c.Profile = def.Profile
+				c.Profile = classifierDefaults.Profile
 			}
 			if c.TimeoutMs == 0 {
-				c.TimeoutMs = def.TimeoutMs
+				c.TimeoutMs = classifierDefaults.TimeoutMs
 			}
 			if c.MaxRecentActions == 0 {
-				c.MaxRecentActions = def.MaxRecentActions
+				c.MaxRecentActions = classifierDefaults.MaxRecentActions
 			}
 			if c.MaxAuditContextChars == 0 {
-				c.MaxAuditContextChars = def.MaxAuditContextChars
+				c.MaxAuditContextChars = classifierDefaults.MaxAuditContextChars
 			}
 		}
 		cfg.Profiles[name] = merged

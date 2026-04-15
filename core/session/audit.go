@@ -28,6 +28,9 @@ const (
 	SnapshotStatusCreated        SnapshotStatus = "created"
 	SnapshotStatusFailed         SnapshotStatus = "failed"
 	SnapshotStatusMissingGitRepo SnapshotStatus = "missing_git_repo"
+	// SnapshotStatusNotInstalled mirrors agent.SnapshotStatusNotInstalled for
+	// persistence; kept in sync with that source of truth.
+	SnapshotStatusNotInstalled SnapshotStatus = "not_installed"
 )
 
 // ContextSummary stores a compact audit summary instead of full raw context.

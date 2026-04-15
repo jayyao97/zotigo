@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	osexec "os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1269,8 +1270,11 @@ func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
 		if len(turns) == 0 {
 			t.Fatal("Expected at least one turn")
 		}
-		if turns[0].SnapshotStatus != agent.SnapshotStatusFailed {
-			t.Fatalf("Expected failed snapshot status, got %s", turns[0].SnapshotStatus)
+		if turns[0].SnapshotStatus != agent.SnapshotStatusNotInstalled {
+			t.Fatalf("Expected not_installed snapshot status, got %s", turns[0].SnapshotStatus)
+		}
+		if turns[0].SnapshotID != "" {
+			t.Errorf("Expected empty SnapshotID for not_installed case, got %q", turns[0].SnapshotID)
 		}
 	}
 
@@ -1293,31 +1297,82 @@ func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
 }
 
 // TestAgent_SnapshotNotInstalled_LocalExecutor exercises the graceful fallback
-// against a real LocalExecutor with an intentionally bogus snap-commit binary
-// name, proving end-to-end that the production exec path triggers the
-// isCommandNotFound branch.
+// against a real LocalExecutor end-to-end. Skips if snap-commit is actually
+// installed on the test machine (in which case the missing-binary path isn't
+// reachable).
 func TestAgent_SnapshotNotInstalled_LocalExecutor(t *testing.T) {
-	// Run a direct exec of a guaranteed-missing binary and verify the
-	// production-shape response (err=nil, exit=127, stderr has "not found").
+	if _, err := osexec.LookPath("snap-commit"); err == nil {
+		t.Skip("snap-commit is installed on this machine; cannot test missing-binary path")
+	}
+
+	// Set up a real git repo so isGitRepository returns true.
 	tmpDir := t.TempDir()
+	if _, err := osexec.LookPath("git"); err != nil {
+		t.Skip("git not available; cannot set up test repo")
+	}
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := osexec.Command("git", args...)
+		cmd.Dir = tmpDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	providers.Register("mock-snapshot-localexec", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
 	localExec, err := executor.NewLocalExecutor(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	result, err := localExec.Exec(context.Background(),
-		"definitely-not-a-real-binary-xyz123", executor.ExecOptions{})
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-localexec"}
+	ag, err := agent.New(cfg, localExec)
 	if err != nil {
-		t.Skipf("LocalExecutor returned err for missing binary — platform may differ: %v", err)
+		t.Fatalf("Failed to create agent: %v", err)
 	}
-	if result.ExitCode != 127 {
-		t.Skipf("LocalExecutor did not return exit 127 for missing binary on this platform: got %d", result.ExitCode)
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
 	}
-	if !strings.Contains(strings.ToLower(string(result.Stderr)), "not found") {
-		t.Skipf("LocalExecutor stderr did not contain 'not found' on this platform: %q", result.Stderr)
+	for range events {
 	}
-	// Production shape is confirmed. The graceful-degradation test above
-	// (err_nil_exit_127_path subtest) simulates the same shape and asserts the
-	// agent tolerates it.
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("Approve should succeed when snap-commit is missing; got %v", err)
+	}
+	for range resumed {
+	}
+
+	// User's action must have completed.
+	if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+		t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
+	}
+
+	// Audit should show the distinct "not installed" status, not generic "failed".
+	turns := ag.AuditTurns()
+	if len(turns) == 0 {
+		t.Fatal("Expected at least one turn")
+	}
+	if turns[0].SnapshotStatus != agent.SnapshotStatusNotInstalled {
+		t.Errorf("Expected SnapshotStatusNotInstalled, got %s", turns[0].SnapshotStatus)
+	}
+	// SnapshotID should be empty for not-installed case (not overloaded with a reason).
+	if turns[0].SnapshotID != "" {
+		t.Errorf("Expected empty SnapshotID for not-installed case, got %q", turns[0].SnapshotID)
+	}
 }
 
 // TestAgent_CaptureRawAuditContext verifies that when the operator opts in

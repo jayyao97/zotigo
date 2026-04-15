@@ -54,9 +54,10 @@ type SafetyClassifierConfig struct {
 }
 
 // IsEnabled returns whether the classifier is enabled.
-// Returns false when Enabled is nil. Note: after Manager.Load() merges
-// defaults, nil is replaced with the default value (true), so in practice
-// IsEnabled() returns true unless the user explicitly set enabled: false.
+// Returns false when Enabled is nil. After Manager.Load() merges defaults
+// for every profile (built-in and user-defined), nil is replaced with the
+// default value (true), so IsEnabled() returns true unless the user
+// explicitly set enabled: false.
 func (c SafetyClassifierConfig) IsEnabled() bool {
 	if c.Enabled == nil {
 		return false

@@ -114,6 +114,9 @@ const (
 	SnapshotStatusCreated        SnapshotStatus = "created"
 	SnapshotStatusFailed         SnapshotStatus = "failed"
 	SnapshotStatusMissingGitRepo SnapshotStatus = "missing_git_repo"
+	// SnapshotStatusNotInstalled indicates the snap-commit binary is not on PATH.
+	// Distinct from SnapshotStatusFailed so audit logs can tell them apart.
+	SnapshotStatusNotInstalled SnapshotStatus = "not_installed"
 )
 
 // AuditContextSummary stores a compact audit summary instead of full raw context.

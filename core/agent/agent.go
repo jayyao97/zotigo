@@ -1020,7 +1020,7 @@ func (a *Agent) ensureSnapshotForActions(ctx context.Context, exec executor.Exec
 	// as err=nil, exit=127, stderr contains "command not found") while other
 	// executors may surface it as a non-nil error. Check both paths.
 	if isCommandNotFound(err, result) {
-		a.setTurnSnapshot(SnapshotStatusFailed, "snap-commit not installed")
+		a.setTurnSnapshot(SnapshotStatusNotInstalled, "")
 		return nil
 	}
 	if err != nil {
@@ -1044,20 +1044,29 @@ func (a *Agent) ensureSnapshotForActions(ctx context.Context, exec executor.Exec
 // isCommandNotFound reports whether an exec error / result pair indicates the
 // snap-commit binary is missing from PATH, as opposed to snap-commit itself
 // failing with a non-zero exit.
+//
+// We deliberately use narrow, anchored matches. A bare "not found" substring
+// is too broad: snap-commit's own failure messages can legitimately contain
+// "ref not found" or "object not found", and mis-classifying those as
+// "binary missing" would silently skip the snapshot for a protected action.
 func isCommandNotFound(err error, result *executor.ExecResult) bool {
 	if err != nil {
-		msg := strings.ToLower(err.Error())
-		if strings.Contains(msg, "not found") || strings.Contains(msg, "executable file not found") {
+		// Go's os/exec surfaces a missing binary with this canonical string
+		// (see exec.LookPath / *exec.Error).
+		if strings.Contains(strings.ToLower(err.Error()), "executable file not found") {
 			return true
 		}
 	}
 	if result != nil {
-		stderr := strings.ToLower(string(result.Stderr))
-		if strings.Contains(stderr, "command not found") || strings.Contains(stderr, "not found") {
+		// POSIX shells return 127 when the command does not exist. This is the
+		// most reliable signal across platforms.
+		if result.ExitCode == 127 {
 			return true
 		}
-		// POSIX shells return 127 when the command does not exist
-		if result.ExitCode == 127 {
+		// Some non-POSIX execution paths may not set exit 127 but still print
+		// the canonical "command not found" phrase to stderr. Match only the
+		// anchored phrase to avoid swallowing unrelated snap-commit errors.
+		if strings.Contains(strings.ToLower(string(result.Stderr)), "command not found") {
 			return true
 		}
 	}
