@@ -157,6 +157,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
+		prevWidth := m.width
 		m.width = msg.Width
 		m.height = msg.Height
 
@@ -173,6 +174,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if !m.initialPrinted {
 			m.initialPrinted = true
 			return m, m.printInitialHistory(false)
+		}
+
+		// On a real resize (width changed), the terminal hard-wraps previously
+		// printed content at the old width, leaving stale box borders and
+		// orphaned line fragments above the inline viewport. Clear the visible
+		// screen so the new input area renders cleanly. We intentionally don't
+		// reprint history here — reprinting would duplicate past messages in
+		// scrollback on every resize; the user can scroll up to see them.
+		if prevWidth != 0 && prevWidth != m.width {
+			return m, tea.ClearScreen
 		}
 
 		return m, nil
