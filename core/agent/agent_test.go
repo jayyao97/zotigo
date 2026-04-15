@@ -2,6 +2,11 @@ package agent_test
 
 import (
 	"context"
+	"fmt"
+	"io/fs"
+	"os"
+	osexec "os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -11,7 +16,9 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/tools"
+	builtin "github.com/jayyao97/zotigo/core/tools/builtin"
 )
 
 // --- Mock Provider ---
@@ -71,6 +78,148 @@ func (t *TimeTool) Schema() any              { return nil }
 func (t *TimeTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "12:00", nil
+}
+
+type ShellCallProvider struct {
+	Command string
+	Step    int
+	Tool    string
+	Args    string
+}
+
+type StaticSafetyClassifier struct {
+	Response agent.SafetyClassifierResponse
+	Err      error
+}
+
+func (c *StaticSafetyClassifier) Classify(req agent.SafetyClassifierRequest) (agent.SafetyClassifierResponse, error) {
+	if c.Err != nil {
+		return agent.SafetyClassifierResponse{}, c.Err
+	}
+	return c.Response, nil
+}
+
+type SnapshotTestExecutor struct {
+	base             executor.Executor
+	isGitRepo        bool
+	snapshotStdout   string
+	snapshotStderr   string
+	snapshotErr      error
+	snapshotExitCode int
+	snapshotCalls    int
+	recordedCommands []string
+}
+
+func NewSnapshotTestExecutor(base executor.Executor, isGitRepo bool) *SnapshotTestExecutor {
+	return &SnapshotTestExecutor{
+		base:             base,
+		isGitRepo:        isGitRepo,
+		snapshotStdout:   "snap-123",
+		snapshotExitCode: 0,
+	}
+}
+
+func (e *SnapshotTestExecutor) ReadFile(ctx context.Context, path string) ([]byte, error) {
+	return e.base.ReadFile(ctx, path)
+}
+
+func (e *SnapshotTestExecutor) WriteFile(ctx context.Context, path string, content []byte, perm fs.FileMode) error {
+	return e.base.WriteFile(ctx, path, content, perm)
+}
+
+func (e *SnapshotTestExecutor) ListDir(ctx context.Context, path string) ([]executor.FileInfo, error) {
+	return e.base.ListDir(ctx, path)
+}
+
+func (e *SnapshotTestExecutor) Stat(ctx context.Context, path string) (*executor.FileInfo, error) {
+	return e.base.Stat(ctx, path)
+}
+
+func (e *SnapshotTestExecutor) MkdirAll(ctx context.Context, path string, perm fs.FileMode) error {
+	return e.base.MkdirAll(ctx, path, perm)
+}
+
+func (e *SnapshotTestExecutor) Remove(ctx context.Context, path string) error {
+	return e.base.Remove(ctx, path)
+}
+
+func (e *SnapshotTestExecutor) Exec(ctx context.Context, cmd string, opts executor.ExecOptions) (*executor.ExecResult, error) {
+	e.recordedCommands = append(e.recordedCommands, cmd)
+	switch cmd {
+	case "git rev-parse --is-inside-work-tree":
+		if e.isGitRepo {
+			return &executor.ExecResult{ExitCode: 0, Stdout: []byte("true\n")}, nil
+		}
+		return &executor.ExecResult{ExitCode: 1, Stderr: []byte("fatal")}, nil
+	case `snap-commit store -m "zotigo pre-action snapshot"`:
+		e.snapshotCalls++
+		if e.snapshotErr != nil {
+			return nil, e.snapshotErr
+		}
+		stderr := e.snapshotStderr
+		if stderr == "" && e.snapshotExitCode != 0 {
+			stderr = "snapshot failed"
+		}
+		return &executor.ExecResult{
+			ExitCode: e.snapshotExitCode,
+			Stdout:   []byte(e.snapshotStdout),
+			Stderr:   []byte(stderr),
+		}, nil
+	default:
+		return e.base.Exec(ctx, cmd, opts)
+	}
+}
+
+func (e *SnapshotTestExecutor) WorkDir() string                { return e.base.WorkDir() }
+func (e *SnapshotTestExecutor) Platform() string               { return e.base.Platform() }
+func (e *SnapshotTestExecutor) Init(ctx context.Context) error { return e.base.Init(ctx) }
+func (e *SnapshotTestExecutor) Close() error                   { return e.base.Close() }
+
+func (p *ShellCallProvider) Name() string { return "shell-mock" }
+
+func (p *ShellCallProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 10)
+	go func() {
+		defer close(ch)
+		p.Step++
+		if p.Step == 1 {
+			toolName := p.Tool
+			if toolName == "" {
+				toolName = "shell"
+			}
+			args := p.Args
+			if args == "" {
+				args = `{"command":"` + p.Command + `"}`
+			}
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallDelta,
+				Index: 0,
+				ToolCallDelta: &protocol.ToolCallDelta{
+					ID:   "call_1",
+					Name: toolName,
+				},
+			}
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallEnd,
+				Index: 0,
+				ToolCall: &protocol.ToolCall{
+					ID:        "call_1",
+					Name:      toolName,
+					Arguments: args,
+				},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+			return
+		}
+
+		ch <- protocol.NewTextDeltaEvent("done")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "done"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
 }
 
 // --- Test ---
@@ -576,6 +725,792 @@ func TestAgent_SafeDir_BlocksReadOutsideWorkDir(t *testing.T) {
 	// Path outside workDir should require approval
 	if lastEvent.FinishReason != "need_approval" {
 		t.Errorf("Read-only tool outside workDir should need approval, got %s", lastEvent.FinishReason)
+	}
+}
+
+func TestAgent_AutoApprovePausesHighRiskShell(t *testing.T) {
+	providers.Register("mock-high-risk-shell", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "sudo ls"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	localExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	guard, err := sandbox.NewGuard(localExec, nil)
+	if err != nil {
+		t.Fatalf("Failed to create guard: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-high-risk-shell"}
+	ag, err := agent.New(cfg, guard)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "List files with sudo")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+	}
+
+	snap := ag.Snapshot()
+	if len(snap.Turns) != 1 || len(snap.Turns[0].SafetyEvents) == 0 {
+		t.Fatalf("Expected safety events to be recorded for the turn")
+	}
+	event := snap.Turns[0].SafetyEvents[0]
+	if event.Decision != agent.SafetyClassifierDecisionAskUser {
+		t.Fatalf("Expected ask_user decision, got %s", event.Decision)
+	}
+}
+
+func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
+	providers.Register("mock-write-file", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-write-file"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "Write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+	}
+}
+
+func TestAgent_BlockedShellReturnsDeniedToolResult(t *testing.T) {
+	providers.Register("mock-blocked-shell", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "rm -rf /"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	localExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	guard, err := sandbox.NewGuard(localExec, nil)
+	if err != nil {
+		t.Fatalf("Failed to create guard: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-blocked-shell"}
+	ag, err := agent.New(cfg, guard)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "Delete root")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != protocol.FinishReasonStop {
+		t.Fatalf("Expected stop, got %s", lastEvent.FinishReason)
+	}
+
+	snap := ag.Snapshot()
+	foundDenied := false
+	for _, msg := range snap.History {
+		if msg.Role != protocol.RoleTool {
+			continue
+		}
+		for _, cp := range msg.Content {
+			if cp.ToolResult != nil && cp.ToolResult.Type == protocol.ToolResultTypeExecutionDenied {
+				foundDenied = true
+			}
+		}
+	}
+	if !foundDenied {
+		t.Fatal("Expected execution denied tool result in history")
+	}
+}
+
+func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
+	providers.Register("mock-classifier-allow", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch note.txt"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-classifier-allow",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{
+				Enabled:                 config.BoolPtr(true),
+				AllowAutoExecuteOnAllow: true,
+			},
+		},
+	}
+	ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+		Response: agent.SafetyClassifierResponse{
+			Decision: agent.SafetyClassifierDecisionAllow,
+			Reason:   "classifier allowed command",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "touch a file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason == "need_approval" {
+		t.Fatal("Expected classifier allow to auto-execute when configured")
+	}
+
+	turns := ag.AuditTurns()
+	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
+		t.Fatal("Expected safety events")
+	}
+	if turns[0].SafetyEvents[0].DecisionSource != agent.SafetyDecisionSourceClassifier {
+		t.Fatalf("Expected classifier decision source, got %s", turns[0].SafetyEvents[0].DecisionSource)
+	}
+}
+
+func TestAgent_ClassifierDenyReturnsDeniedResult(t *testing.T) {
+	providers.Register("mock-classifier-deny", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch note.txt"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-classifier-deny",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
+	ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+		Response: agent.SafetyClassifierResponse{
+			Decision: agent.SafetyClassifierDecisionDeny,
+			Reason:   "denied by classifier",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "touch a file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	snap := ag.Snapshot()
+	foundDenied := false
+	for _, msg := range snap.History {
+		if msg.Role != protocol.RoleTool {
+			continue
+		}
+		for _, cp := range msg.Content {
+			if cp.ToolResult != nil && cp.ToolResult.Type == protocol.ToolResultTypeExecutionDenied &&
+				strings.Contains(cp.ToolResult.Reason, "denied by classifier") {
+				foundDenied = true
+			}
+		}
+	}
+	if !foundDenied {
+		t.Fatal("Expected denied tool result from classifier deny")
+	}
+}
+
+func TestAgent_ClassifierAskUserPauses(t *testing.T) {
+	providers.Register("mock-classifier-ask", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch note.txt"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-classifier-ask",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
+	ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+		Response: agent.SafetyClassifierResponse{
+			Decision: agent.SafetyClassifierDecisionAskUser,
+			Reason:   "need explicit approval",
+		},
+	}))
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "touch a file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+	}
+}
+
+func TestAgent_ClassifierEnabledWithoutImplementationFallsBackToApproval(t *testing.T) {
+	providers.Register("mock-classifier-missing", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch note.txt"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-classifier-missing",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
+	ag, err := agent.New(cfg, exec,
+		agent.WithClassifierUnavailableReason(`classifier profile "missing-mini" not found`),
+		agent.WithClassifierProfile("gpt-4o", config.ProfileConfig{Provider: "openai", Model: "gpt-4o"}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.ShellTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "touch a file")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+	}
+
+	turns := ag.AuditTurns()
+	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
+		t.Fatal("Expected safety event")
+	}
+	ev := turns[0].SafetyEvents[0]
+	if ev.DecisionSource != agent.SafetyDecisionSourceClassifier {
+		t.Fatalf("Expected classifier decision source, got %s", ev.DecisionSource)
+	}
+	if !strings.Contains(ev.Reason, `classifier profile "missing-mini" not found`) {
+		t.Fatalf("Expected missing profile reason, got %q", ev.Reason)
+	}
+	if ev.ClassifierProvider != "openai" || ev.ClassifierModel != "gpt-4o" {
+		t.Fatalf("Expected classifier metadata from resolved/current profile, got %s/%s", ev.ClassifierProvider, ev.ClassifierModel)
+	}
+}
+
+func TestAgent_FirstProtectedActionCreatesSingleSnapshot(t *testing.T) {
+	providers.Register("mock-snapshot-once", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	baseExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	exec := NewSnapshotTestExecutor(baseExec, true)
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-once"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	if exec.snapshotCalls != 0 {
+		t.Fatalf("Snapshot should not run before approval, got %d", exec.snapshotCalls)
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("ApproveAndExecutePendingActions error: %v", err)
+	}
+	for range resumed {
+	}
+
+	if exec.snapshotCalls != 1 {
+		t.Fatalf("Expected exactly one snapshot call, got %d", exec.snapshotCalls)
+	}
+
+	turns := ag.AuditTurns()
+	if len(turns) != 1 {
+		t.Fatalf("Expected one turn, got %d", len(turns))
+	}
+	if turns[0].SnapshotStatus != agent.SnapshotStatusCreated {
+		t.Fatalf("Expected created snapshot status, got %s", turns[0].SnapshotStatus)
+	}
+}
+
+func TestAgent_SnapshotFailureStopsExecution(t *testing.T) {
+	providers.Register("mock-snapshot-fail", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	baseExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	exec := NewSnapshotTestExecutor(baseExec, true)
+	exec.snapshotErr = context.DeadlineExceeded
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-fail"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err == nil {
+		for range resumed {
+		}
+		t.Fatal("Expected snapshot failure to stop execution")
+	}
+
+	turns := ag.AuditTurns()
+	if turns[0].SnapshotStatus != agent.SnapshotStatusFailed {
+		t.Fatalf("Expected failed snapshot status, got %s", turns[0].SnapshotStatus)
+	}
+}
+
+func TestAgent_NonGitWorkspaceDoesNotSnapshot(t *testing.T) {
+	providers.Register("mock-snapshot-nongit", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	baseExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+	exec := NewSnapshotTestExecutor(baseExec, false)
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-nongit"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("ApproveAndExecutePendingActions error: %v", err)
+	}
+	for range resumed {
+	}
+
+	if exec.snapshotCalls != 0 {
+		t.Fatalf("Expected no snapshot calls in non-git workspace, got %d", exec.snapshotCalls)
+	}
+
+	turns := ag.AuditTurns()
+	if turns[0].SnapshotStatus != agent.SnapshotStatusMissingGitRepo {
+		t.Fatalf("Expected missing_git_repo snapshot status, got %s", turns[0].SnapshotStatus)
+	}
+}
+
+// TestAgent_SnapshotNotInstalledDegradesGracefully verifies that when the
+// optional snap-commit binary is not on PATH, the agent marks the turn as
+// failed-with-reason but lets the user's action proceed instead of aborting.
+//
+// Subtests cover both the err!=nil path (some executors surface missing-binary
+// as an error) and the err=nil + exit=127 path (LocalExecutor swallows
+// *exec.ExitError and returns only the result).
+func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
+	run := func(t *testing.T, setup func(e *SnapshotTestExecutor)) {
+		t.Helper()
+		providers.Register(fmt.Sprintf("mock-snapshot-notfound-%s", t.Name()),
+			func(cfg config.ProfileConfig) (providers.Provider, error) {
+				return &ShellCallProvider{
+					Tool: "write_file",
+					Args: `{"path":"note.txt","content":"hello"}`,
+				}, nil
+			})
+
+		tmpDir := t.TempDir()
+		baseExec, err := executor.NewLocalExecutor(tmpDir)
+		if err != nil {
+			t.Fatalf("Failed to create executor: %v", err)
+		}
+		exec := NewSnapshotTestExecutor(baseExec, true)
+		setup(exec)
+
+		cfg := config.ProfileConfig{Provider: fmt.Sprintf("mock-snapshot-notfound-%s", t.Name())}
+		ag, err := agent.New(cfg, exec)
+		if err != nil {
+			t.Fatalf("Failed to create agent: %v", err)
+		}
+		ag.RegisterTool(&builtin.WriteFileTool{})
+		ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+		events, err := ag.Run(context.Background(), "write a note")
+		if err != nil {
+			t.Fatalf("Run error: %v", err)
+		}
+		for range events {
+		}
+
+		resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+		if err != nil {
+			t.Fatalf("Approve should succeed when snap-commit is missing; got %v", err)
+		}
+		for range resumed {
+		}
+
+		// The write should still have happened.
+		if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+			t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
+		}
+
+		turns := ag.AuditTurns()
+		if len(turns) == 0 {
+			t.Fatal("Expected at least one turn")
+		}
+		if turns[0].SnapshotStatus != agent.SnapshotStatusNotInstalled {
+			t.Fatalf("Expected not_installed snapshot status, got %s", turns[0].SnapshotStatus)
+		}
+		if turns[0].SnapshotID != "" {
+			t.Errorf("Expected empty SnapshotID for not_installed case, got %q", turns[0].SnapshotID)
+		}
+	}
+
+	// Some executors may return a non-nil Go error (err message contains
+	// "executable file not found").
+	t.Run("err_nonnil_path", func(t *testing.T) {
+		run(t, func(e *SnapshotTestExecutor) {
+			e.snapshotErr = fmt.Errorf(`exec: "snap-commit": executable file not found in $PATH`)
+		})
+	})
+
+	// Production LocalExecutor path: sh -c returns exit 127 with "command not
+	// found" on stderr; exec.ExitError is swallowed so err is nil.
+	t.Run("err_nil_exit_127_path", func(t *testing.T) {
+		run(t, func(e *SnapshotTestExecutor) {
+			e.snapshotExitCode = 127
+			e.snapshotStderr = "sh: snap-commit: command not found"
+		})
+	})
+}
+
+// TestAgent_SnapshotNotInstalled_LocalExecutor exercises the graceful fallback
+// against a real LocalExecutor end-to-end. Skips if snap-commit is actually
+// installed on the test machine (in which case the missing-binary path isn't
+// reachable).
+func TestAgent_SnapshotNotInstalled_LocalExecutor(t *testing.T) {
+	if _, err := osexec.LookPath("snap-commit"); err == nil {
+		t.Skip("snap-commit is installed on this machine; cannot test missing-binary path")
+	}
+
+	// Set up a real git repo so isGitRepository returns true.
+	tmpDir := t.TempDir()
+	if _, err := osexec.LookPath("git"); err != nil {
+		t.Skip("git not available; cannot set up test repo")
+	}
+	for _, args := range [][]string{
+		{"init"},
+		{"config", "user.email", "test@test.com"},
+		{"config", "user.name", "Test"},
+	} {
+		cmd := osexec.Command("git", args...)
+		cmd.Dir = tmpDir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v failed: %v\n%s", args, err, out)
+		}
+	}
+
+	providers.Register("mock-snapshot-localexec", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	localExec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-snapshot-localexec"}
+	ag, err := agent.New(cfg, localExec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("Approve should succeed when snap-commit is missing; got %v", err)
+	}
+	for range resumed {
+	}
+
+	// User's action must have completed.
+	if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+		t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
+	}
+
+	// Audit should show the distinct "not installed" status, not generic "failed".
+	turns := ag.AuditTurns()
+	if len(turns) == 0 {
+		t.Fatal("Expected at least one turn")
+	}
+	if turns[0].SnapshotStatus != agent.SnapshotStatusNotInstalled {
+		t.Errorf("Expected SnapshotStatusNotInstalled, got %s", turns[0].SnapshotStatus)
+	}
+	// SnapshotID should be empty for not-installed case (not overloaded with a reason).
+	if turns[0].SnapshotID != "" {
+		t.Errorf("Expected empty SnapshotID for not-installed case, got %q", turns[0].SnapshotID)
+	}
+}
+
+// TestAgent_CaptureRawAuditContext verifies that when the operator opts in
+// via config, classifier-sourced audit events carry a bounded raw context
+// dump; otherwise the field stays empty.
+func TestAgent_CaptureRawAuditContext(t *testing.T) {
+	providers.Register("mock-raw-audit", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "touch a file"}, nil
+	})
+
+	run := func(t *testing.T, capture bool) []agent.AuditEvent {
+		t.Helper()
+		tmpDir := t.TempDir()
+		exec, err := executor.NewLocalExecutor(tmpDir)
+		if err != nil {
+			t.Fatalf("Failed to create executor: %v", err)
+		}
+
+		cfg := config.ProfileConfig{
+			Provider: "mock-raw-audit",
+			Safety: config.SafetyProfileConfig{
+				Classifier: config.SafetyClassifierConfig{
+					Enabled:                config.BoolPtr(true),
+					CaptureRawAuditContext: capture,
+					MaxAuditContextChars:   500,
+				},
+			},
+		}
+		ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{
+				Decision: agent.SafetyClassifierDecisionAskUser,
+				Reason:   "review before executing",
+			},
+		}))
+		if err != nil {
+			t.Fatalf("Failed to create agent: %v", err)
+		}
+		ag.RegisterTool(&builtin.ShellTool{})
+
+		events, err := ag.Run(context.Background(), "please touch a file")
+		if err != nil {
+			t.Fatalf("Run error: %v", err)
+		}
+		for range events {
+		}
+
+		turns := ag.AuditTurns()
+		if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
+			t.Fatal("Expected safety events")
+		}
+		return turns[0].SafetyEvents
+	}
+
+	t.Run("disabled keeps raw context empty", func(t *testing.T) {
+		events := run(t, false)
+		for _, e := range events {
+			if e.RawContext != "" {
+				t.Errorf("RawContext should be empty when CaptureRawAuditContext=false, got %q", e.RawContext)
+			}
+		}
+	})
+
+	t.Run("enabled captures bounded raw context on classifier events", func(t *testing.T) {
+		events := run(t, true)
+		var found bool
+		for _, e := range events {
+			if e.DecisionSource != agent.SafetyDecisionSourceClassifier {
+				continue
+			}
+			found = true
+			if e.RawContext == "" {
+				t.Error("Expected RawContext to be populated for classifier event")
+			}
+			if !strings.Contains(e.RawContext, "tool:") {
+				t.Errorf("RawContext should contain tool name, got: %q", e.RawContext)
+			}
+			if len(e.RawContext) > 520 {
+				t.Errorf("RawContext exceeds bounded limit: len=%d", len(e.RawContext))
+			}
+		}
+		if !found {
+			t.Fatal("Expected at least one classifier-sourced safety event")
+		}
+	})
+}
+
+func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
+	providers.Register("mock-deny-audit", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-deny-audit"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	_, err = ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{
+		{
+			ToolCallID: "call_1",
+			ToolName:   "write_file",
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     "User denied in test",
+		},
+	})
+	if err != nil {
+		t.Fatalf("SubmitToolOutputs error: %v", err)
+	}
+
+	turns := ag.AuditTurns()
+	found := false
+	for _, ev := range turns[0].SafetyEvents {
+		if ev.DecisionSource == agent.SafetyDecisionSourceUserApproval &&
+			ev.Decision == agent.SafetyClassifierDecisionDeny &&
+			strings.Contains(ev.Reason, "User denied in test") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("Expected deny audit event")
 	}
 }
 

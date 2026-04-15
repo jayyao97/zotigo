@@ -7,51 +7,53 @@ Runtime CLI config still uses `~/.zotigo/config.yaml`.
 
 1. Copy the example file:
    ```bash
-   cp e2e.config.example.json e2e.config.json
+   cp zotigo.e2e.example.yaml zotigo.e2e.yaml
    ```
 
-2. Edit `e2e.config.json` with your API keys and models.
+2. Edit `zotigo.e2e.yaml` with your API keys and models.
 
 3. Run E2E tests:
    ```bash
    go test -tags=e2e ./core/providers -run TestE2E_ProviderSmoke -v
    ```
 
-## Example (OpenRouter)
+## Example
 
-```json
-{
-  "provider": "openai",
-  "streaming": true,
-  "user_id": "local_test",
-  "openai": {
-    "api_key": "sk-or-v1-...",
-    "base_url": "https://openrouter.ai/api/v1",
-    "model": "gpt-5.2-codex"
-  },
-  "anthropic": {
-    "api_key": "sk-or-v1-...",
-    "base_url": "https://openrouter.ai/api/v1",
-    "model": "anthropic/claude-haiku-4.5"
-  },
-  "gemini": {
-    "api_key": "sk-or-v1-...",
-    "base_url": "https://openrouter.ai/api/v1",
-    "model": "google/gemini-3-flash-preview"
-  }
-}
+```yaml
+default_profile: gpt-4o
+
+profiles:
+  gpt-4o:
+    provider: openai
+    model: gpt-4o
+    api_key: "sk-or-v1-..."
+    base_url: "https://openrouter.ai/api/v1"
+    safety:
+      classifier:
+        enabled: true
+        mode: high_risk_and_ambiguous
+        profile: gpt-5.4-reasoning
+        timeout_ms: 3000
+        allow_auto_execute_on_allow: false
+
+  gpt-5.4-reasoning:
+    provider: openai
+    model: gpt-5.4
+    api_key: "sk-or-v1-..."
+    base_url: "https://openrouter.ai/api/v1"
 ```
 
 ## File Resolution Order
 
-`LoadE2EConfig()` resolves config files in this order:
+The E2E helper resolves config files in this order:
 
-1. `e2e.config.json` (preferred)
-2. `config.json` (legacy fallback)
+1. `zotigo.e2e.yaml` (preferred)
+2. `e2e.config.json` (legacy fallback)
+3. `config.json` (legacy fallback)
 
 ## Security
 
-- `e2e.config.json` is ignored by git.
+- `zotigo.e2e.yaml` should contain test credentials only.
 - Never commit real API keys.
 
 ## Troubleshooting
@@ -65,5 +67,5 @@ Make sure the selected `provider` section has a non-empty `api_key`.
 Create the file from the example:
 
 ```bash
-cp e2e.config.example.json e2e.config.json
+cp zotigo.e2e.example.yaml zotigo.e2e.yaml
 ```

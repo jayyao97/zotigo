@@ -1,4 +1,6 @@
 /zotigo
+/build/
+/dist/
 .idea
 config.json
 e2e.config.json

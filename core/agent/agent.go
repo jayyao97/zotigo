@@ -15,6 +15,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -33,15 +34,21 @@ type Agent struct {
 	reminderBuilder *prompt.ReminderBuilder
 
 	// Services
-	loopDetector  *services.LoopDetector
-	compressor    *services.Compressor
-	skillManager  *skills.SkillManager
-	extraSafeDirs []string
+	loopDetector                *services.LoopDetector
+	compressor                  *services.Compressor
+	skillManager                *skills.SkillManager
+	classifier                  SafetyClassifier
+	classifierProfileName       string
+	classifierProfile           config.ProfileConfig
+	classifierUnavailableReason string
+	extraSafeDirs               []string
+	turnSafety                  TurnSafetyState
 
 	mu             sync.RWMutex
 	state          State
 	history        []protocol.Message
 	pendingActions []*PendingAction
+	turns          []TurnAudit
 }
 
 // AgentOption configures an Agent during construction.
@@ -131,6 +138,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		policy:       ApprovalPolicyManual,
 		state:        StateIdle,
 		history:      make([]protocol.Message, 0),
+		turns:        make([]TurnAudit, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:   services.NewCompressor(services.DefaultCompressorConfig()),
 	}
@@ -172,6 +180,16 @@ func (a *Agent) SkillManager() *skills.SkillManager {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.skillManager
+}
+
+// AuditTurns returns a copy of persisted turn audit records.
+func (a *Agent) AuditTurns() []TurnAudit {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	turns := make([]TurnAudit, len(a.turns))
+	copy(turns, a.turns)
+	return turns
 }
 
 // ResetLoopDetector clears the loop detection history.
@@ -230,10 +248,14 @@ func (a *Agent) Snapshot() Snapshot {
 	copy(hist, a.history)
 	pending := make([]*PendingAction, len(a.pendingActions))
 	copy(pending, a.pendingActions)
+	turns := make([]TurnAudit, len(a.turns))
+	copy(turns, a.turns)
 	return Snapshot{
 		State:          a.state,
 		History:        hist,
 		PendingActions: pending,
+		TurnSafety:     a.turnSafety,
+		Turns:          turns,
 		CreatedAt:      time.Now(),
 	}
 }
@@ -245,6 +267,12 @@ func (a *Agent) Restore(s Snapshot) {
 	a.state = s.State
 	a.history = s.History
 	a.pendingActions = s.PendingActions
+	a.turnSafety = s.TurnSafety
+	if s.Turns == nil {
+		a.turns = make([]TurnAudit, 0)
+	} else {
+		a.turns = s.Turns
+	}
 }
 
 // Run continues the execution loop.
@@ -276,6 +304,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		}
 
 		a.history = append(a.history, msg)
+		if msg.Role == protocol.RoleUser {
+			a.startNewTurn(msg.String())
+		}
 	}
 
 	if a.state == StatePaused && len(a.pendingActions) > 0 {
@@ -386,87 +417,83 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			// Handle tool calls
 			if len(currentToolCalls) > 0 {
-				if a.policy == ApprovalPolicyManual {
-					// Split into safe (read-only in working dir) and unsafe tool calls
-					var safeCalls, unsafeCalls []*protocol.ToolCall
-					for _, tc := range currentToolCalls {
-						if a.isToolCallSafe(tc) {
-							safeCalls = append(safeCalls, tc)
-						} else {
-							unsafeCalls = append(unsafeCalls, tc)
-						}
-					}
+				var autoCalls []*PendingAction
+				var approvalCalls []*PendingAction
+				var immediateResults []protocol.ToolResult
 
-					// Auto-execute safe tool calls
-					if len(safeCalls) > 0 {
-						a.mu.Lock()
-						for _, tc := range safeCalls {
-							a.pendingActions = append(a.pendingActions, &PendingAction{
-								ToolCallID: tc.ID,
-								Name:       tc.Name,
-								Arguments:  tc.Arguments,
-								ToolCall:   tc,
-							})
-						}
-						a.mu.Unlock()
-
-						results, err := a.executePendingActions(ctx)
-						if err != nil {
-							outCh <- protocol.NewErrorEvent(err)
-							return
-						}
-						for i := range results {
-							outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
-						}
-						toolMsg := protocol.NewToolMessage(results)
-						a.mu.Lock()
-						a.history = append(a.history, toolMsg)
-						a.mu.Unlock()
-					}
-
-					// Pause for unsafe tool calls
-					if len(unsafeCalls) > 0 {
-						a.mu.Lock()
-						a.state = StatePaused
-						for _, tc := range unsafeCalls {
-							a.pendingActions = append(a.pendingActions, &PendingAction{
-								ToolCallID: tc.ID,
-								Name:       tc.Name,
-								Arguments:  tc.Arguments,
-								ToolCall:   tc,
-							})
-						}
-						a.mu.Unlock()
-					}
-
-					continue
-				}
-
-				// Auto execution
-				a.mu.Lock()
 				for _, tc := range currentToolCalls {
-					a.pendingActions = append(a.pendingActions, &PendingAction{
+					decision := a.classifyToolCall(tc)
+					a.appendSafetyEvent(AuditEvent{
+						ToolCallID:         tc.ID,
+						ToolName:           tc.Name,
+						ToolArgsSummary:    summarizeText(tc.Arguments, 240),
+						DecisionSource:     decision.Source,
+						Decision:           mapExecutionDecision(decision.Decision),
+						Reason:             decision.Reason,
+						RiskLevel:          decision.RiskLevel,
+						SnapshotStatus:     SnapshotStatusNotNeeded,
+						ClassifierProvider: a.classifierProfile.Provider,
+						ClassifierModel:    a.classifierProfile.Model,
+						ContextSummary: AuditContextSummary{
+							UserPrompt: a.turnSafety.CurrentUserPrompt,
+							Trigger:    decision.Reason,
+						},
+						RawContext: decision.RawContext,
+					})
+
+					action := &PendingAction{
 						ToolCallID: tc.ID,
 						Name:       tc.Name,
 						Arguments:  tc.Arguments,
+						Decision:   decision,
 						ToolCall:   tc,
-					})
+					}
+					switch decision.Decision {
+					case ExecutionDecisionAutoExecute:
+						autoCalls = append(autoCalls, action)
+					case ExecutionDecisionRequireApproval:
+						approvalCalls = append(approvalCalls, action)
+					case ExecutionDecisionBlock:
+						immediateResults = append(immediateResults, protocol.ToolResult{
+							ToolCallID: tc.ID,
+							ToolName:   tc.Name,
+							Type:       protocol.ToolResultTypeExecutionDenied,
+							Reason:     decision.Reason,
+							IsError:    true,
+						})
+					}
 				}
-				a.mu.Unlock()
 
-				results, err := a.executePendingActions(ctx)
-				if err != nil {
-					outCh <- protocol.NewErrorEvent(err)
-					return
-				}
-				for i := range results {
-					outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+				if len(autoCalls) > 0 {
+					a.mu.Lock()
+					a.pendingActions = append(a.pendingActions, autoCalls...)
+					a.mu.Unlock()
+
+					results, err := a.executePendingActions(ctx)
+					if err != nil {
+						outCh <- protocol.NewErrorEvent(err)
+						return
+					}
+					immediateResults = append(immediateResults, results...)
 				}
 
-				toolMsg := protocol.NewToolMessage(results)
-				a.mu.Lock()
-				a.history = append(a.history, toolMsg)
-				a.mu.Unlock()
+				if len(immediateResults) > 0 {
+					for i := range immediateResults {
+						outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &immediateResults[i]}
+					}
+					toolMsg := protocol.NewToolMessage(immediateResults)
+					a.mu.Lock()
+					a.history = append(a.history, toolMsg)
+					a.mu.Unlock()
+				}
+
+				if len(approvalCalls) > 0 {
+					a.mu.Lock()
+					a.state = StatePaused
+					a.pendingActions = append(a.pendingActions, approvalCalls...)
+					a.mu.Unlock()
+				}
+
 				continue
 			}
 
@@ -485,6 +512,27 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 // ApproveAndExecutePendingActions executes all pending tool calls and continues.
 func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan protocol.Event, error) {
+	a.mu.RLock()
+	actions := make([]*PendingAction, len(a.pendingActions))
+	copy(actions, a.pendingActions)
+	a.mu.RUnlock()
+	for _, action := range actions {
+		a.appendSafetyEvent(AuditEvent{
+			ToolCallID:      action.ToolCallID,
+			ToolName:        action.Name,
+			ToolArgsSummary: summarizeText(action.Arguments, 240),
+			DecisionSource:  SafetyDecisionSourceUserApproval,
+			Decision:        SafetyClassifierDecisionAllow,
+			Reason:          "user approved action",
+			RiskLevel:       action.Decision.RiskLevel,
+			SnapshotStatus:  SnapshotStatusNotNeeded,
+			ContextSummary: AuditContextSummary{
+				UserPrompt: a.turnSafety.CurrentUserPrompt,
+				Trigger:    "user approved pending action",
+			},
+		})
+	}
+
 	results, err := a.executePendingActions(ctx)
 	if err != nil {
 		return nil, err
@@ -520,6 +568,24 @@ func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 	msg := protocol.NewToolMessage(outputs)
 	a.history = append(a.history, msg)
 	a.mu.Unlock()
+
+	for _, output := range outputs {
+		if output.Type != protocol.ToolResultTypeExecutionDenied {
+			continue
+		}
+		a.appendSafetyEvent(AuditEvent{
+			ToolCallID:     output.ToolCallID,
+			ToolName:       output.ToolName,
+			DecisionSource: SafetyDecisionSourceUserApproval,
+			Decision:       SafetyClassifierDecisionDeny,
+			Reason:         output.Reason,
+			SnapshotStatus: SnapshotStatusNotNeeded,
+			ContextSummary: AuditContextSummary{
+				UserPrompt: a.turnSafety.CurrentUserPrompt,
+				Trigger:    "pending action denied",
+			},
+		})
+	}
 	return a.Run(ctx, "")
 }
 
@@ -528,6 +594,10 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 	actions := a.pendingActions
 	exec := a.executor
 	a.mu.RUnlock()
+
+	if err := a.ensureSnapshotForActions(ctx, exec, actions); err != nil {
+		return nil, err
+	}
 
 	var results []protocol.ToolResult
 	for _, action := range actions {
@@ -586,6 +656,487 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 	a.pendingActions = nil
 	a.mu.Unlock()
 	return results, nil
+}
+
+func (a *Agent) startNewTurn(userPrompt string) {
+	turnID := fmt.Sprintf("turn_%d", time.Now().UnixNano())
+	now := time.Now()
+	a.turnSafety = TurnSafetyState{
+		TurnID:            turnID,
+		CurrentUserPrompt: userPrompt,
+	}
+	a.turns = append(a.turns, TurnAudit{
+		ID:                turnID,
+		CreatedAt:         now,
+		UpdatedAt:         now,
+		UserPromptSummary: summarizeText(userPrompt, 240),
+		SnapshotStatus:    SnapshotStatusNotNeeded,
+		SafetyEvents:      make([]AuditEvent, 0),
+	})
+}
+
+func (a *Agent) currentTurnIndex() int {
+	if a.turnSafety.TurnID == "" {
+		return -1
+	}
+	for i := len(a.turns) - 1; i >= 0; i-- {
+		if a.turns[i].ID == a.turnSafety.TurnID {
+			return i
+		}
+	}
+	return -1
+}
+
+func (a *Agent) appendSafetyEvent(event AuditEvent) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if event.Timestamp.IsZero() {
+		event.Timestamp = time.Now()
+	}
+	if event.TurnID == "" {
+		event.TurnID = a.turnSafety.TurnID
+	}
+
+	idx := a.currentTurnIndex()
+	if idx == -1 {
+		now := time.Now()
+		turnID := a.turnSafety.TurnID
+		if turnID == "" {
+			turnID = fmt.Sprintf("turn_%d", now.UnixNano())
+			a.turnSafety.TurnID = turnID
+		}
+		a.turns = append(a.turns, TurnAudit{
+			ID:             turnID,
+			CreatedAt:      now,
+			UpdatedAt:      now,
+			SnapshotStatus: SnapshotStatusNotNeeded,
+			SafetyEvents:   make([]AuditEvent, 0),
+		})
+		idx = len(a.turns) - 1
+	}
+
+	a.turns[idx].UpdatedAt = time.Now()
+	a.turns[idx].SafetyEvents = append(a.turns[idx].SafetyEvents, event)
+}
+
+func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	idx := a.currentTurnIndex()
+	if idx == -1 {
+		return
+	}
+	a.turns[idx].UpdatedAt = time.Now()
+	a.turns[idx].SnapshotStatus = status
+	a.turns[idx].SnapshotID = snapshotID
+	a.turnSafety.SnapshotID = snapshotID
+	a.turnSafety.SnapshotCreated = status == SnapshotStatusCreated
+	a.turnSafety.SnapshotFailed = status == SnapshotStatusFailed
+	a.turnSafety.SnapshotAttempted = status == SnapshotStatusCreated || status == SnapshotStatusFailed
+}
+
+func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
+	tool, ok := a.tools[tc.Name]
+	if !ok {
+		return ActionDecision{
+			Decision:  ExecutionDecisionBlock,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    "tool not found",
+			RiskLevel: "blocked",
+		}
+	}
+
+	if tc.Name == "shell" {
+		return a.classifyShellToolCall(tc)
+	}
+
+	if isProtectedToolName(tc.Name) {
+		return ActionDecision{
+			Decision:         ExecutionDecisionRequireApproval,
+			Source:           SafetyDecisionSourceHardRule,
+			Reason:           "mutating tool requires approval",
+			RiskLevel:        "normal",
+			RequiresSnapshot: true,
+		}
+	}
+
+	safety := tool.Safety()
+	if safety.ReadOnly {
+		if len(safety.PathArgs) == 0 || a.allPathsInSafeDirs(tc.Arguments, safety.PathArgs) {
+			return ActionDecision{
+				Decision:  ExecutionDecisionAutoExecute,
+				Source:    SafetyDecisionSourceHardRule,
+				Reason:    "read-only tool in safe scope",
+				RiskLevel: "safe",
+			}
+		}
+		return ActionDecision{
+			Decision:  ExecutionDecisionRequireApproval,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    "read-only tool targets path outside safe directories",
+			RiskLevel: "normal",
+		}
+	}
+
+	if a.policy == ApprovalPolicyAuto {
+		return ActionDecision{
+			Decision:  ExecutionDecisionAutoExecute,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    "auto-approve enabled for non-protected tool",
+			RiskLevel: "normal",
+		}
+	}
+
+	return ActionDecision{
+		Decision:  ExecutionDecisionRequireApproval,
+		Source:    SafetyDecisionSourceHardRule,
+		Reason:    "tool requires approval",
+		RiskLevel: "normal",
+	}
+}
+
+func (a *Agent) classifyShellToolCall(tc *protocol.ToolCall) ActionDecision {
+	command := extractShellCommand(tc.Arguments)
+	if command == "" {
+		return ActionDecision{
+			Decision:  ExecutionDecisionRequireApproval,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    "shell command missing",
+			RiskLevel: "normal",
+		}
+	}
+
+	if checker, ok := a.executor.(interface {
+		CheckCommand(string) sandbox.CommandCheckResult
+	}); ok {
+		check := checker.CheckCommand(command)
+		switch check.RiskLevel {
+		case sandbox.RiskLevelBlocked:
+			return ActionDecision{
+				Decision:  ExecutionDecisionBlock,
+				Source:    SafetyDecisionSourceHardRule,
+				Reason:    "blocked by sandbox policy",
+				RiskLevel: check.RiskLevel.String(),
+			}
+		case sandbox.RiskLevelHigh:
+			if resp, ok := a.classifyWithSafetyClassifier(tc, check.RiskLevel.String()); ok {
+				return resp
+			}
+			return ActionDecision{
+				Decision:         ExecutionDecisionRequireApproval,
+				Source:           SafetyDecisionSourceHardRule,
+				Reason:           "high-risk shell command requires approval",
+				RiskLevel:        check.RiskLevel.String(),
+				RequiresSnapshot: true,
+			}
+		}
+	}
+
+	if shellCommandAppearsReadOnly(command) {
+		return ActionDecision{
+			Decision:  ExecutionDecisionAutoExecute,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    "read-only shell command",
+			RiskLevel: "normal",
+		}
+	}
+
+	if resp, ok := a.classifyWithSafetyClassifier(tc, "normal"); ok {
+		return resp
+	}
+
+	return ActionDecision{
+		Decision:         ExecutionDecisionRequireApproval,
+		Source:           SafetyDecisionSourceHardRule,
+		Reason:           "shell command may mutate state",
+		RiskLevel:        "normal",
+		RequiresSnapshot: true,
+	}
+}
+
+func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel string) (ActionDecision, bool) {
+	if !a.cfg.Safety.Classifier.IsEnabled() {
+		return ActionDecision{}, false
+	}
+	if a.classifier == nil {
+		reason := a.classifierUnavailableReason
+		if reason == "" {
+			reason = "classifier enabled but no classifier implementation configured; falling back to user approval"
+		}
+		return ActionDecision{
+			Decision:  ExecutionDecisionRequireApproval,
+			Source:    SafetyDecisionSourceClassifier,
+			Reason:    reason,
+			RiskLevel: riskLevel,
+		}, true
+	}
+
+	req := SafetyClassifierRequest{
+		UserPrompt:    a.turnSafety.CurrentUserPrompt,
+		ToolName:      tc.Name,
+		ToolArguments: tc.Arguments,
+		RiskLevel:     riskLevel,
+		IsGitRepo:     a.isGitRepository(context.Background(), a.executor),
+		HasSnapshot:   a.turnSafety.SnapshotCreated,
+		RecentActions: a.recentActionsForClassifier(),
+	}
+
+	// Capture a bounded dump of the classifier request for audit when the
+	// operator has explicitly opted in. Never attached otherwise.
+	var rawCtx string
+	if a.cfg.Safety.Classifier.CaptureRawAuditContext {
+		limit := a.cfg.Safety.Classifier.MaxAuditContextChars
+		if limit <= 0 {
+			limit = 1200
+		}
+		rawCtx = summarizeClassifierRequest(req, limit)
+	}
+
+	resp, err := a.classifier.Classify(req)
+	if err != nil {
+		return ActionDecision{
+			Decision:   ExecutionDecisionRequireApproval,
+			Source:     SafetyDecisionSourceClassifier,
+			Reason:     fmt.Sprintf("classifier error: %v; falling back to user approval", err),
+			RiskLevel:  riskLevel,
+			RawContext: rawCtx,
+		}, true
+	}
+
+	switch resp.Decision {
+	case SafetyClassifierDecisionAllow:
+		if !a.cfg.Safety.Classifier.AllowAutoExecuteOnAllow {
+			return ActionDecision{
+				Decision:         ExecutionDecisionRequireApproval,
+				Source:           SafetyDecisionSourceClassifier,
+				Reason:           resp.Reason,
+				RiskLevel:        riskLevel,
+				RequiresSnapshot: resp.RequiresSnapshot,
+				RawContext:       rawCtx,
+			}, true
+		}
+		return ActionDecision{
+			Decision:         ExecutionDecisionAutoExecute,
+			Source:           SafetyDecisionSourceClassifier,
+			Reason:           resp.Reason,
+			RiskLevel:        riskLevel,
+			RequiresSnapshot: resp.RequiresSnapshot,
+			RawContext:       rawCtx,
+		}, true
+	case SafetyClassifierDecisionDeny:
+		return ActionDecision{
+			Decision:   ExecutionDecisionBlock,
+			Source:     SafetyDecisionSourceClassifier,
+			Reason:     resp.Reason,
+			RiskLevel:  riskLevel,
+			RawContext: rawCtx,
+		}, true
+	case SafetyClassifierDecisionAskUser:
+		return ActionDecision{
+			Decision:         ExecutionDecisionRequireApproval,
+			Source:           SafetyDecisionSourceClassifier,
+			Reason:           resp.Reason,
+			RiskLevel:        riskLevel,
+			RequiresSnapshot: resp.RequiresSnapshot,
+			RawContext:       rawCtx,
+		}, true
+	default:
+		return ActionDecision{}, false
+	}
+}
+
+// summarizeClassifierRequest renders a bounded textual dump of a classifier
+// request for audit persistence. It is only used when the operator has
+// enabled CaptureRawAuditContext.
+func summarizeClassifierRequest(req SafetyClassifierRequest, limit int) string {
+	var sb strings.Builder
+	fmt.Fprintf(&sb, "user_prompt: %s\n", summarizeText(req.UserPrompt, 400))
+	fmt.Fprintf(&sb, "tool: %s\n", req.ToolName)
+	fmt.Fprintf(&sb, "args: %s\n", summarizeText(req.ToolArguments, 400))
+	fmt.Fprintf(&sb, "risk_level: %s\n", req.RiskLevel)
+	fmt.Fprintf(&sb, "is_git_repo: %t\n", req.IsGitRepo)
+	fmt.Fprintf(&sb, "has_snapshot: %t\n", req.HasSnapshot)
+	if len(req.RecentActions) > 0 {
+		sb.WriteString("recent_actions:\n")
+		for _, a := range req.RecentActions {
+			status := "ok"
+			if a.IsError {
+				status = "error"
+			}
+			fmt.Fprintf(&sb, "- [%s] %s: %s\n", status, a.ToolName, summarizeText(a.Result, 120))
+		}
+	}
+	return summarizeText(sb.String(), limit)
+}
+
+func (a *Agent) recentActionsForClassifier() []RecentAction {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	var actions []RecentAction
+	for i := len(a.history) - 1; i >= 0 && len(actions) < 6; i-- {
+		msg := a.history[i]
+		for _, cp := range msg.Content {
+			if cp.Type == protocol.ContentTypeToolResult && cp.ToolResult != nil {
+				actions = append(actions, RecentAction{
+					ToolName: cp.ToolResult.ToolName,
+					Result:   summarizeText(cp.ToolResult.Text, 160),
+					IsError:  cp.ToolResult.IsError,
+				})
+			}
+		}
+	}
+	return actions
+}
+
+func (a *Agent) ensureSnapshotForActions(ctx context.Context, exec executor.Executor, actions []*PendingAction) error {
+	var needsSnapshot bool
+	for _, action := range actions {
+		if action.Decision.RequiresSnapshot {
+			needsSnapshot = true
+			break
+		}
+	}
+	if !needsSnapshot || a.turnSafety.SnapshotCreated {
+		return nil
+	}
+
+	if !a.isGitRepository(ctx, exec) {
+		a.setTurnSnapshot(SnapshotStatusMissingGitRepo, "")
+		return nil
+	}
+
+	a.turnSafety.SnapshotAttempted = true
+	result, err := exec.Exec(ctx, `snap-commit store -m "zotigo pre-action snapshot"`, executor.ExecOptions{})
+
+	// snap-commit is an optional external binary. If it isn't installed,
+	// degrade gracefully: mark the turn as unsnapshotted but do not abort
+	// the user's action. The same pattern is used in
+	// cli/commands/builtin/snapshot.go for explicit /snapshot invocations.
+	//
+	// LocalExecutor swallows *exec.ExitError (so a missing binary surfaces
+	// as err=nil, exit=127, stderr contains "command not found") while other
+	// executors may surface it as a non-nil error. Check both paths.
+	if isCommandNotFound(err, result) {
+		a.setTurnSnapshot(SnapshotStatusNotInstalled, "")
+		return nil
+	}
+	if err != nil {
+		a.setTurnSnapshot(SnapshotStatusFailed, "")
+		return fmt.Errorf("failed to create pre-action snapshot: %w", err)
+	}
+	if !result.Success() {
+		a.setTurnSnapshot(SnapshotStatusFailed, "")
+		stderr := strings.TrimSpace(string(result.Stderr))
+		if stderr == "" {
+			stderr = fmt.Sprintf("exit code %d", result.ExitCode)
+		}
+		return fmt.Errorf("failed to create pre-action snapshot: %s", stderr)
+	}
+
+	snapshotID := summarizeText(strings.TrimSpace(string(result.Stdout)), 120)
+	a.setTurnSnapshot(SnapshotStatusCreated, snapshotID)
+	return nil
+}
+
+// isCommandNotFound reports whether an exec error / result pair indicates the
+// snap-commit binary is missing from PATH, as opposed to snap-commit itself
+// failing with a non-zero exit.
+//
+// We deliberately use narrow, anchored matches. A bare "not found" substring
+// is too broad: snap-commit's own failure messages can legitimately contain
+// "ref not found" or "object not found", and mis-classifying those as
+// "binary missing" would silently skip the snapshot for a protected action.
+func isCommandNotFound(err error, result *executor.ExecResult) bool {
+	if err != nil {
+		// Go's os/exec surfaces a missing binary with this canonical string
+		// (see exec.LookPath / *exec.Error).
+		if strings.Contains(strings.ToLower(err.Error()), "executable file not found") {
+			return true
+		}
+	}
+	if result != nil {
+		// POSIX shells return 127 when the command does not exist. This is the
+		// most reliable signal across platforms.
+		if result.ExitCode == 127 {
+			return true
+		}
+		// Some non-POSIX execution paths may not set exit 127 but still print
+		// the canonical "command not found" phrase to stderr. Match only the
+		// anchored phrase to avoid swallowing unrelated snap-commit errors.
+		if strings.Contains(strings.ToLower(string(result.Stderr)), "command not found") {
+			return true
+		}
+	}
+	return false
+}
+
+func (a *Agent) isGitRepository(ctx context.Context, exec executor.Executor) bool {
+	result, err := exec.Exec(ctx, "git rev-parse --is-inside-work-tree", executor.ExecOptions{Timeout: 2 * time.Second})
+	if err != nil || !result.Success() {
+		return false
+	}
+	return strings.TrimSpace(string(result.Stdout)) == "true"
+}
+
+func extractShellCommand(argsJSON string) string {
+	var args struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(args.Command)
+}
+
+func shellCommandAppearsReadOnly(command string) bool {
+	base := strings.Fields(strings.TrimSpace(command))
+	if len(base) == 0 {
+		return false
+	}
+	switch base[0] {
+	case "ls", "pwd", "cat", "head", "tail", "grep", "rg", "find", "fd", "git":
+		if base[0] != "git" {
+			return true
+		}
+		return strings.HasPrefix(command, "git status") ||
+			strings.HasPrefix(command, "git diff") ||
+			strings.HasPrefix(command, "git log") ||
+			strings.HasPrefix(command, "git show") ||
+			strings.HasPrefix(command, "git branch")
+	default:
+		return false
+	}
+}
+
+func isProtectedToolName(name string) bool {
+	switch name {
+	case "write_file", "edit", "patch":
+		return true
+	default:
+		return false
+	}
+}
+
+func summarizeText(s string, limit int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= limit {
+		return s
+	}
+	return s[:limit] + "..."
+}
+
+func mapExecutionDecision(decision ExecutionDecision) SafetyClassifierDecision {
+	switch decision {
+	case ExecutionDecisionAutoExecute:
+		return SafetyClassifierDecisionAllow
+	case ExecutionDecisionBlock:
+		return SafetyClassifierDecisionDeny
+	default:
+		return SafetyClassifierDecisionAskUser
+	}
 }
 
 // formatToolOutput converts a tool's return value to a readable string.
@@ -684,29 +1235,6 @@ func (a *Agent) wrapUserMessage(msg protocol.Message, pctx prompt.PromptContext)
 		Metadata:  msg.Metadata,
 		CreatedAt: msg.CreatedAt,
 	}
-}
-
-// isToolCallSafe checks if a tool call can be auto-approved based on the tool's Safety() declaration.
-func (a *Agent) isToolCallSafe(tc *protocol.ToolCall) bool {
-	tool, ok := a.tools[tc.Name]
-	if !ok {
-		return false
-	}
-
-	safety := tool.Safety()
-
-	// Non-read-only tools always require approval
-	if !safety.ReadOnly {
-		return false
-	}
-
-	// Read-only with no path args → always safe
-	if len(safety.PathArgs) == 0 {
-		return true
-	}
-
-	// Read-only with path args → check all paths are within safe directories
-	return a.allPathsInSafeDirs(tc.Arguments, safety.PathArgs)
 }
 
 // safeDirs returns all directories that are safe for auto-approved read access.

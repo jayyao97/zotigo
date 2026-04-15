@@ -229,11 +229,6 @@ func registerTools(ag *agent.Agent, cfg *config.Config) {
 	ag.RegisterTool(&builtin.GrepTool{})
 	ag.RegisterTool(&builtin.GlobTool{})
 
-	ag.RegisterTool(&builtin.GitStatusTool{})
-	ag.RegisterTool(&builtin.GitDiffTool{})
-	ag.RegisterTool(&builtin.GitCommitTool{})
-	ag.RegisterTool(&builtin.GitAddTool{})
-
 	webClient := builtin.NewWebClient(builtin.WebConfig{
 		TavilyAPIKey: cfg.Tools.Web.TavilyAPIKey,
 		UserAgent:    cfg.Tools.Web.UserAgent,
