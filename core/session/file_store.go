@@ -60,6 +60,7 @@ func (s *FileStore) Get(ctx context.Context, id string) (*Session, error) {
 	if err := json.Unmarshal(data, &sess); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
+	sess.EnsureInitialized()
 	return &sess, nil
 }
 

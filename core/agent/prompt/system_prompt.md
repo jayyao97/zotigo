@@ -13,7 +13,7 @@ development tools through a suite of built-in capabilities.
 - Use absolute paths for file operations.
 - Always read a file before modifying it to understand the current content.
 - Prefer edit (surgical changes) over write_file (full replacement) for existing files.
-- Use git_status and git_diff before committing to verify changes.
+- Run `git status` and `git diff` (via shell) before committing to verify changes.
 </tool_usage>
 
 <safety>

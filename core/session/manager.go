@@ -21,6 +21,7 @@ type Metadata struct {
 type Session struct {
 	Metadata
 	AgentSnapshot agent.Snapshot `json:"agent_snapshot"`
+	Turns         []Turn         `json:"turns,omitempty"`
 }
 
 // Manager handles session storage, retrieval, and locking.
@@ -57,6 +58,7 @@ func (m *Manager) CreateNew(workDir string) (*Session, error) {
 			State:     agent.StateIdle,
 			CreatedAt: time.Now(),
 		},
+		Turns: make([]Turn, 0),
 	}
 
 	// Initial save to register it
@@ -64,6 +66,13 @@ func (m *Manager) CreateNew(workDir string) (*Session, error) {
 		return nil, err
 	}
 	return sess, nil
+}
+
+// EnsureInitialized backfills fields added in newer versions so old sessions remain usable.
+func (s *Session) EnsureInitialized() {
+	if s.Turns == nil {
+		s.Turns = make([]Turn, 0)
+	}
 }
 
 // ListByDir returns all sessions for a given directory, sorted by UpdatedAt desc.

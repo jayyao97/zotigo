@@ -1,5 +1,7 @@
 package config
 
+import "fmt"
+
 // Config represents the top-level configuration structure.
 type Config struct {
 	DefaultProfile string                   `mapstructure:"default_profile" yaml:"default_profile"`
@@ -25,9 +27,45 @@ type ProfileConfig struct {
 	//   Gemini: ThinkingLevel (LOW, MEDIUM, HIGH)
 	ThinkingLevel string `mapstructure:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
 
+	// Safety config controls optional safety classifier behavior for this profile.
+	Safety SafetyProfileConfig `mapstructure:"safety,omitempty" yaml:"safety,omitempty"`
+
 	// Additional provider-specific params can be added here or in a generic map
 	Params map[string]any `mapstructure:"params,omitempty" yaml:"params,omitempty"`
 }
+
+// SafetyProfileConfig holds runtime safety behavior for a profile.
+type SafetyProfileConfig struct {
+	Classifier SafetyClassifierConfig `mapstructure:"classifier,omitempty" yaml:"classifier,omitempty"`
+}
+
+// SafetyClassifierConfig controls the lightweight safety classifier.
+// Enabled uses *bool so config merging can distinguish "not set" (nil) from
+// "explicitly disabled" (false).
+type SafetyClassifierConfig struct {
+	Enabled                 *bool  `mapstructure:"enabled" yaml:"enabled"`
+	Mode                    string `mapstructure:"mode,omitempty" yaml:"mode,omitempty"`
+	Profile                 string `mapstructure:"profile,omitempty" yaml:"profile,omitempty"`
+	TimeoutMs               int    `mapstructure:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
+	AllowAutoExecuteOnAllow bool   `mapstructure:"allow_auto_execute_on_allow" yaml:"allow_auto_execute_on_allow"`
+	MaxRecentActions        int    `mapstructure:"max_recent_actions,omitempty" yaml:"max_recent_actions,omitempty"`
+	CaptureRawAuditContext  bool   `mapstructure:"capture_raw_audit_context" yaml:"capture_raw_audit_context"`
+	MaxAuditContextChars    int    `mapstructure:"max_audit_context_chars,omitempty" yaml:"max_audit_context_chars,omitempty"`
+}
+
+// IsEnabled returns whether the classifier is enabled.
+// Returns false when Enabled is nil. Note: after Manager.Load() merges
+// defaults, nil is replaced with the default value (true), so in practice
+// IsEnabled() returns true unless the user explicitly set enabled: false.
+func (c SafetyClassifierConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+// BoolPtr is a helper for constructing *bool values in config literals.
+func BoolPtr(v bool) *bool { return &v }
 
 // SecurityConfig holds security-related settings.
 type SecurityConfig struct {
@@ -61,14 +99,23 @@ func DefaultConfig() *Config {
 			"gpt-4o": {
 				Provider: "openai",
 				Model:    "gpt-4o",
+				Safety: SafetyProfileConfig{
+					Classifier: defaultSafetyClassifierConfig(),
+				},
 			},
 			"claude-sonnet": {
 				Provider: "claude",
 				Model:    "claude-4-6-sonnet-latest",
+				Safety: SafetyProfileConfig{
+					Classifier: defaultSafetyClassifierConfig(),
+				},
 			},
 			"gemini-pro": {
 				Provider: "gemini",
 				Model:    "gemini-3.0-pro-latest",
+				Safety: SafetyProfileConfig{
+					Classifier: defaultSafetyClassifierConfig(),
+				},
 			},
 		},
 		Security: SecurityConfig{
@@ -86,4 +133,39 @@ func DefaultConfig() *Config {
 			},
 		},
 	}
+}
+
+func defaultSafetyClassifierConfig() SafetyClassifierConfig {
+	return SafetyClassifierConfig{
+		Enabled:                 BoolPtr(true),
+		Mode:                    "high_risk_and_ambiguous",
+		TimeoutMs:               3000,
+		AllowAutoExecuteOnAllow: false,
+		MaxRecentActions:        6,
+		CaptureRawAuditContext:  false,
+		MaxAuditContextChars:    1200,
+	}
+}
+
+// ResolveClassifierProfile resolves the classifier profile for an active profile.
+// If classifier.profile is empty, it reuses the active profile itself.
+func (c *Config) ResolveClassifierProfile(activeProfileName string) (string, ProfileConfig, error) {
+	if c == nil {
+		return "", ProfileConfig{}, fmt.Errorf("config is nil")
+	}
+	active, ok := c.Profiles[activeProfileName]
+	if !ok {
+		return "", ProfileConfig{}, fmt.Errorf("active profile %q not found", activeProfileName)
+	}
+
+	targetName := activeProfileName
+	if name := active.Safety.Classifier.Profile; name != "" {
+		targetName = name
+	}
+
+	target, ok := c.Profiles[targetName]
+	if !ok {
+		return "", ProfileConfig{}, fmt.Errorf("classifier profile %q not found", targetName)
+	}
+	return targetName, target, nil
 }

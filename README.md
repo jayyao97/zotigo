@@ -109,6 +109,20 @@ profiles:
     provider: openai
     model: gpt-4o
     api_key: sk-...
+    safety:
+      classifier:
+        enabled: true
+        mode: high_risk_and_ambiguous
+        profile: gpt-5-mini
+        timeout_ms: 3000
+        allow_auto_execute_on_allow: false
+        max_recent_actions: 6
+        capture_raw_audit_context: false
+        max_audit_context_chars: 1200
+  gpt-5-mini:
+    provider: openai
+    model: gpt-5-mini
+    api_key: sk-...
   claude-sonnet:
     provider: claude
     model: claude-4-6-sonnet-latest
@@ -118,6 +132,8 @@ profiles:
     model: gemini-3.0-pro-latest
     api_key: ...
 ```
+
+The `safety.classifier` block is optional. If omitted, Zotigo uses built-in defaults. If `classifier.profile` is omitted, the classifier reuses the current active profile.
 
 Run:
 ```bash

@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 
@@ -31,6 +32,23 @@ func TestFileStore_PutGet(t *testing.T) {
 			State:     agent.StateIdle,
 			CreatedAt: time.Now(),
 		},
+		Turns: []Turn{
+			{
+				ID:                "turn_1",
+				CreatedAt:         time.Now(),
+				UpdatedAt:         time.Now(),
+				UserPromptSummary: "hello",
+				SafetyEvents: []SafetyEvent{
+					{
+						Timestamp:      time.Now(),
+						TurnID:         "turn_1",
+						ToolName:       "shell",
+						DecisionSource: SafetyDecisionSourceClassifier,
+						Decision:       SafetyDecisionAskUser,
+					},
+				},
+			},
+		},
 	}
 
 	// Put
@@ -52,6 +70,12 @@ func TestFileStore_PutGet(t *testing.T) {
 	}
 	if loaded.LastPrompt != sess.LastPrompt {
 		t.Errorf("LastPrompt mismatch: got %s, want %s", loaded.LastPrompt, sess.LastPrompt)
+	}
+	if len(loaded.Turns) != 1 {
+		t.Fatalf("Expected 1 turn, got %d", len(loaded.Turns))
+	}
+	if len(loaded.Turns[0].SafetyEvents) != 1 {
+		t.Fatalf("Expected 1 safety event, got %d", len(loaded.Turns[0].SafetyEvents))
 	}
 }
 
@@ -258,6 +282,9 @@ func TestManager_CreateAndLoad(t *testing.T) {
 	if sess.WorkingDirectory != "/test/project" {
 		t.Errorf("WorkingDirectory mismatch: got %s", sess.WorkingDirectory)
 	}
+	if sess.Turns == nil {
+		t.Error("Expected turns slice to be initialized")
+	}
 
 	// Load the session
 	loaded, err := mgr.Load(sess.ID)
@@ -267,6 +294,47 @@ func TestManager_CreateAndLoad(t *testing.T) {
 
 	if loaded.ID != sess.ID {
 		t.Errorf("ID mismatch: got %s, want %s", loaded.ID, sess.ID)
+	}
+	if loaded.Turns == nil {
+		t.Error("Expected turns slice to be initialized on load")
+	}
+}
+
+func TestFileStore_Get_BackfillsMissingTurns(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	raw := `{
+  "id": "legacy_session",
+  "working_directory": "/tmp/test",
+  "created_at": "2026-01-01T00:00:00Z",
+  "updated_at": "2026-01-01T00:00:00Z",
+  "agent_snapshot": {
+    "state": "idle",
+    "created_at": "2026-01-01T00:00:00Z"
+  }
+}`
+	sessionPath := store.sessionPath("legacy_session")
+	if err := os.WriteFile(sessionPath, []byte(raw), 0644); err != nil {
+		t.Fatalf("Failed to write legacy session: %v", err)
+	}
+
+	loaded, err := store.Get(context.Background(), "legacy_session")
+	if err != nil {
+		t.Fatalf("Get failed: %v", err)
+	}
+	if loaded == nil {
+		t.Fatal("Expected loaded session")
+	}
+	if loaded.Turns == nil {
+		t.Fatal("Expected missing turns to be backfilled")
+	}
+	if len(loaded.Turns) != 0 {
+		t.Fatalf("Expected no turns, got %d", len(loaded.Turns))
 	}
 }
 

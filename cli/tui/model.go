@@ -816,11 +816,53 @@ func (m Model) saveSession() {
 	sess, err := m.sessionMgr.Load(m.sessionID)
 	if err == nil {
 		sess.AgentSnapshot = snap
+		sess.Turns = convertAgentTurns(snap.Turns)
 		if lastPrompt != "" {
 			sess.LastPrompt = lastPrompt
 		}
 		m.sessionMgr.Save(sess)
 	}
+}
+
+func convertAgentTurns(turns []agent.TurnAudit) []session.Turn {
+	result := make([]session.Turn, len(turns))
+	for i, turn := range turns {
+		result[i] = session.Turn{
+			ID:                turn.ID,
+			CreatedAt:         turn.CreatedAt,
+			UpdatedAt:         turn.UpdatedAt,
+			UserPromptSummary: turn.UserPromptSummary,
+			SnapshotStatus:    session.SnapshotStatus(turn.SnapshotStatus),
+			SnapshotID:        turn.SnapshotID,
+		}
+		if len(turn.SafetyEvents) > 0 {
+			result[i].SafetyEvents = make([]session.SafetyEvent, len(turn.SafetyEvents))
+			for j, event := range turn.SafetyEvents {
+				result[i].SafetyEvents[j] = session.SafetyEvent{
+					Timestamp:          event.Timestamp,
+					TurnID:             event.TurnID,
+					ToolCallID:         event.ToolCallID,
+					ToolName:           event.ToolName,
+					ToolArgsSummary:    event.ToolArgsSummary,
+					DecisionSource:     session.SafetyDecisionSource(event.DecisionSource),
+					Decision:           session.SafetyDecision(event.Decision),
+					Reason:             event.Reason,
+					RiskLevel:          event.RiskLevel,
+					SnapshotStatus:     session.SnapshotStatus(event.SnapshotStatus),
+					SnapshotID:         event.SnapshotID,
+					ClassifierProvider: event.ClassifierProvider,
+					ClassifierModel:    event.ClassifierModel,
+					ContextSummary: session.ContextSummary{
+						UserPrompt:    event.ContextSummary.UserPrompt,
+						RecentActions: event.ContextSummary.RecentActions,
+						Trigger:       event.ContextSummary.Trigger,
+					},
+					RawContext: event.RawContext,
+				}
+			}
+		}
+	}
+	return result
 }
 
 func renderMessage(msg protocol.Message) (string, bool) {
@@ -1181,6 +1223,8 @@ func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
 }
 
 // formatPendingActions builds the approval header string from pending tool actions.
+// Includes the classifier/policy reason when available so users can see why
+// approval was requested.
 func formatPendingActions(actions []*agent.PendingAction) string {
 	var parts []string
 	for _, act := range actions {
@@ -1188,7 +1232,28 @@ func formatPendingActions(actions []*agent.PendingAction) string {
 		if tc == nil {
 			tc = &protocol.ToolCall{Name: act.Name, Arguments: act.Arguments}
 		}
-		parts = append(parts, formatToolCall(tc))
+		line := formatToolCall(tc)
+		if reason := strings.TrimSpace(act.Decision.Reason); reason != "" {
+			badge := ""
+			switch act.Decision.Source {
+			case agent.SafetyDecisionSourceClassifier:
+				badge = "classifier"
+			case agent.SafetyDecisionSourceHardRule:
+				badge = "policy"
+			}
+			if act.Decision.RiskLevel != "" && act.Decision.RiskLevel != "normal" {
+				badge = strings.TrimSpace(badge + " " + act.Decision.RiskLevel)
+			}
+			if badge != "" {
+				line += fmt.Sprintf("\n  ⚠ [%s] %s", badge, reason)
+			} else {
+				line += fmt.Sprintf("\n  ⚠ %s", reason)
+			}
+			if act.Decision.RequiresSnapshot {
+				line += " (snapshot will be created)"
+			}
+		}
+		parts = append(parts, line)
 	}
 	return strings.Join(parts, "\n")
 }

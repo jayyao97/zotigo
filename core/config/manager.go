@@ -30,6 +30,7 @@ func (m *Manager) Load() (*Config, error) {
 	m.v.SetDefault("profiles", defaults.Profiles)
 	m.v.SetDefault("security", defaults.Security)
 	m.v.SetDefault("ui", defaults.UI)
+	m.v.SetDefault("tools", defaults.Tools)
 
 	// Load Global
 	home, err := os.UserHomeDir()
@@ -80,7 +81,52 @@ func (m *Manager) Load() (*Config, error) {
 	for name, profile := range defaults.Profiles {
 		if _, exists := cfg.Profiles[name]; !exists {
 			cfg.Profiles[name] = profile
+			continue
 		}
+
+		merged := cfg.Profiles[name]
+
+		// If the user omitted the entire classifier block, adopt defaults wholesale.
+		// Otherwise merge field-by-field, inheriting defaults for zero-valued fields
+		// including booleans.
+		userOmittedClassifier := merged.Safety.Classifier == (SafetyClassifierConfig{})
+		if userOmittedClassifier {
+			merged.Safety.Classifier = profile.Safety.Classifier
+		} else {
+			def := profile.Safety.Classifier
+			c := &merged.Safety.Classifier
+			// *bool nil means "not set" — inherit default.
+			// Non-nil means the user explicitly chose true or false.
+			if c.Enabled == nil {
+				c.Enabled = def.Enabled
+			}
+			if c.Mode == "" {
+				c.Mode = def.Mode
+			}
+			if c.Profile == "" {
+				c.Profile = def.Profile
+			}
+			if c.TimeoutMs == 0 {
+				c.TimeoutMs = def.TimeoutMs
+			}
+			if c.MaxRecentActions == 0 {
+				c.MaxRecentActions = def.MaxRecentActions
+			}
+			if c.MaxAuditContextChars == 0 {
+				c.MaxAuditContextChars = def.MaxAuditContextChars
+			}
+		}
+		cfg.Profiles[name] = merged
+	}
+
+	if cfg.Tools.Web.UserAgent == "" {
+		cfg.Tools.Web.UserAgent = defaults.Tools.Web.UserAgent
+	}
+	if cfg.Tools.Web.TimeoutSec == 0 {
+		cfg.Tools.Web.TimeoutSec = defaults.Tools.Web.TimeoutSec
+	}
+	if cfg.Tools.Web.MaxPageSize == 0 {
+		cfg.Tools.Web.MaxPageSize = defaults.Tools.Web.MaxPageSize
 	}
 
 	return &cfg, nil
@@ -106,6 +152,7 @@ func (m *Manager) Save(cfg *Config) error {
 	vSave.Set("profiles", cfg.Profiles)
 	vSave.Set("security", cfg.Security)
 	vSave.Set("ui", cfg.UI)
+	vSave.Set("tools", cfg.Tools)
 
 	if err := vSave.WriteConfigAs(filePath); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)

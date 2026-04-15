@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
+	"github.com/jayyao97/zotigo/core/providers"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
@@ -178,6 +179,24 @@ func Run(args []string) int {
 		ag.Restore(currentSession.AgentSnapshot)
 	}
 
+	if profile.Safety.Classifier.IsEnabled() {
+		classifierProfileName, classifierProfile, err := cfg.ResolveClassifierProfile(profileName)
+		if err != nil {
+			ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+			agent.WithClassifierUnavailableReason(err.Error())(ag)
+		} else {
+			agent.WithClassifierProfile(classifierProfileName, classifierProfile)(ag)
+			if classifierProvider, err := providers.NewProvider(classifierProfile); err != nil {
+				agent.WithClassifierUnavailableReason(
+					fmt.Sprintf("failed to create classifier provider %q: %v", classifierProfileName, err),
+				)(ag)
+			} else {
+				classifier := agent.NewProviderSafetyClassifier(classifierProvider, profile.Safety.Classifier)
+				agent.WithSafetyClassifier(classifier)(ag)
+			}
+		}
+	}
+
 	ag.RegisterTool(&builtin.ReadFileTool{})
 	ag.RegisterTool(&builtin.WriteFileTool{})
 	ag.RegisterTool(&builtin.ListDirTool{})
@@ -187,11 +206,6 @@ func Run(args []string) int {
 	ag.RegisterTool(&builtin.ShellTool{})
 	ag.RegisterTool(&builtin.GrepTool{})
 	ag.RegisterTool(&builtin.GlobTool{})
-
-	ag.RegisterTool(&builtin.GitStatusTool{})
-	ag.RegisterTool(&builtin.GitDiffTool{})
-	ag.RegisterTool(&builtin.GitCommitTool{})
-	ag.RegisterTool(&builtin.GitAddTool{})
 
 	lspManager := lsp.NewManager(cwd)
 	defer lspManager.StopAll()

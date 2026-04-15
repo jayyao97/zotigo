@@ -3,6 +3,7 @@
 package testutil
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -12,10 +13,12 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Config file names in priority order.
+// Config file names in priority order, including legacy fallbacks.
 var e2eConfigFileNames = []string{
 	"zotigo.e2e.yaml",
 	"zotigo.e2e.yml",
+	"e2e.config.json",
+	"config.json",
 }
 
 // E2EConfig mirrors the main config structure for e2e testing.
@@ -56,6 +59,20 @@ func (c *E2EConfig) GetProfile(name string) (config.ProfileConfig, bool) {
 // AllProfiles returns all configured profiles.
 func (c *E2EConfig) AllProfiles() map[string]config.ProfileConfig {
 	return c.Profiles
+}
+
+// ResolveClassifierProfile resolves the classifier profile for the default profile.
+func (c *E2EConfig) ResolveClassifierProfile() (string, config.ProfileConfig, error) {
+	active := c.GetProfileConfig()
+	targetName := c.DefaultProfile
+	if name := active.Safety.Classifier.Profile; name != "" {
+		targetName = name
+	}
+	target, ok := c.Profiles[targetName]
+	if !ok {
+		return "", config.ProfileConfig{}, fmt.Errorf("classifier profile %q not found", targetName)
+	}
+	return targetName, target, nil
 }
 
 // ProfilesByProvider returns profiles matching a specific provider.

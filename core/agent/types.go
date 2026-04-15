@@ -19,6 +19,8 @@ type Snapshot struct {
 	State          State              `json:"state"`
 	History        []protocol.Message `json:"history"`
 	PendingActions []*PendingAction   `json:"pending_actions,omitempty"`
+	TurnSafety     TurnSafetyState    `json:"turn_safety,omitempty"`
+	Turns          []TurnAudit        `json:"turns,omitempty"`
 	CreatedAt      time.Time          `json:"created_at"`
 }
 
@@ -27,6 +29,7 @@ type PendingAction struct {
 	ToolCallID string             `json:"tool_call_id"`
 	Name       string             `json:"name"`
 	Arguments  string             `json:"arguments"`
+	Decision   ActionDecision     `json:"decision,omitempty"`
 	ToolCall   *protocol.ToolCall `json:"-"` // Internal reference
 }
 
