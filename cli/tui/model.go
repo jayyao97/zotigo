@@ -118,17 +118,6 @@ func (m Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-// eraseVisibleScreen emits ANSI codes to clear the entire visible terminal
-// display (\x1b[2J) and home the cursor (\x1b[H). Unlike \x1b[3J, this does
-// NOT touch the terminal's scrollback buffer, so the user can still scroll
-// up to see past conversation content. We use this on resize to wipe the
-// inline viewport's ghost fragments that bubbletea's own ClearScreen can't
-// reach (it only manages the viewport region, not rows above it).
-func eraseVisibleScreen() tea.Msg {
-	_, _ = io.WriteString(os.Stdout, "\x1b[2J\x1b[H")
-	return nil
-}
-
 func (m Model) printInitialHistory(isRepaint bool) tea.Cmd {
 	snap := m.agent.Snapshot()
 	history := snap.History
@@ -189,15 +178,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// On a real resize (width changed), the terminal hard-wraps previously
 		// printed content at the old width, leaving stale box borders and
-		// orphaned line fragments above the inline viewport. Bubbletea's own
-		// ClearScreen only erases its viewport region, so any ghost fragment
-		// sitting above the viewport persists. Emit \x1b[2J (erase entire
-		// visible display) + \x1b[H (cursor home) directly. This clears what's
-		// on screen right now but preserves the terminal's scrollback buffer —
-		// the user can scroll up to see history as usual. Then ClearScreen
-		// resyncs bubbletea's frame buffer so the next redraw is clean.
+		// orphaned line fragments above the inline viewport. Ask bubbletea to
+		// clear its viewport so the new input area renders cleanly.
+		//
+		// NOTE: This doesn't reach rows above bubbletea's viewport, so one
+		// stale border fragment from the previous frame may remain visible in
+		// scrollback. Truly erasing it requires raw ANSI writes that conflict
+		// with bubbletea's internal renderer state — don't go there.
 		if prevWidth != 0 && prevWidth != m.width {
-			return m, tea.Sequence(eraseVisibleScreen, tea.ClearScreen)
+			return m, tea.ClearScreen
 		}
 
 		return m, nil
