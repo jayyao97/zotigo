@@ -118,6 +118,17 @@ func (m Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+// eraseVisibleScreen emits ANSI codes to clear the entire visible terminal
+// display (\x1b[2J) and home the cursor (\x1b[H). Unlike \x1b[3J, this does
+// NOT touch the terminal's scrollback buffer, so the user can still scroll
+// up to see past conversation content. We use this on resize to wipe the
+// inline viewport's ghost fragments that bubbletea's own ClearScreen can't
+// reach (it only manages the viewport region, not rows above it).
+func eraseVisibleScreen() tea.Msg {
+	_, _ = io.WriteString(os.Stdout, "\x1b[2J\x1b[H")
+	return nil
+}
+
 func (m Model) printInitialHistory(isRepaint bool) tea.Cmd {
 	snap := m.agent.Snapshot()
 	history := snap.History
@@ -178,12 +189,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// On a real resize (width changed), the terminal hard-wraps previously
 		// printed content at the old width, leaving stale box borders and
-		// orphaned line fragments above the inline viewport. Clear the visible
-		// screen so the new input area renders cleanly. We intentionally don't
-		// reprint history here — reprinting would duplicate past messages in
-		// scrollback on every resize; the user can scroll up to see them.
+		// orphaned line fragments above the inline viewport. Bubbletea's own
+		// ClearScreen only erases its viewport region, so any ghost fragment
+		// sitting above the viewport persists. Emit \x1b[2J (erase entire
+		// visible display) + \x1b[H (cursor home) directly. This clears what's
+		// on screen right now but preserves the terminal's scrollback buffer —
+		// the user can scroll up to see history as usual. Then ClearScreen
+		// resyncs bubbletea's frame buffer so the next redraw is clean.
 		if prevWidth != 0 && prevWidth != m.width {
-			return m, tea.ClearScreen
+			return m, tea.Sequence(eraseVisibleScreen, tea.ClearScreen)
 		}
 
 		return m, nil
