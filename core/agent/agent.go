@@ -907,7 +907,7 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 
 	switch resp.Decision {
 	case SafetyClassifierDecisionAllow:
-		if !a.cfg.Safety.Classifier.AllowAutoExecuteOnAllow {
+		if a.cfg.Safety.Classifier.AllowAutoExecuteOnAllow != nil && !*a.cfg.Safety.Classifier.AllowAutoExecuteOnAllow {
 			return ActionDecision{
 				Decision:         ExecutionDecisionRequireApproval,
 				Source:           SafetyDecisionSourceClassifier,

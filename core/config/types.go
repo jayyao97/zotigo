@@ -47,7 +47,7 @@ type SafetyClassifierConfig struct {
 	Mode                    string `mapstructure:"mode,omitempty" yaml:"mode,omitempty"`
 	Profile                 string `mapstructure:"profile,omitempty" yaml:"profile,omitempty"`
 	TimeoutMs               int    `mapstructure:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
-	AllowAutoExecuteOnAllow bool   `mapstructure:"allow_auto_execute_on_allow" yaml:"allow_auto_execute_on_allow"`
+	AllowAutoExecuteOnAllow *bool  `mapstructure:"allow_auto_execute_on_allow" yaml:"allow_auto_execute_on_allow"`
 	MaxRecentActions        int    `mapstructure:"max_recent_actions,omitempty" yaml:"max_recent_actions,omitempty"`
 	CaptureRawAuditContext  bool   `mapstructure:"capture_raw_audit_context" yaml:"capture_raw_audit_context"`
 	MaxAuditContextChars    int    `mapstructure:"max_audit_context_chars,omitempty" yaml:"max_audit_context_chars,omitempty"`
@@ -141,7 +141,7 @@ func defaultSafetyClassifierConfig() SafetyClassifierConfig {
 		Enabled:                 BoolPtr(true),
 		Mode:                    "high_risk_and_ambiguous",
 		TimeoutMs:               3000,
-		AllowAutoExecuteOnAllow: true,
+		AllowAutoExecuteOnAllow: BoolPtr(true),
 		MaxRecentActions:        6,
 		CaptureRawAuditContext:  false,
 		MaxAuditContextChars:    1200,

@@ -879,7 +879,7 @@ func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
 		Safety: config.SafetyProfileConfig{
 			Classifier: config.SafetyClassifierConfig{
 				Enabled:                 config.BoolPtr(true),
-				AllowAutoExecuteOnAllow: true,
+				AllowAutoExecuteOnAllow: config.BoolPtr(true),
 			},
 		},
 	}
