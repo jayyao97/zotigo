@@ -141,7 +141,7 @@ func defaultSafetyClassifierConfig() SafetyClassifierConfig {
 		Enabled:                 BoolPtr(true),
 		Mode:                    "high_risk_and_ambiguous",
 		TimeoutMs:               3000,
-		AllowAutoExecuteOnAllow: false,
+		AllowAutoExecuteOnAllow: true,
 		MaxRecentActions:        6,
 		CaptureRawAuditContext:  false,
 		MaxAuditContextChars:    1200,
