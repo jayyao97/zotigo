@@ -6,54 +6,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
 
-// trackingExec is a minimal executor wrapper that implements tools.ReadTracker
-// for testing the Edit/Write Read-first enforcement.
-type trackingExec struct {
-	executor.Executor
-	mu  sync.Mutex
-	set map[string]bool
+// newTrackingExec returns an executor that tracks reads using the
+// public helper — same wrapper the agent uses.
+func newTrackingExec(base executor.Executor) executor.Executor {
+	return tools.WrapReadTracker(base)
 }
-
-func newTrackingExec(base executor.Executor) *trackingExec {
-	return &trackingExec{Executor: base, set: map[string]bool{}}
-}
-
-func (e *trackingExec) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	b, err := e.Executor.ReadFile(ctx, path)
-	if err == nil {
-		e.MarkRead(path)
-	}
-	return b, err
-}
-
-func (e *trackingExec) HasRead(path string) bool {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.set[e.key(path)]
-}
-
-func (e *trackingExec) MarkRead(path string) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.set[e.key(path)] = true
-}
-
-func (e *trackingExec) key(path string) string {
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(e.WorkDir(), path)
-	}
-	return filepath.Clean(path)
-}
-
-var _ tools.ReadTracker = (*trackingExec)(nil)
 
 func TestEditTool_RequiresReadFirst(t *testing.T) {
 	tmpDir := t.TempDir()
@@ -89,6 +54,27 @@ func TestEditTool_RequiresReadFirst(t *testing.T) {
 		b, _ := os.ReadFile(path)
 		if !strings.HasPrefix(string(b), "world") {
 			t.Errorf("expected edit applied, got %q", b)
+		}
+	})
+
+	t.Run("edit after external modification fails", func(t *testing.T) {
+		extPath := filepath.Join(tmpDir, "ext.txt")
+		if err := os.WriteFile(extPath, []byte("aaa\n"), fs.FileMode(0644)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (&builtin.ReadFileTool{}).Execute(ctx, exec, `{"path":"`+extPath+`"}`); err != nil {
+			t.Fatalf("read: %v", err)
+		}
+		// Simulate an external edit — bump mtime forward and change size.
+		later := time.Now().Add(2 * time.Second)
+		if err := os.WriteFile(extPath, []byte("bbbb changed\n"), fs.FileMode(0644)); err != nil {
+			t.Fatal(err)
+		}
+		_ = os.Chtimes(extPath, later, later)
+
+		_, err := tool.Execute(ctx, exec, `{"path":"`+extPath+`","old_string":"aaa","new_string":"zzz"}`)
+		if err == nil || !strings.Contains(err.Error(), "changed on disk") {
+			t.Fatalf("expected on-disk-change error, got %v", err)
 		}
 	})
 }

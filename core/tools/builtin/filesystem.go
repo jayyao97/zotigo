@@ -169,12 +169,11 @@ func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, arg
 		return nil, fmt.Errorf("path is required")
 	}
 
-	// Require a prior read_file only when the file already exists — creating
-	// new files doesn't need a Read first. Missing Stat is treated as
-	// "file does not exist" and allowed through.
-	if tracker, ok := exec.(tools.ReadTracker); ok && !tracker.HasRead(args.Path) {
-		if info, statErr := exec.Stat(ctx, args.Path); statErr == nil && info != nil && !info.IsDir {
-			return nil, fmt.Errorf("must call read_file on %s before overwriting an existing file", args.Path)
+	// Only enforce Read-first when the target already exists — creating
+	// a new file has nothing to read.
+	if info, statErr := exec.Stat(ctx, args.Path); statErr == nil && info != nil && !info.IsDir {
+		if err := checkReadFreshness(ctx, exec, args.Path, "overwriting"); err != nil {
+			return nil, err
 		}
 	}
 
