@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -13,8 +14,10 @@ import (
 
 type ReadFileTool struct{}
 
-func (t *ReadFileTool) Name() string        { return "read_file" }
-func (t *ReadFileTool) Description() string { return "Read content of a file from the filesystem" }
+func (t *ReadFileTool) Name() string { return "read_file" }
+func (t *ReadFileTool) Description() string {
+	return "Read content of a file from the filesystem. Use offset/limit to read a slice of large files (1-indexed line numbers)."
+}
 
 func (t *ReadFileTool) Schema() any {
 	return map[string]any{
@@ -23,6 +26,16 @@ func (t *ReadFileTool) Schema() any {
 			"path": map[string]any{
 				"type":        "string",
 				"description": "The absolute or relative path to the file",
+			},
+			"offset": map[string]any{
+				"type":        "integer",
+				"description": "1-indexed line number to start from (optional; defaults to 1). Use for large files.",
+				"minimum":     1,
+			},
+			"limit": map[string]any{
+				"type":        "integer",
+				"description": "Maximum number of lines to return (optional; defaults to the whole file). Use for large files.",
+				"minimum":     1,
 			},
 		},
 		"required": []string{"path"},
@@ -38,7 +51,9 @@ func (t *ReadFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 
 func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
 	var args struct {
-		Path string `json:"path"`
+		Path   string `json:"path"`
+		Offset int    `json:"offset"`
+		Limit  int    `json:"limit"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -48,7 +63,52 @@ func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, args
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
-	return string(content), nil
+
+	if args.Offset <= 1 && args.Limit <= 0 {
+		return string(content), nil
+	}
+	return sliceLines(string(content), args.Offset, args.Limit), nil
+}
+
+// sliceLines returns a 1-indexed [offset, offset+limit) window of lines.
+// offset <= 1 means "from the start". limit <= 0 means "through the end".
+// A trailing marker notes how many lines were skipped or truncated so the
+// caller (usually the LLM) can reason about whether to request more.
+func sliceLines(content string, offset, limit int) string {
+	lines := strings.Split(content, "\n")
+	// strings.Split("a\n", "\n") => ["a", ""]; drop the synthetic trailing
+	// empty entry so line counts match the file's actual line count.
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	total := len(lines)
+
+	start := offset - 1
+	if start < 0 {
+		start = 0
+	}
+	if start >= total {
+		return fmt.Sprintf("[empty: file has %d lines; offset %d is past end]", total, offset)
+	}
+
+	end := total
+	if limit > 0 && start+limit < total {
+		end = start + limit
+	}
+
+	var notes []string
+	if start > 0 {
+		notes = append(notes, fmt.Sprintf("skipped %d lines before offset", start))
+	}
+	if end < total {
+		notes = append(notes, fmt.Sprintf("truncated %d lines after limit", total-end))
+	}
+
+	body := strings.Join(lines[start:end], "\n")
+	if len(notes) == 0 {
+		return body
+	}
+	return body + "\n\n[" + strings.Join(notes, "; ") + "]"
 }
 
 // --- WriteFile ---
