@@ -42,8 +42,7 @@ type Agent struct {
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
 
-	hooks     []Hook
-	toolChain Next // lazily initialized from hooks on first dispatch
+	hooks []Hook
 
 	mu             sync.RWMutex
 	state          State
@@ -665,7 +664,10 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			Arguments: action.Arguments,
 			Executor:  exec,
 		}
-		res, err := a.invokeTool(ctx, call)
+		invoke := buildHookChain(a.hooks, func(ctx context.Context, c *ToolCall) (any, error) {
+			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
+		})
+		res, err := invoke(ctx, call)
 		if err != nil {
 			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
 			tr.ToolName = action.Name

@@ -42,7 +42,10 @@ func WithHook(h Hook) AgentOption {
 }
 
 // buildHookChain composes all registered hooks around final. Final is
-// typically the raw tool.Execute call.
+// typically the raw tool.Execute call. Callers build the chain freshly
+// per dispatch — hooks slice is small and closure allocation is cheap
+// relative to the tool call itself; keeping build inline avoids the
+// synchronization dance a cached chain would need.
 func buildHookChain(hooks []Hook, final Next) Next {
 	chain := final
 	for i := len(hooks) - 1; i >= 0; i-- {
@@ -52,17 +55,4 @@ func buildHookChain(hooks []Hook, final Next) Next {
 		chain = hooks[i](chain)
 	}
 	return chain
-}
-
-// invokeTool runs a ToolCall through the cached hook chain. The chain
-// is built on first call from a.hooks (which is append-only via
-// WithHook at construction time), then reused — so N tool calls in a
-// turn allocate one chain, not N.
-func (a *Agent) invokeTool(ctx context.Context, call *ToolCall) (any, error) {
-	if a.toolChain == nil {
-		a.toolChain = buildHookChain(a.hooks, func(ctx context.Context, c *ToolCall) (any, error) {
-			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
-		})
-	}
-	return a.toolChain(ctx, call)
 }
