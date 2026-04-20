@@ -47,8 +47,14 @@ func (t *ShellTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 		return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "shell command missing"}
 	}
 
-	// Sandbox policy is the first hard gate.
-	if checker, ok := call.Executor.(interface {
+	// Sandbox policy is the first hard gate. The executor may be wrapped
+	// (e.g. the agent's read tracker) so unwrap once before the capability
+	// probe.
+	exec := call.Executor
+	if u, ok := exec.(interface{ Unwrap() executor.Executor }); ok {
+		exec = u.Unwrap()
+	}
+	if checker, ok := exec.(interface {
 		CheckCommand(string) sandbox.CommandCheckResult
 	}); ok {
 		switch checker.CheckCommand(command).RiskLevel {

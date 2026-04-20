@@ -14,9 +14,14 @@ import (
 
 type ReadFileTool struct{}
 
+// defaultReadLimit caps a single read_file call. Files longer than this
+// return a truncated slice plus a <system-reminder> telling the model to
+// follow up with offset+limit if it needs more.
+const defaultReadLimit = 2000
+
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return "Read content of a file from the filesystem. Use offset/limit to read a slice of large files (1-indexed line numbers)."
+	return fmt.Sprintf("Read content of a file from the filesystem. Defaults to the first %d lines; pass offset/limit to page through larger files (1-indexed line numbers).", defaultReadLimit)
 }
 
 func (t *ReadFileTool) Schema() any {
@@ -29,12 +34,12 @@ func (t *ReadFileTool) Schema() any {
 			},
 			"offset": map[string]any{
 				"type":        "integer",
-				"description": "1-indexed line number to start from (optional; defaults to 1). Use for large files.",
+				"description": fmt.Sprintf("1-indexed line number to start from (optional; defaults to 1). Use together with limit to page through files larger than %d lines.", defaultReadLimit),
 				"minimum":     1,
 			},
 			"limit": map[string]any{
 				"type":        "integer",
-				"description": "Maximum number of lines to return (optional; defaults to the whole file). Use for large files.",
+				"description": fmt.Sprintf("Maximum number of lines to return (optional; defaults to %d). Raise or combine with offset to read more.", defaultReadLimit),
 				"minimum":     1,
 			},
 		},
@@ -64,16 +69,18 @@ func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, args
 		return nil, fmt.Errorf("failed to read file: %w", err)
 	}
 
-	if args.Offset <= 1 && args.Limit <= 0 {
-		return string(content), nil
+	limit := args.Limit
+	if limit <= 0 {
+		limit = defaultReadLimit
 	}
-	return sliceLines(string(content), args.Offset, args.Limit), nil
+	return sliceLines(string(content), args.Offset, limit), nil
 }
 
 // sliceLines returns a 1-indexed [offset, offset+limit) window of lines.
-// offset <= 1 means "from the start". limit <= 0 means "through the end".
-// A trailing marker notes how many lines were skipped or truncated so the
-// caller (usually the LLM) can reason about whether to request more.
+// offset <= 1 means "from the start". A trailing <system-reminder> notes
+// how many lines were skipped before offset or remain after the window,
+// so the model can decide whether to follow up with another read_file
+// call using offset+limit.
 func sliceLines(content string, offset, limit int) string {
 	lines := strings.Split(content, "\n")
 	// strings.Split("a\n", "\n") => ["a", ""]; drop the synthetic trailing
@@ -88,7 +95,7 @@ func sliceLines(content string, offset, limit int) string {
 		start = 0
 	}
 	if start >= total {
-		return fmt.Sprintf("[empty: file has %d lines; offset %d is past end]", total, offset)
+		return fmt.Sprintf("<system-reminder>File has %d lines; offset %d is past the end.</system-reminder>", total, offset)
 	}
 
 	end := total
@@ -98,35 +105,39 @@ func sliceLines(content string, offset, limit int) string {
 
 	var notes []string
 	if start > 0 {
-		notes = append(notes, fmt.Sprintf("skipped %d lines before offset", start))
+		notes = append(notes, fmt.Sprintf("Skipped %d lines before offset %d.", start, offset))
 	}
 	if end < total {
-		notes = append(notes, fmt.Sprintf("truncated %d lines after limit", total-end))
+		notes = append(notes, fmt.Sprintf("File has more lines: showing %d-%d of %d. Call read_file again with offset=%d to continue.", start+1, end, total, end+1))
 	}
 
 	body := strings.Join(lines[start:end], "\n")
 	if len(notes) == 0 {
 		return body
 	}
-	return body + "\n\n[" + strings.Join(notes, "; ") + "]"
+	return body + "\n\n<system-reminder>" + strings.Join(notes, " ") + "</system-reminder>"
 }
 
 // --- WriteFile ---
 
 type WriteFileTool struct{}
 
-func (t *WriteFileTool) Name() string        { return "write_file" }
-func (t *WriteFileTool) Description() string { return "Write content to a file (overwrites existing)" }
+func (t *WriteFileTool) Name() string { return "write_file" }
+func (t *WriteFileTool) Description() string {
+	return "Write content to a file (overwrites existing). When the file already exists you must call read_file first so the overwrite is based on the real contents, not a guess."
+}
 
 func (t *WriteFileTool) Schema() any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"path": map[string]any{
-				"type": "string",
+				"type":        "string",
+				"description": "The absolute or relative path to the file",
 			},
 			"content": map[string]any{
-				"type": "string",
+				"type":        "string",
+				"description": "The full replacement content to write to the file",
 			},
 		},
 		"required": []string{"path", "content"},
@@ -153,6 +164,18 @@ func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, arg
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.Path == "" {
+		return nil, fmt.Errorf("path is required")
+	}
+
+	// Require a prior read_file only when the file already exists — creating
+	// new files doesn't need a Read first. Missing Stat is treated as
+	// "file does not exist" and allowed through.
+	if tracker, ok := exec.(tools.ReadTracker); ok && !tracker.HasRead(args.Path) {
+		if info, statErr := exec.Stat(ctx, args.Path); statErr == nil && info != nil && !info.IsDir {
+			return nil, fmt.Errorf("must call read_file on %s before overwriting an existing file", args.Path)
+		}
 	}
 
 	if err := exec.WriteFile(ctx, args.Path, []byte(args.Content), 0644); err != nil {

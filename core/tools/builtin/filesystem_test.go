@@ -32,13 +32,17 @@ func TestReadFileTool_OffsetLimit(t *testing.T) {
 	tool := &ReadFileTool{}
 	ctx := context.Background()
 
-	t.Run("no offset/limit returns full file", func(t *testing.T) {
+	t.Run("small file returns full content with no reminder", func(t *testing.T) {
 		got, err := tool.Execute(ctx, exec, `{"path":"`+path+`"}`)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if got.(string) != content {
-			t.Errorf("expected full content, got %q", got)
+		s := got.(string)
+		if !strings.Contains(s, "line 1") || !strings.Contains(s, "line 10") {
+			t.Errorf("expected full content, got %q", s)
+		}
+		if strings.Contains(s, "<system-reminder>") {
+			t.Errorf("small file should have no reminder, got %q", s)
 		}
 	})
 
@@ -51,23 +55,26 @@ func TestReadFileTool_OffsetLimit(t *testing.T) {
 		if !strings.HasPrefix(s, "line 5") {
 			t.Errorf("expected to start at line 5, got %q", s)
 		}
-		if !strings.Contains(s, "skipped 4 lines before offset") {
+		if !strings.Contains(s, "Skipped 4 lines before offset 5.") {
 			t.Errorf("expected skip notice, got %q", s)
 		}
 	})
 
-	t.Run("limit truncates trailing lines", func(t *testing.T) {
+	t.Run("limit truncates trailing lines with system-reminder", func(t *testing.T) {
 		got, err := tool.Execute(ctx, exec, `{"path":"`+path+`","limit":3}`)
 		if err != nil {
 			t.Fatal(err)
 		}
 		s := got.(string)
-		body := strings.Split(s, "\n\n[")[0]
+		body := strings.Split(s, "\n\n<system-reminder>")[0]
 		if lineCount := strings.Count(body, "\n") + 1; lineCount != 3 {
 			t.Errorf("expected 3 lines in body, got %d: %q", lineCount, s)
 		}
-		if !strings.Contains(s, "truncated 7 lines after limit") {
-			t.Errorf("expected truncate notice, got %q", s)
+		if !strings.Contains(s, "<system-reminder>") || !strings.Contains(s, "File has more lines") {
+			t.Errorf("expected system-reminder, got %q", s)
+		}
+		if !strings.Contains(s, "offset=4") {
+			t.Errorf("expected next-offset hint, got %q", s)
 		}
 	})
 
@@ -76,7 +83,7 @@ func TestReadFileTool_OffsetLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		body := strings.Split(got.(string), "\n\n[")[0]
+		body := strings.Split(got.(string), "\n\n<system-reminder>")[0]
 		if body != "line 4\nline 5" {
 			t.Errorf("expected lines 4-5, got %q", body)
 		}
@@ -87,8 +94,32 @@ func TestReadFileTool_OffsetLimit(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(got.(string), "past end") {
-			t.Errorf("expected past-end marker, got %q", got)
+		s := got.(string)
+		if !strings.Contains(s, "<system-reminder>") || !strings.Contains(s, "past the end") {
+			t.Errorf("expected past-end reminder, got %q", s)
+		}
+	})
+
+	t.Run("default limit truncates huge files", func(t *testing.T) {
+		bigPath := filepath.Join(tmpDir, "big.txt")
+		var big []string
+		for i := 1; i <= 2500; i++ {
+			big = append(big, fmt.Sprintf("row %d", i))
+		}
+		if err := os.WriteFile(bigPath, []byte(strings.Join(big, "\n")+"\n"), 0644); err != nil {
+			t.Fatalf("write: %v", err)
+		}
+
+		got, err := tool.Execute(ctx, exec, `{"path":"`+bigPath+`"}`)
+		if err != nil {
+			t.Fatal(err)
+		}
+		s := got.(string)
+		if !strings.Contains(s, "<system-reminder>") || !strings.Contains(s, "File has more lines") {
+			t.Errorf("expected truncation reminder for big file, got tail %q", s[max(0, len(s)-300):])
+		}
+		if !strings.Contains(s, "offset=2001") {
+			t.Errorf("expected next-offset=2001 hint, got tail %q", s[max(0, len(s)-300):])
 		}
 	})
 }

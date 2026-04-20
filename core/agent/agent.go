@@ -131,7 +131,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 	a := &Agent{
 		cfg:          cfg,
 		provider:     p,
-		executor:     exec,
+		executor:     wrapReadTracker(exec),
 		tools:        make(map[string]tools.Tool),
 		policy:       ApprovalPolicyManual,
 		state:        StateIdle,
