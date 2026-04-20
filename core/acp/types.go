@@ -74,10 +74,10 @@ type FSCapabilities struct {
 }
 
 type InitializeResult struct {
-	ProtocolVersion    int               `json:"protocolVersion"`
-	AgentInfo          *Implementation   `json:"agentInfo,omitempty"`
-	AgentCapabilities  AgentCapabilities `json:"agentCapabilities"`
-	AuthMethods        []AuthMethod      `json:"authMethods,omitempty"`
+	ProtocolVersion   int               `json:"protocolVersion"`
+	AgentInfo         *Implementation   `json:"agentInfo,omitempty"`
+	AgentCapabilities AgentCapabilities `json:"agentCapabilities"`
+	AuthMethods       []AuthMethod      `json:"authMethods,omitempty"`
 }
 
 type AgentCapabilities struct {
@@ -307,8 +307,8 @@ type TerminalReleaseResult struct{}
 // --- Permission (Agent → Client) ---
 
 type RequestPermissionParams struct {
-	SessionID string           `json:"sessionId"`
-	ToolCall  ToolCallData     `json:"toolCall"`
+	SessionID string             `json:"sessionId"`
+	ToolCall  ToolCallData       `json:"toolCall"`
 	Options   []PermissionOption `json:"options"`
 }
 
@@ -334,6 +334,6 @@ type RequestPermissionResult struct {
 
 // PermissionOutcome is a discriminated union on the Outcome field.
 type PermissionOutcome struct {
-	Outcome  string `json:"outcome"`  // "selected" or "cancelled"
+	Outcome  string `json:"outcome"`            // "selected" or "cancelled"
 	OptionID string `json:"optionId,omitempty"` // only for "selected"
 }

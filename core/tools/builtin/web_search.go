@@ -86,8 +86,8 @@ func (t *WebSearchTool) Schema() any {
 	}
 }
 
-func (t *WebSearchTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true}
+func (t *WebSearchTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "web search (read-only)"}
 }
 
 func (t *WebSearchTool) Execute(ctx context.Context, _ executor.Executor, argsJSON string) (any, error) {

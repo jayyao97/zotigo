@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -17,7 +18,7 @@ func TestConvertToAnthropicParams_TextOnly(t *testing.T) {
 		protocol.NewUserMessage("Hello"),
 	}
 
-	params, err := convertToAnthropicParams(msgs, nil)
+	params, err := convertToAnthropicParams(msgs, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -42,7 +43,7 @@ func TestConvertToAnthropicParams_SystemPrompt(t *testing.T) {
 		protocol.NewUserMessage("Hi"),
 	}
 
-	params, err := convertToAnthropicParams(msgs, nil)
+	params, err := convertToAnthropicParams(msgs, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -69,7 +70,7 @@ func TestConvertToAnthropicParams_AssistantWithToolCall(t *testing.T) {
 		Arguments: `{"path":"/tmp/test"}`,
 	})
 
-	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil)
+	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -98,7 +99,7 @@ func TestConvertToAnthropicParams_ToolResult(t *testing.T) {
 	tr := protocol.NewTextToolResult("call_1", "success", false)
 	msg := protocol.NewToolMessage([]protocol.ToolResult{tr})
 
-	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil)
+	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -129,7 +130,7 @@ func TestConvertToAnthropicParams_Image(t *testing.T) {
 		},
 	}
 
-	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil)
+	params, err := convertToAnthropicParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -151,10 +152,12 @@ type mockTool struct {
 	schema      any
 }
 
-func (m *mockTool) Name() string             { return m.name }
-func (m *mockTool) Description() string      { return m.description }
-func (m *mockTool) Schema() any              { return m.schema }
-func (m *mockTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: true} }
+func (m *mockTool) Name() string        { return m.name }
+func (m *mockTool) Description() string { return m.description }
+func (m *mockTool) Schema() any         { return m.schema }
+func (m *mockTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
 func (m *mockTool) Execute(_ context.Context, _ executor.Executor, _ string) (any, error) {
 	return nil, nil
 }
@@ -177,7 +180,7 @@ func TestConvertToAnthropicParams_Tools(t *testing.T) {
 		},
 	}
 
-	params, err := convertToAnthropicParams([]protocol.Message{protocol.NewUserMessage("read")}, []tools.Tool{tool})
+	params, err := convertToAnthropicParams([]protocol.Message{protocol.NewUserMessage("read")}, []tools.Tool{tool}, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

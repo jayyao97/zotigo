@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"google.golang.org/genai"
 )
@@ -23,8 +24,9 @@ func (p *ChatProvider) Name() string {
 	return "gemini-chat"
 }
 
-func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
-	contents, config, err := convertToGeminiParams(messages, toolsList)
+func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	resolved := providers.ResolveOptions(opts)
+	contents, config, err := convertToGeminiParams(messages, toolsList, resolved.ToolChoice)
 	if err != nil {
 		return nil, err
 	}
@@ -36,10 +38,14 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		config.MaxOutputTokens = p.maxTokens
 	}
 
-	// Configure thinking
-	if p.thinkingLevel != "" {
+	// Configure thinking — per-call override wins over the provider default.
+	level := resolved.ReasoningEffort
+	if level == "" {
+		level = p.thinkingLevel
+	}
+	if level != "" {
 		tc := &genai.ThinkingConfig{IncludeThoughts: true}
-		switch p.thinkingLevel {
+		switch level {
 		case "low":
 			tc.ThinkingLevel = genai.ThinkingLevelLow
 		case "medium":

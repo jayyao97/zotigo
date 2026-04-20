@@ -16,7 +16,6 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/tools"
 	builtin "github.com/jayyao97/zotigo/core/tools/builtin"
 )
@@ -29,7 +28,7 @@ type StepMockProvider struct {
 
 func (p *StepMockProvider) Name() string { return "mock" }
 
-func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 
 	go func() {
@@ -72,10 +71,12 @@ func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 type TimeTool struct{}
 
-func (t *TimeTool) Name() string             { return "get_time" }
-func (t *TimeTool) Description() string      { return "Returns current time" }
-func (t *TimeTool) Schema() any              { return nil }
-func (t *TimeTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
+func (t *TimeTool) Name() string        { return "get_time" }
+func (t *TimeTool) Description() string { return "Returns current time" }
+func (t *TimeTool) Schema() any         { return nil }
+func (t *TimeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow}
+}
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "12:00", nil
 }
@@ -177,7 +178,7 @@ func (e *SnapshotTestExecutor) Close() error                   { return e.base.C
 
 func (p *ShellCallProvider) Name() string { return "shell-mock" }
 
-func (p *ShellCallProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *ShellCallProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -431,8 +432,16 @@ func TestAgent_ReminderAppendedToLastToolResult(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-reminder"}
+	cfg := config.ProfileConfig{
+		Provider: "mock-reminder",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
 	ag, err := agent.New(cfg, exec,
+		agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+		}),
 		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
 			return "Remember: stay focused on the task."
 		}),
@@ -533,8 +542,16 @@ func TestAgent_MultipleReminders(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-reminder-multi"}
+	cfg := config.ProfileConfig{
+		Provider: "mock-reminder-multi",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
 	ag, err := agent.New(cfg, exec,
+		agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+		}),
 		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
 			return "Reminder A"
 		}),
@@ -600,8 +617,11 @@ type ReadFileMockTool struct {
 func (t *ReadFileMockTool) Name() string        { return "read_file" }
 func (t *ReadFileMockTool) Description() string { return "Read a file" }
 func (t *ReadFileMockTool) Schema() any         { return nil }
-func (t *ReadFileMockTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *ReadFileMockTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium}
 }
 func (t *ReadFileMockTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	t.LastPath = args
@@ -616,7 +636,7 @@ type PathCallMockProvider struct {
 
 func (p *PathCallMockProvider) Name() string { return "path-call-mock" }
 
-func (p *PathCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *PathCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -734,21 +754,26 @@ func TestAgent_AutoApprovePausesHighRiskShell(t *testing.T) {
 	})
 
 	tmpDir := t.TempDir()
-	localExec, err := executor.NewLocalExecutor(tmpDir)
+	exec, err := executor.NewLocalExecutor(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	cfg := config.ProfileConfig{Provider: "mock-high-risk-shell"}
-	ag, err := agent.New(cfg, guard)
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	// Attach a shell policy whose high-risk list flags `sudo` so the
+	// test exercises the LevelHigh → classifier path (ask_user here,
+	// since no classifier is wired up).
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(&builtin.ShellPolicy{
+		HighRiskPatterns: []string{`sudo\s+`},
+	}))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 	events, err := ag.Run(context.Background(), "List files with sudo")
@@ -774,7 +799,7 @@ func TestAgent_AutoApprovePausesHighRiskShell(t *testing.T) {
 	}
 }
 
-func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
+func TestAgent_AutoModeAutoExecutesWriteInWorkDir(t *testing.T) {
 	providers.Register("mock-write-file", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &ShellCallProvider{
 			Tool: "write_file",
@@ -788,8 +813,15 @@ func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-write-file"}
-	ag, err := agent.New(cfg, exec)
+	cfg := config.ProfileConfig{
+		Provider: "mock-write-file",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
+	ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+		Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+	}))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -805,8 +837,89 @@ func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
 	for e := range events {
 		lastEvent = e
 	}
+	// Auto mode + write in working dir + classifier=allow → auto-execute
+	if lastEvent.FinishReason == "need_approval" {
+		t.Fatal("Auto mode + classifier=allow should auto-execute write_file in working directory")
+	}
+
+	// File should actually be written
+	if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+		t.Errorf("Expected note.txt to be created: %v", err)
+	}
+}
+
+func TestAgent_AutoModePausesWriteOutsideWorkDir(t *testing.T) {
+	// Write to an absolute path outside working directory → should still pause
+	providers.Register("mock-write-outside", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"/tmp/evil.txt","content":"hack"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-write-outside"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "Write outside")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	// Auto mode but path is outside working dir → still requires approval
 	if lastEvent.FinishReason != "need_approval" {
-		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+		t.Fatal("Auto mode should still require approval for writes outside working directory")
+	}
+}
+
+func TestAgent_ManualModePausesWriteInWorkDir(t *testing.T) {
+	// Manual mode → always pause for write_file, even in working dir
+	providers.Register("mock-write-manual", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-write-manual"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "Write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatal("Manual mode should require approval for write_file")
 	}
 }
 
@@ -816,21 +929,21 @@ func TestAgent_BlockedShellReturnsDeniedToolResult(t *testing.T) {
 	})
 
 	tmpDir := t.TempDir()
-	localExec, err := executor.NewLocalExecutor(tmpDir)
+	exec, err := executor.NewLocalExecutor(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	cfg := config.ProfileConfig{Provider: "mock-blocked-shell"}
-	ag, err := agent.New(cfg, guard)
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 	events, err := ag.Run(context.Background(), "Delete root")
@@ -878,8 +991,7 @@ func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
 		Provider: "mock-classifier-allow",
 		Safety: config.SafetyProfileConfig{
 			Classifier: config.SafetyClassifierConfig{
-				Enabled:                 config.BoolPtr(true),
-				AllowAutoExecuteOnAllow: true,
+				Enabled: config.BoolPtr(true),
 			},
 		},
 	}
@@ -1065,6 +1177,59 @@ func TestAgent_ClassifierEnabledWithoutImplementationFallsBackToApproval(t *test
 	}
 	if ev.ClassifierProvider != "openai" || ev.ClassifierModel != "gpt-4o" {
 		t.Fatalf("Expected classifier metadata from resolved/current profile, got %s/%s", ev.ClassifierProvider, ev.ClassifierModel)
+	}
+}
+
+// TestAgent_ReviewThresholdOffStillApprovesHighRisk verifies that setting
+// review_threshold=off disables the classifier but does NOT silently
+// auto-execute high-risk tool calls — they should fall back to user
+// approval. "off" means "don't spend a classifier round-trip", not
+// "approve everything that isn't hard-blocked".
+func TestAgent_ReviewThresholdOffStillApprovesHighRisk(t *testing.T) {
+	providers.Register("mock-off-high-risk", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "sudo rm /tmp/foo"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-off-high-risk",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{
+				Enabled:         config.BoolPtr(false),
+				ReviewThreshold: "off",
+			},
+		},
+	}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	// Shell policy that flags sudo as high-risk so the tool call reaches
+	// LevelHigh. Threshold=off should still promote it to approval.
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(&builtin.ShellPolicy{
+		HighRiskPatterns: []string{`sudo\s+`},
+	}))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "run a sudo command")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("threshold=off should still require approval for LevelHigh, got finish=%s", lastEvent.FinishReason)
 	}
 }
 
@@ -1411,6 +1576,8 @@ func TestAgent_CaptureRawAuditContext(t *testing.T) {
 			t.Fatalf("Failed to create agent: %v", err)
 		}
 		ag.RegisterTool(&builtin.ShellTool{})
+		// Classifier is only called in Auto mode now.
+		ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 		events, err := ag.Run(context.Background(), "please touch a file")
 		if err != nil {
@@ -1601,7 +1768,7 @@ type StatsMockProvider struct{}
 
 func (p *StatsMockProvider) Name() string { return "stats-mock" }
 
-func (p *StatsMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *StatsMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -1619,7 +1786,7 @@ type VerboseMockProvider struct{}
 
 func (p *VerboseMockProvider) Name() string { return "verbose-mock" }
 
-func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -1638,4 +1805,250 @@ func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protoco
 		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
 	}()
 	return ch, nil
+}
+
+// EmptyThenTextProvider emits an empty response on the first call (no text,
+// no tool call — simulating the "all output tokens went to thinking"
+// failure mode) and a normal text response on subsequent calls.
+type EmptyThenTextProvider struct {
+	Step          int
+	ReceivedMsgs  [][]protocol.Message
+	SecondCallTxt string
+}
+
+func (p *EmptyThenTextProvider) Name() string { return "empty-then-text" }
+
+func (p *EmptyThenTextProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.Step++
+	snap := make([]protocol.Message, len(messages))
+	copy(snap, messages)
+	p.ReceivedMsgs = append(p.ReceivedMsgs, snap)
+
+	ch := make(chan protocol.Event, 4)
+	go func() {
+		defer close(ch)
+		if p.Step == 1 {
+			// Empty: no content deltas, no tool calls.
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+			return
+		}
+		txt := p.SecondCallTxt
+		if txt == "" {
+			txt = "done"
+		}
+		ch <- protocol.NewTextDeltaEvent(txt)
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: txt},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+// AlwaysEmptyProvider always returns an empty response. Used to verify
+// the retry cap prevents an infinite loop.
+type AlwaysEmptyProvider struct{ Step int }
+
+func (p *AlwaysEmptyProvider) Name() string { return "always-empty" }
+
+func (p *AlwaysEmptyProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.Step++
+	ch := make(chan protocol.Event, 1)
+	go func() {
+		defer close(ch)
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func TestAgentEmptyResponseRecovery(t *testing.T) {
+	prov := &EmptyThenTextProvider{SecondCallTxt: "recovered"}
+	providers.Register("empty-then-text", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "empty-then-text"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var content string
+	for e := range events {
+		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil {
+			content += e.ContentPartDelta.Text
+		}
+	}
+
+	if prov.Step != 2 {
+		t.Errorf("expected provider called 2x (empty + recovery), got %d", prov.Step)
+	}
+	if content != "recovered" {
+		t.Errorf("expected recovered content, got %q", content)
+	}
+
+	// The second call should have seen the injected system-reminder
+	// nudge in its context.
+	if len(prov.ReceivedMsgs) < 2 {
+		t.Fatalf("expected 2 provider calls recorded, got %d", len(prov.ReceivedMsgs))
+	}
+	secondCtx := prov.ReceivedMsgs[1]
+	foundNudge := false
+	for _, m := range secondCtx {
+		if m.Role != protocol.RoleUser {
+			continue
+		}
+		for _, p := range m.Content {
+			if p.Type == protocol.ContentTypeText && strings.Contains(p.Text, "<system-reminder>") && strings.Contains(p.Text, "no visible text") {
+				foundNudge = true
+			}
+		}
+	}
+	if !foundNudge {
+		t.Errorf("expected injected system-reminder nudge in second call context")
+	}
+}
+
+// SequencedProvider emits a caller-controlled sequence of responses.
+// Each element: if ToolName is set, emit a tool call; else if Text is set,
+// emit that text; else emit nothing (empty response).
+type SequencedStep struct {
+	Text     string
+	ToolName string
+	ToolArgs string
+	ToolID   string
+}
+
+type SequencedProvider struct {
+	Steps []SequencedStep
+	Step  int
+}
+
+func (p *SequencedProvider) Name() string { return "sequenced" }
+
+func (p *SequencedProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	idx := p.Step
+	p.Step++
+	ch := make(chan protocol.Event, 6)
+	go func() {
+		defer close(ch)
+		if idx >= len(p.Steps) {
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+			return
+		}
+		s := p.Steps[idx]
+		switch {
+		case s.ToolName != "":
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallEnd,
+				Index: 0,
+				ToolCall: &protocol.ToolCall{
+					ID:        s.ToolID,
+					Name:      s.ToolName,
+					Arguments: s.ToolArgs,
+				},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+		case s.Text != "":
+			ch <- protocol.NewTextDeltaEvent(s.Text)
+			ch <- protocol.Event{
+				Type:        protocol.EventTypeContentEnd,
+				ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: s.Text},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		default:
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		}
+	}()
+	return ch, nil
+}
+
+// TestAgentEmptyResponseRecoveryResetsAfterProgress verifies that the
+// recovery budget refills after legit output — so a long multi-step turn
+// can tolerate more than one empty response as long as they aren't
+// consecutive.
+func TestAgentEmptyResponseRecoveryResetsAfterProgress(t *testing.T) {
+	prov := &SequencedProvider{
+		Steps: []SequencedStep{
+			{}, // 1: empty
+			{ToolName: "get_time", ToolID: "call_1", ToolArgs: "{}"}, // 2: recovered, tool call
+			// (tool result injected by runtime; agent loop re-enters model)
+			{},              // 3: empty again
+			{Text: "final"}, // 4: recovered
+		},
+	}
+	providers.Register("sequenced-reset", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "sequenced-reset"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var content string
+	for e := range events {
+		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil {
+			content += e.ContentPartDelta.Text
+		}
+	}
+
+	if prov.Step != 4 {
+		t.Errorf("expected 4 provider calls (empty, tool, empty, text), got %d", prov.Step)
+	}
+	if content != "final" {
+		t.Errorf("expected final content 'final', got %q", content)
+	}
+}
+
+func TestAgentEmptyResponseRecoveryCapped(t *testing.T) {
+	prov := &AlwaysEmptyProvider{}
+	providers.Register("always-empty", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "always-empty"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for range events {
+	}
+
+	// Cap is 1 retry: expect exactly 2 provider calls, then give up.
+	if prov.Step != 2 {
+		t.Errorf("expected exactly 2 calls (original + 1 retry), got %d", prov.Step)
+	}
 }

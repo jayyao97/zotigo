@@ -52,8 +52,11 @@ func (t *GrepTool) Schema() any {
 	}
 }
 
-func (t *GrepTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *GrepTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "grep in safe scope"}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "grep outside safe scope or on sensitive path"}
 }
 
 func (t *GrepTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

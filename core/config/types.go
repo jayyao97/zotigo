@@ -41,16 +41,18 @@ type SafetyProfileConfig struct {
 
 // SafetyClassifierConfig controls the lightweight safety classifier.
 // Enabled uses *bool so config merging can distinguish "not set" (nil) from
-// "explicitly disabled" (false).
+// "explicitly disabled" (false). ReviewThreshold accepts the SafetyLevel
+// names (safe | low | medium | high) or "off" to disable classifier calls
+// entirely — any call at or above the threshold gets routed to the
+// classifier in Auto mode.
 type SafetyClassifierConfig struct {
-	Enabled                 *bool  `mapstructure:"enabled" yaml:"enabled"`
-	Mode                    string `mapstructure:"mode,omitempty" yaml:"mode,omitempty"`
-	Profile                 string `mapstructure:"profile,omitempty" yaml:"profile,omitempty"`
-	TimeoutMs               int    `mapstructure:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
-	AllowAutoExecuteOnAllow bool   `mapstructure:"allow_auto_execute_on_allow" yaml:"allow_auto_execute_on_allow"`
-	MaxRecentActions        int    `mapstructure:"max_recent_actions,omitempty" yaml:"max_recent_actions,omitempty"`
-	CaptureRawAuditContext  bool   `mapstructure:"capture_raw_audit_context" yaml:"capture_raw_audit_context"`
-	MaxAuditContextChars    int    `mapstructure:"max_audit_context_chars,omitempty" yaml:"max_audit_context_chars,omitempty"`
+	Enabled                *bool  `mapstructure:"enabled" yaml:"enabled"`
+	ReviewThreshold        string `mapstructure:"review_threshold,omitempty" yaml:"review_threshold,omitempty"`
+	Profile                string `mapstructure:"profile,omitempty" yaml:"profile,omitempty"`
+	TimeoutMs              int    `mapstructure:"timeout_ms,omitempty" yaml:"timeout_ms,omitempty"`
+	MaxRecentActions       int    `mapstructure:"max_recent_actions,omitempty" yaml:"max_recent_actions,omitempty"`
+	CaptureRawAuditContext bool   `mapstructure:"capture_raw_audit_context" yaml:"capture_raw_audit_context"`
+	MaxAuditContextChars   int    `mapstructure:"max_audit_context_chars,omitempty" yaml:"max_audit_context_chars,omitempty"`
 }
 
 // IsEnabled returns whether the classifier is enabled.
@@ -138,13 +140,12 @@ func DefaultConfig() *Config {
 
 func defaultSafetyClassifierConfig() SafetyClassifierConfig {
 	return SafetyClassifierConfig{
-		Enabled:                 BoolPtr(true),
-		Mode:                    "high_risk_and_ambiguous",
-		TimeoutMs:               3000,
-		AllowAutoExecuteOnAllow: true,
-		MaxRecentActions:        6,
-		CaptureRawAuditContext:  false,
-		MaxAuditContextChars:    1200,
+		Enabled:                BoolPtr(true),
+		ReviewThreshold:        "medium",
+		TimeoutMs:              3000,
+		MaxRecentActions:       6,
+		CaptureRawAuditContext: false,
+		MaxAuditContextChars:   1200,
 	}
 }
 

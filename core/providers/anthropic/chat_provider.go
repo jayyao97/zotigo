@@ -6,6 +6,7 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -21,11 +22,13 @@ func (p *ChatProvider) Name() string {
 }
 
 // thinkingBudgetTokens returns the budget_tokens for the given thinking level.
-func (p *ChatProvider) thinkingBudgetTokens() int64 {
-	if p.thinkingBudget > 0 {
-		return p.thinkingBudget
+// An explicit budget override wins; otherwise the level string maps to a
+// fixed token budget.
+func thinkingBudgetTokens(level string, explicit int64) int64 {
+	if explicit > 0 {
+		return explicit
 	}
-	switch p.thinkingLevel {
+	switch level {
 	case "low":
 		return 2048
 	case "medium":
@@ -37,16 +40,21 @@ func (p *ChatProvider) thinkingBudgetTokens() int64 {
 	}
 }
 
-func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
-	params, err := convertToAnthropicParams(messages, toolsList)
+func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	resolved := providers.ResolveOptions(opts)
+	params, err := convertToAnthropicParams(messages, toolsList, resolved.ToolChoice)
 	if err != nil {
 		return nil, err
 	}
 
 	params.Model = anthropic.Model(p.model)
 
-	// Configure thinking
-	budget := p.thinkingBudgetTokens()
+	// Configure thinking — per-call override wins over the provider default.
+	level := resolved.ReasoningEffort
+	if level == "" {
+		level = p.thinkingLevel
+	}
+	budget := thinkingBudgetTokens(level, p.thinkingBudget)
 	if budget > 0 {
 		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
 		// MaxTokens must exceed budget; set a reasonable total

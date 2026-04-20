@@ -2,9 +2,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -12,10 +10,10 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -43,6 +41,8 @@ type Agent struct {
 	classifierUnavailableReason string
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
+
+	hooks []Hook
 
 	mu             sync.RWMutex
 	state          State
@@ -322,6 +322,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	go func() {
 		defer close(outCh)
 
+		emptyRecoveryAttempts := 0
+		const maxEmptyRecoveryAttempts = 1
+
 		for {
 			a.mu.RLock()
 			state := a.state
@@ -346,6 +349,20 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			sort.Slice(toolList, func(i, j int) bool {
 				return toolList[i].Name() < toolList[j].Name()
 			})
+
+			estimatedTokens := 0
+			if a.compressor != nil {
+				estimatedTokens = a.compressor.CountTokens(msgs)
+			}
+			modelTurnStart := time.Now()
+			debug.Logf(
+				"agent turn start provider=%s model=%s messages=%d tools=%d est_tokens=%d",
+				a.provider.Name(),
+				a.cfg.Model,
+				len(msgs),
+				len(toolList),
+				estimatedTokens,
+			)
 
 			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
 			if err != nil {
@@ -411,9 +428,39 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				asstMsg.Metadata.Usage = providerUsage
 			}
 
+			debug.Logf(
+				"agent turn end provider=%s model=%s duration=%s finish=%s content_chars=%d reasoning_chars=%d tool_calls=%d usage_in=%d usage_out=%d",
+				a.provider.Name(),
+				a.cfg.Model,
+				time.Since(modelTurnStart).Round(time.Millisecond),
+				providerFinishReason,
+				len(currentContent),
+				len(currentReasoning),
+				len(currentToolCalls),
+				func() int {
+					if providerUsage == nil {
+						return 0
+					}
+					return providerUsage.InputTokens
+				}(),
+				func() int {
+					if providerUsage == nil {
+						return 0
+					}
+					return providerUsage.OutputTokens
+				}(),
+			)
+
 			a.mu.Lock()
 			a.history = append(a.history, asstMsg)
 			a.mu.Unlock()
+
+			// Reset the empty-recovery budget on any legitimate output.
+			// The cap is meant to stop consecutive empty responses, not to
+			// limit total recoveries within a long multi-step turn.
+			if currentContent != "" || len(currentToolCalls) > 0 {
+				emptyRecoveryAttempts = 0
+			}
 
 			// Handle tool calls
 			if len(currentToolCalls) > 0 {
@@ -494,6 +541,31 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					a.mu.Unlock()
 				}
 
+				continue
+			}
+
+			// Recover from empty responses: the model emitted no text and no
+			// tool calls (all output_tokens went into reasoning). Without this
+			// guard the turn would end silently mid-task. Nudge the model once
+			// with a system-reminder and retry; if that also comes back empty,
+			// fall through to the normal end-of-turn.
+			if currentContent == "" && len(currentToolCalls) == 0 &&
+				emptyRecoveryAttempts < maxEmptyRecoveryAttempts {
+				emptyRecoveryAttempts++
+				debug.Logf(
+					"agent empty response recovery attempt=%d reasoning_chars=%d",
+					emptyRecoveryAttempts, len(currentReasoning),
+				)
+				nudge := protocol.NewUserMessage(
+					"<system-reminder>\nYour previous response contained no " +
+						"visible text and no tool call. If the task is not " +
+						"yet complete, continue by emitting the next tool " +
+						"call. If the task is complete, reply with a short " +
+						"summary of what was done.\n</system-reminder>",
+				)
+				a.mu.Lock()
+				a.history = append(a.history, nudge)
+				a.mu.Unlock()
 				continue
 			}
 
@@ -621,7 +693,16 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			results = append(results, tr)
 			continue
 		}
-		res, err := tool.Execute(ctx, exec, action.Arguments)
+		call := &ToolCall{
+			Tool:      tool,
+			Name:      action.Name,
+			Arguments: action.Arguments,
+			Executor:  exec,
+		}
+		invoke := buildHookChain(a.hooks, func(ctx context.Context, c *ToolCall) (any, error) {
+			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
+		})
+		res, err := invoke(ctx, call)
 		if err != nil {
 			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
 			tr.ToolName = action.Name
@@ -737,6 +818,26 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 	a.turnSafety.SnapshotAttempted = status == SnapshotStatusCreated || status == SnapshotStatusFailed
 }
 
+// classifyToolCall decides how a tool call should be handled.
+//
+// Each tool assigns an ordinal SafetyLevel to the call. The agent
+// compares that against a single configurable threshold:
+//
+//	Level         | Manual mode       | Auto mode
+//	LevelSafe     | auto_execute      | auto_execute
+//	LevelLow      | require_approval  | auto_execute (< threshold) or
+//	              |                   | classifier (>= threshold)
+//	LevelMedium   | require_approval  | auto_execute (< threshold) or
+//	              |                   | classifier (>= threshold)
+//	LevelHigh     | require_approval  | classifier (default threshold),
+//	              |                   | or approval when classifier is off
+//	LevelBlocked  | block             | block
+//
+// Auto threshold is config.Safety.Classifier.ReviewThreshold; default
+// LevelMedium. Manual threshold is fixed at LevelLow — any mutation
+// gets a prompt. When the threshold is set to "off", the classifier is
+// never called but LevelHigh calls still require user approval ("off"
+// disables classifier calls, not safety).
 func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
@@ -744,115 +845,84 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 			Decision:  ExecutionDecisionBlock,
 			Source:    SafetyDecisionSourceHardRule,
 			Reason:    "tool not found",
-			RiskLevel: "blocked",
+			RiskLevel: tools.LevelBlocked.String(),
 		}
 	}
 
-	if tc.Name == "shell" {
-		return a.classifyShellToolCall(tc)
+	decision := tool.Classify(tools.SafetyCall{
+		Arguments: tc.Arguments,
+		WorkDir:   a.executor.WorkDir(),
+		SafeDirs:  a.safeDirs(),
+		Executor:  a.executor,
+	})
+
+	level := decision.Level
+	riskLabel := level.String()
+
+	if level >= tools.LevelBlocked {
+		return ActionDecision{
+			Decision:  ExecutionDecisionBlock,
+			Source:    SafetyDecisionSourceHardRule,
+			Reason:    decision.Reason,
+			RiskLevel: riskLabel,
+		}
 	}
 
-	if isProtectedToolName(tc.Name) {
+	if level <= tools.LevelSafe {
+		return ActionDecision{
+			Decision:         ExecutionDecisionAutoExecute,
+			Source:           SafetyDecisionSourceHardRule,
+			Reason:           decision.Reason,
+			RiskLevel:        riskLabel,
+			RequiresSnapshot: decision.RequiresSnapshot,
+		}
+	}
+
+	if a.policy != ApprovalPolicyAuto {
+		// Manual mode: any mutation (level > Safe) prompts the user.
 		return ActionDecision{
 			Decision:         ExecutionDecisionRequireApproval,
 			Source:           SafetyDecisionSourceHardRule,
-			Reason:           "mutating tool requires approval",
-			RiskLevel:        "normal",
-			RequiresSnapshot: true,
+			Reason:           decision.Reason,
+			RiskLevel:        riskLabel,
+			RequiresSnapshot: decision.RequiresSnapshot,
 		}
 	}
 
-	safety := tool.Safety()
-	if safety.ReadOnly {
-		if len(safety.PathArgs) == 0 || a.allPathsInSafeDirs(tc.Arguments, safety.PathArgs) {
-			return ActionDecision{
-				Decision:  ExecutionDecisionAutoExecute,
-				Source:    SafetyDecisionSourceHardRule,
-				Reason:    "read-only tool in safe scope",
-				RiskLevel: "safe",
-			}
-		}
+	threshold := tools.ParseSafetyLevel(a.cfg.Safety.Classifier.ReviewThreshold)
+	// "off" / "none" parses to a level beyond LevelHigh. Interpret this as
+	// "never call the classifier" but still require approval for anything
+	// LevelHigh and above — the setting disables the classifier, not
+	// safety. Clamp the threshold so High stays above it.
+	classifierDisabled := threshold > tools.LevelHigh
+	if classifierDisabled {
+		threshold = tools.LevelHigh
+	}
+
+	if level < threshold {
+		// Below the configured review bar: trust the tool's call.
 		return ActionDecision{
-			Decision:  ExecutionDecisionRequireApproval,
-			Source:    SafetyDecisionSourceHardRule,
-			Reason:    "read-only tool targets path outside safe directories",
-			RiskLevel: "normal",
+			Decision:         ExecutionDecisionAutoExecute,
+			Source:           SafetyDecisionSourceHardRule,
+			Reason:           decision.Reason,
+			RiskLevel:        riskLabel,
+			RequiresSnapshot: decision.RequiresSnapshot,
 		}
 	}
 
-	if a.policy == ApprovalPolicyAuto {
-		return ActionDecision{
-			Decision:  ExecutionDecisionAutoExecute,
-			Source:    SafetyDecisionSourceHardRule,
-			Reason:    "auto-approve enabled for non-protected tool",
-			RiskLevel: "normal",
+	// At or above the threshold: consult the classifier (when enabled).
+	if !classifierDisabled {
+		if resp, ok := a.classifyWithSafetyClassifier(tc, riskLabel); ok {
+			return resp
 		}
 	}
-
-	return ActionDecision{
-		Decision:  ExecutionDecisionRequireApproval,
-		Source:    SafetyDecisionSourceHardRule,
-		Reason:    "tool requires approval",
-		RiskLevel: "normal",
-	}
-}
-
-func (a *Agent) classifyShellToolCall(tc *protocol.ToolCall) ActionDecision {
-	command := extractShellCommand(tc.Arguments)
-	if command == "" {
-		return ActionDecision{
-			Decision:  ExecutionDecisionRequireApproval,
-			Source:    SafetyDecisionSourceHardRule,
-			Reason:    "shell command missing",
-			RiskLevel: "normal",
-		}
-	}
-
-	if checker, ok := a.executor.(interface {
-		CheckCommand(string) sandbox.CommandCheckResult
-	}); ok {
-		check := checker.CheckCommand(command)
-		switch check.RiskLevel {
-		case sandbox.RiskLevelBlocked:
-			return ActionDecision{
-				Decision:  ExecutionDecisionBlock,
-				Source:    SafetyDecisionSourceHardRule,
-				Reason:    "blocked by sandbox policy",
-				RiskLevel: check.RiskLevel.String(),
-			}
-		case sandbox.RiskLevelHigh:
-			if resp, ok := a.classifyWithSafetyClassifier(tc, check.RiskLevel.String()); ok {
-				return resp
-			}
-			return ActionDecision{
-				Decision:         ExecutionDecisionRequireApproval,
-				Source:           SafetyDecisionSourceHardRule,
-				Reason:           "high-risk shell command requires approval",
-				RiskLevel:        check.RiskLevel.String(),
-				RequiresSnapshot: true,
-			}
-		}
-	}
-
-	if shellCommandAppearsReadOnly(command) {
-		return ActionDecision{
-			Decision:  ExecutionDecisionAutoExecute,
-			Source:    SafetyDecisionSourceHardRule,
-			Reason:    "read-only shell command",
-			RiskLevel: "normal",
-		}
-	}
-
-	if resp, ok := a.classifyWithSafetyClassifier(tc, "normal"); ok {
-		return resp
-	}
-
+	// Classifier disabled or unavailable — fall back to user approval.
 	return ActionDecision{
 		Decision:         ExecutionDecisionRequireApproval,
 		Source:           SafetyDecisionSourceHardRule,
-		Reason:           "shell command may mutate state",
-		RiskLevel:        "normal",
-		RequiresSnapshot: true,
+		Reason:           decision.Reason,
+		RiskLevel:        riskLabel,
+		RequiresSnapshot: decision.RequiresSnapshot,
 	}
 }
 
@@ -907,16 +977,10 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 
 	switch resp.Decision {
 	case SafetyClassifierDecisionAllow:
-		if !a.cfg.Safety.Classifier.AllowAutoExecuteOnAllow {
-			return ActionDecision{
-				Decision:         ExecutionDecisionRequireApproval,
-				Source:           SafetyDecisionSourceClassifier,
-				Reason:           resp.Reason,
-				RiskLevel:        riskLevel,
-				RequiresSnapshot: resp.RequiresSnapshot,
-				RawContext:       rawCtx,
-			}, true
-		}
+		// Classifier is only called in Auto mode (see classifyToolCall /
+		// classifyShellToolCall), so allow always means auto-execute. Manual
+		// mode never consults the classifier — users review every mutating
+		// action themselves.
 		return ActionDecision{
 			Decision:         ExecutionDecisionAutoExecute,
 			Source:           SafetyDecisionSourceClassifier,
@@ -1081,45 +1145,6 @@ func (a *Agent) isGitRepository(ctx context.Context, exec executor.Executor) boo
 	return strings.TrimSpace(string(result.Stdout)) == "true"
 }
 
-func extractShellCommand(argsJSON string) string {
-	var args struct {
-		Command string `json:"command"`
-	}
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return ""
-	}
-	return strings.TrimSpace(args.Command)
-}
-
-func shellCommandAppearsReadOnly(command string) bool {
-	base := strings.Fields(strings.TrimSpace(command))
-	if len(base) == 0 {
-		return false
-	}
-	switch base[0] {
-	case "ls", "pwd", "cat", "head", "tail", "grep", "rg", "find", "fd", "git":
-		if base[0] != "git" {
-			return true
-		}
-		return strings.HasPrefix(command, "git status") ||
-			strings.HasPrefix(command, "git diff") ||
-			strings.HasPrefix(command, "git log") ||
-			strings.HasPrefix(command, "git show") ||
-			strings.HasPrefix(command, "git branch")
-	default:
-		return false
-	}
-}
-
-func isProtectedToolName(name string) bool {
-	switch name {
-	case "write_file", "edit", "patch":
-		return true
-	default:
-		return false
-	}
-}
-
 func summarizeText(s string, limit int) string {
 	s = strings.TrimSpace(s)
 	if len(s) <= limit {
@@ -1243,41 +1268,4 @@ func (a *Agent) safeDirs() []string {
 	dirs = append(dirs, a.executor.WorkDir())
 	dirs = append(dirs, a.extraSafeDirs...)
 	return dirs
-}
-
-// allPathsInSafeDirs checks that all path arguments are within any safe directory.
-func (a *Agent) allPathsInSafeDirs(argsJSON string, pathArgs []string) bool {
-	var args map[string]any
-	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
-		return false
-	}
-
-	safeDirs := a.safeDirs()
-	for _, key := range pathArgs {
-		val, ok := args[key]
-		if !ok || val == nil {
-			continue
-		}
-		pathStr, ok := val.(string)
-		if !ok || pathStr == "" {
-			continue
-		}
-		absPath := pathStr
-		if !filepath.IsAbs(pathStr) {
-			absPath = filepath.Join(a.executor.WorkDir(), pathStr)
-		}
-		absPath = filepath.Clean(absPath)
-
-		safe := false
-		for _, dir := range safeDirs {
-			if strings.HasPrefix(absPath, dir) {
-				safe = true
-				break
-			}
-		}
-		if !safe {
-			return false
-		}
-	}
-	return true
 }

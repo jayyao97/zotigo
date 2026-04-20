@@ -22,10 +22,11 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/core/tools/middleware"
 )
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
@@ -140,11 +141,9 @@ func Run(args []string) int {
 	}
 	defer localExec.Close()
 
-	exec, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		fmt.Printf("Error creating security guard: %v\n", err)
-		return 1
-	}
+	// Executor is used raw now — command-safety is enforced by ShellTool's
+	// ShellPolicy in Classify; file-path safety by tools' in-workdir checks.
+	exec := localExec
 
 	pbOpts := []prompt.SystemPromptOption{
 		prompt.WithDynamicSection("environment", func(ctx prompt.PromptContext) string {
@@ -165,10 +164,13 @@ func Run(args []string) int {
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
+	readTracker := tools.NewReadTracker(cwd)
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
 		agent.WithTranscriptDir(transcriptDir),
+		agent.WithHook(middleware.ReadTracker(readTracker)),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
@@ -203,7 +205,12 @@ func Run(args []string) int {
 	ag.RegisterTool(&builtin.EditTool{})
 	ag.RegisterTool(&builtin.PatchTool{})
 
-	ag.RegisterTool(&builtin.ShellTool{})
+	shellTool, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
+	if err != nil {
+		fmt.Println("Error creating shell tool:", err)
+		return 1
+	}
+	ag.RegisterTool(shellTool)
 	ag.RegisterTool(&builtin.GrepTool{})
 	ag.RegisterTool(&builtin.GlobTool{})
 

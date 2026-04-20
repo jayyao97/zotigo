@@ -31,10 +31,9 @@ profiles:
     safety:
       classifier:
         enabled: true
-        mode: high_risk_and_ambiguous
+        review_threshold: medium
         profile: gpt-5.4-reasoning
         timeout_ms: 3000
-        allow_auto_execute_on_allow: false
 
   gpt-5.4-reasoning:
     provider: openai

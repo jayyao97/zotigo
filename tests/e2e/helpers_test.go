@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -131,7 +132,7 @@ type e2eVerboseProvider struct{}
 
 func (p *e2eVerboseProvider) Name() string { return "e2e-verbose" }
 
-func (p *e2eVerboseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eVerboseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -154,7 +155,7 @@ type e2eToolProvider struct {
 
 func (p *e2eToolProvider) Name() string { return "e2e-tools" }
 
-func (p *e2eToolProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eToolProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -197,7 +198,7 @@ type e2eLargeResponseProvider struct{}
 
 func (p *e2eLargeResponseProvider) Name() string { return "e2e-memory" }
 
-func (p *e2eLargeResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eLargeResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -215,8 +216,11 @@ type mockReadFileTool struct{}
 func (t *mockReadFileTool) Name() string        { return "read_file" }
 func (t *mockReadFileTool) Description() string { return "Reads a file" }
 func (t *mockReadFileTool) Schema() any         { return nil }
-func (t *mockReadFileTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *mockReadFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium}
 }
 
 func (t *mockReadFileTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
@@ -238,8 +242,8 @@ func (d *dummyTool) Schema() any {
 func (d *dummyTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "ok", nil
 }
-func (d *dummyTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true}
+func (d *dummyTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
 }
 
 // ============ Conversation Builders (for compressor tests) ============

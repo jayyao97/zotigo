@@ -22,8 +22,8 @@ func TestConfigDefaults(t *testing.T) {
 	if !classifier.IsEnabled() {
 		t.Error("Expected classifier to be enabled by default")
 	}
-	if classifier.Mode == "" {
-		t.Error("Expected classifier mode default to be set")
+	if classifier.ReviewThreshold == "" {
+		t.Error("Expected classifier review_threshold default to be set")
 	}
 	if classifier.Profile != "" {
 		t.Error("Expected classifier profile to default to current active profile when omitted")
@@ -121,7 +121,7 @@ profiles:
 	if !classifier.IsEnabled() {
 		t.Error("Partial override (timeout_ms only) must not disable the classifier — Enabled should inherit from defaults")
 	}
-	if classifier.Mode == "" {
+	if classifier.ReviewThreshold == "" {
 		t.Error("Expected classifier mode default to be preserved")
 	}
 	if classifier.MaxRecentActions == 0 {
@@ -203,7 +203,7 @@ profiles:
 		t.Error("User explicitly set enabled: false but classifier is still enabled")
 	}
 	// Other defaults should still be inherited
-	if classifier.Mode == "" {
+	if classifier.ReviewThreshold == "" {
 		t.Error("Expected classifier mode default to be preserved")
 	}
 }
@@ -279,7 +279,7 @@ profiles:
 	if !classifier.IsEnabled() {
 		t.Error("Custom profile should get classifier default Enabled=true; got disabled")
 	}
-	if classifier.Mode == "" {
+	if classifier.ReviewThreshold == "" {
 		t.Error("Custom profile should get classifier default Mode")
 	}
 	if classifier.TimeoutMs == 0 {
@@ -327,7 +327,7 @@ profiles:
 	if !classifier.IsEnabled() {
 		t.Error("Partial override must not disable the classifier; Enabled should inherit default=true")
 	}
-	if classifier.Mode == "" {
+	if classifier.ReviewThreshold == "" {
 		t.Error("Mode should inherit default for partial override")
 	}
 }

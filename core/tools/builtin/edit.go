@@ -46,8 +46,17 @@ func (t *EditTool) Schema() any {
 	}
 }
 
-func (t *EditTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
+func (t *EditTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	level := tools.LevelLow
+	reason := "file edit in working directory"
+	if !tools.IsInWorkDir(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "edit targets path outside working directory"
+	} else if tools.IsSensitivePath(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "edit targets sensitive path"
+	}
+	return tools.SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
 }
 
 func (t *EditTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -146,8 +155,17 @@ func (t *PatchTool) Schema() any {
 	}
 }
 
-func (t *PatchTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
+func (t *PatchTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	level := tools.LevelLow
+	reason := "file patch in working directory"
+	if !tools.IsInWorkDir(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "patch targets path outside working directory"
+	} else if tools.IsSensitivePath(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "patch targets sensitive path"
+	}
+	return tools.SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
 }
 
 func (t *PatchTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
