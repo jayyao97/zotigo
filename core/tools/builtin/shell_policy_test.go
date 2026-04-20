@@ -1,6 +1,7 @@
 package builtin_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/tools"
@@ -88,6 +89,48 @@ func TestShellPolicy_AllowedCommandsWhitelist(t *testing.T) {
 		if level, _ := p.Classify(cmd); level != tools.LevelBlocked {
 			t.Errorf("%q should be blocked by whitelist, got %v", cmd, level)
 		}
+	}
+}
+
+func TestShellPolicy_WhitelistHitReturnsExplicitReason(t *testing.T) {
+	// A whitelist hit should return LevelSafe with a non-empty reason so
+	// ShellTool can distinguish "policy explicitly allowed this" from
+	// "policy has no opinion, fall through to heuristics".
+	p := &builtin.ShellPolicy{AllowedCommands: []string{"git"}}
+	if err := p.Compile(); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+
+	level, reason := p.Classify("git commit -m x")
+	if level != tools.LevelSafe {
+		t.Fatalf("expected LevelSafe for whitelisted git, got %v", level)
+	}
+	if !strings.Contains(reason, "whitelist") {
+		t.Fatalf("expected whitelist reason, got %q", reason)
+	}
+
+	// No whitelist configured → empty reason on unknown command.
+	p2 := &builtin.ShellPolicy{}
+	if err := p2.Compile(); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	level, reason = p2.Classify("git commit")
+	if level != tools.LevelSafe || reason != "" {
+		t.Fatalf("expected (LevelSafe, \"\") when no whitelist, got (%v, %q)", level, reason)
+	}
+}
+
+func TestShellPolicy_ExtractBaseCommandRejectsBareEnv(t *testing.T) {
+	// `env FOO=bar` with no trailing verb must not leak "FOO=bar" as a
+	// command name — it should register as "no verb" and get blocked
+	// under whitelist mode instead of silently passing.
+	p := &builtin.ShellPolicy{AllowedCommands: []string{"git"}}
+	if err := p.Compile(); err != nil {
+		t.Fatalf("compile: %v", err)
+	}
+	level, reason := p.Classify("env FOO=bar")
+	if level != tools.LevelBlocked {
+		t.Fatalf("expected LevelBlocked for bare env, got %v (%q)", level, reason)
 	}
 }
 

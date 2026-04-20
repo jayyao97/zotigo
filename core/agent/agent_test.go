@@ -991,8 +991,7 @@ func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
 		Provider: "mock-classifier-allow",
 		Safety: config.SafetyProfileConfig{
 			Classifier: config.SafetyClassifierConfig{
-				Enabled:                 config.BoolPtr(true),
-				AllowAutoExecuteOnAllow: config.BoolPtr(true),
+				Enabled: config.BoolPtr(true),
 			},
 		},
 	}
@@ -1178,6 +1177,59 @@ func TestAgent_ClassifierEnabledWithoutImplementationFallsBackToApproval(t *test
 	}
 	if ev.ClassifierProvider != "openai" || ev.ClassifierModel != "gpt-4o" {
 		t.Fatalf("Expected classifier metadata from resolved/current profile, got %s/%s", ev.ClassifierProvider, ev.ClassifierModel)
+	}
+}
+
+// TestAgent_ReviewThresholdOffStillApprovesHighRisk verifies that setting
+// review_threshold=off disables the classifier but does NOT silently
+// auto-execute high-risk tool calls — they should fall back to user
+// approval. "off" means "don't spend a classifier round-trip", not
+// "approve everything that isn't hard-blocked".
+func TestAgent_ReviewThresholdOffStillApprovesHighRisk(t *testing.T) {
+	providers.Register("mock-off-high-risk", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Command: "sudo rm /tmp/foo"}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider: "mock-off-high-risk",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{
+				Enabled:         config.BoolPtr(false),
+				ReviewThreshold: "off",
+			},
+		},
+	}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	// Shell policy that flags sudo as high-risk so the tool call reaches
+	// LevelHigh. Threshold=off should still promote it to approval.
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(&builtin.ShellPolicy{
+		HighRiskPatterns: []string{`sudo\s+`},
+	}))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "run a sudo command")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("threshold=off should still require approval for LevelHigh, got finish=%s", lastEvent.FinishReason)
 	}
 }
 

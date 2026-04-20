@@ -406,7 +406,6 @@ Suggested fields:
 - `provider`
 - `model`
 - `timeout_ms`
-- `allow_auto_execute_on_allow`
 - `max_recent_actions`
 - `capture_raw_audit_context`
 - `max_audit_context_chars`
@@ -423,7 +422,6 @@ profiles:
         provider: openai
         model: gpt-5-mini
         timeout_ms: 3000
-        allow_auto_execute_on_allow: false
         max_recent_actions: 6
         capture_raw_audit_context: false
         max_audit_context_chars: 1200

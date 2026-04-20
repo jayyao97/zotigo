@@ -42,7 +42,8 @@ type Agent struct {
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
 
-	hooks []Hook
+	hooks     []Hook
+	toolChain Next // lazily initialized from hooks on first dispatch
 
 	mu             sync.RWMutex
 	state          State
@@ -664,10 +665,7 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			Arguments: action.Arguments,
 			Executor:  exec,
 		}
-		invoke := buildHookChain(a.hooks, func(ctx context.Context, c *ToolCall) (any, error) {
-			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
-		})
-		res, err := invoke(ctx, call)
+		res, err := a.invokeTool(ctx, call)
 		if err != nil {
 			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
 			tr.ToolName = action.Name
@@ -794,12 +792,15 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 //	              |                   | classifier (>= threshold)
 //	LevelMedium   | require_approval  | auto_execute (< threshold) or
 //	              |                   | classifier (>= threshold)
-//	LevelHigh     | require_approval  | classifier (default threshold)
+//	LevelHigh     | require_approval  | classifier (default threshold),
+//	              |                   | or approval when classifier is off
 //	LevelBlocked  | block             | block
 //
 // Auto threshold is config.Safety.Classifier.ReviewThreshold; default
 // LevelMedium. Manual threshold is fixed at LevelLow — any mutation
-// gets a prompt.
+// gets a prompt. When the threshold is set to "off", the classifier is
+// never called but LevelHigh calls still require user approval ("off"
+// disables classifier calls, not safety).
 func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
@@ -852,6 +853,15 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 	}
 
 	threshold := tools.ParseSafetyLevel(a.cfg.Safety.Classifier.ReviewThreshold)
+	// "off" / "none" parses to a level beyond LevelHigh. Interpret this as
+	// "never call the classifier" but still require approval for anything
+	// LevelHigh and above — the setting disables the classifier, not
+	// safety. Clamp the threshold so High stays above it.
+	classifierDisabled := threshold > tools.LevelHigh
+	if classifierDisabled {
+		threshold = tools.LevelHigh
+	}
+
 	if level < threshold {
 		// Below the configured review bar: trust the tool's call.
 		return ActionDecision{
@@ -863,11 +873,13 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 		}
 	}
 
-	// At or above the threshold: consult the classifier.
-	if resp, ok := a.classifyWithSafetyClassifier(tc, riskLabel); ok {
-		return resp
+	// At or above the threshold: consult the classifier (when enabled).
+	if !classifierDisabled {
+		if resp, ok := a.classifyWithSafetyClassifier(tc, riskLabel); ok {
+			return resp
+		}
 	}
-	// Classifier unavailable — fall back to user approval.
+	// Classifier disabled or unavailable — fall back to user approval.
 	return ActionDecision{
 		Decision:         ExecutionDecisionRequireApproval,
 		Source:           SafetyDecisionSourceHardRule,

@@ -76,12 +76,18 @@ func (t *ShellTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 	}
 
 	if t.policy != nil {
-		if level, reason := t.policy.Classify(command); level >= tools.LevelHigh {
+		level, reason := t.policy.Classify(command)
+		switch {
+		case level >= tools.LevelHigh:
 			return tools.SafetyDecision{
 				Level:            level,
 				Reason:           reason,
 				RequiresSnapshot: level < tools.LevelBlocked,
 			}
+		case level == tools.LevelSafe && reason != "":
+			// Policy explicitly accepted the command (e.g. AllowedCommands
+			// whitelist match). Trust that and skip further heuristics.
+			return tools.SafetyDecision{Level: tools.LevelSafe, Reason: reason}
 		}
 	}
 

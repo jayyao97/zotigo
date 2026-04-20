@@ -84,15 +84,21 @@ func (p *ShellPolicy) Compile() error {
 }
 
 // Classify evaluates a command and returns the SafetyLevel the shell
-// tool should surface, plus a short human-readable reason. Unknown or
-// benign commands return (tools.LevelSafe, "") — the caller then
-// applies its own heuristics (e.g. read-only verb whitelist).
+// tool should surface, plus a short human-readable reason.
+//
+// The reason field disambiguates the two meanings of LevelSafe:
+//
+//   - (LevelSafe, "") — policy has no opinion. Caller should apply its
+//     own heuristics (e.g. read-only verb whitelist).
+//   - (LevelSafe, non-empty) — policy explicitly accepted the command
+//     (AllowedCommands hit). Caller should treat this as definitive.
 func (p *ShellPolicy) Classify(cmd string) (tools.SafetyLevel, string) {
 	for i, re := range p.blockedRegexps {
 		if re.MatchString(cmd) {
 			return tools.LevelBlocked, "blocked by pattern: " + p.BlockedPatterns[i]
 		}
 	}
+	var whitelistHit bool
 	if len(p.AllowedCommands) > 0 {
 		base := extractBaseCommand(cmd)
 		allowed := false
@@ -105,17 +111,24 @@ func (p *ShellPolicy) Classify(cmd string) (tools.SafetyLevel, string) {
 		if !allowed {
 			return tools.LevelBlocked, "command not in allowed list: " + base
 		}
+		whitelistHit = true
 	}
 	for i, re := range p.highRiskRegexps {
 		if re.MatchString(cmd) {
 			return tools.LevelHigh, "matched high-risk pattern: " + p.HighRiskPatterns[i]
 		}
 	}
+	if whitelistHit {
+		return tools.LevelSafe, "matched allowed-commands whitelist"
+	}
 	return tools.LevelSafe, ""
 }
 
 // extractBaseCommand returns the command verb (e.g. "rm", "git"),
-// peeling off common wrappers like env/time/nice.
+// peeling off common wrappers like env/time/nice. Returns "" when the
+// input is empty or is purely wrappers with no real verb (e.g.
+// `env FOO=bar` with no command after) — the caller should treat an
+// empty verb as "no executable command", not as a name to whitelist.
 func extractBaseCommand(cmd string) string {
 	parts := strings.Fields(strings.TrimSpace(cmd))
 	if len(parts) == 0 {
@@ -147,5 +160,5 @@ func extractBaseCommand(cmd string) string {
 		}
 		return base
 	}
-	return filepath.Base(parts[len(parts)-1])
+	return ""
 }
