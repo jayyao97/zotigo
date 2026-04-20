@@ -42,6 +42,8 @@ type Agent struct {
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
 
+	hooks []Hook
+
 	mu             sync.RWMutex
 	state          State
 	history        []protocol.Message
@@ -131,7 +133,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 	a := &Agent{
 		cfg:          cfg,
 		provider:     p,
-		executor:     tools.WrapReadTracker(exec),
+		executor:     exec,
 		tools:        make(map[string]tools.Tool),
 		policy:       ApprovalPolicyManual,
 		state:        StateIdle,
@@ -656,7 +658,16 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 			results = append(results, tr)
 			continue
 		}
-		res, err := tool.Execute(ctx, exec, action.Arguments)
+		call := &ToolCall{
+			Tool:      tool,
+			Name:      action.Name,
+			Arguments: action.Arguments,
+			Executor:  exec,
+		}
+		invoke := buildHookChain(a.hooks, func(ctx context.Context, c *ToolCall) (any, error) {
+			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
+		})
+		res, err := invoke(ctx, call)
 		if err != nil {
 			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
 			tr.ToolName = action.Name

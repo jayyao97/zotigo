@@ -24,7 +24,9 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/core/tools/middleware"
 )
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
@@ -162,10 +164,13 @@ func Run(args []string) int {
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
+	readTracker := tools.NewReadTracker(cwd)
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
 		agent.WithTranscriptDir(transcriptDir),
+		agent.WithHook(middleware.ReadTracker(readTracker)),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)

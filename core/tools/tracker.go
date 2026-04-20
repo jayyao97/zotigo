@@ -1,129 +1,69 @@
 package tools
 
 import (
-	"context"
 	"path/filepath"
 	"sync"
 	"time"
-
-	"github.com/jayyao97/zotigo/core/executor"
 )
 
-// ReadTracker lets mutating tools verify two things before touching a
-// file: that the agent has actually opened it with read_file, and that
-// the on-disk contents haven't changed since then. Both guards prevent
-// the "hallucinate-or-stale contents, then overwrite" failure.
+// ReadTracker is a session-scoped bag of "which files the model has
+// read and what they looked like at that moment". It is consumed by
+// tool-call middleware (see core/tools/middleware/tracker.go) which
+// calls Mark on successful reads and HasRead + Snapshot on attempted
+// mutations, and is otherwise invisible to tool code.
 //
-// Any Executor can opt in by implementing this interface. Callers
-// typically compose it with the concrete Executor via WrapReadTracker.
-// Tools check the tracker by type-asserting the Executor they are
-// handed:
-//
-//	if tracker, ok := exec.(tools.ReadTracker); ok {
-//	    snap, ok := tracker.ReadSnapshot(path)
-//	    if !ok { /* never read */ }
-//	    // compare snap against a fresh Stat to detect external edits.
-//	}
-type ReadTracker interface {
-	// HasRead reports whether the given path has been opened via
-	// ReadFile during the current session. Paths are normalized
-	// (relative → working directory; cleaned) so "foo.go" and
-	// "/workdir/foo.go" compare equal.
-	HasRead(path string) bool
-	// MarkRead records that the given path was read. Fetches a fresh
-	// snapshot (size + mtime) from the underlying executor if possible.
-	MarkRead(path string)
-	// ReadSnapshot returns the recorded size+mtime at the last read, or
-	// (zero, false) if the path was never read.
-	ReadSnapshot(path string) (ReadSnapshot, bool)
+// ReadTracker is not an Executor wrapper. Paths are normalized against
+// a working directory so relative and absolute forms compare equal;
+// callers pass the working directory once at construction.
+type ReadTracker struct {
+	workDir string
+
+	mu        sync.Mutex
+	snapshots map[string]ReadSnapshot
 }
 
-// ReadSnapshot is the fingerprint captured at read time. Comparing it
-// against a fresh Stat lets a mutating tool detect that the file was
-// changed out-of-band (another process, the user's editor, a git
-// checkout) between the model's read and its intended edit.
+// ReadSnapshot records the size and mtime captured at read time so
+// mutators can detect that the file changed on disk since then.
 type ReadSnapshot struct {
 	Size  int64
 	Mtime time.Time
 }
 
-// WrapReadTracker wraps exec so mutating tools can observe read history
-// and external changes. If exec already implements ReadTracker it is
-// returned unchanged. The wrapper also exposes Unwrap() so tools that
-// need optional capabilities on the underlying executor (e.g. shell's
-// sandbox CheckCommand) can still reach them.
-func WrapReadTracker(exec executor.Executor) executor.Executor {
-	if _, ok := exec.(ReadTracker); ok {
-		return exec
-	}
-	return &readTrackingExecutor{
-		Executor:  exec,
+// NewReadTracker returns an empty tracker that normalizes paths against
+// workDir. A zero workDir treats all paths as absolute.
+func NewReadTracker(workDir string) *ReadTracker {
+	return &ReadTracker{
+		workDir:   filepath.Clean(workDir),
 		snapshots: make(map[string]ReadSnapshot),
 	}
 }
 
-type readTrackingExecutor struct {
-	executor.Executor
-	mu        sync.Mutex
-	snapshots map[string]ReadSnapshot
-}
-
-// ReadFile delegates to the wrapped executor and, on success, records a
-// snapshot so Edit/Write can detect external changes later.
-func (e *readTrackingExecutor) ReadFile(ctx context.Context, path string) ([]byte, error) {
-	b, err := e.Executor.ReadFile(ctx, path)
-	if err == nil {
-		snap := ReadSnapshot{Size: int64(len(b))}
-		if info, statErr := e.Executor.Stat(ctx, path); statErr == nil && info != nil {
-			snap.Size = info.Size
-			snap.Mtime = info.ModTime
-		}
-		e.setSnapshot(path, snap)
-	}
-	return b, err
-}
-
-// Unwrap exposes the underlying executor so callers that do optional
-// capability probing (shell tool's sandbox CheckCommand, etc.) can type
-// assert against the real implementation rather than the wrapper.
-func (e *readTrackingExecutor) Unwrap() executor.Executor { return e.Executor }
-
-// HasRead implements ReadTracker.
-func (e *readTrackingExecutor) HasRead(path string) bool {
-	_, ok := e.ReadSnapshot(path)
+// HasRead reports whether the path has been marked during this session.
+func (t *ReadTracker) HasRead(path string) bool {
+	_, ok := t.Snapshot(path)
 	return ok
 }
 
-// MarkRead implements ReadTracker. Captures a best-effort snapshot from
-// the underlying executor so external-change detection works even when
-// the caller credits itself via MarkRead rather than going through
-// ReadFile.
-func (e *readTrackingExecutor) MarkRead(path string) {
-	snap := ReadSnapshot{}
-	if info, err := e.Executor.Stat(context.Background(), path); err == nil && info != nil {
-		snap.Size = info.Size
-		snap.Mtime = info.ModTime
-	}
-	e.setSnapshot(path, snap)
+// Mark records a snapshot for the given path. Subsequent mutations
+// against the same path are accepted until the file changes on disk.
+func (t *ReadTracker) Mark(path string, snap ReadSnapshot) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.snapshots[t.key(path)] = snap
 }
 
-// ReadSnapshot implements ReadTracker.
-func (e *readTrackingExecutor) ReadSnapshot(path string) (ReadSnapshot, bool) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	s, ok := e.snapshots[e.key(path)]
+// Snapshot returns the stored snapshot for path (or the zero value and
+// false when not tracked).
+func (t *ReadTracker) Snapshot(path string) (ReadSnapshot, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	s, ok := t.snapshots[t.key(path)]
 	return s, ok
 }
 
-func (e *readTrackingExecutor) setSnapshot(path string, s ReadSnapshot) {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	e.snapshots[e.key(path)] = s
-}
-
-func (e *readTrackingExecutor) key(path string) string {
-	if !filepath.IsAbs(path) {
-		path = filepath.Join(e.WorkDir(), path)
+func (t *ReadTracker) key(path string) string {
+	if !filepath.IsAbs(path) && t.workDir != "" {
+		path = filepath.Join(t.workDir, path)
 	}
 	return filepath.Clean(path)
 }

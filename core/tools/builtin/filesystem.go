@@ -169,14 +169,6 @@ func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, arg
 		return nil, fmt.Errorf("path is required")
 	}
 
-	// Only enforce Read-first when the target already exists — creating
-	// a new file has nothing to read.
-	if info, statErr := exec.Stat(ctx, args.Path); statErr == nil && info != nil && !info.IsDir {
-		if err := checkReadFreshness(ctx, exec, args.Path, "overwriting"); err != nil {
-			return nil, err
-		}
-	}
-
 	if err := exec.WriteFile(ctx, args.Path, []byte(args.Content), 0644); err != nil {
 		return nil, fmt.Errorf("failed to write file: %w", err)
 	}

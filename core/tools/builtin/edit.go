@@ -80,10 +80,6 @@ func (t *EditTool) Execute(ctx context.Context, exec executor.Executor, argsJSON
 		return nil, fmt.Errorf("old_string and new_string are identical - no change needed")
 	}
 
-	if err := checkReadFreshness(ctx, exec, args.Path, "editing"); err != nil {
-		return nil, err
-	}
-
 	// Read the file
 	content, err := exec.ReadFile(ctx, args.Path)
 	if err != nil {
@@ -186,10 +182,6 @@ func (t *PatchTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	}
 	if args.Patch == "" {
 		return nil, fmt.Errorf("patch is required")
-	}
-
-	if err := checkReadFreshness(ctx, exec, args.Path, "patching"); err != nil {
-		return nil, err
 	}
 
 	// Read original content
