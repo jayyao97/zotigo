@@ -130,7 +130,10 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 		},
 	}
 
-	stream, err := c.provider.StreamChat(ctx, msgs, []tools.Tool{classifierDecisionTool{}})
+	stream, err := c.provider.StreamChat(ctx, msgs, []tools.Tool{classifierDecisionTool{}},
+		providers.WithToolChoiceTool(classifierToolName),
+		providers.WithReasoningEffort("low"),
+	)
 	if err != nil {
 		debug.Logf("classifier error provider=%s tool=%s duration=%s err=%v", c.provider.Name(), req.ToolName, time.Since(start).Round(time.Millisecond), err)
 		return SafetyClassifierResponse{}, fmt.Errorf("classifier stream: %w", err)

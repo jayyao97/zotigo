@@ -20,7 +20,7 @@ type SimpleMockProvider struct{}
 
 func (p *SimpleMockProvider) Name() string { return "simple_mock" }
 
-func (p *SimpleMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *SimpleMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -41,7 +41,7 @@ type ToolCallMockProvider struct {
 
 func (p *ToolCallMockProvider) Name() string { return "toolcall_mock" }
 
-func (p *ToolCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *ToolCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)

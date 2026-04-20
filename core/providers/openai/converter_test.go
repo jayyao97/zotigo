@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 )
 
 func TestConvertToChatParams_TextOnly(t *testing.T) {
@@ -13,7 +14,7 @@ func TestConvertToChatParams_TextOnly(t *testing.T) {
 		protocol.NewUserMessage("Hello"),
 	}
 
-	params, err := convertToChatParams(msgs, nil)
+	params, err := convertToChatParams(msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -37,7 +38,7 @@ func TestConvertToChatParams_ToolResult(t *testing.T) {
 	tr := protocol.NewTextToolResult("call_1", "success", false)
 	msg := protocol.NewToolMessage([]protocol.ToolResult{tr})
 
-	params, err := convertToChatParams([]protocol.Message{msg}, nil)
+	params, err := convertToChatParams([]protocol.Message{msg}, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Error: %v", err)
 	}
@@ -66,7 +67,7 @@ func TestConvertToChatParams_Image(t *testing.T) {
 		},
 	}
 
-	params, _ := convertToChatParams([]protocol.Message{msgData}, nil)
+	params, _ := convertToChatParams([]protocol.Message{msgData}, nil, "", providers.ToolChoice{})
 
 	b, _ := json.Marshal(params.Messages[0])
 	jsonStr := string(b)

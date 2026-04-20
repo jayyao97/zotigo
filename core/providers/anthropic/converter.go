@@ -6,11 +6,12 @@ import (
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // convertToAnthropicParams converts internal protocol messages to Anthropic MessageNewParams.
-func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (anthropic.MessageNewParams, error) {
+func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, toolChoice providers.ToolChoice) (anthropic.MessageNewParams, error) {
 	var anthropicMsgs []anthropic.MessageParam
 	var systemTexts []string
 
@@ -160,6 +161,18 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool) (
 			}
 		}
 		params.Tools = anthropicTools
+	}
+
+	// Translate tool choice.
+	switch toolChoice.Mode {
+	case providers.ToolChoiceRequired:
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfAny: &anthropic.ToolChoiceAnyParam{},
+		}
+	case providers.ToolChoiceSpecific:
+		params.ToolChoice = anthropic.ToolChoiceUnionParam{
+			OfTool: &anthropic.ToolChoiceToolParam{Name: toolChoice.Name},
+		}
 	}
 
 	return params, nil

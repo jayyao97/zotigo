@@ -2,8 +2,11 @@ package openai
 
 import (
 	"context"
+	"time"
 
+	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/openai/openai-go/v3"
 )
@@ -11,20 +14,28 @@ import (
 type ChatProvider struct {
 	client          *openai.Client
 	model           string
-	reasoningEffort string // "", "low", "medium", "high"
+	reasoningEffort string // "", "low", "medium", "high" — default for calls
 }
 
 func (p *ChatProvider) Name() string {
 	return "openai-chat"
 }
 
-func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
-	params, err := convertToChatParams(messages, toolsList, p.reasoningEffort)
+func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	resolved := providers.ResolveOptions(opts)
+	effort := resolved.ReasoningEffort
+	if effort == "" {
+		effort = p.reasoningEffort
+	}
+
+	params, err := convertToChatParams(messages, toolsList, effort, resolved.ToolChoice)
 	if err != nil {
 		return nil, err
 	}
 
 	params.Model = p.model
+	start := time.Now()
+	debug.Logf("openai stream start model=%s messages=%d tools=%d reasoning=%s", p.model, len(messages), len(toolsList), effort)
 
 	stream := p.client.Chat.Completions.NewStreaming(ctx, params)
 
@@ -40,8 +51,13 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		contentIndex := 0
 		var finishReason string
 		var lastUsage *openai.CompletionUsage
+		var firstChunkAt time.Time
 
 		for stream.Next() {
+			if firstChunkAt.IsZero() {
+				firstChunkAt = time.Now()
+				debug.Logf("openai stream first_chunk model=%s ttft=%s", p.model, firstChunkAt.Sub(start).Round(time.Millisecond))
+			}
 			chunk := stream.Current()
 			acc.AddChunk(chunk)
 
@@ -135,6 +151,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		}
 
 		if err := stream.Err(); err != nil {
+			debug.Logf("openai stream error model=%s duration=%s err=%v", p.model, time.Since(start).Round(time.Millisecond), err)
 			ch <- protocol.NewErrorEvent(err)
 			return
 		}
@@ -150,6 +167,30 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				CacheReadInputTokens: int(lastUsage.PromptTokensDetails.CachedTokens),
 			}
 		}
+		debug.Logf(
+			"openai stream end model=%s duration=%s finish=%s usage_in=%d usage_out=%d usage_total=%d",
+			p.model,
+			time.Since(start).Round(time.Millisecond),
+			reason,
+			func() int {
+				if lastUsage == nil {
+					return 0
+				}
+				return int(lastUsage.PromptTokens)
+			}(),
+			func() int {
+				if lastUsage == nil {
+					return 0
+				}
+				return int(lastUsage.CompletionTokens)
+			}(),
+			func() int {
+				if lastUsage == nil {
+					return 0
+				}
+				return int(lastUsage.TotalTokens)
+			}(),
+		)
 		ch <- finishEvt
 	}()
 

@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -131,7 +132,7 @@ type e2eVerboseProvider struct{}
 
 func (p *e2eVerboseProvider) Name() string { return "e2e-verbose" }
 
-func (p *e2eVerboseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eVerboseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -154,7 +155,7 @@ type e2eToolProvider struct {
 
 func (p *e2eToolProvider) Name() string { return "e2e-tools" }
 
-func (p *e2eToolProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eToolProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -197,7 +198,7 @@ type e2eLargeResponseProvider struct{}
 
 func (p *e2eLargeResponseProvider) Name() string { return "e2e-memory" }
 
-func (p *e2eLargeResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *e2eLargeResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)

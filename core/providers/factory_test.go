@@ -15,7 +15,7 @@ type MockProvider struct {
 	name string
 }
 
-func (m *MockProvider) StreamChat(ctx context.Context, messages []protocol.Message, tools []tools.Tool) (<-chan protocol.Event, error) {
+func (m *MockProvider) StreamChat(ctx context.Context, messages []protocol.Message, tools []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event)
 	close(ch)
 	return ch, nil

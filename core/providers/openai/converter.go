@@ -6,13 +6,14 @@ import (
 	"fmt"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/shared"
 )
 
 // convertToChatParams converts internal protocol messages to OpenAI ChatCompletionNewParams.
-func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reasoningEffort ...string) (openai.ChatCompletionNewParams, error) {
+func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reasoningEffort string, toolChoice providers.ToolChoice) (openai.ChatCompletionNewParams, error) {
 	var oaMsgs []openai.ChatCompletionMessageParamUnion
 
 	for _, msg := range msgs {
@@ -114,15 +115,13 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reason
 	}
 
 	// Set reasoning effort if provided
-	if len(reasoningEffort) > 0 && reasoningEffort[0] != "" {
-		switch reasoningEffort[0] {
-		case "low":
-			params.ReasoningEffort = shared.ReasoningEffortLow
-		case "medium":
-			params.ReasoningEffort = shared.ReasoningEffortMedium
-		case "high":
-			params.ReasoningEffort = shared.ReasoningEffortHigh
-		}
+	switch reasoningEffort {
+	case "low":
+		params.ReasoningEffort = shared.ReasoningEffortLow
+	case "medium":
+		params.ReasoningEffort = shared.ReasoningEffortMedium
+	case "high":
+		params.ReasoningEffort = shared.ReasoningEffortHigh
 	}
 
 	// Convert Tools
@@ -150,6 +149,18 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reason
 			})
 		}
 		params.Tools = oaTools
+	}
+
+	// Translate tool choice.
+	switch toolChoice.Mode {
+	case providers.ToolChoiceRequired:
+		params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{
+			OfAuto: openai.String("required"),
+		}
+	case providers.ToolChoiceSpecific:
+		params.ToolChoice = openai.ToolChoiceOptionFunctionToolChoice(
+			openai.ChatCompletionNamedToolChoiceFunctionParam{Name: toolChoice.Name},
+		)
 	}
 
 	return params, nil

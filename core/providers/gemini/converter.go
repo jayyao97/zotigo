@@ -6,12 +6,13 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"google.golang.org/genai"
 )
 
 // convertToGeminiParams converts internal protocol messages and tools to Gemini SDK types.
-func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool) ([]*genai.Content, *genai.GenerateContentConfig, error) {
+func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool, toolChoice providers.ToolChoice) ([]*genai.Content, *genai.GenerateContentConfig, error) {
 	var contents []*genai.Content
 	var systemText string
 
@@ -128,6 +129,23 @@ func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool) ([]*
 		}
 		config.Tools = []*genai.Tool{
 			{FunctionDeclarations: funcDecls},
+		}
+	}
+
+	// Translate tool choice.
+	switch toolChoice.Mode {
+	case providers.ToolChoiceRequired:
+		config.ToolConfig = &genai.ToolConfig{
+			FunctionCallingConfig: &genai.FunctionCallingConfig{
+				Mode: genai.FunctionCallingConfigModeAny,
+			},
+		}
+	case providers.ToolChoiceSpecific:
+		config.ToolConfig = &genai.ToolConfig{
+			FunctionCallingConfig: &genai.FunctionCallingConfig{
+				Mode:                 genai.FunctionCallingConfigModeAny,
+				AllowedFunctionNames: []string{toolChoice.Name},
+			},
 		}
 	}
 

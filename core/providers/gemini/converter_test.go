@@ -6,6 +6,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"google.golang.org/genai"
 )
@@ -15,7 +16,7 @@ func TestConvertToGeminiParams_TextOnly(t *testing.T) {
 		protocol.NewUserMessage("Hello"),
 	}
 
-	contents, config, err := convertToGeminiParams(msgs, nil)
+	contents, config, err := convertToGeminiParams(msgs, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestConvertToGeminiParams_SystemInstruction(t *testing.T) {
 		protocol.NewUserMessage("Hi"),
 	}
 
-	contents, config, err := convertToGeminiParams(msgs, nil)
+	contents, config, err := convertToGeminiParams(msgs, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -72,7 +73,7 @@ func TestConvertToGeminiParams_AssistantWithToolCall(t *testing.T) {
 		Arguments: `{"path":"/tmp/test"}`,
 	})
 
-	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil)
+	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -121,7 +122,7 @@ func TestConvertToGeminiParams_ToolResult(t *testing.T) {
 	tr := protocol.NewTextToolResult("call_1", "file content here", false)
 	toolMsg := protocol.NewToolMessage([]protocol.ToolResult{tr})
 
-	contents, _, err := convertToGeminiParams([]protocol.Message{assistantMsg, toolMsg}, nil)
+	contents, _, err := convertToGeminiParams([]protocol.Message{assistantMsg, toolMsg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -165,7 +166,7 @@ func TestConvertToGeminiParams_Image(t *testing.T) {
 		},
 	}
 
-	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil)
+	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -194,7 +195,7 @@ func TestConvertToGeminiParams_ReasoningBlock(t *testing.T) {
 		},
 	}
 
-	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil)
+	contents, _, err := convertToGeminiParams([]protocol.Message{msg}, nil, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -261,7 +262,7 @@ func TestConvertToGeminiParams_Tools(t *testing.T) {
 	}
 
 	msgs := []protocol.Message{protocol.NewUserMessage("read /tmp")}
-	_, config, err := convertToGeminiParams(msgs, []tools.Tool{tool})
+	_, config, err := convertToGeminiParams(msgs, []tools.Tool{tool}, providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

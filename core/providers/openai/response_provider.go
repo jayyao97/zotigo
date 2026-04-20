@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/openai/openai-go/v3"
 )
@@ -18,6 +19,6 @@ func (p *ResponseProvider) Name() string {
 	return "openai-response"
 }
 
-func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool) (<-chan protocol.Event, error) {
+func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	return nil, fmt.Errorf("responses api implementation pending SDK verification")
 }

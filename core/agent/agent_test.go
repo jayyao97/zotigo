@@ -29,7 +29,7 @@ type StepMockProvider struct {
 
 func (p *StepMockProvider) Name() string { return "mock" }
 
-func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 
 	go func() {
@@ -179,7 +179,7 @@ func (e *SnapshotTestExecutor) Close() error                   { return e.base.C
 
 func (p *ShellCallProvider) Name() string { return "shell-mock" }
 
-func (p *ShellCallProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *ShellCallProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -637,7 +637,7 @@ type PathCallMockProvider struct {
 
 func (p *PathCallMockProvider) Name() string { return "path-call-mock" }
 
-func (p *PathCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *PathCallMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -1712,7 +1712,7 @@ type StatsMockProvider struct{}
 
 func (p *StatsMockProvider) Name() string { return "stats-mock" }
 
-func (p *StatsMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *StatsMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
@@ -1730,7 +1730,7 @@ type VerboseMockProvider struct{}
 
 func (p *VerboseMockProvider) Name() string { return "verbose-mock" }
 
-func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool) (<-chan protocol.Event, error) {
+func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 10)
 	go func() {
 		defer close(ch)
