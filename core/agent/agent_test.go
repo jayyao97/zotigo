@@ -16,7 +16,6 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/tools"
 	builtin "github.com/jayyao97/zotigo/core/tools/builtin"
 )
@@ -755,21 +754,26 @@ func TestAgent_AutoApprovePausesHighRiskShell(t *testing.T) {
 	})
 
 	tmpDir := t.TempDir()
-	localExec, err := executor.NewLocalExecutor(tmpDir)
+	exec, err := executor.NewLocalExecutor(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	cfg := config.ProfileConfig{Provider: "mock-high-risk-shell"}
-	ag, err := agent.New(cfg, guard)
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	// Attach a shell policy whose high-risk list flags `sudo` so the
+	// test exercises the LevelHigh → classifier path (ask_user here,
+	// since no classifier is wired up).
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(&builtin.ShellPolicy{
+		HighRiskPatterns: []string{`sudo\s+`},
+	}))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 	events, err := ag.Run(context.Background(), "List files with sudo")
@@ -925,21 +929,21 @@ func TestAgent_BlockedShellReturnsDeniedToolResult(t *testing.T) {
 	})
 
 	tmpDir := t.TempDir()
-	localExec, err := executor.NewLocalExecutor(tmpDir)
+	exec, err := executor.NewLocalExecutor(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	cfg := config.ProfileConfig{Provider: "mock-blocked-shell"}
-	ag, err := agent.New(cfg, guard)
+	ag, err := agent.New(cfg, exec)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 	events, err := ag.Run(context.Background(), "Delete root")

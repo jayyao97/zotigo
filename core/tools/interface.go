@@ -24,17 +24,17 @@ const (
 	// directory, write to a sensitive path, ambiguous shell command.
 	// Triggers the classifier under the default threshold.
 	LevelMedium
-	// LevelHigh: known-dangerous action — sandbox flagged the command as
-	// high-risk, or the tool otherwise has strong reason for concern.
+	// LevelHigh: known-dangerous action — matched a high-risk policy
+	// pattern (e.g. shell's ShellPolicy), or the tool otherwise has
+	// strong reason for concern.
 	LevelHigh
 	// LevelBlocked: hard refuse; never execute under any policy.
 	LevelBlocked
 )
 
 // String returns the canonical risk label for a SafetyLevel. These
-// strings are forwarded to the classifier request and surfaced in audit
-// events, so they intentionally match the values produced by
-// sandbox.RiskLevel.String() for the levels they overlap with.
+// strings are forwarded to the classifier request and surfaced in
+// audit events.
 func (l SafetyLevel) String() string {
 	switch l {
 	case LevelSafe:
@@ -84,8 +84,8 @@ type SafetyCall struct {
 	// SafeDirs is the full set of directories the agent treats as safe
 	// (working directory + any extras, such as skills). A superset of WorkDir.
 	SafeDirs []string
-	// Executor gives tools access to capabilities like sandbox CheckCommand
-	// when they need to (e.g. the shell tool).
+	// Executor lets tools reach optional capabilities exposed by their
+	// underlying executor (via the Unwrap / capability-probe pattern).
 	Executor executor.Executor
 }
 

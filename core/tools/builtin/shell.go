@@ -8,12 +8,40 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
-// ShellTool executes shell commands through the executor.
-type ShellTool struct{}
+// ShellTool executes shell commands through the executor. Construct
+// with NewShellTool and (optionally) WithPolicy to apply a
+// ShellPolicy for pattern-based blocking.
+type ShellTool struct {
+	policy *ShellPolicy
+}
+
+// ShellOption configures a ShellTool at construction time.
+type ShellOption func(*ShellTool)
+
+// WithPolicy attaches a ShellPolicy that will gate Classify. The policy
+// is compiled on attach; compilation errors are surfaced by NewShellTool.
+func WithPolicy(p *ShellPolicy) ShellOption {
+	return func(t *ShellTool) { t.policy = p }
+}
+
+// NewShellTool constructs a ShellTool. Any WithPolicy() option is
+// compiled before returning; a compilation error propagates to the
+// caller so misconfigured policies fail fast at startup.
+func NewShellTool(opts ...ShellOption) (*ShellTool, error) {
+	t := &ShellTool{}
+	for _, opt := range opts {
+		opt(t)
+	}
+	if t.policy != nil {
+		if err := t.policy.Compile(); err != nil {
+			return nil, fmt.Errorf("shell policy: %w", err)
+		}
+	}
+	return t, nil
+}
 
 func (t *ShellTool) Name() string { return "shell" }
 func (t *ShellTool) Description() string {
@@ -47,21 +75,13 @@ func (t *ShellTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 		return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "shell command missing"}
 	}
 
-	// Sandbox policy is the first hard gate. The executor may be wrapped
-	// (e.g. the agent's read tracker) so unwrap once before the capability
-	// probe.
-	exec := call.Executor
-	if u, ok := exec.(interface{ Unwrap() executor.Executor }); ok {
-		exec = u.Unwrap()
-	}
-	if checker, ok := exec.(interface {
-		CheckCommand(string) sandbox.CommandCheckResult
-	}); ok {
-		switch checker.CheckCommand(command).RiskLevel {
-		case sandbox.RiskLevelBlocked:
-			return tools.SafetyDecision{Level: tools.LevelBlocked, Reason: "blocked by sandbox policy"}
-		case sandbox.RiskLevelHigh:
-			return tools.SafetyDecision{Level: tools.LevelHigh, Reason: "high-risk shell command", RequiresSnapshot: true}
+	if t.policy != nil {
+		if level, reason := t.policy.Classify(command); level >= tools.LevelHigh {
+			return tools.SafetyDecision{
+				Level:            level,
+				Reason:           reason,
+				RequiresSnapshot: level < tools.LevelBlocked,
+			}
 		}
 	}
 

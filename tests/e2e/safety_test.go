@@ -19,7 +19,6 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
-	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/testutil"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
@@ -500,23 +499,23 @@ func TestE2E_Safety_DestructiveCommandNeverExecutes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	profileCfg := e2eCfg.GetProfileConfig()
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use shell tool.")
 
-	ag, err := agent.New(profileCfg, guard,
+	ag, err := agent.New(profileCfg, localExec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
 	)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -575,10 +574,6 @@ func TestE2E_Safety_HighRiskShellTriggersClassifier(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
-	guard, err := sandbox.NewGuard(localExec, nil)
-	if err != nil {
-		t.Fatalf("Failed to create guard: %v", err)
-	}
 
 	pb := prompt.NewSystemPromptBuilder()
 	pb.SetStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use the shell tool.")
@@ -602,11 +597,20 @@ func TestE2E_Safety_HighRiskShellTriggersClassifier(t *testing.T) {
 	opts = append(opts, agent.WithSafetyClassifier(classifier))
 	t.Logf("Classifier: profile=%s model=%s", classifierName, classifierProfile.Model)
 
-	ag, err := agent.New(profileCfg, guard, opts...)
+	ag, err := agent.New(profileCfg, localExec, opts...)
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
-	ag.RegisterTool(&builtin.ShellTool{})
+	// Attach a shell policy with a sudo high-risk pattern so this case
+	// exercises the LevelHigh → classifier path deterministically
+	// (default policy no longer includes context-dependent patterns).
+	shell, err := builtin.NewShellTool(builtin.WithPolicy(&builtin.ShellPolicy{
+		HighRiskPatterns: []string{`sudo\s+`},
+	}))
+	if err != nil {
+		t.Fatalf("shell tool: %v", err)
+	}
+	ag.RegisterTool(shell)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
