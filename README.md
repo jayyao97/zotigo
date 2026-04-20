@@ -112,7 +112,7 @@ profiles:
     safety:
       classifier:
         enabled: true
-        mode: high_risk_and_ambiguous
+        review_threshold: medium
         profile: gpt-5-mini
         timeout_ms: 3000
         allow_auto_execute_on_allow: false

@@ -50,8 +50,11 @@ func (t *GlobTool) Schema() any {
 	}
 }
 
-func (t *GlobTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *GlobTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "glob in safe scope"}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "glob outside safe scope or on sensitive path"}
 }
 
 func (t *GlobTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

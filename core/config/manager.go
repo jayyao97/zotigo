@@ -104,8 +104,8 @@ func (m *Manager) Load() (*Config, error) {
 			if c.AllowAutoExecuteOnAllow == nil {
 				c.AllowAutoExecuteOnAllow = classifierDefaults.AllowAutoExecuteOnAllow
 			}
-			if c.Mode == "" {
-				c.Mode = classifierDefaults.Mode
+			if c.ReviewThreshold == "" {
+				c.ReviewThreshold = classifierDefaults.ReviewThreshold
 			}
 			if c.Profile == "" {
 				c.Profile = classifierDefaults.Profile

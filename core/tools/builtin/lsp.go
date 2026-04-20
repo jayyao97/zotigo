@@ -64,8 +64,11 @@ func (t *LSPTool) Schema() any {
 	}
 }
 
-func (t *LSPTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"file_path"}}
+func (t *LSPTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"file_path"}) && !tools.IsSensitivePath(call, []string{"file_path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "LSP query in safe scope"}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "LSP query outside safe scope or on sensitive path"}
 }
 
 func (t *LSPTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

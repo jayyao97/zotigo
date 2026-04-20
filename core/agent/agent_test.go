@@ -72,10 +72,12 @@ func (p *StepMockProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 type TimeTool struct{}
 
-func (t *TimeTool) Name() string             { return "get_time" }
-func (t *TimeTool) Description() string      { return "Returns current time" }
-func (t *TimeTool) Schema() any              { return nil }
-func (t *TimeTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: false} }
+func (t *TimeTool) Name() string        { return "get_time" }
+func (t *TimeTool) Description() string { return "Returns current time" }
+func (t *TimeTool) Schema() any         { return nil }
+func (t *TimeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow}
+}
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	return "12:00", nil
 }
@@ -431,8 +433,16 @@ func TestAgent_ReminderAppendedToLastToolResult(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-reminder"}
+	cfg := config.ProfileConfig{
+		Provider: "mock-reminder",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
 	ag, err := agent.New(cfg, exec,
+		agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+		}),
 		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
 			return "Remember: stay focused on the task."
 		}),
@@ -533,8 +543,16 @@ func TestAgent_MultipleReminders(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-reminder-multi"}
+	cfg := config.ProfileConfig{
+		Provider: "mock-reminder-multi",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
 	ag, err := agent.New(cfg, exec,
+		agent.WithSafetyClassifier(&StaticSafetyClassifier{
+			Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+		}),
 		agent.WithReminder(func(_ prompt.PromptContext, _ []prompt.ToolCallResult) string {
 			return "Reminder A"
 		}),
@@ -600,8 +618,11 @@ type ReadFileMockTool struct {
 func (t *ReadFileMockTool) Name() string        { return "read_file" }
 func (t *ReadFileMockTool) Description() string { return "Read a file" }
 func (t *ReadFileMockTool) Schema() any         { return nil }
-func (t *ReadFileMockTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *ReadFileMockTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium}
 }
 func (t *ReadFileMockTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	t.LastPath = args
@@ -774,7 +795,7 @@ func TestAgent_AutoApprovePausesHighRiskShell(t *testing.T) {
 	}
 }
 
-func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
+func TestAgent_AutoModeAutoExecutesWriteInWorkDir(t *testing.T) {
 	providers.Register("mock-write-file", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &ShellCallProvider{
 			Tool: "write_file",
@@ -788,8 +809,15 @@ func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
 		t.Fatalf("Failed to create executor: %v", err)
 	}
 
-	cfg := config.ProfileConfig{Provider: "mock-write-file"}
-	ag, err := agent.New(cfg, exec)
+	cfg := config.ProfileConfig{
+		Provider: "mock-write-file",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)},
+		},
+	}
+	ag, err := agent.New(cfg, exec, agent.WithSafetyClassifier(&StaticSafetyClassifier{
+		Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow},
+	}))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
 	}
@@ -805,8 +833,89 @@ func TestAgent_AutoApprovePausesProtectedWriteTool(t *testing.T) {
 	for e := range events {
 		lastEvent = e
 	}
+	// Auto mode + write in working dir + classifier=allow → auto-execute
+	if lastEvent.FinishReason == "need_approval" {
+		t.Fatal("Auto mode + classifier=allow should auto-execute write_file in working directory")
+	}
+
+	// File should actually be written
+	if _, err := os.Stat(filepath.Join(tmpDir, "note.txt")); err != nil {
+		t.Errorf("Expected note.txt to be created: %v", err)
+	}
+}
+
+func TestAgent_AutoModePausesWriteOutsideWorkDir(t *testing.T) {
+	// Write to an absolute path outside working directory → should still pause
+	providers.Register("mock-write-outside", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"/tmp/evil.txt","content":"hack"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-write-outside"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "Write outside")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	// Auto mode but path is outside working dir → still requires approval
 	if lastEvent.FinishReason != "need_approval" {
-		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
+		t.Fatal("Auto mode should still require approval for writes outside working directory")
+	}
+}
+
+func TestAgent_ManualModePausesWriteInWorkDir(t *testing.T) {
+	// Manual mode → always pause for write_file, even in working dir
+	providers.Register("mock-write-manual", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{
+			Tool: "write_file",
+			Args: `{"path":"note.txt","content":"hello"}`,
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "mock-write-manual"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	ag.RegisterTool(&builtin.WriteFileTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	events, err := ag.Run(context.Background(), "Write a note")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatal("Manual mode should require approval for write_file")
 	}
 }
 
@@ -1411,6 +1520,8 @@ func TestAgent_CaptureRawAuditContext(t *testing.T) {
 			t.Fatalf("Failed to create agent: %v", err)
 		}
 		ag.RegisterTool(&builtin.ShellTool{})
+		// Classifier is only called in Auto mode now.
+		ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
 
 		events, err := ag.Run(context.Background(), "please touch a file")
 		if err != nil {

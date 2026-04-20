@@ -83,10 +83,10 @@ func TestListDirWindows_EmptyDir(t *testing.T) {
 
 func TestStatWindows_Parse(t *testing.T) {
 	tests := []struct {
-		name     string
-		output   string
-		wantDir  bool
-		wantErr  bool
+		name    string
+		output  string
+		wantDir bool
+		wantErr bool
 	}{
 		{"directory", "DIR\n", true, false},
 		{"file", "FILE\n", false, false},

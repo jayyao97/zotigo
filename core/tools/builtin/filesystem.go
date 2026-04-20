@@ -29,8 +29,11 @@ func (t *ReadFileTool) Schema() any {
 	}
 }
 
-func (t *ReadFileTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *ReadFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "file read in safe scope"}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "file read outside safe scope or on sensitive path"}
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -70,8 +73,17 @@ func (t *WriteFileTool) Schema() any {
 	}
 }
 
-func (t *WriteFileTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: false, PathArgs: []string{"path"}}
+func (t *WriteFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	level := tools.LevelLow
+	reason := "file write in working directory"
+	if !tools.IsInWorkDir(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "write targets path outside working directory"
+	} else if tools.IsSensitivePath(call, []string{"path"}) {
+		level = tools.LevelMedium
+		reason = "write targets sensitive path"
+	}
+	return tools.SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
 }
 
 func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -108,8 +120,11 @@ func (t *ListDirTool) Schema() any {
 	}
 }
 
-func (t *ListDirTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true, PathArgs: []string{"path"}}
+func (t *ListDirTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "directory listing in safe scope"}
+	}
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "directory listing outside safe scope"}
 }
 
 func (t *ListDirTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

@@ -34,8 +34,8 @@ func (t *ListSkillsTool) Schema() any {
 	}
 }
 
-func (t *ListSkillsTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true}
+func (t *ListSkillsTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "list skills (read-only)"}
 }
 
 func (t *ListSkillsTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {

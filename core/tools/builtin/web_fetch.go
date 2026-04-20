@@ -49,8 +49,8 @@ func (t *WebFetchTool) Schema() any {
 	}
 }
 
-func (t *WebFetchTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: true}
+func (t *WebFetchTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "web fetch (read-only)"}
 }
 
 func (t *WebFetchTool) Execute(ctx context.Context, _ executor.Executor, argsJSON string) (any, error) {

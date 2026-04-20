@@ -232,10 +232,12 @@ type mockTool struct {
 	schema      any
 }
 
-func (m *mockTool) Name() string             { return m.name }
-func (m *mockTool) Description() string      { return m.description }
-func (m *mockTool) Schema() any              { return m.schema }
-func (m *mockTool) Safety() tools.ToolSafety { return tools.ToolSafety{ReadOnly: true} }
+func (m *mockTool) Name() string        { return m.name }
+func (m *mockTool) Description() string { return m.description }
+func (m *mockTool) Schema() any         { return m.schema }
+func (m *mockTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
 func (m *mockTool) Execute(_ context.Context, _ executor.Executor, _ string) (any, error) {
 	return nil, nil
 }

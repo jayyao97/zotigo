@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/sandbox"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -40,8 +41,51 @@ func (t *ShellTool) Schema() any {
 	}
 }
 
-func (t *ShellTool) Safety() tools.ToolSafety {
-	return tools.ToolSafety{ReadOnly: false}
+func (t *ShellTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
+	command := tools.StringArg(call.Arguments, "command")
+	if command == "" {
+		return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "shell command missing"}
+	}
+
+	// Sandbox policy is the first hard gate.
+	if checker, ok := call.Executor.(interface {
+		CheckCommand(string) sandbox.CommandCheckResult
+	}); ok {
+		switch checker.CheckCommand(command).RiskLevel {
+		case sandbox.RiskLevelBlocked:
+			return tools.SafetyDecision{Level: tools.LevelBlocked, Reason: "blocked by sandbox policy"}
+		case sandbox.RiskLevelHigh:
+			return tools.SafetyDecision{Level: tools.LevelHigh, Reason: "high-risk shell command", RequiresSnapshot: true}
+		}
+	}
+
+	// Read-only whitelist bypasses approval.
+	if shellCommandAppearsReadOnly(command) {
+		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "read-only shell command"}
+	}
+
+	// Ambiguous mutating shell — tool can't tell what it does.
+	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "shell command may mutate state", RequiresSnapshot: true}
+}
+
+// shellCommandAppearsReadOnly recognises a small set of commands we trust
+// enough to execute without approval. The list is intentionally conservative.
+func shellCommandAppearsReadOnly(command string) bool {
+	fields := strings.Fields(strings.TrimSpace(command))
+	if len(fields) == 0 {
+		return false
+	}
+	switch fields[0] {
+	case "ls", "pwd", "cat", "head", "tail", "grep", "rg", "find", "fd":
+		return true
+	case "git":
+		return strings.HasPrefix(command, "git status") ||
+			strings.HasPrefix(command, "git diff") ||
+			strings.HasPrefix(command, "git log") ||
+			strings.HasPrefix(command, "git show") ||
+			strings.HasPrefix(command, "git branch")
+	}
+	return false
 }
 
 func (t *ShellTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
