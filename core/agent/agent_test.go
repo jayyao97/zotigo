@@ -1806,3 +1806,249 @@ func (p *VerboseMockProvider) StreamChat(ctx context.Context, messages []protoco
 	}()
 	return ch, nil
 }
+
+// EmptyThenTextProvider emits an empty response on the first call (no text,
+// no tool call — simulating the "all output tokens went to thinking"
+// failure mode) and a normal text response on subsequent calls.
+type EmptyThenTextProvider struct {
+	Step          int
+	ReceivedMsgs  [][]protocol.Message
+	SecondCallTxt string
+}
+
+func (p *EmptyThenTextProvider) Name() string { return "empty-then-text" }
+
+func (p *EmptyThenTextProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.Step++
+	snap := make([]protocol.Message, len(messages))
+	copy(snap, messages)
+	p.ReceivedMsgs = append(p.ReceivedMsgs, snap)
+
+	ch := make(chan protocol.Event, 4)
+	go func() {
+		defer close(ch)
+		if p.Step == 1 {
+			// Empty: no content deltas, no tool calls.
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+			return
+		}
+		txt := p.SecondCallTxt
+		if txt == "" {
+			txt = "done"
+		}
+		ch <- protocol.NewTextDeltaEvent(txt)
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: txt},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+// AlwaysEmptyProvider always returns an empty response. Used to verify
+// the retry cap prevents an infinite loop.
+type AlwaysEmptyProvider struct{ Step int }
+
+func (p *AlwaysEmptyProvider) Name() string { return "always-empty" }
+
+func (p *AlwaysEmptyProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.Step++
+	ch := make(chan protocol.Event, 1)
+	go func() {
+		defer close(ch)
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func TestAgentEmptyResponseRecovery(t *testing.T) {
+	prov := &EmptyThenTextProvider{SecondCallTxt: "recovered"}
+	providers.Register("empty-then-text", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "empty-then-text"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var content string
+	for e := range events {
+		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil {
+			content += e.ContentPartDelta.Text
+		}
+	}
+
+	if prov.Step != 2 {
+		t.Errorf("expected provider called 2x (empty + recovery), got %d", prov.Step)
+	}
+	if content != "recovered" {
+		t.Errorf("expected recovered content, got %q", content)
+	}
+
+	// The second call should have seen the injected system-reminder
+	// nudge in its context.
+	if len(prov.ReceivedMsgs) < 2 {
+		t.Fatalf("expected 2 provider calls recorded, got %d", len(prov.ReceivedMsgs))
+	}
+	secondCtx := prov.ReceivedMsgs[1]
+	foundNudge := false
+	for _, m := range secondCtx {
+		if m.Role != protocol.RoleUser {
+			continue
+		}
+		for _, p := range m.Content {
+			if p.Type == protocol.ContentTypeText && strings.Contains(p.Text, "<system-reminder>") && strings.Contains(p.Text, "no visible text") {
+				foundNudge = true
+			}
+		}
+	}
+	if !foundNudge {
+		t.Errorf("expected injected system-reminder nudge in second call context")
+	}
+}
+
+// SequencedProvider emits a caller-controlled sequence of responses.
+// Each element: if ToolName is set, emit a tool call; else if Text is set,
+// emit that text; else emit nothing (empty response).
+type SequencedStep struct {
+	Text     string
+	ToolName string
+	ToolArgs string
+	ToolID   string
+}
+
+type SequencedProvider struct {
+	Steps []SequencedStep
+	Step  int
+}
+
+func (p *SequencedProvider) Name() string { return "sequenced" }
+
+func (p *SequencedProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	idx := p.Step
+	p.Step++
+	ch := make(chan protocol.Event, 6)
+	go func() {
+		defer close(ch)
+		if idx >= len(p.Steps) {
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+			return
+		}
+		s := p.Steps[idx]
+		switch {
+		case s.ToolName != "":
+			ch <- protocol.Event{
+				Type:  protocol.EventTypeToolCallEnd,
+				Index: 0,
+				ToolCall: &protocol.ToolCall{
+					ID:        s.ToolID,
+					Name:      s.ToolName,
+					Arguments: s.ToolArgs,
+				},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+		case s.Text != "":
+			ch <- protocol.NewTextDeltaEvent(s.Text)
+			ch <- protocol.Event{
+				Type:        protocol.EventTypeContentEnd,
+				ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: s.Text},
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		default:
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+		}
+	}()
+	return ch, nil
+}
+
+// TestAgentEmptyResponseRecoveryResetsAfterProgress verifies that the
+// recovery budget refills after legit output — so a long multi-step turn
+// can tolerate more than one empty response as long as they aren't
+// consecutive.
+func TestAgentEmptyResponseRecoveryResetsAfterProgress(t *testing.T) {
+	prov := &SequencedProvider{
+		Steps: []SequencedStep{
+			{}, // 1: empty
+			{ToolName: "get_time", ToolID: "call_1", ToolArgs: "{}"}, // 2: recovered, tool call
+			// (tool result injected by runtime; agent loop re-enters model)
+			{},              // 3: empty again
+			{Text: "final"}, // 4: recovered
+		},
+	}
+	providers.Register("sequenced-reset", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "sequenced-reset"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var content string
+	for e := range events {
+		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil {
+			content += e.ContentPartDelta.Text
+		}
+	}
+
+	if prov.Step != 4 {
+		t.Errorf("expected 4 provider calls (empty, tool, empty, text), got %d", prov.Step)
+	}
+	if content != "final" {
+		t.Errorf("expected final content 'final', got %q", content)
+	}
+}
+
+func TestAgentEmptyResponseRecoveryCapped(t *testing.T) {
+	prov := &AlwaysEmptyProvider{}
+	providers.Register("always-empty", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "always-empty"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for range events {
+	}
+
+	// Cap is 1 retry: expect exactly 2 provider calls, then give up.
+	if prov.Step != 2 {
+		t.Errorf("expected exactly 2 calls (original + 1 retry), got %d", prov.Step)
+	}
+}

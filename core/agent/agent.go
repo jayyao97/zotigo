@@ -322,6 +322,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	go func() {
 		defer close(outCh)
 
+		emptyRecoveryAttempts := 0
+		const maxEmptyRecoveryAttempts = 1
+
 		for {
 			a.mu.RLock()
 			state := a.state
@@ -452,6 +455,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			a.history = append(a.history, asstMsg)
 			a.mu.Unlock()
 
+			// Reset the empty-recovery budget on any legitimate output.
+			// The cap is meant to stop consecutive empty responses, not to
+			// limit total recoveries within a long multi-step turn.
+			if currentContent != "" || len(currentToolCalls) > 0 {
+				emptyRecoveryAttempts = 0
+			}
+
 			// Handle tool calls
 			if len(currentToolCalls) > 0 {
 				var autoCalls []*PendingAction
@@ -531,6 +541,31 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					a.mu.Unlock()
 				}
 
+				continue
+			}
+
+			// Recover from empty responses: the model emitted no text and no
+			// tool calls (all output_tokens went into reasoning). Without this
+			// guard the turn would end silently mid-task. Nudge the model once
+			// with a system-reminder and retry; if that also comes back empty,
+			// fall through to the normal end-of-turn.
+			if currentContent == "" && len(currentToolCalls) == 0 &&
+				emptyRecoveryAttempts < maxEmptyRecoveryAttempts {
+				emptyRecoveryAttempts++
+				debug.Logf(
+					"agent empty response recovery attempt=%d reasoning_chars=%d",
+					emptyRecoveryAttempts, len(currentReasoning),
+				)
+				nudge := protocol.NewUserMessage(
+					"<system-reminder>\nYour previous response contained no " +
+						"visible text and no tool call. If the task is not " +
+						"yet complete, continue by emitting the next tool " +
+						"call. If the task is complete, reply with a short " +
+						"summary of what was done.\n</system-reminder>",
+				)
+				a.mu.Lock()
+				a.history = append(a.history, nudge)
+				a.mu.Unlock()
 				continue
 			}
 
