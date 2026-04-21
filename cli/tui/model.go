@@ -137,6 +137,7 @@ func (m Model) printInitialHistory(isRepaint bool) tea.Cmd {
 
 	var cmds []tea.Cmd
 	cmds = append(cmds, tea.Println(header))
+	cmds = append(cmds, tea.Println(renderAgentBanner(m.agent.Describe())))
 	if truncated {
 		cmds = append(cmds, tea.Println(headerStyle.Render("── (...earlier messages truncated...) ──")))
 	}
@@ -1256,4 +1257,49 @@ func formatPendingActions(actions []*agent.PendingAction) string {
 		parts = append(parts, line)
 	}
 	return strings.Join(parts, "\n")
+}
+
+// renderAgentBanner formats the resolved agent configuration into a
+// compact, non-secret banner shown right under the welcome header.
+// Fields that are unset (e.g. no classifier configured) are omitted so
+// the block stays tight.
+func renderAgentBanner(d agent.Description) string {
+	subStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
+
+	var rows []string
+	add := func(k, v string) {
+		if strings.TrimSpace(v) == "" {
+			return
+		}
+		rows = append(rows, "  "+keyStyle.Render(k+":")+" "+subStyle.Render(v))
+	}
+
+	add("Provider", d.Provider)
+	add("Model", d.Model)
+	if d.ThinkingLevel != "" {
+		add("Thinking", d.ThinkingLevel)
+	}
+	add("Policy", string(d.ApprovalPolicy))
+
+	switch {
+	case d.ClassifierAvailable:
+		cls := d.ClassifierProvider
+		if d.ClassifierModel != "" {
+			cls += " / " + d.ClassifierModel
+		}
+		if d.ReviewThreshold != "" {
+			cls += " (threshold=" + d.ReviewThreshold + ")"
+		}
+		add("Classifier", cls)
+	case d.ClassifierEnabled:
+		// Enabled in config but not wired — usually means the resolver
+		// failed (missing classifier profile). Surface it so the user
+		// isn't surprised when approvals start firing.
+		add("Classifier", "enabled but unavailable (falling back to approval)")
+	default:
+		add("Classifier", "off")
+	}
+
+	return strings.Join(rows, "\n")
 }

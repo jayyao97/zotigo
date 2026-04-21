@@ -2052,3 +2052,87 @@ func TestAgentEmptyResponseRecoveryCapped(t *testing.T) {
 		t.Errorf("expected exactly 2 calls (original + 1 retry), got %d", prov.Step)
 	}
 }
+
+func TestAgent_Describe(t *testing.T) {
+	providers.Register("mock-describe", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{
+		Provider:      "mock-describe",
+		Model:         "mock-1",
+		ThinkingLevel: "low",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{
+				Enabled:         config.BoolPtr(true),
+				ReviewThreshold: "high",
+			},
+		},
+	}
+	ag, err := agent.New(cfg, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithClassifierProfile("mini", config.ProfileConfig{Provider: "openai", Model: "gpt-4o-mini"}),
+		agent.WithSafetyClassifier(&StaticSafetyClassifier{}),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	d := ag.Describe()
+	if d.Provider != "mock" {
+		t.Errorf("expected provider=mock, got %q", d.Provider)
+	}
+	if d.Model != "mock-1" {
+		t.Errorf("expected model=mock-1, got %q", d.Model)
+	}
+	if d.ThinkingLevel != "low" {
+		t.Errorf("expected thinking=low, got %q", d.ThinkingLevel)
+	}
+	if d.ApprovalPolicy != agent.ApprovalPolicyAuto {
+		t.Errorf("expected auto policy, got %q", d.ApprovalPolicy)
+	}
+	if !d.ClassifierAvailable {
+		t.Error("expected classifier available")
+	}
+	if d.ClassifierModel != "gpt-4o-mini" {
+		t.Errorf("expected classifier model gpt-4o-mini, got %q", d.ClassifierModel)
+	}
+	if d.ReviewThreshold != "high" {
+		t.Errorf("expected threshold=high, got %q", d.ReviewThreshold)
+	}
+}
+
+func TestAgent_Describe_ClassifierDisabled(t *testing.T) {
+	providers.Register("mock-describe-noclf", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{
+		Provider: "mock-describe-noclf",
+		Model:    "mock-1",
+		Safety: config.SafetyProfileConfig{
+			Classifier: config.SafetyClassifierConfig{
+				Enabled: config.BoolPtr(false),
+			},
+		},
+	}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	d := ag.Describe()
+	if d.ClassifierEnabled {
+		t.Error("expected ClassifierEnabled=false")
+	}
+	if d.ClassifierAvailable {
+		t.Error("expected ClassifierAvailable=false")
+	}
+}

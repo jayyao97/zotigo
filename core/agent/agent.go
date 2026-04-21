@@ -167,6 +167,48 @@ func (a *Agent) Executor() executor.Executor {
 	return a.executor
 }
 
+// Description is a user-facing snapshot of the resolved runtime
+// configuration — useful for startup banners, /info commands, and
+// bug-report context. Everything in it is non-secret (no API keys,
+// no base URLs).
+type Description struct {
+	Profile             string
+	Provider            string
+	Model               string
+	ThinkingLevel       string
+	ApprovalPolicy      ApprovalPolicy
+	ClassifierEnabled   bool
+	ClassifierAvailable bool // true when a classifier is wired + enabled
+	ClassifierProvider  string
+	ClassifierModel     string
+	ReviewThreshold     string
+}
+
+// Describe returns a resolved snapshot of the agent's configuration at
+// construction time. Safe to call at any point in the agent lifecycle.
+func (a *Agent) Describe() Description {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	d := Description{
+		Profile:           a.cfg.Provider,
+		Model:             a.cfg.Model,
+		ThinkingLevel:     a.cfg.ThinkingLevel,
+		ApprovalPolicy:    a.policy,
+		ClassifierEnabled: a.cfg.Safety.Classifier.IsEnabled(),
+		ReviewThreshold:   a.cfg.Safety.Classifier.ReviewThreshold,
+	}
+	if a.provider != nil {
+		d.Provider = a.provider.Name()
+	}
+	if a.classifier != nil && d.ClassifierEnabled {
+		d.ClassifierAvailable = true
+		d.ClassifierProvider = a.classifierProfile.Provider
+		d.ClassifierModel = a.classifierProfile.Model
+	}
+	return d
+}
+
 // SetSkillManager sets the skill manager at runtime.
 func (a *Agent) SetSkillManager(sm *skills.SkillManager) {
 	a.mu.Lock()
