@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
+	"github.com/jayyao97/zotigo/core/middleware"
 	"github.com/jayyao97/zotigo/core/providers"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
@@ -26,7 +27,6 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
-	"github.com/jayyao97/zotigo/core/tools/middleware"
 )
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.

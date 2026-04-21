@@ -8,7 +8,7 @@ import (
 
 // ReadTracker is a session-scoped bag of "which files the model has
 // read and what they looked like at that moment". It is consumed by
-// tool-call middleware (see core/tools/middleware/tracker.go) which
+// tool-call middleware (see core/middleware/tracker.go) which
 // calls Mark on successful reads and HasRead + Snapshot on attempted
 // mutations, and is otherwise invisible to tool code.
 //
