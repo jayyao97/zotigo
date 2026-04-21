@@ -2,7 +2,9 @@ package openai
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -352,18 +354,16 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 			}
 
 		case protocol.RoleUser:
-			var text strings.Builder
-			for _, part := range m.Content {
-				if part.Type == protocol.ContentTypeText {
-					if text.Len() > 0 {
-						text.WriteString("\n")
-					}
-					text.WriteString(part.Text)
-				}
-				// TODO: image / file parts — omitted until we extend the
-				// protocol's Responses-API input shape.
+			content, err := buildEasyInputContent(m.Content)
+			if err != nil {
+				return responses.ResponseNewParams{}, err
 			}
-			items = append(items, responses.ResponseInputItemParamOfMessage(text.String(), responses.EasyInputMessageRoleUser))
+			items = append(items, responses.ResponseInputItemUnionParam{
+				OfMessage: &responses.EasyInputMessageParam{
+					Content: content,
+					Role:    responses.EasyInputMessageRoleUser,
+				},
+			})
 
 		case protocol.RoleAssistant:
 			// Split the assistant turn into its text and tool-call parts.
@@ -473,4 +473,86 @@ func (e *responseStreamError) Error() string {
 		return e.Msg + " (code=" + e.Code + ")"
 	}
 	return e.Msg
+}
+
+// buildEasyInputContent converts a protocol user message's parts into
+// the Responses API's rich content shape. Pure-text messages collapse
+// to a string; anything with an image promotes to a content list with
+// input_text + input_image items. The image URL follows the same
+// data URI convention used by Chat Completions (base64 inline or a
+// plain URL passthrough).
+func buildEasyInputContent(parts []protocol.ContentPart) (responses.EasyInputMessageContentUnionParam, error) {
+	// Fast path: pure text → single string.
+	hasNonText := false
+	for _, p := range parts {
+		if p.Type != protocol.ContentTypeText {
+			hasNonText = true
+			break
+		}
+	}
+	if !hasNonText {
+		var sb strings.Builder
+		for _, p := range parts {
+			if p.Type != protocol.ContentTypeText {
+				continue
+			}
+			if sb.Len() > 0 {
+				sb.WriteString("\n")
+			}
+			sb.WriteString(p.Text)
+		}
+		return responses.EasyInputMessageContentUnionParam{
+			OfString: param.NewOpt(sb.String()),
+		}, nil
+	}
+
+	// Rich path: build a content list.
+	var list responses.ResponseInputMessageContentListParam
+	for _, p := range parts {
+		switch p.Type {
+		case protocol.ContentTypeText:
+			list = append(list, responses.ResponseInputContentUnionParam{
+				OfInputText: &responses.ResponseInputTextParam{Text: p.Text},
+			})
+		case protocol.ContentTypeImage:
+			img, err := newInputImageParam(p.Image)
+			if err != nil {
+				return responses.EasyInputMessageContentUnionParam{}, err
+			}
+			list = append(list, responses.ResponseInputContentUnionParam{
+				OfInputImage: img,
+			})
+		}
+	}
+	return responses.EasyInputMessageContentUnionParam{
+		OfInputItemContentList: list,
+	}, nil
+}
+
+// newInputImageParam builds a Responses API input_image from a
+// protocol MediaPart. Preference order: explicit FileID (upload-first
+// workflow) → URL passthrough → inline base64 data URI.
+func newInputImageParam(media *protocol.MediaPart) (*responses.ResponseInputImageParam, error) {
+	if media == nil {
+		return nil, fmt.Errorf("image part is nil")
+	}
+	img := &responses.ResponseInputImageParam{
+		Detail: responses.ResponseInputImageDetailAuto,
+	}
+	switch {
+	case media.FileID != "":
+		img.FileID = param.NewOpt(media.FileID)
+	case media.URL != "":
+		img.ImageURL = param.NewOpt(media.URL)
+	case len(media.Data) > 0:
+		mime := media.MediaType
+		if mime == "" {
+			mime = "image/png"
+		}
+		b64 := base64.StdEncoding.EncodeToString(media.Data)
+		img.ImageURL = param.NewOpt(fmt.Sprintf("data:%s;base64,%s", mime, b64))
+	default:
+		return nil, fmt.Errorf("image part has no data, url, or file_id")
+	}
+	return img, nil
 }
