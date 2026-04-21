@@ -32,7 +32,11 @@ type ProviderSafetyClassifier struct {
 func NewProviderSafetyClassifier(p providers.Provider, cfg config.SafetyClassifierConfig) *ProviderSafetyClassifier {
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 3 * time.Second
+		// Real-world classifier calls routinely take 10–30s even with
+		// reasoning=low on a small model — a 3s default silently kills
+		// the call and forces fallback to user approval, which
+		// surprises operators who didn't set an explicit timeout.
+		timeout = 30 * time.Second
 	}
 	maxRecent := cfg.MaxRecentActions
 	if maxRecent <= 0 {
