@@ -745,22 +745,32 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 	var results []protocol.ToolResult
 	for _, action := range actions {
-		// Check for loops before executing
+		// A loop-detector warning is prefixed to the real tool result
+		// (rather than appended as a separate ToolResult) so the tool
+		// call ID stays unique within the tool-role message we emit —
+		// OpenAI Chat Completions rejects a request whose messages
+		// contain two tool-role entries with the same tool_call_id.
+		var loopWarning string
 		if a.loopDetector != nil {
 			status := a.loopDetector.RecordCall(action.Name, action.Arguments)
 			if status.IsLooping {
-				results = append(results, protocol.NewTextToolResult(
-					action.ToolCallID,
-					fmt.Sprintf("Warning: Loop detected - %s\nSuggestion: %s\n\nProceeding with execution anyway...",
-						status.Pattern, status.Suggestion),
-					false,
-				))
+				loopWarning = fmt.Sprintf(
+					"<system-reminder>\nLoop detected: %s\nSuggestion: %s\nProceeding with execution anyway.\n</system-reminder>\n\n",
+					status.Pattern, status.Suggestion,
+				)
 			}
+		}
+
+		prefixed := func(text string) string {
+			if loopWarning == "" {
+				return text
+			}
+			return loopWarning + text
 		}
 
 		tool, ok := a.tools[action.Name]
 		if !ok {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: Tool %s not found", action.Name)), true)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 			continue
@@ -776,11 +786,11 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 		})
 		res, err := invoke(ctx, call)
 		if err != nil {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: %v", err)), true)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		} else {
-			tr := protocol.NewTextToolResult(action.ToolCallID, formatToolOutput(res), false)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(formatToolOutput(res)), false)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		}

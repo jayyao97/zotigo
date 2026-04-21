@@ -138,6 +138,56 @@ func TestLoopDetector_Stats(t *testing.T) {
 	if len(stats) != 2 {
 		t.Errorf("Expected 2 unique signatures, got %d", len(stats))
 	}
+	total := 0
+	for _, v := range stats {
+		total += v
+	}
+	if total != 3 {
+		t.Errorf("Expected 3 total recorded calls across histogram, got %d", total)
+	}
+}
+
+// TestLoopDetector_ConsecutiveOnly verifies that the detector counts only
+// consecutive identical calls — an iterative workflow that interleaves the
+// same command with other work (edit → go test → edit → go test) must NOT
+// be flagged as a loop, even if the same command shows up several times
+// within the recent-calls window.
+func TestLoopDetector_ConsecutiveOnly(t *testing.T) {
+	ld := NewLoopDetector(LoopDetectorConfig{
+		MaxRepeats: 3,
+		WindowSize: 20,
+	})
+
+	// Simulate: run test, edit, run test, edit, run test — 3 test runs in
+	// the window but never consecutive.
+	for i := range 3 {
+		if status := ld.RecordCall("shell", `{"cmd": "go test ./..."}`); status.IsLooping {
+			t.Fatalf("iteration %d: go test call should not trigger loop yet (interleaved)", i)
+		}
+		if status := ld.RecordCall("edit", `{"path": "foo.go", "iter": `+string(rune('0'+i))+`}`); status.IsLooping {
+			t.Fatalf("iteration %d: edit call should not trigger loop", i)
+		}
+	}
+
+	// One final go test — still not consecutive (last call was an edit),
+	// so consec should reset to 1.
+	status := ld.RecordCall("shell", `{"cmd": "go test ./..."}`)
+	if status.IsLooping {
+		t.Error("non-consecutive repeats must not trigger loop detection")
+	}
+	if status.RepeatCount != 1 {
+		t.Errorf("expected RepeatCount=1 for non-consecutive repeat, got %d", status.RepeatCount)
+	}
+}
+
+func TestLoopDetector_DefaultThresholds(t *testing.T) {
+	cfg := DefaultLoopDetectorConfig()
+	if cfg.MaxRepeats != 7 {
+		t.Errorf("expected default MaxRepeats=7, got %d", cfg.MaxRepeats)
+	}
+	if cfg.WindowSize != 15 {
+		t.Errorf("expected default WindowSize=15, got %d", cfg.WindowSize)
+	}
 }
 
 func TestLoopDetector_Suggestion(t *testing.T) {
