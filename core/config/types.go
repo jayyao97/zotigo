@@ -142,7 +142,7 @@ func defaultSafetyClassifierConfig() SafetyClassifierConfig {
 	return SafetyClassifierConfig{
 		Enabled:                BoolPtr(true),
 		ReviewThreshold:        "medium",
-		TimeoutMs:              30000,
+		TimeoutMs:              20000,
 		MaxRecentActions:       6,
 		CaptureRawAuditContext: false,
 		MaxAuditContextChars:   1200,
