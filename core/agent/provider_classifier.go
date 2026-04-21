@@ -32,7 +32,13 @@ type ProviderSafetyClassifier struct {
 func NewProviderSafetyClassifier(p providers.Provider, cfg config.SafetyClassifierConfig) *ProviderSafetyClassifier {
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
-		timeout = 3 * time.Second
+		// Real-world classifier calls routinely take 10–20s even with
+		// reasoning=low on a small model; 3s silently killed them all
+		// and forced fallback to approval. Pair a 20s per-attempt
+		// budget with one retry (see classifierMaxAttempts) so a
+		// transient timeout or network hiccup doesn't take the whole
+		// classifier offline for one turn.
+		timeout = 20 * time.Second
 	}
 	maxRecent := cfg.MaxRecentActions
 	if maxRecent <= 0 {
@@ -105,13 +111,17 @@ func (classifierDecisionTool) Classify(tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelBlocked}
 }
 
+// classifierMaxAttempts caps total tries per Classify call (1 original
+// + N-1 retries). We retry only on transport-layer failures (context
+// deadline exceeded, provider stream error) — semantic errors like
+// "empty response" or malformed JSON are not retried since repeating
+// the same request will almost certainly produce the same bad output
+// and each attempt costs a full LLM round-trip.
+const classifierMaxAttempts = 2
+
 // Classify implements SafetyClassifier.
 func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (SafetyClassifierResponse, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
-	defer cancel()
-
 	userPrompt := c.buildUserPrompt(req)
-	start := time.Now()
 	debug.Logf(
 		"classifier start provider=%s tool=%s risk=%s prompt_chars=%d args_chars=%d",
 		c.provider.Name(),
@@ -120,6 +130,33 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 		len(userPrompt),
 		len(req.ToolArguments),
 	)
+
+	var lastErr error
+	for attempt := 1; attempt <= classifierMaxAttempts; attempt++ {
+		resp, err, retriable := c.classifyOnce(req, userPrompt, attempt)
+		if err == nil {
+			return resp, nil
+		}
+		lastErr = err
+		if !retriable || attempt == classifierMaxAttempts {
+			return SafetyClassifierResponse{}, err
+		}
+		debug.Logf("classifier retry provider=%s tool=%s attempt=%d err=%v",
+			c.provider.Name(), req.ToolName, attempt, err)
+	}
+	return SafetyClassifierResponse{}, lastErr
+}
+
+// classifyOnce runs a single classifier attempt. Returns (response,
+// err, retriable). retriable distinguishes transport-layer failures
+// (stream setup errors, provider stream errors, context deadline)
+// from semantic failures (empty response, unparseable decision) —
+// only the former are worth another attempt.
+func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, userPrompt string, attempt int) (SafetyClassifierResponse, error, bool) {
+	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+	defer cancel()
+
+	start := time.Now()
 
 	msgs := []protocol.Message{
 		protocol.NewSystemMessage(classifierSystemPrompt),
@@ -135,8 +172,9 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 		providers.WithReasoningEffort("low"),
 	)
 	if err != nil {
-		debug.Logf("classifier error provider=%s tool=%s duration=%s err=%v", c.provider.Name(), req.ToolName, time.Since(start).Round(time.Millisecond), err)
-		return SafetyClassifierResponse{}, fmt.Errorf("classifier stream: %w", err)
+		debug.Logf("classifier error provider=%s tool=%s attempt=%d duration=%s err=%v",
+			c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), err)
+		return SafetyClassifierResponse{}, fmt.Errorf("classifier stream: %w", err), true
 	}
 
 	var textBuf strings.Builder
@@ -153,10 +191,19 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 			}
 		case protocol.EventTypeError:
 			if evt.Error != nil {
-				debug.Logf("classifier stream error provider=%s tool=%s duration=%s err=%v", c.provider.Name(), req.ToolName, time.Since(start).Round(time.Millisecond), evt.Error)
-				return SafetyClassifierResponse{}, evt.Error
+				debug.Logf("classifier stream error provider=%s tool=%s attempt=%d duration=%s err=%v",
+					c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), evt.Error)
+				return SafetyClassifierResponse{}, evt.Error, true
 			}
 		}
+	}
+
+	// Context deadline exceeded mid-stream shows up here rather than as
+	// an explicit error event on some providers.
+	if ctx.Err() != nil && toolArgs == "" && textBuf.Len() == 0 {
+		debug.Logf("classifier deadline provider=%s tool=%s attempt=%d duration=%s err=%v",
+			c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), ctx.Err())
+		return SafetyClassifierResponse{}, ctx.Err(), true
 	}
 
 	var (
@@ -172,23 +219,25 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 		resp, err = parseClassifierResponse(textBuf.String())
 		source = "text_fallback"
 	default:
-		return SafetyClassifierResponse{}, fmt.Errorf("classifier returned empty response")
+		return SafetyClassifierResponse{}, fmt.Errorf("classifier returned empty response"), false
 	}
 	if err != nil {
-		debug.Logf("classifier parse error provider=%s tool=%s source=%s duration=%s err=%v", c.provider.Name(), req.ToolName, source, time.Since(start).Round(time.Millisecond), err)
-		return SafetyClassifierResponse{}, err
+		debug.Logf("classifier parse error provider=%s tool=%s source=%s attempt=%d duration=%s err=%v",
+			c.provider.Name(), req.ToolName, source, attempt, time.Since(start).Round(time.Millisecond), err)
+		return SafetyClassifierResponse{}, err, false
 	}
 
 	debug.Logf(
-		"classifier end provider=%s tool=%s source=%s duration=%s decision=%s snapshot=%t",
+		"classifier end provider=%s tool=%s source=%s attempt=%d duration=%s decision=%s snapshot=%t",
 		c.provider.Name(),
 		req.ToolName,
 		source,
+		attempt,
 		time.Since(start).Round(time.Millisecond),
 		resp.Decision,
 		resp.RequiresSnapshot,
 	)
-	return resp, nil
+	return resp, nil, false
 }
 
 // buildUserPrompt assembles a bounded request body for the classifier.

@@ -26,8 +26,7 @@ var (
 	// Tools that must have a prior successful read (and no external
 	// change) for the given path argument.
 	mutatorTools = map[string]string{
-		"edit":  "path",
-		"patch": "path",
+		"edit": "path",
 	}
 	// Tools that only need the read-first check when the target file
 	// already exists (creating a new file is always allowed).

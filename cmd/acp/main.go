@@ -221,9 +221,7 @@ func main() {
 func registerTools(ag *agent.Agent, cfg *config.Config) {
 	ag.RegisterTool(&builtin.ReadFileTool{})
 	ag.RegisterTool(&builtin.WriteFileTool{})
-	ag.RegisterTool(&builtin.ListDirTool{})
 	ag.RegisterTool(&builtin.EditTool{})
-	ag.RegisterTool(&builtin.PatchTool{})
 
 	ag.RegisterTool(&builtin.ShellTool{})
 	ag.RegisterTool(&builtin.GrepTool{})

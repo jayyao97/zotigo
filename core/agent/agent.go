@@ -135,7 +135,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		provider:     p,
 		executor:     exec,
 		tools:        make(map[string]tools.Tool),
-		policy:       ApprovalPolicyManual,
+		policy:       ApprovalPolicyAuto,
 		state:        StateIdle,
 		history:      make([]protocol.Message, 0),
 		turns:        make([]TurnAudit, 0),
@@ -165,6 +165,48 @@ func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 // Executor returns the agent's executor.
 func (a *Agent) Executor() executor.Executor {
 	return a.executor
+}
+
+// Description is a user-facing snapshot of the resolved runtime
+// configuration — useful for startup banners, /info commands, and
+// bug-report context. Everything in it is non-secret (no API keys,
+// no base URLs).
+type Description struct {
+	Profile             string
+	Provider            string
+	Model               string
+	ThinkingLevel       string
+	ApprovalPolicy      ApprovalPolicy
+	ClassifierEnabled   bool
+	ClassifierAvailable bool // true when a classifier is wired + enabled
+	ClassifierProvider  string
+	ClassifierModel     string
+	ReviewThreshold     string
+}
+
+// Describe returns a resolved snapshot of the agent's configuration at
+// construction time. Safe to call at any point in the agent lifecycle.
+func (a *Agent) Describe() Description {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	d := Description{
+		Profile:           a.cfg.Provider,
+		Model:             a.cfg.Model,
+		ThinkingLevel:     a.cfg.ThinkingLevel,
+		ApprovalPolicy:    a.policy,
+		ClassifierEnabled: a.cfg.Safety.Classifier.IsEnabled(),
+		ReviewThreshold:   a.cfg.Safety.Classifier.ReviewThreshold,
+	}
+	if a.provider != nil {
+		d.Provider = a.provider.Name()
+	}
+	if a.classifier != nil && d.ClassifierEnabled {
+		d.ClassifierAvailable = true
+		d.ClassifierProvider = a.classifierProfile.Provider
+		d.ClassifierModel = a.classifierProfile.Model
+	}
+	return d
 }
 
 // SetSkillManager sets the skill manager at runtime.
@@ -375,6 +417,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var currentContent string
 			var currentReasoning string
 			var reasoningSignature string
+			var reasoningBlocks []protocol.ContentPart // one per ContentEnd for reasoning
 			var providerFinishReason protocol.FinishReason
 			var providerUsage *protocol.Usage
 
@@ -397,26 +440,46 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						currentContent += evt.ContentPartDelta.Text
 					}
 				}
-				// Capture reasoning signature from ContentEnd events
+				// Each ContentEnd for a reasoning block is snapshotted as its
+				// own ContentPart, not merged — Responses API emits multiple
+				// reasoning items per turn (one per think → tool → think
+				// loop) and each has its own ID + encrypted_content that
+				// must be echoed back verbatim next turn to continue the
+				// chain of thought. Anthropic thinking fits the same shape
+				// (one block per turn, signature preserved).
 				if evt.Type == protocol.EventTypeContentEnd && evt.ContentPart != nil &&
 					evt.ContentPart.Type == protocol.ContentTypeReasoning {
-					reasoningSignature = evt.ContentPart.Signature
-					// Use the complete text from the end event if available
-					if evt.ContentPart.Text != "" {
-						currentReasoning = evt.ContentPart.Text
+					text := evt.ContentPart.Text
+					if text == "" {
+						text = currentReasoning
 					}
+					reasoningBlocks = append(reasoningBlocks, protocol.ContentPart{
+						Type:             protocol.ContentTypeReasoning,
+						Text:             text,
+						Signature:        evt.ContentPart.Signature,
+						ReasoningID:      evt.ContentPart.ReasoningID,
+						EncryptedContent: evt.ContentPart.EncryptedContent,
+					})
+					currentReasoning = ""
+					reasoningSignature = evt.ContentPart.Signature
 				}
 			}
 
-			asstMsg := protocol.NewAssistantMessage(currentContent)
-			// Prepend reasoning block if present (thinking comes before text)
+			// Residual reasoning with no matching ContentEnd (provider that
+			// streams deltas but never emits end, or a truncated stream).
 			if currentReasoning != "" {
-				reasoningPart := protocol.ContentPart{
+				reasoningBlocks = append(reasoningBlocks, protocol.ContentPart{
 					Type:      protocol.ContentTypeReasoning,
 					Text:      currentReasoning,
 					Signature: reasoningSignature,
-				}
-				asstMsg.Content = append([]protocol.ContentPart{reasoningPart}, asstMsg.Content...)
+				})
+			}
+
+			asstMsg := protocol.NewAssistantMessage(currentContent)
+			// Prepend reasoning blocks in emit order so the next turn
+			// sees them with their original inter-block position.
+			if len(reasoningBlocks) > 0 {
+				asstMsg.Content = append(reasoningBlocks, asstMsg.Content...)
 			}
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
@@ -435,7 +498,16 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				time.Since(modelTurnStart).Round(time.Millisecond),
 				providerFinishReason,
 				len(currentContent),
-				len(currentReasoning),
+				func() int {
+					// Sum over all captured reasoning blocks; currentReasoning
+					// only holds residual text from any block that never
+					// received a ContentEnd.
+					n := len(currentReasoning)
+					for _, rb := range reasoningBlocks {
+						n += len(rb.Text)
+					}
+					return n
+				}(),
 				len(currentToolCalls),
 				func() int {
 					if providerUsage == nil {
@@ -673,22 +745,32 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 	var results []protocol.ToolResult
 	for _, action := range actions {
-		// Check for loops before executing
+		// A loop-detector warning is prefixed to the real tool result
+		// (rather than appended as a separate ToolResult) so the tool
+		// call ID stays unique within the tool-role message we emit —
+		// OpenAI Chat Completions rejects a request whose messages
+		// contain two tool-role entries with the same tool_call_id.
+		var loopWarning string
 		if a.loopDetector != nil {
 			status := a.loopDetector.RecordCall(action.Name, action.Arguments)
 			if status.IsLooping {
-				results = append(results, protocol.NewTextToolResult(
-					action.ToolCallID,
-					fmt.Sprintf("Warning: Loop detected - %s\nSuggestion: %s\n\nProceeding with execution anyway...",
-						status.Pattern, status.Suggestion),
-					false,
-				))
+				loopWarning = fmt.Sprintf(
+					"<system-reminder>\nLoop detected: %s\nSuggestion: %s\nProceeding with execution anyway.\n</system-reminder>\n\n",
+					status.Pattern, status.Suggestion,
+				)
 			}
+		}
+
+		prefixed := func(text string) string {
+			if loopWarning == "" {
+				return text
+			}
+			return loopWarning + text
 		}
 
 		tool, ok := a.tools[action.Name]
 		if !ok {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: Tool %s not found", action.Name), true)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: Tool %s not found", action.Name)), true)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 			continue
@@ -704,11 +786,11 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 		})
 		res, err := invoke(ctx, call)
 		if err != nil {
-			tr := protocol.NewTextToolResult(action.ToolCallID, fmt.Sprintf("Error: %v", err), true)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: %v", err)), true)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		} else {
-			tr := protocol.NewTextToolResult(action.ToolCallID, formatToolOutput(res), false)
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(formatToolOutput(res)), false)
 			tr.ToolName = action.Name
 			results = append(results, tr)
 		}

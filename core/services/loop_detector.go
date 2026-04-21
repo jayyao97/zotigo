@@ -18,8 +18,7 @@ type LoopDetector struct {
 	similarityThresh float64
 
 	// State
-	recentCalls  []callSignature
-	repeatCounts map[string]int
+	recentCalls []callSignature
 }
 
 // callSignature represents a unique identifier for a tool call
@@ -40,25 +39,24 @@ type LoopDetectorConfig struct {
 // DefaultLoopDetectorConfig returns sensible defaults
 func DefaultLoopDetectorConfig() LoopDetectorConfig {
 	return LoopDetectorConfig{
-		MaxRepeats: 3,
-		WindowSize: 10,
+		MaxRepeats: 7,
+		WindowSize: 15,
 	}
 }
 
 // NewLoopDetector creates a new loop detector with the given config
 func NewLoopDetector(cfg LoopDetectorConfig) *LoopDetector {
 	if cfg.MaxRepeats <= 0 {
-		cfg.MaxRepeats = 3
+		cfg.MaxRepeats = 7
 	}
 	if cfg.WindowSize <= 0 {
-		cfg.WindowSize = 10
+		cfg.WindowSize = 15
 	}
 
 	return &LoopDetector{
-		maxRepeats:   cfg.MaxRepeats,
-		windowSize:   cfg.WindowSize,
-		recentCalls:  make([]callSignature, 0, cfg.WindowSize),
-		repeatCounts: make(map[string]int),
+		maxRepeats:  cfg.MaxRepeats,
+		windowSize:  cfg.WindowSize,
+		recentCalls: make([]callSignature, 0, cfg.WindowSize),
 	}
 }
 
@@ -74,49 +72,45 @@ type LoopStatus struct {
 	Suggestion string
 }
 
-// RecordCall records a tool call and returns the loop status
+// RecordCall records a tool call and returns the loop status.
+//
+// Loop detection requires the SAME (toolName, args) pair to be called
+// consecutively maxRepeats times. Any intervening call with a different
+// signature resets the counter — this matches how a human would judge
+// a loop, and avoids flagging normal iterative workflows
+// (go test → edit → go test → edit → go test) as loops just because
+// the same command shows up several times in the recent history.
 func (d *LoopDetector) RecordCall(toolName string, args string) LoopStatus {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	// Create signature for this call
 	sig := d.createSignature(toolName, args)
-
-	// Add to recent calls
 	d.recentCalls = append(d.recentCalls, sig)
 
-	// Trim to window size
 	if len(d.recentCalls) > d.windowSize {
-		// Remove oldest entries from repeat counts
-		removed := d.recentCalls[0]
-		if count, ok := d.repeatCounts[removed.hash]; ok {
-			count--
-			if count <= 0 {
-				delete(d.repeatCounts, removed.hash)
-			} else {
-				d.repeatCounts[removed.hash] = count
-			}
-		}
 		d.recentCalls = d.recentCalls[1:]
 	}
 
-	// Increment repeat count
-	d.repeatCounts[sig.hash]++
-	count := d.repeatCounts[sig.hash]
-
-	// Check for loop
-	if count >= d.maxRepeats {
-		return LoopStatus{
-			IsLooping:   true,
-			RepeatCount: count,
-			Pattern:     fmt.Sprintf("%s (called %d times)", toolName, count),
-			Suggestion:  d.getSuggestion(toolName, count),
+	// Count how many consecutive trailing entries match this signature.
+	consec := 1
+	for i := len(d.recentCalls) - 2; i >= 0; i-- {
+		if d.recentCalls[i].hash != sig.hash {
+			break
 		}
+		consec++
 	}
 
+	if consec >= d.maxRepeats {
+		return LoopStatus{
+			IsLooping:   true,
+			RepeatCount: consec,
+			Pattern:     fmt.Sprintf("%s (called %d times in a row)", toolName, consec),
+			Suggestion:  d.getSuggestion(toolName, consec),
+		}
+	}
 	return LoopStatus{
 		IsLooping:   false,
-		RepeatCount: count,
+		RepeatCount: consec,
 	}
 }
 
@@ -169,7 +163,6 @@ func (d *LoopDetector) Reset() {
 	defer d.mu.Unlock()
 
 	d.recentCalls = make([]callSignature, 0, d.windowSize)
-	d.repeatCounts = make(map[string]int)
 }
 
 // createSignature creates a unique signature for a tool call
@@ -218,15 +211,15 @@ func (d *LoopDetector) getSuggestion(toolName string, count int) string {
 	}
 }
 
-// Stats returns current detection statistics
+// Stats returns a histogram of call signatures currently in the sliding
+// window, keyed by signature hash.
 func (d *LoopDetector) Stats() map[string]int {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 
-	// Return copy of repeat counts
-	stats := make(map[string]int)
-	for k, v := range d.repeatCounts {
-		stats[k] = v
+	stats := make(map[string]int, len(d.recentCalls))
+	for _, c := range d.recentCalls {
+		stats[c.hash]++
 	}
 	return stats
 }

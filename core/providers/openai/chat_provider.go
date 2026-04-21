@@ -2,6 +2,7 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/debug"
@@ -9,6 +10,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/respjson"
 )
 
 type ChatProvider struct {
@@ -76,7 +78,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 				delta := choice.Delta
 
-				// 1. Content Delta
+				// 1. Reasoning Delta (non-standard OpenAI fields).
+				// DeepSeek, llama.cpp (--reasoning-format deepseek), OpenRouter,
+				// and gpt-oss all stream thinking content under custom keys that
+				// the official SDK drops into ExtraFields. Surface them as
+				// reasoning content so the TUI can render a Thinking block.
+				if text := extractReasoningDelta(delta.JSON.ExtraFields); text != "" {
+					ch <- protocol.NewReasoningDeltaEvent(text)
+				}
+
+				// 2. Content Delta
 				if delta.Content != "" {
 					contentStarted = true
 					ch <- protocol.Event{
@@ -86,7 +97,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 				}
 
-				// 2. Tool Call Delta
+				// 3. Tool Call Delta
 				if len(delta.ToolCalls) > 0 {
 					for _, tc := range delta.ToolCalls {
 						idx := int(tc.Index)
@@ -102,7 +113,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 				}
 
-				// 3. Accumulated Full Objects (End Events)
+				// 4. Accumulated Full Objects (End Events)
 				// Must be handled BEFORE FinishReason
 				if tool, ok := acc.JustFinishedToolCall(); ok {
 					idx := int(tool.Index)
@@ -135,7 +146,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 					}
 				}
 
-				// 4. Finish Reason — save it but don't return yet;
+				// 5. Finish Reason — save it but don't return yet;
 				// the usage chunk (with empty choices) arrives after this.
 				if choice.FinishReason != "" {
 					if contentStarted {
@@ -195,6 +206,40 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}()
 
 	return ch, nil
+}
+
+// reasoningDeltaKeys enumerates the non-standard JSON keys different
+// OpenAI-compatible servers use to stream thinking content alongside
+// the regular `content` field. We probe each in order and return the
+// first non-empty string found on a given chunk.
+//
+//   - reasoning_content: DeepSeek, llama.cpp (--reasoning-format deepseek),
+//     Qwen3-thinking via llama.cpp, gpt-oss
+//   - reasoning:         OpenRouter passthrough, some LM Studio builds
+//   - thinking:          occasional older llama.cpp builds
+var reasoningDeltaKeys = []string{"reasoning_content", "reasoning", "thinking"}
+
+// extractReasoningDelta pulls a thinking-content fragment out of the
+// SDK's ExtraFields map for a single streaming chunk. Returns "" when
+// no recognized key carries a non-empty string.
+func extractReasoningDelta(extra map[string]respjson.Field) string {
+	if len(extra) == 0 {
+		return ""
+	}
+	for _, key := range reasoningDeltaKeys {
+		f, ok := extra[key]
+		if !ok || !f.Valid() {
+			continue
+		}
+		var s string
+		if err := json.Unmarshal([]byte(f.Raw()), &s); err != nil {
+			continue
+		}
+		if s != "" {
+			return s
+		}
+	}
+	return ""
 }
 
 func mapFinishReason(fr string) protocol.FinishReason {

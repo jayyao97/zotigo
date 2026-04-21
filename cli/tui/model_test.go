@@ -55,3 +55,82 @@ func TestConvertAgentTurns(t *testing.T) {
 		t.Fatalf("Unexpected trigger summary: %s", got[0].SafetyEvents[0].ContextSummary.Trigger)
 	}
 }
+
+func TestRenderAgentBanner(t *testing.T) {
+	tests := []struct {
+		name    string
+		desc    agent.Description
+		wantIn  []string
+		wantOut []string
+	}{
+		{
+			name: "full config with classifier",
+			desc: agent.Description{
+				Provider:            "openai-response",
+				Model:               "gpt-5-codex",
+				ThinkingLevel:       "low",
+				ApprovalPolicy:      agent.ApprovalPolicyAuto,
+				ClassifierEnabled:   true,
+				ClassifierAvailable: true,
+				ClassifierProvider:  "openai",
+				ClassifierModel:     "gpt-4o-mini",
+				ReviewThreshold:     "medium",
+			},
+			wantIn: []string{"openai-response", "gpt-5-codex", "low", "gpt-4o-mini", "threshold=medium"},
+		},
+		{
+			name: "classifier disabled",
+			desc: agent.Description{
+				Provider:          "openai-chat",
+				Model:             "gpt-4o",
+				ApprovalPolicy:    agent.ApprovalPolicyManual,
+				ClassifierEnabled: false,
+			},
+			wantIn:  []string{"openai-chat", "gpt-4o", "off"},
+			wantOut: []string{"threshold="},
+		},
+		{
+			name: "classifier enabled but unavailable",
+			desc: agent.Description{
+				Provider:            "openai-chat",
+				Model:               "gpt-4o",
+				ApprovalPolicy:      agent.ApprovalPolicyAuto,
+				ClassifierEnabled:   true,
+				ClassifierAvailable: false,
+			},
+			wantIn: []string{"enabled but unavailable"},
+		},
+		{
+			name: "no thinking level suppresses the row",
+			desc: agent.Description{
+				Provider: "openai-chat",
+				Model:    "gpt-4o-mini",
+			},
+			wantOut: []string{"Thinking:"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got := renderAgentBanner(tc.desc)
+			for _, s := range tc.wantIn {
+				if !containsSubstr(got, s) {
+					t.Errorf("expected %q in banner, got:\n%s", s, got)
+				}
+			}
+			for _, s := range tc.wantOut {
+				if containsSubstr(got, s) {
+					t.Errorf("did not expect %q in banner, got:\n%s", s, got)
+				}
+			}
+		})
+	}
+}
+
+func containsSubstr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
+	}
+	return false
+}

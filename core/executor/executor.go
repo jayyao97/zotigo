@@ -15,12 +15,13 @@ type Executor interface {
 	// File operations
 	ReadFile(ctx context.Context, path string) ([]byte, error)
 	WriteFile(ctx context.Context, path string, content []byte, perm fs.FileMode) error
-	ListDir(ctx context.Context, path string) ([]FileInfo, error)
 	Stat(ctx context.Context, path string) (*FileInfo, error)
-	MkdirAll(ctx context.Context, path string, perm fs.FileMode) error
-	Remove(ctx context.Context, path string) error
 
-	// Command execution
+	// Command execution. Directory creation, file removal, directory
+	// listing, and similar filesystem side effects all go through the
+	// shell (the agent already exposes a ShellTool with a read-only
+	// whitelist) — keeping the executor interface narrow mirrors the
+	// Claude Code tool surface (Read / Write / Edit / Glob / Grep + Bash).
 	Exec(ctx context.Context, cmd string, opts ExecOptions) (*ExecResult, error)
 
 	// Environment info

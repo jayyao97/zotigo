@@ -168,7 +168,7 @@ func Run(args []string) int {
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
-		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
 		agent.WithHook(middleware.ReadTracker(readTracker)),
 	)
@@ -201,9 +201,7 @@ func Run(args []string) int {
 
 	ag.RegisterTool(&builtin.ReadFileTool{})
 	ag.RegisterTool(&builtin.WriteFileTool{})
-	ag.RegisterTool(&builtin.ListDirTool{})
 	ag.RegisterTool(&builtin.EditTool{})
-	ag.RegisterTool(&builtin.PatchTool{})
 
 	shellTool, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
 	if err != nil {
