@@ -96,7 +96,7 @@ func newCachingTestAgent(t *testing.T, profile config.ProfileConfig) *agent.Agen
 	}
 
 	toolNames := []string{
-		"read_file", "write_file", "list_dir", "search_code",
+		"read_file", "write_file", "search_code",
 		"run_command", "git_status", "git_diff", "edit_file",
 	}
 	for _, name := range toolNames {

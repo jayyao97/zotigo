@@ -43,75 +43,6 @@ func (e *RemoteExecutor) WriteFile(ctx context.Context, path string, content []b
 	return e.server.WriteTextFile(ctx, e.sessionID, path, string(content))
 }
 
-func (e *RemoteExecutor) ListDir(ctx context.Context, path string) ([]executor.FileInfo, error) {
-	shell, shellArg := e.shellCmd()
-
-	if e.platform == "windows" {
-		return e.listDirWindows(ctx, shell, shellArg, path)
-	}
-	return e.listDirUnix(ctx, shell, shellArg, path)
-}
-
-func (e *RemoteExecutor) listDirUnix(ctx context.Context, shell, shellArg, path string) ([]executor.FileInfo, error) {
-	cmd := fmt.Sprintf("ls -la %q", path)
-	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
-	if err != nil {
-		return nil, err
-	}
-	if exitCode != 0 {
-		return nil, fmt.Errorf("ls failed (exit %d): %s", exitCode, output)
-	}
-
-	var entries []executor.FileInfo
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "total") {
-			continue
-		}
-		fields := strings.Fields(line)
-		if len(fields) < 9 {
-			continue
-		}
-		name := strings.Join(fields[8:], " ")
-		isDir := strings.HasPrefix(fields[0], "d")
-		entries = append(entries, executor.FileInfo{
-			Name:  name,
-			IsDir: isDir,
-		})
-	}
-	return entries, nil
-}
-
-func (e *RemoteExecutor) listDirWindows(ctx context.Context, shell, shellArg, path string) ([]executor.FileInfo, error) {
-	// Use /B for bare format (one name per line) and /AD or /A-D to split dirs and files.
-	// First get directories, then files.
-	cmd := fmt.Sprintf("dir /B /AD %q 2>nul & echo --- & dir /B /A-D %q 2>nul", path, path)
-	output, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
-	if err != nil {
-		return nil, err
-	}
-	// exitCode may be non-zero if dir is empty; we still parse what we got.
-	_ = exitCode
-
-	var entries []executor.FileInfo
-	isFilesSection := false
-	for _, line := range strings.Split(output, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "---" {
-			isFilesSection = true
-			continue
-		}
-		if line == "" {
-			continue
-		}
-		entries = append(entries, executor.FileInfo{
-			Name:  line,
-			IsDir: !isFilesSection,
-		})
-	}
-	return entries, nil
-}
-
 func (e *RemoteExecutor) Stat(ctx context.Context, path string) (*executor.FileInfo, error) {
 	shell, shellArg := e.shellCmd()
 
@@ -169,40 +100,6 @@ func (e *RemoteExecutor) statWindows(ctx context.Context, shell, shellArg, path 
 	default:
 		return nil, fmt.Errorf("path not found: %s", path)
 	}
-}
-
-func (e *RemoteExecutor) MkdirAll(ctx context.Context, path string, _ fs.FileMode) error {
-	cmd := fmt.Sprintf("mkdir -p %q", path)
-	shell, shellArg := e.shellCmd()
-	if e.platform == "windows" {
-		cmd = fmt.Sprintf("mkdir %q", path)
-	}
-
-	_, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("mkdir failed (exit %d)", exitCode)
-	}
-	return nil
-}
-
-func (e *RemoteExecutor) Remove(ctx context.Context, path string) error {
-	cmd := fmt.Sprintf("rm %q", path)
-	shell, shellArg := e.shellCmd()
-	if e.platform == "windows" {
-		cmd = fmt.Sprintf("del %q", path)
-	}
-
-	_, exitCode, err := e.server.TerminalExec(ctx, e.sessionID, shell, []string{shellArg, cmd}, e.workDir, nil)
-	if err != nil {
-		return err
-	}
-	if exitCode != 0 {
-		return fmt.Errorf("rm failed (exit %d)", exitCode)
-	}
-	return nil
 }
 
 func (e *RemoteExecutor) Exec(ctx context.Context, cmd string, opts executor.ExecOptions) (*executor.ExecResult, error) {

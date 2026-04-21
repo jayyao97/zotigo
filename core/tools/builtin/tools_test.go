@@ -312,39 +312,3 @@ func TestEditTool(t *testing.T) {
 		}
 	})
 }
-
-func TestPatchTool(t *testing.T) {
-	tmpDir := t.TempDir()
-	exec, err := executor.NewLocalExecutor(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create executor: %v", err)
-	}
-	defer exec.Close()
-
-	tool := &PatchTool{}
-	ctx := context.Background()
-
-	t.Run("simple add lines", func(t *testing.T) {
-		filePath := filepath.Join(tmpDir, "patch1.txt")
-		os.WriteFile(filePath, []byte("line1\nline2\nline3"), 0644)
-
-		patch := `@@ -1,3 +1,4 @@
- line1
-+new line
- line2
- line3`
-
-		result, err := tool.Execute(ctx, exec, `{"path": "`+filePath+`", "patch": "`+strings.ReplaceAll(patch, "\n", "\\n")+`"}`)
-		if err != nil {
-			t.Fatalf("Execute failed: %v", err)
-		}
-		if !strings.Contains(result.(string), "Successfully") {
-			t.Errorf("Expected success message, got: %v", result)
-		}
-
-		content, _ := os.ReadFile(filePath)
-		if !strings.Contains(string(content), "new line") {
-			t.Errorf("Expected 'new line' in content, got: %s", content)
-		}
-	})
-}

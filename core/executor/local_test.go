@@ -37,44 +37,6 @@ func TestLocalExecutor_ReadWriteFile(t *testing.T) {
 	}
 }
 
-func TestLocalExecutor_ListDir(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	exec, err := NewLocalExecutor(tmpDir)
-	if err != nil {
-		t.Fatalf("failed to create executor: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// Create some files
-	exec.WriteFile(ctx, "file1.txt", []byte("1"), 0644)
-	exec.WriteFile(ctx, "file2.txt", []byte("2"), 0644)
-	exec.MkdirAll(ctx, "subdir", 0755)
-
-	// List directory
-	entries, err := exec.ListDir(ctx, ".")
-	if err != nil {
-		t.Fatalf("ListDir failed: %v", err)
-	}
-
-	if len(entries) != 3 {
-		t.Errorf("expected 3 entries, got %d", len(entries))
-	}
-
-	// Check for subdir
-	found := false
-	for _, e := range entries {
-		if e.Name == "subdir" && e.IsDir {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Error("subdir not found in listing")
-	}
-}
-
 func TestLocalExecutor_Exec(t *testing.T) {
 	tmpDir := t.TempDir()
 

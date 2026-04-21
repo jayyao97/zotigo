@@ -128,20 +128,8 @@ func (e *SnapshotTestExecutor) WriteFile(ctx context.Context, path string, conte
 	return e.base.WriteFile(ctx, path, content, perm)
 }
 
-func (e *SnapshotTestExecutor) ListDir(ctx context.Context, path string) ([]executor.FileInfo, error) {
-	return e.base.ListDir(ctx, path)
-}
-
 func (e *SnapshotTestExecutor) Stat(ctx context.Context, path string) (*executor.FileInfo, error) {
 	return e.base.Stat(ctx, path)
-}
-
-func (e *SnapshotTestExecutor) MkdirAll(ctx context.Context, path string, perm fs.FileMode) error {
-	return e.base.MkdirAll(ctx, path, perm)
-}
-
-func (e *SnapshotTestExecutor) Remove(ctx context.Context, path string) error {
-	return e.base.Remove(ctx, path)
 }
 
 func (e *SnapshotTestExecutor) Exec(ctx context.Context, cmd string, opts executor.ExecOptions) (*executor.ExecResult, error) {

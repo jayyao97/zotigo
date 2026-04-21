@@ -57,7 +57,7 @@ func TestLoopDetector_DifferentTools(t *testing.T) {
 	// Different tools with same args should not trigger loop
 	ld.RecordCall("read_file", `{"path": "test.txt"}`)
 	ld.RecordCall("write_file", `{"path": "test.txt"}`)
-	status := ld.RecordCall("list_dir", `{"path": "test.txt"}`)
+	status := ld.RecordCall("glob", `{"path": "test.txt"}`)
 
 	if status.IsLooping {
 		t.Error("Different tools should not trigger loop")

@@ -95,39 +95,6 @@ func (e *LocalExecutor) WriteFile(ctx context.Context, path string, content []by
 	return os.WriteFile(absPath, content, perm)
 }
 
-// ListDir lists the contents of a directory
-func (e *LocalExecutor) ListDir(ctx context.Context, path string) ([]FileInfo, error) {
-	absPath := e.resolvePath(path)
-
-	select {
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	default:
-	}
-
-	entries, err := os.ReadDir(absPath)
-	if err != nil {
-		return nil, err
-	}
-
-	result := make([]FileInfo, 0, len(entries))
-	for _, entry := range entries {
-		info, err := entry.Info()
-		if err != nil {
-			continue // Skip files we can't stat
-		}
-		result = append(result, FileInfo{
-			Name:    entry.Name(),
-			Size:    info.Size(),
-			Mode:    info.Mode(),
-			ModTime: info.ModTime(),
-			IsDir:   entry.IsDir(),
-		})
-	}
-
-	return result, nil
-}
-
 // Stat returns file information
 func (e *LocalExecutor) Stat(ctx context.Context, path string) (*FileInfo, error) {
 	absPath := e.resolvePath(path)
@@ -150,36 +117,6 @@ func (e *LocalExecutor) Stat(ctx context.Context, path string) (*FileInfo, error
 		ModTime: info.ModTime(),
 		IsDir:   info.IsDir(),
 	}, nil
-}
-
-// MkdirAll creates a directory and all parent directories
-func (e *LocalExecutor) MkdirAll(ctx context.Context, path string, perm fs.FileMode) error {
-	absPath := e.resolvePath(path)
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	if perm == 0 {
-		perm = 0755
-	}
-
-	return os.MkdirAll(absPath, perm)
-}
-
-// Remove removes a file or empty directory
-func (e *LocalExecutor) Remove(ctx context.Context, path string) error {
-	absPath := e.resolvePath(path)
-
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-
-	return os.Remove(absPath)
 }
 
 // Exec executes a shell command
