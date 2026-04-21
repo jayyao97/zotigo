@@ -171,3 +171,77 @@ func TestBuildResponseParams_SystemMessageBecomesInstructions(t *testing.T) {
 		t.Errorf("expected user content, got %s", js)
 	}
 }
+
+func TestBuildResponseParams_IncludesEncryptedContentFlag(t *testing.T) {
+	// Every Responses API request should ask for encrypted reasoning
+	// blobs. Without this flag, the server won't include
+	// encrypted_content in reasoning items and stateless multi-turn
+	// chain-of-thought won't work.
+	params, err := buildResponseParams("gpt-5", []protocol.Message{protocol.NewUserMessage("hi")}, nil, "", providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	js := marshalJSON(t, params)
+	if !strings.Contains(js, `"reasoning.encrypted_content"`) {
+		t.Errorf("expected include to request reasoning.encrypted_content, got %s", js)
+	}
+}
+
+func TestBuildResponseParams_PassesReasoningItemsBack(t *testing.T) {
+	// An assistant message with a reasoning ContentPart carrying
+	// ReasoningID + EncryptedContent should flow into the request as
+	// a typed reasoning input item — this is how stateless
+	// chain-of-thought continuity works.
+	asst := protocol.Message{Role: protocol.RoleAssistant}
+	asst.Content = []protocol.ContentPart{
+		{
+			Type:             protocol.ContentTypeReasoning,
+			Text:             "was thinking about X",
+			ReasoningID:      "rs_abc123",
+			EncryptedContent: "ENC_BLOB_XYZ",
+		},
+		{Type: protocol.ContentTypeText, Text: "plan: do the thing"},
+	}
+	msgs := []protocol.Message{
+		protocol.NewUserMessage("start"),
+		asst,
+	}
+	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	js := marshalJSON(t, params)
+	if !strings.Contains(js, `"reasoning"`) {
+		t.Errorf("expected reasoning input item type, got %s", js)
+	}
+	if !strings.Contains(js, `"rs_abc123"`) {
+		t.Errorf("expected reasoning id in input, got %s", js)
+	}
+	if !strings.Contains(js, `"ENC_BLOB_XYZ"`) {
+		t.Errorf("expected encrypted_content in input, got %s", js)
+	}
+	// Assistant text should still be sent as its own message item.
+	if !strings.Contains(js, `"plan: do the thing"`) {
+		t.Errorf("expected text plan in input, got %s", js)
+	}
+}
+
+func TestBuildResponseParams_DropsReasoningWithoutEncryptedContent(t *testing.T) {
+	// A reasoning part with no ID / encrypted_content is the
+	// "historical reasoning, never got server-issued continuity
+	// token" case (e.g. loaded from an older session). We drop it
+	// rather than emit a malformed reasoning input item.
+	asst := protocol.Message{Role: protocol.RoleAssistant}
+	asst.Content = []protocol.ContentPart{
+		{Type: protocol.ContentTypeReasoning, Text: "no blob"},
+		{Type: protocol.ContentTypeText, Text: "hi"},
+	}
+	params, err := buildResponseParams("gpt-5", []protocol.Message{asst}, nil, "", providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	js := marshalJSON(t, params)
+	if strings.Contains(js, `"type":"reasoning"`) {
+		t.Errorf("did not expect reasoning input item, got %s", js)
+	}
+}

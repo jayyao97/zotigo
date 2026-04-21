@@ -32,15 +32,22 @@ type Usage struct {
 }
 
 type ContentPart struct {
-	Type       ContentType `json:"type"`
-	Text       string      `json:"text,omitempty"`
-	Signature  string      `json:"signature,omitempty"` // For reasoning blocks (Anthropic thinking signature)
-	Image      *MediaPart  `json:"image,omitempty"`
-	Audio      *MediaPart  `json:"audio,omitempty"`
-	Video      *MediaPart  `json:"video,omitempty"`
-	File       *FilePart   `json:"file,omitempty"`
-	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
-	ToolResult *ToolResult `json:"tool_result,omitempty"`
+	Type      ContentType `json:"type"`
+	Text      string      `json:"text,omitempty"`
+	Signature string      `json:"signature,omitempty"` // Anthropic thinking block signature
+	// ReasoningID + EncryptedContent are populated on reasoning content
+	// parts produced by the OpenAI Responses API when the request
+	// includes "reasoning.encrypted_content". Both fields must be
+	// echoed back verbatim on the next turn (via a reasoning input
+	// item) to preserve chain-of-thought across a stateless call.
+	ReasoningID      string      `json:"reasoning_id,omitempty"`
+	EncryptedContent string      `json:"encrypted_content,omitempty"`
+	Image            *MediaPart  `json:"image,omitempty"`
+	Audio            *MediaPart  `json:"audio,omitempty"`
+	Video            *MediaPart  `json:"video,omitempty"`
+	File             *FilePart   `json:"file,omitempty"`
+	ToolCall         *ToolCall   `json:"tool_call,omitempty"`
+	ToolResult       *ToolResult `json:"tool_result,omitempty"`
 }
 
 type MediaPart struct {

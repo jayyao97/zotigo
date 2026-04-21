@@ -134,12 +134,16 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 			// --- Reasoning content ---
 			//
-			// Two sibling event families carry thinking: reasoning_text is the
-			// raw chain of thought (available on o3-pro / gpt-5 with
-			// include=reasoning.encrypted_content), reasoning_summary_text is
-			// the higher-level summary emitted by default. We surface both as
-			// ContentTypeReasoning so the TUI renders a Thinking block either
-			// way.
+			// Two sibling event families carry thinking: reasoning_text is
+			// the raw chain of thought, reasoning_summary_text is the
+			// higher-level summary. We surface both as ContentTypeReasoning
+			// so the TUI renders a Thinking block either way.
+			//
+			// ContentEnd is intentionally deferred until
+			// response.output_item.done — that's when the SDK hands us
+			// the reasoning item's ID + encrypted_content, which we must
+			// preserve so the next turn can include them as input for
+			// stateless chain-of-thought continuity.
 
 			case "response.reasoning_text.delta",
 				"response.reasoning_summary_text.delta":
@@ -155,22 +159,8 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 			case "response.reasoning_text.done",
 				"response.reasoning_summary_text.done":
-				if blockType[evt.OutputIndex] == kindReasoning {
-					full := ""
-					if b := contentBuf[evt.OutputIndex]; b != nil {
-						full = b.String()
-					}
-					ch <- protocol.Event{
-						Type:  protocol.EventTypeContentEnd,
-						Index: int(evt.OutputIndex),
-						ContentPart: &protocol.ContentPart{
-							Type: protocol.ContentTypeReasoning,
-							Text: full,
-						},
-					}
-					delete(contentBuf, evt.OutputIndex)
-					delete(blockType, evt.OutputIndex)
-				}
+				// No-op: we'll emit ContentEnd once output_item.done fires
+				// with the full reasoning item (including encrypted_content).
 
 			// --- Function / tool calls ---
 			//
@@ -236,6 +226,34 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 					},
 				}
 				delete(pending, evt.ItemID)
+
+			// response.output_item.done fires for every top-level output
+			// item at completion. For reasoning items it carries the ID
+			// + encrypted_content we need to preserve for stateless
+			// chain-of-thought continuity — emit ContentEnd here (with
+			// blockType check to avoid firing on indexes we never saw
+			// reasoning on).
+			case "response.output_item.done":
+				rs := evt.Item.AsReasoning()
+				if rs.ID == "" && rs.EncryptedContent == "" {
+					continue
+				}
+				full := ""
+				if b := contentBuf[evt.OutputIndex]; b != nil {
+					full = b.String()
+				}
+				ch <- protocol.Event{
+					Type:  protocol.EventTypeContentEnd,
+					Index: int(evt.OutputIndex),
+					ContentPart: &protocol.ContentPart{
+						Type:             protocol.ContentTypeReasoning,
+						Text:             full,
+						ReasoningID:      rs.ID,
+						EncryptedContent: rs.EncryptedContent,
+					},
+				}
+				delete(contentBuf, evt.OutputIndex)
+				delete(blockType, evt.OutputIndex)
 
 			// --- Terminal events ---
 
@@ -366,10 +384,29 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 			})
 
 		case protocol.RoleAssistant:
-			// Split the assistant turn into its text and tool-call parts.
+			// Split the assistant turn into its reasoning, text, and
+			// tool-call parts. Reasoning items carry the encrypted
+			// chain-of-thought blob — they must go back to the server
+			// in the same relative order they were emitted, otherwise
+			// the model sees a jumbled history.
 			var text strings.Builder
 			for _, part := range m.Content {
 				switch part.Type {
+				case protocol.ContentTypeReasoning:
+					if part.ReasoningID == "" || part.EncryptedContent == "" {
+						// No server-issued blob to preserve — drop.
+						// (Most likely this reasoning came through a
+						// Chat Completions path, or the request didn't
+						// ask for encrypted content.)
+						continue
+					}
+					items = append(items, responses.ResponseInputItemUnionParam{
+						OfReasoning: &responses.ResponseReasoningItemParam{
+							ID:               part.ReasoningID,
+							EncryptedContent: param.NewOpt(part.EncryptedContent),
+							Summary:          []responses.ResponseReasoningItemSummaryParam{},
+						},
+					})
 				case protocol.ContentTypeText:
 					text.WriteString(part.Text)
 				case protocol.ContentTypeToolCall:
@@ -409,6 +446,12 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 	params := responses.ResponseNewParams{
 		Model: shared.ResponsesModel(model),
 		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
+		// Ask the server to emit encrypted reasoning blobs so we can
+		// pass them back on the next turn. This is what makes stateless
+		// multi-turn reasoning work without previous_response_id.
+		Include: []responses.ResponseIncludable{
+			responses.ResponseIncludableReasoningEncryptedContent,
+		},
 	}
 	if instructions.Len() > 0 {
 		params.Instructions = param.NewOpt(instructions.String())

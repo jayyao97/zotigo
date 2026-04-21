@@ -417,6 +417,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var currentContent string
 			var currentReasoning string
 			var reasoningSignature string
+			var reasoningBlocks []protocol.ContentPart // one per ContentEnd for reasoning
 			var providerFinishReason protocol.FinishReason
 			var providerUsage *protocol.Usage
 
@@ -439,26 +440,46 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						currentContent += evt.ContentPartDelta.Text
 					}
 				}
-				// Capture reasoning signature from ContentEnd events
+				// Each ContentEnd for a reasoning block is snapshotted as its
+				// own ContentPart, not merged — Responses API emits multiple
+				// reasoning items per turn (one per think → tool → think
+				// loop) and each has its own ID + encrypted_content that
+				// must be echoed back verbatim next turn to continue the
+				// chain of thought. Anthropic thinking fits the same shape
+				// (one block per turn, signature preserved).
 				if evt.Type == protocol.EventTypeContentEnd && evt.ContentPart != nil &&
 					evt.ContentPart.Type == protocol.ContentTypeReasoning {
-					reasoningSignature = evt.ContentPart.Signature
-					// Use the complete text from the end event if available
-					if evt.ContentPart.Text != "" {
-						currentReasoning = evt.ContentPart.Text
+					text := evt.ContentPart.Text
+					if text == "" {
+						text = currentReasoning
 					}
+					reasoningBlocks = append(reasoningBlocks, protocol.ContentPart{
+						Type:             protocol.ContentTypeReasoning,
+						Text:             text,
+						Signature:        evt.ContentPart.Signature,
+						ReasoningID:      evt.ContentPart.ReasoningID,
+						EncryptedContent: evt.ContentPart.EncryptedContent,
+					})
+					currentReasoning = ""
+					reasoningSignature = evt.ContentPart.Signature
 				}
 			}
 
-			asstMsg := protocol.NewAssistantMessage(currentContent)
-			// Prepend reasoning block if present (thinking comes before text)
+			// Residual reasoning with no matching ContentEnd (provider that
+			// streams deltas but never emits end, or a truncated stream).
 			if currentReasoning != "" {
-				reasoningPart := protocol.ContentPart{
+				reasoningBlocks = append(reasoningBlocks, protocol.ContentPart{
 					Type:      protocol.ContentTypeReasoning,
 					Text:      currentReasoning,
 					Signature: reasoningSignature,
-				}
-				asstMsg.Content = append([]protocol.ContentPart{reasoningPart}, asstMsg.Content...)
+				})
+			}
+
+			asstMsg := protocol.NewAssistantMessage(currentContent)
+			// Prepend reasoning blocks in emit order so the next turn
+			// sees them with their original inter-block position.
+			if len(reasoningBlocks) > 0 {
+				asstMsg.Content = append(reasoningBlocks, asstMsg.Content...)
 			}
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
@@ -477,7 +498,16 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				time.Since(modelTurnStart).Round(time.Millisecond),
 				providerFinishReason,
 				len(currentContent),
-				len(currentReasoning),
+				func() int {
+					// Sum over all captured reasoning blocks; currentReasoning
+					// only holds residual text from any block that never
+					// received a ContentEnd.
+					n := len(currentReasoning)
+					for _, rb := range reasoningBlocks {
+						n += len(rb.Text)
+					}
+					return n
+				}(),
 				len(currentToolCalls),
 				func() int {
 					if providerUsage == nil {
