@@ -135,7 +135,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		provider:     p,
 		executor:     exec,
 		tools:        make(map[string]tools.Tool),
-		policy:       ApprovalPolicyManual,
+		policy:       ApprovalPolicyAuto,
 		state:        StateIdle,
 		history:      make([]protocol.Message, 0),
 		turns:        make([]TurnAudit, 0),

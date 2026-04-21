@@ -168,7 +168,7 @@ func Run(args []string) int {
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
-		agent.WithApprovalPolicy(agent.ApprovalPolicyManual),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
 		agent.WithHook(middleware.ReadTracker(readTracker)),
 	)

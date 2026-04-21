@@ -100,6 +100,12 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 		cmdRegistry: cmdRegistry,
 		ctx:         context.Background(),
 		input:       ta,
+		// Keep the local auto-approve toggle in sync with the agent's
+		// actual policy — new sessions default to Auto, and resuming
+		// a session inherits whatever policy was active. Without this
+		// sync, shift-tab would start at "off" while the agent was
+		// actually in Auto.
+		autoApprove: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
 	}
 
 	// If the agent was saved in a paused state with pending actions,
