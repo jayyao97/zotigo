@@ -1,7 +1,7 @@
 // Package middleware holds agent-level tool-call middleware that
 // implement cross-cutting concerns (read tracking, metrics, audit, ...)
 // outside of the individual tool implementations. Each middleware here
-// plugs into agent.WithHook.
+// plugs into agent.WithMiddleware.
 package middleware
 
 import (
@@ -35,10 +35,10 @@ var (
 	}
 )
 
-// ReadTracker is the tool-call hook that enforces "read before edit"
-// and records snapshots for external-change detection. Construct one
-// per Agent and register via agent.WithHook.
-func ReadTracker(tracker *tools.ReadTracker) agent.Hook {
+// ReadTracker is the tool-call middleware that enforces "read before
+// edit" and records snapshots for external-change detection. Construct
+// one per Agent and register via agent.WithMiddleware.
+func ReadTracker(tracker *tools.ReadTracker) agent.Middleware {
 	if tracker == nil {
 		return nil
 	}
