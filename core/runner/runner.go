@@ -1,5 +1,5 @@
 // Package runner orchestrates an Agent and Transport for bidirectional
-// communication. It handles the event loop, approval flow, and lifecycle hooks.
+// communication. It handles the event loop, approval flow, and turn-level listeners.
 //
 // The Runner sits between the agent (conversation logic) and transport
 // (communication channel), keeping both packages decoupled.
@@ -15,16 +15,22 @@ import (
 	"github.com/jayyao97/zotigo/core/transport"
 )
 
-// Hooks allows callers to inject custom logic at key points in the
-// event loop (e.g. session persistence, logging, metrics).
-type Hooks struct {
-	// BeforeTurn is called before processing a user message.
+// Listeners is the set of observational callbacks the Runner invokes
+// at turn-level milestones. Unlike agent.Middleware (which wraps every
+// tool call and can alter control flow), Listeners are fire-and-forget:
+// return values are ignored and any panic is logged via OnError but
+// does not abort the turn. Use Listeners for session persistence,
+// logging, metrics, or TUI updates; use agent.Middleware when you need
+// to actually change what a tool does.
+type Listeners struct {
+	// BeforeTurn fires before processing a user message.
 	BeforeTurn func(input transport.UserInput)
-	// AfterTurn is called after each complete agent turn (finish with stop).
+	// AfterTurn fires after each complete agent turn (finish with stop).
 	AfterTurn func(snapshot agent.Snapshot)
-	// OnPause is called when the agent pauses for tool approval.
+	// OnPause fires when the agent pauses for tool approval.
 	OnPause func(snapshot agent.Snapshot)
-	// OnError is called when an error occurs during execution.
+	// OnError fires when an error occurs during execution — including
+	// panics from any of the other listeners in this set.
 	OnError func(err error)
 }
 
@@ -32,7 +38,7 @@ type Hooks struct {
 type Runner struct {
 	agent     *agent.Agent
 	transport transport.Transport
-	hooks     Hooks
+	listeners Listeners
 
 	mu       sync.Mutex
 	running  bool
@@ -42,9 +48,12 @@ type Runner struct {
 // Option configures a Runner.
 type Option func(*Runner)
 
-// WithHooks sets lifecycle hooks on the Runner.
-func WithHooks(hooks Hooks) Option {
-	return func(r *Runner) { r.hooks = hooks }
+// WithListeners sets the turn-level observational callbacks on the
+// Runner. For tool-call interception (not observation), register an
+// agent.Middleware via agent.WithMiddleware when constructing the
+// agent.
+func WithListeners(listeners Listeners) Option {
+	return func(r *Runner) { r.listeners = listeners }
 }
 
 // New creates a new Runner with the given agent and transport.
@@ -356,39 +365,39 @@ func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event
 	}
 }
 
-// --- hooks ---
+// --- listener dispatch ---
 
-func (r *Runner) safeCallHook(fn func()) {
+func (r *Runner) safeCallListener(fn func()) {
 	defer func() {
 		if v := recover(); v != nil {
-			r.fireOnError(fmt.Errorf("hook panicked: %v", v))
+			r.fireOnError(fmt.Errorf("listener panicked: %v", v))
 		}
 	}()
 	fn()
 }
 
 func (r *Runner) fireBeforeTurn(input transport.UserInput) {
-	if r.hooks.BeforeTurn != nil {
-		r.safeCallHook(func() { r.hooks.BeforeTurn(input) })
+	if r.listeners.BeforeTurn != nil {
+		r.safeCallListener(func() { r.listeners.BeforeTurn(input) })
 	}
 }
 
 func (r *Runner) fireAfterTurn() {
-	if r.hooks.AfterTurn != nil {
-		r.safeCallHook(func() { r.hooks.AfterTurn(r.agent.Snapshot()) })
+	if r.listeners.AfterTurn != nil {
+		r.safeCallListener(func() { r.listeners.AfterTurn(r.agent.Snapshot()) })
 	}
 }
 
 func (r *Runner) fireOnPause() {
-	if r.hooks.OnPause != nil {
-		r.safeCallHook(func() { r.hooks.OnPause(r.agent.Snapshot()) })
+	if r.listeners.OnPause != nil {
+		r.safeCallListener(func() { r.listeners.OnPause(r.agent.Snapshot()) })
 	}
 }
 
 func (r *Runner) fireOnError(err error) {
-	if r.hooks.OnError == nil {
+	if r.listeners.OnError == nil {
 		return
 	}
 	defer func() { recover() }()
-	r.hooks.OnError(err)
+	r.listeners.OnError(err)
 }

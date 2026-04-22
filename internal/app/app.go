@@ -170,7 +170,7 @@ func Run(args []string) int {
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
-		agent.WithHook(middleware.ReadTracker(readTracker)),
+		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)

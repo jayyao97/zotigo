@@ -371,7 +371,7 @@ collectLoop:
 	}
 }
 
-func TestRunner_Hooks_AfterTurn(t *testing.T) {
+func TestRunner_Listeners_AfterTurn(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})
@@ -393,14 +393,14 @@ func TestRunner_Hooks_AfterTurn(t *testing.T) {
 
 	var gotSnapshot agent.Snapshot
 	called := false
-	hooks := runner.Hooks{
+	listeners := runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
 			called = true
 			gotSnapshot = snap
 		},
 	}
 
-	r := runner.New(ag, tr, runner.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithListeners(listeners))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
@@ -439,7 +439,7 @@ drainLoop:
 	}
 }
 
-func TestRunner_Hooks_OnPause(t *testing.T) {
+func TestRunner_Listeners_OnPause(t *testing.T) {
 	mockProvider := &ToolCallMockProvider{}
 	providers.Register("toolcall_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return mockProvider, nil
@@ -465,14 +465,14 @@ func TestRunner_Hooks_OnPause(t *testing.T) {
 
 	var gotSnapshot agent.Snapshot
 	called := false
-	hooks := runner.Hooks{
+	listeners := runner.Listeners{
 		OnPause: func(snap agent.Snapshot) {
 			called = true
 			gotSnapshot = snap
 		},
 	}
 
-	r := runner.New(ag, tr, runner.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithListeners(listeners))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
@@ -510,7 +510,7 @@ drainLoop:
 	}
 }
 
-func TestRunner_Hooks_BeforeTurn(t *testing.T) {
+func TestRunner_Listeners_BeforeTurn(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})
@@ -532,14 +532,14 @@ func TestRunner_Hooks_BeforeTurn(t *testing.T) {
 
 	var gotInput transport.UserInput
 	called := false
-	hooks := runner.Hooks{
+	listeners := runner.Listeners{
 		BeforeTurn: func(input transport.UserInput) {
 			called = true
 			gotInput = input
 		},
 	}
 
-	r := runner.New(ag, tr, runner.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithListeners(listeners))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -592,7 +592,7 @@ drainLoop:
 	}
 }
 
-func TestRunner_Hooks_OnError(t *testing.T) {
+func TestRunner_Listeners_OnError(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})
@@ -613,13 +613,13 @@ func TestRunner_Hooks_OnError(t *testing.T) {
 	defer tr.Close()
 
 	var gotErr error
-	hooks := runner.Hooks{
+	listeners := runner.Listeners{
 		OnError: func(err error) {
 			gotErr = err
 		},
 	}
 
-	r := runner.New(ag, tr, runner.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithListeners(listeners))
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -667,7 +667,7 @@ func TestRunner_Hooks_OnError(t *testing.T) {
 	}
 }
 
-func TestRunner_Hooks_PanicRecover(t *testing.T) {
+func TestRunner_Listeners_PanicRecover(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})
@@ -688,7 +688,7 @@ func TestRunner_Hooks_PanicRecover(t *testing.T) {
 	defer tr.Close()
 
 	var recoveredErr error
-	hooks := runner.Hooks{
+	listeners := runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
 			panic("boom")
 		},
@@ -697,7 +697,7 @@ func TestRunner_Hooks_PanicRecover(t *testing.T) {
 		},
 	}
 
-	r := runner.New(ag, tr, runner.WithHooks(hooks))
+	r := runner.New(ag, tr, runner.WithListeners(listeners))
 	ctx := context.Background()
 
 	done := make(chan error, 1)
@@ -731,12 +731,12 @@ drainLoop:
 	if recoveredErr == nil {
 		t.Fatal("OnError was not called after AfterTurn panic")
 	}
-	if recoveredErr.Error() != "hook panicked: boom" {
-		t.Errorf("Expected 'hook panicked: boom', got '%s'", recoveredErr.Error())
+	if recoveredErr.Error() != "listener panicked: boom" {
+		t.Errorf("Expected 'listener panicked: boom', got '%s'", recoveredErr.Error())
 	}
 }
 
-func TestRunner_Hooks_Nil(t *testing.T) {
+func TestRunner_Listeners_Nil(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})

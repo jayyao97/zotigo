@@ -19,7 +19,7 @@ import (
 // dispatch wires a tool call through a single middleware the same way
 // agent.executeToolCall would, so we can test behavior end-to-end
 // without spinning up the full Agent.
-func dispatch(t *testing.T, hook agent.Hook, tool tools.Tool, exec executor.Executor, args string) (any, error) {
+func dispatch(t *testing.T, mw agent.Middleware, tool tools.Tool, exec executor.Executor, args string) (any, error) {
 	t.Helper()
 	call := &agent.ToolCall{
 		Tool:      tool,
@@ -30,7 +30,7 @@ func dispatch(t *testing.T, hook agent.Hook, tool tools.Tool, exec executor.Exec
 	next := func(ctx context.Context, c *agent.ToolCall) (any, error) {
 		return c.Tool.Execute(ctx, c.Executor, c.Arguments)
 	}
-	return hook(next)(context.Background(), call)
+	return mw(next)(context.Background(), call)
 }
 
 func TestReadTrackerHook_MutateWithoutRead(t *testing.T) {
@@ -160,6 +160,6 @@ func TestReadTrackerHook_WriteFileRequiresReadForOverwrite(t *testing.T) {
 
 func TestReadTrackerHook_NilTrackerIsNoop(t *testing.T) {
 	if middleware.ReadTracker(nil) != nil {
-		t.Fatal("nil tracker should yield nil hook so agent.WithHook can skip it")
+		t.Fatal("nil tracker should yield nil middleware so agent.WithMiddleware can skip it")
 	}
 }
