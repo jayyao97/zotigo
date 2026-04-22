@@ -15,13 +15,13 @@ profiles:
     base_url: "https://api.openai.com/v1"
     safety:
       classifier:
-        enabled: true
-        review_threshold: medium
-        profile: gpt-5.4-reasoning
-        timeout_ms: 3000
-        max_recent_actions: 6
-        capture_raw_audit_context: false
-        max_audit_context_chars: 1200
+        enabled: true                   # master switch; false skips the classifier entirely
+        review_threshold: medium        # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
+        profile: gpt-5.4-reasoning      # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
+        timeout_ms: 20000               # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
+        max_recent_actions: 6           # how many prior agent actions to include as context when asking the classifier to decide
+        capture_raw_audit_context: false  # store raw tool args in the audit log — enable for forensics/debugging, off by default to keep logs small
+        max_audit_context_chars: 1200   # per-entry cap applied only when capture_raw_audit_context is true
 
   claude-sonnet:
     provider: anthropic

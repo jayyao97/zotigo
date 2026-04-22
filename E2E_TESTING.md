@@ -30,10 +30,10 @@ profiles:
     base_url: "https://openrouter.ai/api/v1"
     safety:
       classifier:
-        enabled: true
-        review_threshold: medium
-        profile: gpt-5.4-reasoning
-        timeout_ms: 3000
+        enabled: true              # master switch; false skips the classifier entirely
+        review_threshold: medium   # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
+        profile: gpt-5.4-reasoning # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
+        timeout_ms: 20000          # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
 
   gpt-5.4-reasoning:
     provider: openai
