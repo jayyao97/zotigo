@@ -1274,18 +1274,15 @@ func (a *Agent) buildContext() []protocol.Message {
 		Model:    a.cfg.Model,
 	}
 
-	// System prompt messages (static + dynamic, each as separate message)
+	// System prompt messages (static + dynamic, each as separate message).
+	// System array stays ≤ 2 messages so Anthropic can keep ephemeral cache
+	// on block[0] and small models can rely on first-system attention.
+	// Dynamic content that would otherwise land in a third system message
+	// (skill index, per-turn snapshots) rides the latest user message via
+	// userTurnReminders instead.
 	if a.promptBuilder != nil {
 		for _, text := range a.promptBuilder.BuildMessages(pctx) {
 			msgs = append(msgs, protocol.NewSystemMessage(text))
-		}
-	}
-
-	// Dynamically reload and inject skill index (progressive disclosure)
-	if a.skillManager != nil {
-		a.skillManager.Load()
-		if index := a.skillManager.BuildSkillIndex(); index != "" {
-			msgs = append(msgs, protocol.NewSystemMessage(index))
 		}
 	}
 

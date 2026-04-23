@@ -138,17 +138,22 @@ func TestUserPromptWrapper_WithContext(t *testing.T) {
 	)
 
 	result := w.Wrap("Fix the bug", PromptContext{})
-	if !strings.Contains(result, "<user_query>") {
-		t.Error("Expected <user_query> tag")
+	if strings.Contains(result, "<user_query>") {
+		t.Error("wrapper should no longer emit <user_query> tags; raw user text rides bare")
 	}
-	if !strings.Contains(result, "Fix the bug") {
-		t.Error("Expected original input in result")
+	if !strings.Contains(result, "<file>") || !strings.Contains(result, "main.go contents here") {
+		t.Error("context section should be rendered as <file>...</file>")
 	}
-	if !strings.Contains(result, "<file>") {
-		t.Error("Expected <file> context tag")
+
+	// Context must come BEFORE the user's text so next-token prediction
+	// anchors on the user's actual question, not on background context.
+	fileIdx := strings.Index(result, "<file>")
+	userIdx := strings.Index(result, "Fix the bug")
+	if fileIdx < 0 || userIdx < 0 {
+		t.Fatalf("both parts should be present; got %q", result)
 	}
-	if !strings.Contains(result, "main.go contents here") {
-		t.Error("Expected file content in result")
+	if fileIdx >= userIdx {
+		t.Errorf("context section must precede the user text, got %q", result)
 	}
 }
 

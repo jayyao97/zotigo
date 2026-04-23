@@ -202,28 +202,29 @@ func NewUserPromptWrapper(opts ...UserPromptOption) *UserPromptWrapper {
 	return w
 }
 
-// Wrap returns rawInput wrapped with <user_query> tags and interleaved context.
-// Providers are called lazily; empty results are skipped.
-// Returns rawInput unchanged if no context sections produce output.
+// Wrap prepends interleaved context sections to rawInput. Each non-empty
+// provider becomes a `<tag>...</tag>` block placed BEFORE the user's text,
+// matching how Claude Code, Codex, and similar agents stage system-injected
+// context: background first, user intent last. Keeping the user's own words
+// at the end anchors next-token prediction to what the user actually asked.
+//
+// Providers are called lazily; empty outputs are skipped.
+// Returns rawInput unchanged if no section produces output.
 func (w *UserPromptWrapper) Wrap(rawInput string, ctx PromptContext) string {
 	if len(w.ContextSections) == 0 {
 		return rawInput
 	}
-	var sections []ContextSection
+	var b strings.Builder
 	for _, s := range w.ContextSections {
 		content := s.Provider(ctx)
-		if strings.TrimSpace(content) != "" {
-			sections = append(sections, ContextSection{Tag: s.Tag, Provider: func(_ PromptContext) string { return content }})
+		if strings.TrimSpace(content) == "" {
+			continue
 		}
+		fmt.Fprintf(&b, "<%s>\n%s\n</%s>\n\n", s.Tag, content, s.Tag)
 	}
-	if len(sections) == 0 {
+	if b.Len() == 0 {
 		return rawInput
 	}
-	var b strings.Builder
-	fmt.Fprintf(&b, "<user_query>\n%s\n</user_query>", rawInput)
-	for _, s := range sections {
-		content := s.Provider(ctx)
-		fmt.Fprintf(&b, "\n\n<%s>\n%s\n</%s>", s.Tag, content, s.Tag)
-	}
+	b.WriteString(rawInput)
 	return b.String()
 }
