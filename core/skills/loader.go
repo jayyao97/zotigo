@@ -128,13 +128,28 @@ func walkSkillsDir(dir string, depth int, fn func(string) error) error {
 	return nil
 }
 
-// GetUserSkillsDir returns the user skills directory path
+// GetUserSkillsDir returns the user skills directory path (Zotigo-native).
 func GetUserSkillsDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 	return filepath.Join(home, ".zotigo", "skills"), nil
+}
+
+// GetAgentsUserSkillsDir returns the ~/.agents/skills/ directory path
+// (shared across agent CLI tools like Claude Code, Aider, etc.).
+//
+// Always returns the path so that (a) directories created after process
+// start are picked up by /skills --reload, and (b) non-ENOENT Stat errors
+// (permission denied, symlink loops, stale NFS) surface through the normal
+// DiscoverSkills warning path instead of being silently ignored.
+func GetAgentsUserSkillsDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("failed to get home directory: %w", err)
+	}
+	return filepath.Join(home, ".agents", "skills"), nil
 }
 
 // GetProjectSkillsDir returns the project skills directory path

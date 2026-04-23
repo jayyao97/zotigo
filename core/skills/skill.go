@@ -6,6 +6,8 @@ type SkillSource int
 const (
 	// SkillSourceBuiltin - built into the binary
 	SkillSourceBuiltin SkillSource = iota
+	// SkillSourceAgents - loaded from ~/.agents/skills/ (shared across agent CLIs)
+	SkillSourceAgents
 	// SkillSourceUser - loaded from ~/.zotigo/skills/
 	SkillSourceUser
 	// SkillSourceProject - loaded from .zotigo/skills/
@@ -16,6 +18,8 @@ func (s SkillSource) String() string {
 	switch s {
 	case SkillSourceBuiltin:
 		return "builtin"
+	case SkillSourceAgents:
+		return "agents"
 	case SkillSourceUser:
 		return "user"
 	case SkillSourceProject:
