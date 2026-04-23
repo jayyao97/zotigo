@@ -101,6 +101,11 @@ func (m *Manager) Save(sess *Session) error {
 	return m.store.Put(context.Background(), sess)
 }
 
+// Delete removes a session from the store.
+func (m *Manager) Delete(id string) error {
+	return m.store.Delete(context.Background(), id)
+}
+
 // Lock creates a lock on the session.
 func (m *Manager) Lock(id string) error {
 	return m.store.Lock(context.Background(), id)
