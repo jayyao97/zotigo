@@ -20,8 +20,11 @@ type SkillManager struct {
 	// projectDir is the current project directory
 	projectDir string
 
-	// userDir is the user skills directory
+	// userDir is the user skills directory (~/.zotigo/skills/)
 	userDir string
+
+	// agentsDir is the ~/.agents/skills/ directory (shared across agent CLIs)
+	agentsDir string
 
 	// extraDirs are additional skill directories (for SDK users)
 	extraDirs []string
@@ -38,6 +41,11 @@ func WithUserDir(dir string) SkillManagerOption {
 	return func(m *SkillManager) { m.userDir = dir }
 }
 
+// WithAgentsDir overrides the default agents skills directory.
+func WithAgentsDir(dir string) SkillManagerOption {
+	return func(m *SkillManager) { m.agentsDir = dir }
+}
+
 // WithExtraDirs adds additional skill directories (loaded between user and project).
 func WithExtraDirs(dirs ...string) SkillManagerOption {
 	return func(m *SkillManager) { m.extraDirs = append(m.extraDirs, dirs...) }
@@ -46,12 +54,14 @@ func WithExtraDirs(dirs ...string) SkillManagerOption {
 // NewSkillManager creates a new skill manager
 func NewSkillManager(projectDir string, opts ...SkillManagerOption) *SkillManager {
 	userDir, _ := GetUserSkillsDir()
+	agentsDir, _ := GetAgentsUserSkillsDir()
 
 	m := &SkillManager{
 		skills:     make(map[string]*SkillDefinition),
 		aliases:    make(map[string]string),
 		projectDir: projectDir,
 		userDir:    userDir,
+		agentsDir:  agentsDir,
 	}
 	for _, opt := range opts {
 		opt(m)
@@ -73,7 +83,19 @@ func (m *SkillManager) Load() error {
 		m.addSkill(skill)
 	}
 
-	// 2. Load user skills (medium priority)
+	// 2. Load skills from ~/.agents/skills/ (shared across agent CLIs)
+	if m.agentsDir != "" {
+		agentsSkills, err := DiscoverSkills(m.agentsDir, SkillSourceAgents)
+		if err != nil {
+			fmt.Printf("Warning: failed to load skills from %s: %v\n", m.agentsDir, err)
+		} else {
+			for _, skill := range agentsSkills {
+				m.addSkill(skill)
+			}
+		}
+	}
+
+	// 3. Load user skills (medium priority)
 	if m.userDir != "" {
 		userSkills, err := DiscoverSkills(m.userDir, SkillSourceUser)
 		if err != nil {
@@ -84,7 +106,7 @@ func (m *SkillManager) Load() error {
 		}
 	}
 
-	// 3. Load extra dirs (SDK-configurable, between user and project)
+	// 4. Load extra dirs (SDK-configurable, between user and project)
 	for _, dir := range m.extraDirs {
 		if dir == "" {
 			continue
@@ -98,7 +120,7 @@ func (m *SkillManager) Load() error {
 		}
 	}
 
-	// 4. Load project skills (highest priority)
+	// 5. Load project skills (highest priority)
 	if m.projectDir != "" {
 		projectSkillsDir := GetProjectSkillsDir(m.projectDir)
 		projectSkills, err := DiscoverSkills(projectSkillsDir, SkillSourceProject)
@@ -117,6 +139,14 @@ func (m *SkillManager) Load() error {
 // Reload reloads all skills
 func (m *SkillManager) Reload() error {
 	return m.Load()
+}
+
+// SetAgentsDir updates the agents skills directory at runtime.
+// Useful for tests that need to point at a different directory.
+func (m *SkillManager) SetAgentsDir(dir string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.agentsDir = dir
 }
 
 // addSkill adds a skill to the manager (higher priority overwrites lower)
@@ -185,7 +215,7 @@ func (m *SkillManager) Count() int {
 // Used by the agent to whitelist these paths for auto-approved reads.
 func (m *SkillManager) Dirs() []string {
 	var dirs []string
-	for _, d := range []string{m.userDir, GetProjectSkillsDir(m.projectDir)} {
+	for _, d := range []string{m.agentsDir, m.userDir, GetProjectSkillsDir(m.projectDir)} {
 		if d == "" {
 			continue
 		}
