@@ -18,11 +18,15 @@ var (
 )
 
 type SessionSelectionModel struct {
-	sessions []session.Metadata
-	manager  *session.Manager
-	cursor   int
-	ChosenID string
-	quitting bool
+	sessions      []session.Metadata
+	manager       *session.Manager
+	cursor        int
+	offset        int
+	height        int
+	pendingDelete bool
+	statusMsg     string
+	ChosenID      string
+	quitting      bool
 }
 
 func NewSessionSelectionModel(sessions []session.Metadata, mgr *session.Manager) SessionSelectionModel {
@@ -37,21 +41,136 @@ func (m SessionSelectionModel) Init() tea.Cmd {
 	return nil
 }
 
+// visibleRows returns how many session rows fit on screen given the current
+// terminal height, reserving space for the title (2 lines) and footer (2 lines).
+// Returns 0 to signal "height unknown, render everything" (first frame before
+// WindowSizeMsg arrives).
+func (m SessionSelectionModel) visibleRows() int {
+	if m.height <= 0 {
+		return 0
+	}
+	return max(m.height-4, 3)
+}
+
+// confirmDelete removes the session at the cursor from the store and the
+// in-memory list, then fixes up cursor/offset. On error, leaves the list
+// untouched and surfaces a status line.
+func (m SessionSelectionModel) confirmDelete() SessionSelectionModel {
+	m.pendingDelete = false
+	if len(m.sessions) == 0 {
+		return m
+	}
+	target := m.sessions[m.cursor]
+	if err := m.manager.Delete(target.ID); err != nil {
+		m.statusMsg = fmt.Sprintf("Delete failed: %v", err)
+		return m
+	}
+	m.sessions = append(m.sessions[:m.cursor], m.sessions[m.cursor+1:]...)
+	if m.cursor >= len(m.sessions) {
+		m.cursor = max(len(m.sessions)-1, 0)
+	}
+	m.statusMsg = fmt.Sprintf("Deleted session %s.", target.ID[5:13])
+	return m.clampOffset()
+}
+
+func (m SessionSelectionModel) clampOffset() SessionSelectionModel {
+	visible := m.visibleRows()
+	if visible == 0 || len(m.sessions) <= visible {
+		m.offset = 0
+		return m
+	}
+	if m.cursor < m.offset {
+		m.offset = m.cursor
+	} else if m.cursor >= m.offset+visible {
+		m.offset = m.cursor - visible + 1
+	}
+	maxOffset := len(m.sessions) - visible
+	if m.offset > maxOffset {
+		m.offset = maxOffset
+	}
+	if m.offset < 0 {
+		m.offset = 0
+	}
+	return m
+}
+
 func (m SessionSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case tea.WindowSizeMsg:
+		m.height = msg.Height
+		return m.clampOffset(), nil
 	case tea.KeyPressMsg:
-		switch msg.String() {
+		key := msg.String()
+
+		// Delete-confirmation mode intercepts everything: y/Y confirms,
+		// ctrl+c still quits the program, any other key cancels.
+		if m.pendingDelete {
+			switch key {
+			case "y", "Y":
+				return m.confirmDelete(), nil
+			case "ctrl+c":
+				m.quitting = true
+				return m, tea.Quit
+			default:
+				m.pendingDelete = false
+				m.statusMsg = ""
+				return m, nil
+			}
+		}
+
+		// Any keypress clears a stale status line.
+		m.statusMsg = ""
+
+		switch key {
 		case "ctrl+c", "q", "esc":
 			m.quitting = true
 			return m, tea.Quit
+		case "d":
+			if len(m.sessions) == 0 {
+				return m, nil
+			}
+			if m.manager.IsLocked(m.sessions[m.cursor].ID) {
+				m.statusMsg = "Cannot delete a locked session (in use by another process)."
+				return m, nil
+			}
+			m.pendingDelete = true
+			return m, nil
 		case "up", "k":
 			if m.cursor > 0 {
 				m.cursor--
 			}
+			return m.clampOffset(), nil
 		case "down", "j":
 			if m.cursor < len(m.sessions)-1 {
 				m.cursor++
 			}
+			return m.clampOffset(), nil
+		case "pgup":
+			step := m.visibleRows()
+			if step <= 0 {
+				step = 10
+			}
+			m.cursor -= step
+			if m.cursor < 0 {
+				m.cursor = 0
+			}
+			return m.clampOffset(), nil
+		case "pgdown":
+			step := m.visibleRows()
+			if step <= 0 {
+				step = 10
+			}
+			m.cursor += step
+			if m.cursor > len(m.sessions)-1 {
+				m.cursor = len(m.sessions) - 1
+			}
+			return m.clampOffset(), nil
+		case "home", "g":
+			m.cursor = 0
+			return m.clampOffset(), nil
+		case "end", "G":
+			m.cursor = max(len(m.sessions)-1, 0)
+			return m.clampOffset(), nil
 		case "enter":
 			if len(m.sessions) == 0 {
 				return m, nil
@@ -85,7 +204,15 @@ func (m SessionSelectionModel) View() tea.View {
 		return tea.NewView(s)
 	}
 
-	for i, sess := range m.sessions {
+	start, end := 0, len(m.sessions)
+	visible := m.visibleRows()
+	if visible > 0 && len(m.sessions) > visible {
+		start = m.offset
+		end = min(start+visible, len(m.sessions))
+	}
+
+	for i := start; i < end; i++ {
+		sess := m.sessions[i]
 		cursor := "  "
 		style := itemStyle
 
@@ -126,6 +253,21 @@ func (m SessionSelectionModel) View() tea.View {
 		s += style.Render(fmt.Sprintf("%s%s", cursor, line)) + "\n"
 	}
 
-	s += descStyle.Render("\nUse ↑/↓ to navigate • Enter to select • Esc to quit") + "\n"
+	s += "\n"
+
+	switch {
+	case m.pendingDelete:
+		target := m.sessions[m.cursor]
+		s += lipgloss.NewStyle().
+			Foreground(lipgloss.Color("196")).Bold(true).
+			Render(fmt.Sprintf("  Delete session [%s]? (y/N)", target.ID[5:13])) + "\n"
+	case m.statusMsg != "":
+		s += descStyle.Render("  "+m.statusMsg) + "\n"
+	case visible > 0 && len(m.sessions) > visible:
+		s += descStyle.Render(fmt.Sprintf("  %d–%d of %d  •  ↑/↓ PgUp/PgDn g/G • Enter select • d delete • Esc quit",
+			start+1, end, len(m.sessions))) + "\n"
+	default:
+		s += descStyle.Render("Use ↑/↓ to navigate • Enter to select • d to delete • Esc to quit") + "\n"
+	}
 	return tea.NewView(s)
 }
