@@ -166,8 +166,27 @@ func Run(args []string) int {
 
 	readTracker := tools.NewReadTracker(cwd)
 
+	sm := skills.NewSkillManager(cwd)
+	if err := sm.Load(); err != nil {
+		fmt.Printf("Warning: failed to load skills: %v\n", err)
+	}
+
+	// Fossilize the current skill listing into each user message as a
+	// <system-reminder>. Each message is byte-identical once stored, so
+	// Anthropic's ephemeral prompt cache keeps hitting on the history
+	// prefix; small open models (Qwen, Llama) see the listing because it
+	// rides on the user message rather than a third system block.
+	uw := prompt.NewUserPromptWrapper(
+		prompt.WithContext("system-reminder", func(_ prompt.PromptContext) string {
+			_ = sm.Load() // re-scan disk so new skill files are picked up
+			return sm.BuildSkillIndex()
+		}),
+	)
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
+		agent.WithUserPromptWrapper(uw),
+		agent.WithSkillManager(sm),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
 		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
@@ -226,12 +245,6 @@ func Run(args []string) int {
 		ag.RegisterTool(builtin.NewWebSearchTool(sp))
 	}
 	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
-
-	sm := skills.NewSkillManager(cwd)
-	if err := sm.Load(); err != nil {
-		fmt.Printf("Warning: failed to load skills: %v\n", err)
-	}
-	ag.SetSkillManager(sm)
 
 	cmdRegistry := commands.NewRegistry()
 	cmdbuiltin.RegisterAll(cmdRegistry)
