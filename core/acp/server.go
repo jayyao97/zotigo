@@ -105,7 +105,7 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-s.conn.Done():
 		return s.conn.Err()
 	case <-ctx.Done():
-		s.conn.Close()
+		_ = s.conn.Close()
 		return ctx.Err()
 	}
 }

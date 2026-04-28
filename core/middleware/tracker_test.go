@@ -11,9 +11,9 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/middleware"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
-	"github.com/jayyao97/zotigo/core/middleware"
 )
 
 // dispatch wires a tool call through a single middleware the same way

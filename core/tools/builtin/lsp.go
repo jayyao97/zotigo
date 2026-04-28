@@ -261,10 +261,7 @@ func (t *LSPTool) workspaceSymbols(ctx context.Context, language, query string) 
 	for _, sym := range symbols {
 		kind := lsp.SymbolKindString(sym.Kind)
 		// Extract just the file name from URI
-		uri := sym.Location.URI
-		if strings.HasPrefix(uri, "file://") {
-			uri = uri[7:]
-		}
+		uri := strings.TrimPrefix(sym.Location.URI, "file://")
 		loc := fmt.Sprintf("%s:%d", uri, sym.Location.Range.Start.Line+1)
 		sb.WriteString(fmt.Sprintf("  [%s] %s (%s)\n", kind, sym.Name, loc))
 	}
@@ -302,10 +299,7 @@ func (t *LSPTool) formatLocations(title string, locations []lsp.Location) string
 	sb.WriteString(fmt.Sprintf("%s (%d):\n\n", title, len(locations)))
 
 	for _, loc := range locations {
-		uri := loc.URI
-		if strings.HasPrefix(uri, "file://") {
-			uri = uri[7:]
-		}
+		uri := strings.TrimPrefix(loc.URI, "file://")
 		line := loc.Range.Start.Line + 1
 		char := loc.Range.Start.Character + 1
 		sb.WriteString(fmt.Sprintf("  %s:%d:%d\n", uri, line, char))

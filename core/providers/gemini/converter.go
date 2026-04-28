@@ -68,7 +68,7 @@ func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool, tool
 				case protocol.ContentTypeToolCall:
 					if p.ToolCall != nil {
 						var argsMap map[string]any
-						json.Unmarshal([]byte(p.ToolCall.Arguments), &argsMap)
+						_ = json.Unmarshal([]byte(p.ToolCall.Arguments), &argsMap)
 						part := &genai.Part{
 							FunctionCall: &genai.FunctionCall{
 								ID:   p.ToolCall.ID,
@@ -198,7 +198,7 @@ func convertSchemaToGemini(schema any) *genai.Schema {
 	schemaMap, ok := schema.(map[string]any)
 	if !ok {
 		b, _ := json.Marshal(schema)
-		json.Unmarshal(b, &schemaMap)
+		_ = json.Unmarshal(b, &schemaMap)
 	}
 	return convertSchemaMap(schemaMap)
 }

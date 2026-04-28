@@ -162,7 +162,6 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 						Type:  protocol.EventTypeContentEnd,
 						Index: contentIndex,
 					}
-					contentStarted = false
 				}
 
 				reason := mapFinishReason(candidate.FinishReason)

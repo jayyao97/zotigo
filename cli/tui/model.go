@@ -332,9 +332,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						if err == nil {
 							mime := "image/png"
 							ext := strings.ToLower(filepath.Ext(path))
-							if ext == ".jpg" || ext == ".jpeg" {
+							switch ext {
+							case ".jpg", ".jpeg":
 								mime = "image/jpeg"
-							} else if ext == ".webp" {
+							case ".webp":
 								mime = "image/webp"
 							}
 							msg.Content = append(msg.Content, protocol.ContentPart{
@@ -827,7 +828,7 @@ func (m Model) saveSession() {
 		if lastPrompt != "" {
 			sess.LastPrompt = lastPrompt
 		}
-		m.sessionMgr.Save(sess)
+		_ = m.sessionMgr.Save(sess)
 	}
 }
 
@@ -998,13 +999,13 @@ func (m *Model) storeImage(srcPath string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer src.Close()
+	defer func() { _ = src.Close() }()
 
 	dst, err := os.Create(destPath)
 	if err != nil {
 		return "", err
 	}
-	defer dst.Close()
+	defer func() { _ = dst.Close() }()
 
 	if _, err := io.Copy(dst, src); err != nil {
 		return "", err
@@ -1041,7 +1042,7 @@ func (m *Model) pasteImageFromClipboard() (string, bool) {
 
 	// Save to current directory's .zotigo folder for shorter paths
 	uploadDir := ".zotigo/uploads"
-	os.MkdirAll(uploadDir, 0755)
+	_ = os.MkdirAll(uploadDir, 0755)
 
 	filename := fmt.Sprintf("paste_%d.png", time.Now().UnixNano())
 	relPath := filepath.Join(uploadDir, filename)
@@ -1075,7 +1076,7 @@ func (m *Model) pasteImageFromClipboard() (string, bool) {
 			return relPath, true // Return relative path for display
 		}
 	}
-	os.Remove(relPath)
+	_ = os.Remove(relPath)
 
 	return "", false
 }

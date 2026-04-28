@@ -279,7 +279,7 @@ func (c *Compressor) saveTranscript(messages []protocol.Message) string {
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	enc := json.NewEncoder(f)
 	for _, msg := range messages {

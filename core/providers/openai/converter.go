@@ -133,7 +133,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reason
 			schemaMap, ok := schema.(map[string]any)
 			if !ok {
 				b, _ := json.Marshal(schema)
-				json.Unmarshal(b, &schemaMap)
+				_ = json.Unmarshal(b, &schemaMap)
 			}
 
 			// Raw assignments, no openai.String/F

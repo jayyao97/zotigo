@@ -28,7 +28,7 @@ func NewLocal(workDir string, dataDir string) (*LocalEnvironment, error) {
 
 	store, err := session.NewFileStore(dataDir)
 	if err != nil {
-		exec.Close()
+		_ = exec.Close()
 		return nil, fmt.Errorf("failed to create store: %w", err)
 	}
 

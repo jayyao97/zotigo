@@ -96,7 +96,7 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 
 	// Remove lock file if exists
 	lockPath := s.lockPath(id)
-	os.Remove(lockPath) // Ignore error
+	_ = os.Remove(lockPath)
 
 	// Update registry
 	return s.removeFromRegistry(id)
@@ -188,7 +188,7 @@ func (s *FileStore) IsLocked(ctx context.Context, id string) (bool, error) {
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		// Corrupt lock file, clean it up
-		os.Remove(lockPath)
+		_ = os.Remove(lockPath)
 		return false, nil
 	}
 
@@ -205,7 +205,7 @@ func (s *FileStore) IsLocked(ctx context.Context, id string) (bool, error) {
 	}
 
 	// Process is dead, clean up stale lock
-	os.Remove(lockPath)
+	_ = os.Remove(lockPath)
 	return false, nil
 }
 

@@ -45,7 +45,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 	go func() {
 		defer close(ch)
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 
 		acc := openai.ChatCompletionAccumulator{}
 

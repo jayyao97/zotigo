@@ -14,7 +14,8 @@ var (
 	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
 	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("170")).Bold(true)
 	descStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
-	lockedStyle       = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true) // Red for locked
+	//nolint:unused // Staged for the locked-session indicator on the resume picker.
+	lockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 )
 
 type SessionSelectionModel struct {

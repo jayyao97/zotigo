@@ -61,7 +61,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 	ch := make(chan protocol.Event)
 	go func() {
 		defer close(ch)
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 
 		// Track per-output-index state for content/reasoning streaming so we
 		// can emit matching ContentEnd events when a block finishes.
@@ -83,7 +83,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 		}
 		pending := map[string]*pendingCall{}
 
-		var finishReason protocol.FinishReason = protocol.FinishReasonUnknown
+		finishReason := protocol.FinishReasonUnknown
 		var firstChunkAt time.Time
 		var finalUsage *responses.ResponseUsage
 
