@@ -97,7 +97,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, _ executor.Executor, argsJSO
 	if err != nil {
 		return nil, fmt.Errorf("fetch failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Limit body read to MaxPageSize.
 	body, err := io.ReadAll(io.LimitReader(resp.Body, int64(t.web.config.MaxPageSize)))

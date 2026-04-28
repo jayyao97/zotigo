@@ -19,14 +19,14 @@ func New(cfg Config) (Environment, error) {
 
 	case TypeDocker:
 		if cfg.Docker == nil {
-			return nil, fmt.Errorf("Docker config is required for docker environment")
+			return nil, fmt.Errorf("docker config is required for docker environment")
 		}
 		// TODO: Implement DockerEnvironment when ready
 		return nil, fmt.Errorf("docker environment not implemented yet")
 
 	case TypeCustom:
 		if cfg.Custom == nil {
-			return nil, fmt.Errorf("Custom config is required for custom environment")
+			return nil, fmt.Errorf("custom config is required for custom environment")
 		}
 		if cfg.Custom.Executor == nil {
 			return nil, fmt.Errorf("executor is required for custom environment")

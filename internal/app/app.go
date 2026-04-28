@@ -132,14 +132,14 @@ func Run(args []string) int {
 		fmt.Printf("Error locking session: %v\n", err)
 		return 1
 	}
-	defer sessMgr.Unlock(currentSession.ID)
+	defer func() { _ = sessMgr.Unlock(currentSession.ID) }()
 
 	localExec, err := executor.NewLocalExecutor(cwd)
 	if err != nil {
 		fmt.Printf("Error creating executor: %v\n", err)
 		return 1
 	}
-	defer localExec.Close()
+	defer func() { _ = localExec.Close() }()
 
 	// Executor is used raw now — command-safety is enforced by ShellTool's
 	// ShellPolicy in Classify; file-path safety by tools' in-workdir checks.
@@ -232,7 +232,7 @@ func Run(args []string) int {
 	ag.RegisterTool(&builtin.GlobTool{})
 
 	lspManager := lsp.NewManager(cwd)
-	defer lspManager.StopAll()
+	defer func() { _ = lspManager.StopAll() }()
 	ag.RegisterTool(builtin.NewLSPTool(lspManager))
 
 	webClient := builtin.NewWebClient(builtin.WebConfig{

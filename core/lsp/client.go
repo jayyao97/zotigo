@@ -114,13 +114,13 @@ func (c *Client) Start(ctx context.Context) error {
 
 	stdout, err := c.cmd.StdoutPipe()
 	if err != nil {
-		stdin.Close()
+		_ = stdin.Close()
 		return fmt.Errorf("failed to create stdout pipe: %w", err)
 	}
 
 	if err := c.cmd.Start(); err != nil {
-		stdin.Close()
-		stdout.Close()
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return fmt.Errorf("failed to start LSP server: %w", err)
 	}
 
@@ -139,7 +139,7 @@ func (c *Client) Start(ctx context.Context) error {
 
 	// Initialize the server
 	if err := c.initialize(ctx); err != nil {
-		c.Stop()
+		_ = c.Stop()
 		return err
 	}
 
@@ -162,8 +162,8 @@ func (rwc *readWriteCloser) Write(p []byte) (n int, err error) {
 }
 
 func (rwc *readWriteCloser) Close() error {
-	rwc.reader.Close()
-	rwc.writer.Close()
+	_ = rwc.reader.Close()
+	_ = rwc.writer.Close()
 	return nil
 }
 
@@ -234,8 +234,8 @@ func (c *Client) Stop() error {
 		// Try to shutdown gracefully, but don't block forever
 		done := make(chan struct{})
 		go func() {
-			c.server.Shutdown(ctx)
-			c.server.Exit(ctx)
+			_ = c.server.Shutdown(ctx)
+			_ = c.server.Exit(ctx)
 			close(done)
 		}()
 
@@ -249,13 +249,13 @@ func (c *Client) Stop() error {
 
 	// Close connection
 	if c.conn != nil {
-		c.conn.Close()
+		_ = c.conn.Close()
 	}
 
 	// Kill process if still running
 	if c.cmd != nil && c.cmd.Process != nil {
-		c.cmd.Process.Kill()
-		c.cmd.Wait()
+		_ = c.cmd.Process.Kill()
+		_ = c.cmd.Wait()
 	}
 
 	c.initialized = false

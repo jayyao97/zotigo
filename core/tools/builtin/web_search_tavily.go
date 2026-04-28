@@ -67,14 +67,14 @@ func (p *TavilySearchProvider) Search(ctx context.Context, query string, maxResu
 	if err != nil {
 		return nil, fmt.Errorf("search request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 1*1024*1024))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("Tavily API error (HTTP %d): %s", resp.StatusCode, string(respBody))
+		return nil, fmt.Errorf("tavily API error (HTTP %d): %s", resp.StatusCode, string(respBody))
 	}
 
 	var tavilyResp tavilyResponse

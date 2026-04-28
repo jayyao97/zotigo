@@ -69,7 +69,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 	go func() {
 		defer close(ch)
-		defer stream.Close()
+		defer func() { _ = stream.Close() }()
 
 		contentIndex := 0
 		toolCallIndex := 0
@@ -100,7 +100,8 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 			case "content_block_start":
-				if event.ContentBlock.Type == "tool_use" {
+				switch event.ContentBlock.Type {
+				case "tool_use":
 					inToolUse = true
 					currentToolCall = &protocol.ToolCall{
 						Index: toolCallIndex,
@@ -123,24 +124,25 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 							Name: event.ContentBlock.Name,
 						},
 					}
-				} else if event.ContentBlock.Type == "thinking" {
+				case "thinking":
 					inThinking = true
 					thinkingText = ""
 				}
 
 			case "content_block_delta":
-				if event.Delta.Type == "thinking_delta" {
+				switch event.Delta.Type {
+				case "thinking_delta":
 					thinkingText += event.Delta.Thinking
 					ch <- protocol.NewReasoningDeltaEvent(event.Delta.Thinking)
-				} else if event.Delta.Type == "signature_delta" {
+				case "signature_delta":
 					thinkingSignature += event.Delta.Signature
-				} else if event.Delta.Type == "text_delta" {
+				case "text_delta":
 					ch <- protocol.Event{
 						Type:             protocol.EventTypeContentDelta,
 						Index:            contentIndex,
 						ContentPartDelta: &protocol.ContentPartDelta{Text: event.Delta.Text},
 					}
-				} else if event.Delta.Type == "input_json_delta" {
+				case "input_json_delta":
 					ch <- protocol.Event{
 						Type:  protocol.EventTypeToolCallDelta,
 						Index: toolCallIndex,

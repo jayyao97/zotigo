@@ -398,6 +398,6 @@ func (r *Runner) fireOnError(err error) {
 	if r.listeners.OnError == nil {
 		return
 	}
-	defer func() { recover() }()
+	defer func() { _ = recover() }()
 	r.listeners.OnError(err)
 }

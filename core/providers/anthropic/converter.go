@@ -69,9 +69,10 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, t
 				case protocol.ContentTypeToolCall:
 					if p.ToolCall != nil {
 						tc := p.ToolCall
-						// Parse arguments JSON to map
+						// Best-effort parse: a malformed argument string falls
+						// back to nil and the SDK rejects it downstream.
 						var inputMap map[string]interface{}
-						json.Unmarshal([]byte(tc.Arguments), &inputMap)
+						_ = json.Unmarshal([]byte(tc.Arguments), &inputMap)
 
 						parts = append(parts, anthropic.ContentBlockParamUnion{
 							OfToolUse: &anthropic.ToolUseBlockParam{
@@ -128,7 +129,7 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, t
 			schemaMap, ok := schema.(map[string]any)
 			if !ok {
 				b, _ := json.Marshal(schema)
-				json.Unmarshal(b, &schemaMap)
+				_ = json.Unmarshal(b, &schemaMap)
 			}
 
 			// Extract properties from schema
