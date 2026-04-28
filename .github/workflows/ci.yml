@@ -1,0 +1,44 @@
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+jobs:
+  check:
+    name: gofmt + vet + lint + test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      # AGENTS.md says: pre-commit hook only checks gofmt (not goimports).
+      # Mirror that here — fail the job if any file would be reformatted.
+      - name: gofmt
+        run: |
+          out=$(gofmt -l .)
+          if [ -n "$out" ]; then
+            echo "::error::gofmt would reformat the following files:"
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - uses: golangci/golangci-lint-action@v8
+        with:
+          version: v2.5.0
+
+      # E2E tests are gated behind the `e2e` build tag and need live API keys —
+      # we deliberately do not run them in CI. The default test path covers
+      # unit + integration.
+      - name: go test
+        run: go test ./... -count=1 -timeout 5m
