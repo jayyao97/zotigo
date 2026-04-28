@@ -8,7 +8,6 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // marshalJSON is a test helper that captures the shape of the
@@ -134,24 +133,6 @@ func TestBuildResponseParams_ImageWithNoPayloadErrors(t *testing.T) {
 		t.Fatal("expected error for empty image part")
 	}
 }
-
-type schemaTool struct{}
-
-func (schemaTool) Name() string        { return "echo" }
-func (schemaTool) Description() string { return "echo input" }
-func (schemaTool) Schema() any {
-	return map[string]any{
-		"type":     "object",
-		"required": []string{"msg"},
-		"properties": map[string]any{
-			"msg": map[string]any{"type": "string"},
-		},
-	}
-}
-func (schemaTool) Classify(tools.SafetyCall) tools.SafetyDecision {
-	return tools.SafetyDecision{Level: tools.LevelSafe}
-}
-func (schemaTool) Execute(_ any, _ any, _ string) (any, error) { return nil, nil }
 
 func TestBuildResponseParams_SystemMessageBecomesInstructions(t *testing.T) {
 	msgs := []protocol.Message{

@@ -2,7 +2,6 @@ package anthropic
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -222,16 +221,4 @@ func mapStopReason(reason anthropic.StopReason) protocol.FinishReason {
 	default:
 		return protocol.FinishReasonUnknown
 	}
-}
-
-// Helper to convert interface to JSON string
-func toJSONString(v interface{}) string {
-	if v == nil {
-		return "{}"
-	}
-	b, err := json.Marshal(v)
-	if err != nil {
-		return "{}"
-	}
-	return string(b)
 }

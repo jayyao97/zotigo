@@ -283,11 +283,8 @@ func TestCompressor_FindSafePartitionPoint(t *testing.T) {
 
 	// The partition should be at a user message that doesn't follow a tool message
 	if partitionIdx > 0 && partitionIdx < len(msgs) {
-		if msgs[partitionIdx].Role != protocol.RoleUser {
-			// It's OK if it falls on user message or at boundaries
-		}
 		// Check it doesn't break a chain
-		if partitionIdx > 0 && msgs[partitionIdx-1].Role == protocol.RoleTool {
+		if msgs[partitionIdx-1].Role == protocol.RoleTool {
 			t.Errorf("Partition at %d breaks tool chain (previous message is tool)", partitionIdx)
 		}
 	}

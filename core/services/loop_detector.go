@@ -13,8 +13,9 @@ type LoopDetector struct {
 	mu sync.RWMutex
 
 	// Configuration
-	maxRepeats       int // Max times the same call pattern can repeat
-	windowSize       int // Number of recent calls to track
+	maxRepeats int // Max times the same call pattern can repeat
+	windowSize int // Number of recent calls to track
+	//nolint:unused // Staged for similarity-based detection (currently exact-match only).
 	similarityThresh float64
 
 	// State
