@@ -48,10 +48,7 @@ func (t *ReadFileTool) Schema() any {
 }
 
 func (t *ReadFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
-	if tools.IsInSafeScope(call, []string{"path"}) && !tools.IsSensitivePath(call, []string{"path"}) {
-		return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "file read in safe scope"}
-	}
-	return tools.SafetyDecision{Level: tools.LevelMedium, Reason: "file read outside safe scope or on sensitive path"}
+	return tools.ReadOnlyScope("path")(call)
 }
 
 func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
@@ -145,16 +142,7 @@ func (t *WriteFileTool) Schema() any {
 }
 
 func (t *WriteFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
-	level := tools.LevelLow
-	reason := "file write in working directory"
-	if !tools.IsInWorkDir(call, []string{"path"}) {
-		level = tools.LevelMedium
-		reason = "write targets path outside working directory"
-	} else if tools.IsSensitivePath(call, []string{"path"}) {
-		level = tools.LevelMedium
-		reason = "write targets sensitive path"
-	}
-	return tools.SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
+	return tools.MutatorScope("path")(call)
 }
 
 func (t *WriteFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
