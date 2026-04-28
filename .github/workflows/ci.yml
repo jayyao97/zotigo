@@ -19,13 +19,24 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      # AGENTS.md says: pre-commit hook only checks gofmt (not goimports).
-      # Mirror that here — fail the job if any file would be reformatted.
       - name: gofmt
         run: |
           out=$(gofmt -l .)
           if [ -n "$out" ]; then
             echo "::error::gofmt would reformat the following files:"
+            echo "$out"
+            exit 1
+          fi
+
+      # goimports enforces import grouping/sorting. `make check` already runs
+      # `goimports -w` locally; this is the read-only counterpart so a PR
+      # whose imports drift can't sneak past CI.
+      - name: goimports
+        run: |
+          go install golang.org/x/tools/cmd/goimports@latest
+          out=$(goimports -l .)
+          if [ -n "$out" ]; then
+            echo "::error::goimports would reformat the following files:"
             echo "$out"
             exit 1
           fi
