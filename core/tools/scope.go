@@ -59,6 +59,41 @@ func IsInSafeScope(call SafetyCall, pathKeys []string) bool {
 	return true
 }
 
+// ReadOnlyScope returns a Classify function for read-style tools whose
+// safety reduces to "is every path-shaped arg inside the safe scope and
+// not on a sensitive path?". Same template as read_file / grep / glob.
+//
+//	func (t *FooTool) Classify(c SafetyCall) SafetyDecision {
+//	    return ReadOnlyScope("path")(c)
+//	}
+func ReadOnlyScope(pathKeys ...string) func(SafetyCall) SafetyDecision {
+	return func(call SafetyCall) SafetyDecision {
+		if IsInSafeScope(call, pathKeys) && !IsSensitivePath(call, pathKeys) {
+			return SafetyDecision{Level: LevelSafe, Reason: "read in safe scope"}
+		}
+		return SafetyDecision{Level: LevelMedium, Reason: "read outside safe scope or on sensitive path"}
+	}
+}
+
+// MutatorScope returns a Classify function for mutator tools whose safety
+// reduces to "writes inside the working directory are Low; outside or
+// sensitive bumps to Medium". Same template as write_file / edit. Always
+// requests a snapshot.
+func MutatorScope(pathKeys ...string) func(SafetyCall) SafetyDecision {
+	return func(call SafetyCall) SafetyDecision {
+		level := LevelLow
+		reason := "mutation in working directory"
+		if !IsInWorkDir(call, pathKeys) {
+			level = LevelMedium
+			reason = "mutation targets path outside working directory"
+		} else if IsSensitivePath(call, pathKeys) {
+			level = LevelMedium
+			reason = "mutation targets sensitive path"
+		}
+		return SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
+	}
+}
+
 // IsSensitivePath returns true if any path-shaped argument resolves to a
 // known-sensitive location: credentials, shell config, VCS internals, SSH
 // keys, etc. Tools use this to force approval/classifier even when the

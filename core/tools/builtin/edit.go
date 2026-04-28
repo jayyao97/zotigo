@@ -47,16 +47,7 @@ func (t *EditTool) Schema() any {
 }
 
 func (t *EditTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
-	level := tools.LevelLow
-	reason := "file edit in working directory"
-	if !tools.IsInWorkDir(call, []string{"path"}) {
-		level = tools.LevelMedium
-		reason = "edit targets path outside working directory"
-	} else if tools.IsSensitivePath(call, []string{"path"}) {
-		level = tools.LevelMedium
-		reason = "edit targets sensitive path"
-	}
-	return tools.SafetyDecision{Level: level, Reason: reason, RequiresSnapshot: true}
+	return tools.MutatorScope("path")(call)
 }
 
 func (t *EditTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
