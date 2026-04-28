@@ -65,13 +65,15 @@ func TestChannelTransport_Approval(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Start approval request in goroutine
+	// Start approval request in goroutine. Each side owns its own error
+	// so the goroutine's write and main's write don't race on the same
+	// variable; main only reads requestErr after `done` closes (happens-before).
 	done := make(chan struct{})
 	var results []ApprovalResult
-	var err error
+	var requestErr error
 
 	go func() {
-		results, err = tr.RequestApproval(ctx, []PendingToolCall{
+		results, requestErr = tr.RequestApproval(ctx, []PendingToolCall{
 			{ID: "call_1", Name: "read_file"},
 		})
 		close(done)
@@ -88,18 +90,17 @@ func TestChannelTransport_Approval(t *testing.T) {
 	}
 
 	// Send approval
-	err = tr.SendApproval(ctx, []ApprovalResult{
+	if err := tr.SendApproval(ctx, []ApprovalResult{
 		{ToolCallID: "call_1", Approved: true},
-	})
-	if err != nil {
+	}); err != nil {
 		t.Fatalf("SendApproval failed: %v", err)
 	}
 
 	// Wait for result
 	select {
 	case <-done:
-		if err != nil {
-			t.Fatalf("RequestApproval failed: %v", err)
+		if requestErr != nil {
+			t.Fatalf("RequestApproval failed: %v", requestErr)
 		}
 		if len(results) != 1 || !results[0].Approved {
 			t.Errorf("unexpected results: %v", results)
