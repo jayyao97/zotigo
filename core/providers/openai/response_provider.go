@@ -274,7 +274,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 				}
 				debug.Logf("openai-response stream error model=%s type=%s msg=%s",
 					p.model, evt.Type, msg)
-				ch <- protocol.NewErrorEvent(&responseStreamError{Msg: msg, Code: evt.Code})
+				// Wrap so reactive-compact can recognize context-length
+				// failures: for gpt-5/o-series the Responses API surfaces
+				// these via response.failed events, not via stream.Err()
+				// at the bottom of the loop.
+				ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(&responseStreamError{Msg: msg, Code: evt.Code}))
 				return
 			}
 		}
@@ -282,7 +286,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 		if err := stream.Err(); err != nil {
 			debug.Logf("openai-response stream err model=%s duration=%s err=%v",
 				p.model, time.Since(start).Round(time.Millisecond), err)
-			ch <- protocol.NewErrorEvent(err)
+			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
 			return
 		}
 
@@ -308,11 +312,16 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 		finishEvt := protocol.NewFinishEvent(finishReason)
 		if finalUsage != nil {
+			// Responses API mirrors Chat Completions: input_tokens already
+			// includes cached input. Subtract so InputTokens stays the
+			// uncached count consistent with protocol.Usage.
+			cached := int(finalUsage.InputTokensDetails.CachedTokens)
+			input := max(int(finalUsage.InputTokens)-cached, 0)
 			finishEvt.Usage = &protocol.Usage{
-				InputTokens:          int(finalUsage.InputTokens),
+				InputTokens:          input,
 				OutputTokens:         int(finalUsage.OutputTokens),
 				TotalTokens:          int(finalUsage.TotalTokens),
-				CacheReadInputTokens: int(finalUsage.InputTokensDetails.CachedTokens),
+				CacheReadInputTokens: cached,
 			}
 		}
 		debug.Logf("openai-response stream end model=%s duration=%s finish=%s",
@@ -354,6 +363,8 @@ func mapResponseCompletedReason(resp *responses.Response) protocol.FinishReason 
 // EasyInputMessage; existing tool calls in history become function_call
 // items; tool results become function_call_output items.
 func buildResponseParams(model string, msgs []protocol.Message, toolsList []tools.Tool, effort string, toolChoice providers.ToolChoice) (responses.ResponseNewParams, error) {
+	msgs = providers.MergeConsecutiveUserMessages(msgs)
+
 	var instructions strings.Builder
 	var items responses.ResponseInputParam
 

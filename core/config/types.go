@@ -2,6 +2,16 @@ package config
 
 import "fmt"
 
+// DefaultContextWindow is the assumed context size when a profile
+// does not specify ContextWindow. 200k matches every modern Claude,
+// GPT-5/o, and Gemini family; smaller models (gpt-4 8k, local llama)
+// need an explicit `context_window: <N>` in the profile rather than a
+// baked-in per-model table here. The upstream numbers shift too often
+// (gpt-4o went 128k → 200k mid-life) for a registry to stay accurate,
+// and a stale guess looks more authoritative than "I don't know"
+// while being just as wrong. Profile config is the source of truth.
+const DefaultContextWindow = 200_000
+
 // Config represents the top-level configuration structure.
 type Config struct {
 	DefaultProfile string                   `mapstructure:"default_profile" yaml:"default_profile"`
@@ -26,6 +36,14 @@ type ProfileConfig struct {
 	//   OpenAI: reasoning_effort (low, medium, high)
 	//   Gemini: ThinkingLevel (LOW, MEDIUM, HIGH)
 	ThinkingLevel string `mapstructure:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
+
+	// ContextWindow sets the model's context window (in tokens) for
+	// the TUI status display and any future budget-aware logic. Set
+	// this for any model where DefaultContextWindow would mislead —
+	// older small models (gpt-4 8k), local servers (llama.cpp /
+	// vLLM), Azure deployments with reduced context, etc. When 0,
+	// DefaultContextWindow is used.
+	ContextWindow int `mapstructure:"context_window,omitempty" yaml:"context_window,omitempty"`
 
 	// Safety config controls optional safety classifier behavior for this profile.
 	Safety SafetyProfileConfig `mapstructure:"safety,omitempty" yaml:"safety,omitempty"`

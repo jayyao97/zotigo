@@ -12,6 +12,8 @@ import (
 
 // convertToAnthropicParams converts internal protocol messages to Anthropic MessageNewParams.
 func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, toolChoice providers.ToolChoice) (anthropic.MessageNewParams, error) {
+	msgs = providers.MergeConsecutiveUserMessages(msgs)
+
 	var anthropicMsgs []anthropic.MessageParam
 	var systemTexts []string
 

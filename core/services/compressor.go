@@ -11,6 +11,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
@@ -39,8 +40,12 @@ type Summarizer interface {
 
 // CompressorConfig holds configuration for the compressor
 type CompressorConfig struct {
-	// ContextWindowSize is the model's context window in tokens
-	// If 0, defaults to 128000 (GPT-4 Turbo / Claude 3)
+	// ContextWindowSize is the model's context window in tokens.
+	// If 0, defaults to config.DefaultContextWindow — the same
+	// fallback the TUI status display uses, so "I'm at X% of context"
+	// stays consistent across components. Callers wiring an agent
+	// should plumb the per-profile config.ContextWindow through here
+	// rather than relying on the default.
 	ContextWindowSize int
 
 	// TriggerRatio is when to trigger compression (default 0.7 = 70% of context)
@@ -66,12 +71,12 @@ type CompressorConfig struct {
 // DefaultCompressorConfig returns sensible defaults
 func DefaultCompressorConfig() CompressorConfig {
 	return CompressorConfig{
-		ContextWindowSize:   128000, // GPT-4 Turbo / Claude 3 default
-		TriggerRatio:        0.7,    // Trigger at 70%
-		TargetRatio:         0.5,    // Target 50%
-		PreserveRatio:       0.3,    // Preserve 30% of recent
-		ToolOutputThreshold: 2000,   // Summarize outputs > 2000 tokens
-		TokenCounter:        nil,    // Use default estimator
+		ContextWindowSize:   config.DefaultContextWindow,
+		TriggerRatio:        0.7,  // Trigger at 70%
+		TargetRatio:         0.5,  // Target 50%
+		PreserveRatio:       0.3,  // Preserve 30% of recent
+		ToolOutputThreshold: 2000, // Summarize outputs > 2000 tokens
+		TokenCounter:        nil,  // Use default estimator
 	}
 }
 
@@ -79,7 +84,7 @@ func DefaultCompressorConfig() CompressorConfig {
 func NewCompressor(cfg CompressorConfig) *Compressor {
 	// Apply defaults
 	if cfg.ContextWindowSize <= 0 {
-		cfg.ContextWindowSize = 128000
+		cfg.ContextWindowSize = config.DefaultContextWindow
 	}
 	if cfg.TriggerRatio <= 0 {
 		cfg.TriggerRatio = 0.7
@@ -134,21 +139,89 @@ type CompressionResult struct {
 	TranscriptPath   string // Path to the saved transcript file, empty if not saved
 }
 
-// NeedsCompression checks if the messages need compression
+// NeedsCompression checks if the messages need compression. Uses the
+// anchored estimator (see EstimatePromptTokens) so the trigger reflects
+// the actual upcoming prompt size as reported by the provider, not a
+// local-tokenizer guess that drifts by 10–40% across model families.
 func (c *Compressor) NeedsCompression(messages []protocol.Message) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	tokens := c.countTokens(messages)
+	tokens := c.estimatePromptTokens(messages)
 	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
 	return tokens > threshold
 }
 
-// CountTokens returns the estimated token count for messages
+// CountTokens returns a raw local-tokenizer estimate over every
+// message. Use this when you need a hypothetical-history count (e.g.
+// post-compression sizing, /stats display); use EstimatePromptTokens
+// when you want "how big is the prompt I'm about to send".
 func (c *Compressor) CountTokens(messages []protocol.Message) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.countTokens(messages)
+}
+
+// EstimatePromptTokens estimates the prompt size that would be sent
+// on the next API call by anchoring on the last assistant turn's
+// recorded usage and tokenizing only what's been appended since.
+//
+// Anchor + delta beats raw local tokenization because:
+//  1. The anchor is provider-reported truth, not a guess — collapses
+//     tokenizer error from "X% × whole history" to "X% × delta", and
+//     deltas are usually small (one user message, maybe a tool output).
+//  2. The local tokenizer (cl100k_base) is only accurate for the
+//     OpenAI GPT-3/4 family; Claude is roughly correct, gpt-4o needs
+//     o200k_base, Gemini uses an entirely different tokenizer family,
+//     and local llama / qwen drift further still. The anchor sidesteps
+//     all of that for the bulk of the count.
+//
+// Falls back to full local tokenization when:
+//   - There's no assistant turn yet (cold start)
+//   - The last assistant has no Usage metadata (provider didn't report,
+//     or the message was loaded from a pre-Usage save format)
+//
+// Caveat: directly after Compress() rewrites history, the preserved
+// assistant's recorded Usage reflects the PRE-compaction prompt size,
+// making the anchor temporarily stale until the next API response
+// refreshes it. Both NeedsCompression and Compress consult this same
+// estimator, so the inflated anchor can trigger one spurious follow-up
+// compaction on the turn after compaction. We accept that cost (a
+// single extra summarize call) because the alternative — reverting to
+// raw counts here — silently lets over-budget prompts through whenever
+// the local tokenizer under-estimates (Gemini / gpt-4o on cl100k_base /
+// local llama), which is a far more common and impactful failure.
+func (c *Compressor) EstimatePromptTokens(messages []protocol.Message) int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.estimatePromptTokens(messages)
+}
+
+func (c *Compressor) estimatePromptTokens(messages []protocol.Message) int {
+	anchorIdx := -1
+	var anchor int
+	for i := len(messages) - 1; i >= 0; i-- {
+		m := messages[i]
+		if m.Role != protocol.RoleAssistant {
+			continue
+		}
+		if m.Metadata == nil || m.Metadata.Usage == nil {
+			continue
+		}
+		anchor = m.Metadata.Usage.Normalized().TotalTokens
+		anchorIdx = i
+		break
+	}
+
+	if anchorIdx == -1 {
+		return c.countTokens(messages)
+	}
+
+	delta := 0
+	for i := anchorIdx + 1; i < len(messages); i++ {
+		delta += c.countSingleMessage(messages[i])
+	}
+	return anchor + delta
 }
 
 // Compress compresses the messages if they exceed the threshold.
@@ -157,18 +230,43 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Trigger decision must use the anchored estimate to stay in sync
+	// with NeedsCompression. Without using the anchor here, a session
+	// where NeedsCompression said yes (provider truth: over threshold)
+	// but the local tokenizer under-estimates would short-circuit to
+	// no-op and the agent would still send the over-budget prompt.
+	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
+	if c.estimatePromptTokens(messages) <= threshold {
+		raw := c.countTokens(messages)
+		return messages, CompressionResult{
+			OriginalTokens:   raw,
+			CompressedTokens: raw,
+			MessagesBefore:   len(messages),
+			MessagesAfter:    len(messages),
+			Compressed:       false,
+		}, nil
+	}
+
+	return c.compressLocked(ctx, messages)
+}
+
+// ForceCompress unconditionally compresses, bypassing the threshold
+// check. Used by the agent's reactive-recovery path: when a provider
+// rejects a request as too long, the local estimate clearly disagreed
+// with the server, so the threshold gate would still no-op us. Force
+// past it.
+func (c *Compressor) ForceCompress(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.compressLocked(ctx, messages)
+}
+
+// compressLocked runs the actual partition + summarize. Caller must
+// hold c.mu.
+func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
 	result := CompressionResult{
 		OriginalTokens: c.countTokens(messages),
 		MessagesBefore: len(messages),
-	}
-
-	// Check if compression is needed
-	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
-	if result.OriginalTokens <= threshold {
-		result.CompressedTokens = result.OriginalTokens
-		result.MessagesAfter = len(messages)
-		result.Compressed = false
-		return messages, result, nil
 	}
 
 	// Separate system messages

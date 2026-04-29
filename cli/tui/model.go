@@ -208,6 +208,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if keyStr == "ctrl+c" || keyStr == "esc" {
 			m.saveSession()
+			if summary := renderUsageSummary(m.agent); summary != "" {
+				return m, tea.Sequence(tea.Println("\n"+summary), tea.Quit)
+			}
 			return m, tea.Quit
 		}
 
@@ -770,6 +773,11 @@ func (m Model) View() tea.View {
 		// Only show indicator when auto-approve is on
 		if m.autoApprove {
 			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
+			sb.WriteString("\n")
+		}
+
+		if status := renderUsageStatus(m.agent); status != "" {
+			sb.WriteString(status)
 			sb.WriteString("\n")
 		}
 
