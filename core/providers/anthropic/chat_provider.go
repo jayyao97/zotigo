@@ -35,6 +35,27 @@ func effortFromLevel(level string) anthropic.OutputConfigEffort {
 	}
 }
 
+// maxTokensForLevel returns a generous max_tokens ceiling for the
+// given thinking effort. Adaptive thinking output counts toward
+// max_tokens, so the converter's 4096 default would silently truncate
+// high-effort reasoning chains before the model gets to write its
+// answer. Numbers mirror the old enabled-mode budget+4096 layout
+// (2048/8192/32768 thinking budget + 4096 response room) rounded to
+// power-of-two ceilings; callers that explicitly set MaxTokens higher
+// keep their override.
+func maxTokensForLevel(level string) int64 {
+	switch level {
+	case "low":
+		return 8192
+	case "medium":
+		return 16384
+	case "high":
+		return 32768
+	default:
+		return 0
+	}
+}
+
 func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	resolved := providers.ResolveOptions(opts)
 	params, err := convertToAnthropicParams(messages, toolsList, resolved.ToolChoice)
@@ -61,6 +82,9 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 			},
 		}
 		params.OutputConfig.Effort = effortFromLevel(level)
+		if want := maxTokensForLevel(level); params.MaxTokens < want {
+			params.MaxTokens = want
+		}
 	}
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
