@@ -359,6 +359,8 @@ func mapResponseCompletedReason(resp *responses.Response) protocol.FinishReason 
 // EasyInputMessage; existing tool calls in history become function_call
 // items; tool results become function_call_output items.
 func buildResponseParams(model string, msgs []protocol.Message, toolsList []tools.Tool, effort string, toolChoice providers.ToolChoice) (responses.ResponseNewParams, error) {
+	msgs = providers.MergeConsecutiveUserMessages(msgs)
+
 	var instructions strings.Builder
 	var items responses.ResponseInputParam
 

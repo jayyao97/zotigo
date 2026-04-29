@@ -14,6 +14,8 @@ import (
 
 // convertToChatParams converts internal protocol messages to OpenAI ChatCompletionNewParams.
 func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reasoningEffort string, toolChoice providers.ToolChoice) (openai.ChatCompletionNewParams, error) {
+	msgs = providers.MergeConsecutiveUserMessages(msgs)
+
 	var oaMsgs []openai.ChatCompletionMessageParamUnion
 
 	for _, msg := range msgs {

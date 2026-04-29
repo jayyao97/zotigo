@@ -13,6 +13,8 @@ import (
 
 // convertToGeminiParams converts internal protocol messages and tools to Gemini SDK types.
 func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool, toolChoice providers.ToolChoice) ([]*genai.Content, *genai.GenerateContentConfig, error) {
+	msgs = providers.MergeConsecutiveUserMessages(msgs)
+
 	var contents []*genai.Content
 	var systemText string
 
