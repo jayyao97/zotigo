@@ -6,7 +6,7 @@ require (
 	charm.land/bubbles/v2 v2.0.0-rc.1
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106192539-4b304240aab7
-	github.com/anthropics/anthropic-sdk-go v1.19.0
+	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/openai/openai-go/v3 v3.8.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/spf13/viper v1.19.0
@@ -23,6 +23,8 @@ require (
 	cloud.google.com/go/auth v0.9.3 // indirect
 	cloud.google.com/go/compute/metadata v0.5.0 // indirect
 	github.com/atotto/clipboard v0.1.4 // indirect
+	github.com/bahlo/generic-list-go v0.2.0 // indirect
+	github.com/buger/jsonparser v1.1.2 // indirect
 	github.com/charmbracelet/colorprofile v0.4.1 // indirect
 	github.com/charmbracelet/ultraviolet v0.0.0-20251217160852-6b0c0e26fad9 // indirect
 	github.com/charmbracelet/x/ansi v0.11.3 // indirect
@@ -41,8 +43,10 @@ require (
 	github.com/googleapis/enterprise-certificate-proxy v0.3.4 // indirect
 	github.com/gorilla/websocket v1.5.3 // indirect
 	github.com/hashicorp/hcl v1.0.0 // indirect
+	github.com/invopop/jsonschema v0.13.0 // indirect
 	github.com/lucasb-eyer/go-colorful v1.3.0 // indirect
 	github.com/magiconair/properties v1.8.7 // indirect
+	github.com/mailru/easyjson v0.7.7 // indirect
 	github.com/mattn/go-runewidth v0.0.19 // indirect
 	github.com/mitchellh/mapstructure v1.5.0 // indirect
 	github.com/muesli/cancelreader v0.2.2 // indirect
@@ -61,6 +65,7 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	github.com/wk8/go-ordered-map/v2 v2.1.8 // indirect
 	github.com/xo/terminfo v0.0.0-20220910002029-abceb7e1c41e // indirect
 	go.lsp.dev/pkg v0.0.0-20210717090340-384b27a52fb2 // indirect
 	go.lsp.dev/uri v0.3.0 // indirect
