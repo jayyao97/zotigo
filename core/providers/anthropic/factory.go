@@ -30,15 +30,9 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 		thinkingLevel: cfg.ThinkingLevel,
 	}
 
-	// Allow explicit budget override via params
-	if bt, ok := cfg.Params["thinking_budget_tokens"]; ok {
-		switch v := bt.(type) {
-		case int:
-			p.thinkingBudget = int64(v)
-		case float64:
-			p.thinkingBudget = int64(v)
-		}
-	}
+	// Note: `thinking_budget_tokens` (legacy enabled-mode override)
+	// has no equivalent in adaptive thinking — silently ignored if
+	// present in cfg.Params for backward compat with older configs.
 
 	return p, nil
 }

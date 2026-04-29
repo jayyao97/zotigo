@@ -10,28 +10,48 @@ import (
 )
 
 type ChatProvider struct {
-	client         *anthropic.Client
-	model          string
-	thinkingLevel  string // "", "low", "medium", "high"
-	thinkingBudget int64  // explicit override; 0 = use level default
+	client        *anthropic.Client
+	model         string
+	thinkingLevel string // "", "low", "medium", "high"
 }
 
 func (p *ChatProvider) Name() string {
 	return "anthropic-chat"
 }
 
-// thinkingBudgetTokens returns the budget_tokens for the given thinking level.
-// An explicit budget override wins; otherwise the level string maps to a
-// fixed token budget.
-func thinkingBudgetTokens(level string, explicit int64) int64 {
-	if explicit > 0 {
-		return explicit
-	}
+// effortFromLevel maps our cross-provider thinking_level string into
+// Anthropic's adaptive output_config.effort enum. "" → empty enum,
+// callers must gate before sending.
+func effortFromLevel(level string) anthropic.OutputConfigEffort {
 	switch level {
 	case "low":
-		return 2048
+		return anthropic.OutputConfigEffortLow
 	case "medium":
+		return anthropic.OutputConfigEffortMedium
+	case "high":
+		return anthropic.OutputConfigEffortHigh
+	default:
+		return ""
+	}
+}
+
+// maxTokensForLevel returns a generous max_tokens ceiling for the
+// given thinking effort. Adaptive thinking output counts toward
+// max_tokens, so the converter's 4096 default would silently truncate
+// high-effort reasoning chains before the model gets to write its
+// answer. Numbers retain the spirit of the old enabled-mode mapping
+// (low/medium/high thinking budgets of 2048/8192/32768 plus 4096 for
+// response): low and medium round their budget+4096 up to the next
+// power of two (8192, 16384); high keeps 32768 because that's both
+// the old high-budget cap and around the practical output ceiling
+// most current Anthropic models accept. Callers that explicitly set
+// MaxTokens higher keep their override.
+func maxTokensForLevel(level string) int64 {
+	switch level {
+	case "low":
 		return 8192
+	case "medium":
+		return 16384
 	case "high":
 		return 32768
 	default:
@@ -48,17 +68,25 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 	params.Model = anthropic.Model(p.model)
 
-	// Configure thinking — per-call override wins over the provider default.
+	// Adaptive thinking — Claude 4.7+ rejects the legacy
+	// `thinking.type: enabled` + budget_tokens shape; older 4.x still
+	// accept adaptive, so we use it uniformly. Per-call ReasoningEffort
+	// overrides the provider-level default. When level is "", we send
+	// no thinking config at all (model decides on its own / no effort
+	// hint).
 	level := resolved.ReasoningEffort
 	if level == "" {
 		level = p.thinkingLevel
 	}
-	budget := thinkingBudgetTokens(level, p.thinkingBudget)
-	if budget > 0 {
-		params.Thinking = anthropic.ThinkingConfigParamOfEnabled(budget)
-		// MaxTokens must exceed budget; set a reasonable total
-		if params.MaxTokens < budget+4096 {
-			params.MaxTokens = budget + 4096
+	if level != "" {
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
+				Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
+			},
+		}
+		params.OutputConfig.Effort = effortFromLevel(level)
+		if want := maxTokensForLevel(level); params.MaxTokens < want {
+			params.MaxTokens = want
 		}
 	}
 
