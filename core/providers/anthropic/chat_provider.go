@@ -39,10 +39,13 @@ func effortFromLevel(level string) anthropic.OutputConfigEffort {
 // given thinking effort. Adaptive thinking output counts toward
 // max_tokens, so the converter's 4096 default would silently truncate
 // high-effort reasoning chains before the model gets to write its
-// answer. Numbers mirror the old enabled-mode budget+4096 layout
-// (2048/8192/32768 thinking budget + 4096 response room) rounded to
-// power-of-two ceilings; callers that explicitly set MaxTokens higher
-// keep their override.
+// answer. Numbers retain the spirit of the old enabled-mode mapping
+// (low/medium/high thinking budgets of 2048/8192/32768 plus 4096 for
+// response): low and medium round their budget+4096 up to the next
+// power of two (8192, 16384); high keeps 32768 because that's both
+// the old high-budget cap and around the practical output ceiling
+// most current Anthropic models accept. Callers that explicitly set
+// MaxTokens higher keep their override.
 func maxTokensForLevel(level string) int64 {
 	switch level {
 	case "low":
