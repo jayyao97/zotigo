@@ -13,6 +13,124 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
+func TestCompressor_EstimatePromptTokens_AnchorsOnLastAssistantUsage(t *testing.T) {
+	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
+
+	// 10k user prompt + assistant reply that the provider says totalled
+	// 12,500 prompt + 500 output = 13,000 tokens of context-after-reply.
+	// Adding a tiny user follow-up should land near 13,000, NOT 13,000 +
+	// the cost of re-tokenizing the whole 10k user prompt.
+	bigUserPrompt := strings.Repeat("word ", 2500) // ~12.5k chars ~ 3.1k local tokens
+	history := []protocol.Message{
+		{
+			Role: protocol.RoleUser,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: bigUserPrompt},
+			},
+		},
+		{
+			Role: protocol.RoleAssistant,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: "ok."},
+			},
+			Metadata: &protocol.MessageMetadata{
+				Usage: &protocol.Usage{
+					InputTokens:  12_500,
+					OutputTokens: 500,
+					TotalTokens:  13_000,
+				},
+			},
+		},
+		{
+			Role: protocol.RoleUser,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: "hi"},
+			},
+		},
+	}
+
+	got := c.EstimatePromptTokens(history)
+	if got < 13_000 || got > 13_050 {
+		t.Errorf("EstimatePromptTokens = %d, expected ~13,000 (anchor=13,000 + tiny delta); raw count would be much smaller and ignore the API truth",
+			got)
+	}
+}
+
+// Reviewer-flagged regression: NeedsCompression uses the anchored
+// estimate, but Compress() also has its own threshold check. If that
+// inner check still used raw countTokens, a session where the provider
+// says "over threshold" but the local tokenizer underestimates would
+// no-op out of Compress and keep sending an over-budget prompt.
+func TestCompressor_Compress_HonorsAnchorWhenLocalTokenizerUnderestimates(t *testing.T) {
+	// Threshold = 100k * 0.7 = 70k. Anchor (provider) says 80k. Local
+	// tokenizer over the same history would say a few hundred (only a
+	// short "ok" message). Compress must still proceed to compaction.
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100_000,
+		TriggerRatio:      0.7,
+		PreserveRatio:     0.3,
+	})
+
+	history := []protocol.Message{
+		{Role: protocol.RoleUser, Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "earlier exchange placeholder"}}},
+		{
+			Role:    protocol.RoleAssistant,
+			Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "ok"}},
+			Metadata: &protocol.MessageMetadata{
+				Usage: &protocol.Usage{
+					InputTokens:  79_000,
+					OutputTokens: 1_000,
+					TotalTokens:  80_000,
+				},
+			},
+		},
+		{Role: protocol.RoleUser, Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "next question"}}},
+	}
+
+	if !c.NeedsCompression(history) {
+		t.Fatal("setup error: anchored NeedsCompression should report true at 80k > 70k threshold")
+	}
+	if raw := c.CountTokens(history); raw > 70_000 {
+		t.Fatalf("setup error: raw count %d should be well below threshold 70_000 to exercise the bug", raw)
+	}
+
+	_, result, err := c.Compress(context.Background(), history)
+	if err != nil {
+		t.Fatalf("Compress error: %v", err)
+	}
+	if !result.Compressed {
+		t.Errorf("Compress returned Compressed=false despite anchor being over threshold; raw inner check defeated the anchored trigger")
+	}
+}
+
+func TestCompressor_EstimatePromptTokens_FallsBackWithoutAnchor(t *testing.T) {
+	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
+
+	// First turn: no assistant message yet → must fall back to raw
+	// local tokenization rather than returning 0.
+	history := []protocol.Message{
+		{
+			Role: protocol.RoleUser,
+			Content: []protocol.ContentPart{
+				{Type: protocol.ContentTypeText, Text: strings.Repeat("word ", 100)},
+			},
+		},
+	}
+	if got := c.EstimatePromptTokens(history); got <= 0 {
+		t.Errorf("EstimatePromptTokens with no anchor returned %d, want positive fallback", got)
+	}
+
+	// Assistant present but missing Usage metadata (e.g. legacy save):
+	// also falls back.
+	history = append(history, protocol.Message{
+		Role:    protocol.RoleAssistant,
+		Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "ok"}},
+	})
+	if got := c.EstimatePromptTokens(history); got <= 0 {
+		t.Errorf("EstimatePromptTokens with usage-less assistant returned %d, want positive fallback", got)
+	}
+}
+
 func TestCompressor_NeedsCompression(t *testing.T) {
 	// Create a compressor with a small context window for testing
 	c := NewCompressor(CompressorConfig{
