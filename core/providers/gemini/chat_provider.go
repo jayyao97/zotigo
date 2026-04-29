@@ -69,7 +69,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 		for resp, err := range p.client.Models.GenerateContentStream(ctx, p.model, contents, config) {
 			if err != nil {
-				ch <- protocol.NewErrorEvent(err)
+				ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
 				return
 			}
 

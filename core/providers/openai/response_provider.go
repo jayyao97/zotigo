@@ -274,7 +274,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 				}
 				debug.Logf("openai-response stream error model=%s type=%s msg=%s",
 					p.model, evt.Type, msg)
-				ch <- protocol.NewErrorEvent(&responseStreamError{Msg: msg, Code: evt.Code})
+				// Wrap so reactive-compact can recognize context-length
+				// failures: for gpt-5/o-series the Responses API surfaces
+				// these via response.failed events, not via stream.Err()
+				// at the bottom of the loop.
+				ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(&responseStreamError{Msg: msg, Code: evt.Code}))
 				return
 			}
 		}
@@ -282,7 +286,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 		if err := stream.Err(); err != nil {
 			debug.Logf("openai-response stream err model=%s duration=%s err=%v",
 				p.model, time.Since(start).Round(time.Millisecond), err)
-			ch <- protocol.NewErrorEvent(err)
+			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
 			return
 		}
 

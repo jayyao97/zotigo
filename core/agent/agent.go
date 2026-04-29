@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -378,6 +379,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		emptyRecoveryAttempts := 0
 		const maxEmptyRecoveryAttempts = 1
 
+		// Reactive compaction: when a provider rejects a request as
+		// over-context, force-compress and retry once. Cap at one retry
+		// so a buggy compactor or persistent overflow can't loop.
+		reactiveRetries := 0
+		const maxReactiveRetries = 1
+
 		for {
 			a.mu.RLock()
 			state := a.state
@@ -419,6 +426,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
 			if err != nil {
+				if a.tryReactiveRecover(ctx, err, &reactiveRetries, maxReactiveRetries, outCh) {
+					continue
+				}
 				outCh <- protocol.NewErrorEvent(err)
 				return
 			}
@@ -431,12 +441,33 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var reasoningBlocks []protocol.ContentPart // one per ContentEnd for reasoning
 			var providerFinishReason protocol.FinishReason
 			var providerUsage *protocol.Usage
+			var reactiveErr error
 
 			for evt := range stream {
 				if evt.Type == protocol.EventTypeFinish {
 					providerFinishReason = evt.FinishReason
 					providerUsage = evt.Usage
 					continue
+				}
+
+				// Errors are terminal for the turn. Context-length errors
+				// get intercepted (caller below force-compacts and retries
+				// once); anything else is forwarded and the turn ends —
+				// without this exit, an empty currentContent would trip
+				// the empty-response recovery path and re-call the model.
+				if evt.Type == protocol.EventTypeError && evt.Error != nil {
+					if errors.Is(evt.Error, providers.ErrContextLengthExceeded) &&
+						reactiveRetries < maxReactiveRetries {
+						reactiveErr = evt.Error
+					} else {
+						outCh <- evt
+					}
+					for range stream {
+					}
+					if reactiveErr == nil {
+						return
+					}
+					break
 				}
 
 				outCh <- evt
@@ -474,6 +505,17 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					currentReasoning = ""
 					reasoningSignature = evt.ContentPart.Signature
 				}
+			}
+
+			// Reactive recovery: a context-length error was caught
+			// mid-stream. Force a compaction and restart the outer
+			// loop so the same user turn gets retried once.
+			if reactiveErr != nil {
+				if a.tryReactiveRecover(ctx, reactiveErr, &reactiveRetries, maxReactiveRetries, outCh) {
+					continue
+				}
+				outCh <- protocol.NewErrorEvent(reactiveErr)
+				return
 			}
 
 			// Residual reasoning with no matching ContentEnd (provider that
@@ -1363,4 +1405,46 @@ func (a *Agent) safeDirs() []string {
 	dirs = append(dirs, a.executor.WorkDir())
 	dirs = append(dirs, a.extraSafeDirs...)
 	return dirs
+}
+
+// tryReactiveRecover handles a provider context-length error by
+// force-compacting history and signalling the caller to retry. Returns
+// true if recovery was attempted (caller should `continue` the turn
+// loop), false if the error isn't ours to handle or recovery itself
+// failed (caller should bubble it up).
+//
+// Increments *retries on success. Emits a transcript-visible notice so
+// users see why their turn paused, but the error itself is swallowed —
+// the retry presents as a normal turn.
+func (a *Agent) tryReactiveRecover(ctx context.Context, err error, retries *int, max int, outCh chan<- protocol.Event) bool {
+	if a.compressor == nil || *retries >= max {
+		return false
+	}
+	if !errors.Is(err, providers.ErrContextLengthExceeded) {
+		return false
+	}
+
+	a.mu.Lock()
+	compressed, result, cerr := a.compressor.ForceCompress(ctx, a.history)
+	if cerr == nil && result.Compressed {
+		a.history = compressed
+	}
+	a.mu.Unlock()
+
+	if cerr != nil || !result.Compressed {
+		debug.Logf("agent reactive recover failed: err=%v compressed=%v", cerr, result.Compressed)
+		return false
+	}
+
+	*retries++
+	debug.Logf("agent reactive recover ok: %d→%d tokens", result.OriginalTokens, result.CompressedTokens)
+	outCh <- protocol.Event{
+		Type: protocol.EventTypeContentDelta,
+		ContentPartDelta: &protocol.ContentPartDelta{
+			Type: protocol.ContentTypeReasoning,
+			Text: fmt.Sprintf("[context exceeded — auto-compacted %d→%d tokens, retrying]\n",
+				result.OriginalTokens, result.CompressedTokens),
+		},
+	}
+	return true
 }

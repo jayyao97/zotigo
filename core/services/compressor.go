@@ -230,25 +230,43 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// Trigger decision must use the anchored estimate to stay in sync
+	// with NeedsCompression. Without using the anchor here, a session
+	// where NeedsCompression said yes (provider truth: over threshold)
+	// but the local tokenizer under-estimates would short-circuit to
+	// no-op and the agent would still send the over-budget prompt.
+	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
+	if c.estimatePromptTokens(messages) <= threshold {
+		raw := c.countTokens(messages)
+		return messages, CompressionResult{
+			OriginalTokens:   raw,
+			CompressedTokens: raw,
+			MessagesBefore:   len(messages),
+			MessagesAfter:    len(messages),
+			Compressed:       false,
+		}, nil
+	}
+
+	return c.compressLocked(ctx, messages)
+}
+
+// ForceCompress unconditionally compresses, bypassing the threshold
+// check. Used by the agent's reactive-recovery path: when a provider
+// rejects a request as too long, the local estimate clearly disagreed
+// with the server, so the threshold gate would still no-op us. Force
+// past it.
+func (c *Compressor) ForceCompress(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.compressLocked(ctx, messages)
+}
+
+// compressLocked runs the actual partition + summarize. Caller must
+// hold c.mu.
+func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
 	result := CompressionResult{
 		OriginalTokens: c.countTokens(messages),
 		MessagesBefore: len(messages),
-	}
-
-	// Trigger decision must use the anchored estimate to stay in sync
-	// with NeedsCompression. OriginalTokens (raw local count) is kept
-	// for the result struct so /compress's "before/after" pair reports
-	// consistent same-tokenizer numbers (no API anchor exists for the
-	// compressed shape). Without using the anchor here, a session where
-	// NeedsCompression said yes (provider truth: over threshold) but the
-	// local tokenizer underestimates would short-circuit to no-op and
-	// the agent would still send the over-budget prompt.
-	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
-	if c.estimatePromptTokens(messages) <= threshold {
-		result.CompressedTokens = result.OriginalTokens
-		result.MessagesAfter = len(messages)
-		result.Compressed = false
-		return messages, result, nil
 	}
 
 	// Separate system messages

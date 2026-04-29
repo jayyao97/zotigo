@@ -2124,3 +2124,146 @@ func TestAgent_Describe_ClassifierDisabled(t *testing.T) {
 		t.Error("expected ClassifierAvailable=false")
 	}
 }
+
+// reactiveMockProvider returns a context-length error on the first
+// StreamChat and plain text on subsequent calls — exercises the
+// agent's force-compact-and-retry path.
+type reactiveMockProvider struct {
+	calls          int
+	failTimes      int // how many of the first calls return ErrContextLengthExceeded
+	contextErrText string
+}
+
+func (p *reactiveMockProvider) Name() string { return "reactive-mock" }
+
+func (p *reactiveMockProvider) StreamChat(_ context.Context, _ []protocol.Message, _ []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 4)
+	p.calls++
+	go func() {
+		defer close(ch)
+		if p.calls <= p.failTimes {
+			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(fmt.Errorf("HTTP 400: %s", p.contextErrText)))
+			return
+		}
+		ch <- protocol.NewTextDeltaEvent("recovered")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "recovered"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
+	mock := &reactiveMockProvider{
+		failTimes:      1,
+		contextErrText: "prompt is too long: 250000 tokens",
+	}
+	providers.Register("reactive-mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return mock, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "reactive-mock"}, exec)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+
+	// Pre-populate history so ForceCompress has something to actually
+	// partition. Without enough conversation messages the partitioner
+	// returns 0 (nothing to compact) and recovery reports failure.
+	seed := agent.Snapshot{History: buildSeedHistory(40)}
+	ag.Restore(seed)
+
+	events, err := ag.Run(context.Background(), "go on")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var sawText bool
+	var lastFinish protocol.FinishReason
+	for e := range events {
+		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil &&
+			e.ContentPartDelta.Type != protocol.ContentTypeReasoning &&
+			strings.Contains(e.ContentPartDelta.Text, "recovered") {
+			sawText = true
+		}
+		if e.Type == protocol.EventTypeFinish {
+			lastFinish = e.FinishReason
+		}
+		if e.Type == protocol.EventTypeError {
+			t.Fatalf("error event leaked through reactive recovery: %v", e.Error)
+		}
+	}
+
+	if mock.calls != 2 {
+		t.Errorf("expected 2 StreamChat calls (initial + retry), got %d", mock.calls)
+	}
+	if !sawText {
+		t.Error("did not see recovered content delta")
+	}
+	if lastFinish != protocol.FinishReasonStop {
+		t.Errorf("expected final FinishReasonStop, got %q", lastFinish)
+	}
+}
+
+func TestAgent_ReactiveCompact_OnlyRetriesOnce(t *testing.T) {
+	mock := &reactiveMockProvider{
+		failTimes:      99, // every call fails
+		contextErrText: "maximum context length exceeded",
+	}
+	providers.Register("reactive-mock-loop", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return mock, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "reactive-mock-loop"}, exec)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	ag.Restore(agent.Snapshot{History: buildSeedHistory(40)})
+
+	events, err := ag.Run(context.Background(), "go on")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var sawError bool
+	for e := range events {
+		if e.Type == protocol.EventTypeError {
+			sawError = true
+		}
+	}
+
+	if !sawError {
+		t.Error("expected error to surface after retry budget exhausted")
+	}
+	if mock.calls > 2 {
+		t.Errorf("retry should be capped at 1 (2 total calls), got %d", mock.calls)
+	}
+}
+
+// buildSeedHistory creates a synthetic conversation with enough size +
+// alternation that the compressor's safe-partition routine returns a
+// non-zero index. Each user message is padded to push token estimates
+// past the preserve ratio.
+func buildSeedHistory(turns int) []protocol.Message {
+	pad := strings.Repeat("words ", 50)
+	var hist []protocol.Message
+	for i := 0; i < turns; i++ {
+		hist = append(hist, protocol.NewUserMessage(fmt.Sprintf("turn %d %s", i, pad)))
+		hist = append(hist, protocol.Message{
+			Role:    protocol.RoleAssistant,
+			Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: fmt.Sprintf("response %d %s", i, pad)}},
+		})
+	}
+	return hist
+}

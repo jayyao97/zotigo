@@ -211,7 +211,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		}
 
 		if err := stream.Err(); err != nil {
-			ch <- protocol.NewErrorEvent(err)
+			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
 		}
 	}()
 

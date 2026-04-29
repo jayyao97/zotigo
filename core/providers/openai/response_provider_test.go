@@ -3,12 +3,40 @@ package openai
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 )
+
+// TestResponseStreamError_WrapsContextLength guards the path that gpt-5
+// / o-series take when the API rejects a request as too long. The
+// error arrives as a response.failed event (constructed locally as
+// responseStreamError), not as stream.Err(). If the stream-loop emit
+// site forgets WrapIfContextLength, reactive compaction silently
+// stops working for these models.
+func TestResponseStreamError_WrapsContextLength(t *testing.T) {
+	cases := []struct {
+		name string
+		err  *responseStreamError
+		want bool
+	}{
+		{"by message", &responseStreamError{Msg: "prompt is too long: 250000 tokens", Code: "invalid_request"}, true},
+		{"by code", &responseStreamError{Msg: "request rejected", Code: "context_length_exceeded"}, true},
+		{"unrelated", &responseStreamError{Msg: "rate limit exceeded", Code: "rate_limit"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			wrapped := providers.WrapIfContextLength(tc.err)
+			got := errors.Is(wrapped, providers.ErrContextLengthExceeded)
+			if got != tc.want {
+				t.Errorf("Wrap(%v) errors.Is = %v, want %v (Error()=%q)", tc.err, got, tc.want, tc.err.Error())
+			}
+		})
+	}
+}
 
 // marshalJSON is a test helper that captures the shape of the
 // serialized params payload. Responses API unions marshal by inlining

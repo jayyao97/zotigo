@@ -163,7 +163,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 		if err := stream.Err(); err != nil {
 			debug.Logf("openai stream error model=%s duration=%s err=%v", p.model, time.Since(start).Round(time.Millisecond), err)
-			ch <- protocol.NewErrorEvent(err)
+			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
 			return
 		}
 
