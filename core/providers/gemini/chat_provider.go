@@ -192,11 +192,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 }
 
 func geminiUsage(m *genai.GenerateContentResponseUsageMetadata) *protocol.Usage {
+	// PromptTokenCount is the full prompt size including any cached
+	// content. Subtract the cached portion so InputTokens carries only
+	// the uncached input — see protocol.Usage for the convention.
+	cached := int(m.CachedContentTokenCount)
+	input := max(int(m.PromptTokenCount)-cached, 0)
 	return &protocol.Usage{
-		InputTokens:          int(m.PromptTokenCount),
+		InputTokens:          input,
 		OutputTokens:         int(m.CandidatesTokenCount),
 		TotalTokens:          int(m.TotalTokenCount),
-		CacheReadInputTokens: int(m.CachedContentTokenCount),
+		CacheReadInputTokens: cached,
 	}
 }
 

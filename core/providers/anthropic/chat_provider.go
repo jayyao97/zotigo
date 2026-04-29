@@ -79,7 +79,17 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		var thinkingSignature string
 
 		// Track usage across events:
-		// message_start has input tokens; message_delta has output tokens
+		//   - message_start carries input_tokens / cache_creation_input_tokens
+		//     / cache_read_input_tokens (absolute, not delta).
+		//   - message_delta carries the final output_tokens.
+		//
+		// Trap: message_delta ALSO restates cache_creation/cache_read as
+		// cumulative absolute values — they're the same numbers as
+		// message_start, not increments. Clients that add them on top of
+		// message_start (LangChain.js, early Cline) end up with cache
+		// counts that exceed input_tokens, which is impossible. We dodge
+		// this by (a) only reading OutputTokens from message_delta and
+		// (b) using `=` everywhere, never `+=`. Don't change either.
 		var usage protocol.Usage
 
 		for stream.Next() {

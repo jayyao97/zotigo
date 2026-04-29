@@ -171,11 +171,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		reason := mapFinishReason(finishReason)
 		finishEvt := protocol.NewFinishEvent(reason)
 		if lastUsage != nil {
+			// OpenAI's prompt_tokens already includes cached tokens; subtract
+			// them so InputTokens means "new uncached input" — see
+			// protocol.Usage doc for the cross-provider convention.
+			cached := int(lastUsage.PromptTokensDetails.CachedTokens)
+			input := max(int(lastUsage.PromptTokens)-cached, 0)
 			finishEvt.Usage = &protocol.Usage{
-				InputTokens:          int(lastUsage.PromptTokens),
+				InputTokens:          input,
 				OutputTokens:         int(lastUsage.CompletionTokens),
 				TotalTokens:          int(lastUsage.TotalTokens),
-				CacheReadInputTokens: int(lastUsage.PromptTokensDetails.CachedTokens),
+				CacheReadInputTokens: cached,
 			}
 		}
 		debug.Logf(

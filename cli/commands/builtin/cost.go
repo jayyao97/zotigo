@@ -30,24 +30,11 @@ func (c *CostCommand) Execute(ctx context.Context, env *commands.Environment, ar
 
 	snap := ag.Snapshot()
 
-	var total protocol.Usage
-	turns := 0
-
-	for _, msg := range snap.History {
-		if msg.Role != protocol.RoleAssistant {
-			continue
-		}
-		turns++
-		if msg.Metadata == nil || msg.Metadata.Usage == nil {
-			continue
-		}
-		u := msg.Metadata.Usage
-		total.InputTokens += u.InputTokens
-		total.OutputTokens += u.OutputTokens
-		total.TotalTokens += u.TotalTokens
-		total.CacheCreationInputTokens += u.CacheCreationInputTokens
-		total.CacheReadInputTokens += u.CacheReadInputTokens
-	}
+	// Share the same aggregation path as the TUI exit summary so
+	// legacy Anthropic turns (TotalTokens=0 on disk) are normalized
+	// in both places.
+	total := protocol.SessionUsage(snap.History)
+	turns := protocol.CountAssistantTurns(snap.History)
 
 	if turns == 0 {
 		env.Output("No assistant turns recorded yet.")

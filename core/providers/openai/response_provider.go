@@ -308,11 +308,16 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 		finishEvt := protocol.NewFinishEvent(finishReason)
 		if finalUsage != nil {
+			// Responses API mirrors Chat Completions: input_tokens already
+			// includes cached input. Subtract so InputTokens stays the
+			// uncached count consistent with protocol.Usage.
+			cached := int(finalUsage.InputTokensDetails.CachedTokens)
+			input := max(int(finalUsage.InputTokens)-cached, 0)
 			finishEvt.Usage = &protocol.Usage{
-				InputTokens:          int(finalUsage.InputTokens),
+				InputTokens:          input,
 				OutputTokens:         int(finalUsage.OutputTokens),
 				TotalTokens:          int(finalUsage.TotalTokens),
-				CacheReadInputTokens: int(finalUsage.InputTokensDetails.CachedTokens),
+				CacheReadInputTokens: cached,
 			}
 		}
 		debug.Logf("openai-response stream end model=%s duration=%s finish=%s",

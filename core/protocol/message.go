@@ -23,12 +23,99 @@ type MessageMetadata struct {
 	Raw      map[string]any `json:"raw,omitempty"`
 }
 
+// Usage normalizes token-accounting fields across providers.
+//
+// Convention: InputTokens counts ONLY new (uncached) prompt tokens.
+// CacheCreationInputTokens and CacheReadInputTokens are reported
+// separately, never folded back into InputTokens. Total prompt size is
+// therefore InputTokens + CacheCreationInputTokens + CacheReadInputTokens
+// (see TotalInput). This matches Anthropic's wire format directly; the
+// OpenAI and Gemini adapters subtract cached counts from their
+// "prompt_tokens" / "prompt_token_count" before assigning InputTokens
+// so the same arithmetic holds for every provider.
 type Usage struct {
 	InputTokens              int `json:"input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
 	TotalTokens              int `json:"total_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+}
+
+// TotalInput returns the full prompt size (uncached + cache-create + cache-read).
+func (u Usage) TotalInput() int {
+	return u.InputTokens + u.CacheCreationInputTokens + u.CacheReadInputTokens
+}
+
+// Add returns u + o component-wise. Useful for session-level rollups.
+func (u Usage) Add(o Usage) Usage {
+	return Usage{
+		InputTokens:              u.InputTokens + o.InputTokens,
+		OutputTokens:             u.OutputTokens + o.OutputTokens,
+		TotalTokens:              u.TotalTokens + o.TotalTokens,
+		CacheCreationInputTokens: u.CacheCreationInputTokens + o.CacheCreationInputTokens,
+		CacheReadInputTokens:     u.CacheReadInputTokens + o.CacheReadInputTokens,
+	}
+}
+
+// Normalized fills TotalTokens from the components when the provider
+// did not supply it (e.g. Anthropic only emits per-component counts).
+func (u Usage) Normalized() Usage {
+	if u.TotalTokens == 0 {
+		u.TotalTokens = u.TotalInput() + u.OutputTokens
+	}
+	return u
+}
+
+// SessionUsage walks the assistant messages in history and returns the
+// component-wise sum of every recorded Usage. Each per-message usage
+// is normalized first so turns persisted before the agent started
+// filling TotalTokens (older Anthropic sessions on disk) still
+// contribute a non-zero total. Without this, a resumed legacy session
+// would have TotalTokens=0 and any caller gating on it would hide its
+// readout despite Input/Output/cache being populated.
+func SessionUsage(history []Message) Usage {
+	var total Usage
+	for _, msg := range history {
+		if msg.Role != RoleAssistant {
+			continue
+		}
+		if msg.Metadata == nil || msg.Metadata.Usage == nil {
+			continue
+		}
+		total = total.Add(msg.Metadata.Usage.Normalized())
+	}
+	return total
+}
+
+// LastTurnUsage returns the most recent assistant turn's recorded
+// usage (or false when history has none). The last turn's TotalInput
+// is the closest proxy for "current context occupancy" — exactly what
+// the next request will pay for before any new user content is added.
+func LastTurnUsage(history []Message) (Usage, bool) {
+	for i := len(history) - 1; i >= 0; i-- {
+		m := history[i]
+		if m.Role != RoleAssistant {
+			continue
+		}
+		if m.Metadata == nil || m.Metadata.Usage == nil {
+			continue
+		}
+		return *m.Metadata.Usage, true
+	}
+	return Usage{}, false
+}
+
+// CountAssistantTurns returns how many assistant messages are in
+// history. Centralized so /cost and the TUI summary can't drift on
+// what counts as a turn.
+func CountAssistantTurns(history []Message) int {
+	n := 0
+	for _, msg := range history {
+		if msg.Role == RoleAssistant {
+			n++
+		}
+	}
+	return n
 }
 
 type ContentPart struct {

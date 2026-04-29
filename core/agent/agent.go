@@ -130,6 +130,15 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		return nil, fmt.Errorf("failed to create provider: %w", err)
 	}
 
+	// Profile config wins for the compressor's context window; the
+	// default already falls back to config.DefaultContextWindow,
+	// so omitting `context_window` doesn't desync this from the TUI
+	// status display.
+	compressorCfg := services.DefaultCompressorConfig()
+	if cfg.ContextWindow > 0 {
+		compressorCfg.ContextWindowSize = cfg.ContextWindow
+	}
+
 	a := &Agent{
 		cfg:          cfg,
 		provider:     p,
@@ -140,7 +149,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		history:      make([]protocol.Message, 0),
 		turns:        make([]TurnAudit, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
-		compressor:   services.NewCompressor(services.DefaultCompressorConfig()),
+		compressor:   services.NewCompressor(compressorCfg),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -176,6 +185,7 @@ type Description struct {
 	Provider            string
 	Model               string
 	ThinkingLevel       string
+	ContextWindow       int // tokens; 0 means "unknown / use registry fallback"
 	ApprovalPolicy      ApprovalPolicy
 	ClassifierEnabled   bool
 	ClassifierAvailable bool // true when a classifier is wired + enabled
@@ -194,6 +204,7 @@ func (a *Agent) Describe() Description {
 		Profile:           a.cfg.Provider,
 		Model:             a.cfg.Model,
 		ThinkingLevel:     a.cfg.ThinkingLevel,
+		ContextWindow:     a.cfg.ContextWindow,
 		ApprovalPolicy:    a.policy,
 		ClassifierEnabled: a.cfg.Safety.Classifier.IsEnabled(),
 		ReviewThreshold:   a.cfg.Safety.Classifier.ReviewThreshold,
@@ -485,10 +496,15 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				asstMsg.AddToolCall(*tc)
 			}
 			if providerUsage != nil {
+				// Normalize before persisting so consumers (cost cmd, TUI
+				// status line) can rely on TotalTokens being populated even
+				// for providers that only emit per-component counts (e.g.
+				// Anthropic, which doesn't ship a total field on the wire).
+				normalized := providerUsage.Normalized()
 				if asstMsg.Metadata == nil {
 					asstMsg.Metadata = &protocol.MessageMetadata{}
 				}
-				asstMsg.Metadata.Usage = providerUsage
+				asstMsg.Metadata.Usage = &normalized
 			}
 
 			debug.Logf(

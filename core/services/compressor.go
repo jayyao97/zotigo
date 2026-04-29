@@ -11,6 +11,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
@@ -39,8 +40,12 @@ type Summarizer interface {
 
 // CompressorConfig holds configuration for the compressor
 type CompressorConfig struct {
-	// ContextWindowSize is the model's context window in tokens
-	// If 0, defaults to 128000 (GPT-4 Turbo / Claude 3)
+	// ContextWindowSize is the model's context window in tokens.
+	// If 0, defaults to config.DefaultContextWindow — the same
+	// fallback the TUI status display uses, so "I'm at X% of context"
+	// stays consistent across components. Callers wiring an agent
+	// should plumb the per-profile config.ContextWindow through here
+	// rather than relying on the default.
 	ContextWindowSize int
 
 	// TriggerRatio is when to trigger compression (default 0.7 = 70% of context)
@@ -66,12 +71,12 @@ type CompressorConfig struct {
 // DefaultCompressorConfig returns sensible defaults
 func DefaultCompressorConfig() CompressorConfig {
 	return CompressorConfig{
-		ContextWindowSize:   128000, // GPT-4 Turbo / Claude 3 default
-		TriggerRatio:        0.7,    // Trigger at 70%
-		TargetRatio:         0.5,    // Target 50%
-		PreserveRatio:       0.3,    // Preserve 30% of recent
-		ToolOutputThreshold: 2000,   // Summarize outputs > 2000 tokens
-		TokenCounter:        nil,    // Use default estimator
+		ContextWindowSize:   config.DefaultContextWindow,
+		TriggerRatio:        0.7,  // Trigger at 70%
+		TargetRatio:         0.5,  // Target 50%
+		PreserveRatio:       0.3,  // Preserve 30% of recent
+		ToolOutputThreshold: 2000, // Summarize outputs > 2000 tokens
+		TokenCounter:        nil,  // Use default estimator
 	}
 }
 
@@ -79,7 +84,7 @@ func DefaultCompressorConfig() CompressorConfig {
 func NewCompressor(cfg CompressorConfig) *Compressor {
 	// Apply defaults
 	if cfg.ContextWindowSize <= 0 {
-		cfg.ContextWindowSize = 128000
+		cfg.ContextWindowSize = config.DefaultContextWindow
 	}
 	if cfg.TriggerRatio <= 0 {
 		cfg.TriggerRatio = 0.7
