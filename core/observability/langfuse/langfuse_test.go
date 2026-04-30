@@ -204,3 +204,74 @@ func TestObserver_DropsOnFullBuffer(t *testing.T) {
 		t.Fatal("emit blocked when buffer was full; should drop instead")
 	}
 }
+
+// TestStatusMessage_StaysShort_EvenForBigToolErrors guards the UX
+// regression where a `go test` failure piped through err.Error()
+// dumped thousands of stdout lines into Langfuse's statusMessage
+// field, overflowing the trace banner and blocking scroll. The full
+// error must remain accessible in `output`; only the banner string
+// is bounded.
+func TestStatusMessage_StaysShort_EvenForBigToolErrors(t *testing.T) {
+	srv, cs := newCaptureServer(t)
+	defer srv.Close()
+
+	obs := New(Config{
+		Host:          srv.URL,
+		PublicKey:     "pk",
+		SecretKey:     "sk",
+		FlushInterval: 50 * time.Millisecond,
+	})
+
+	// Mimic a `go test` failure: header line followed by thousands
+	// of result tokens. >5KB total in the error itself.
+	bigErr := errorString("command exited with code 1: === RUN TestSort\n" +
+		strings.Repeat("8 18 23 38 40 60 76 98 99 115 117 ", 200))
+
+	ctx := context.Background()
+	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("u"), nil)
+	tCtx := obs.StartTool(ctx, "shell", `{"command":"go test ./..."}`)
+	obs.EndTool(tCtx, nil, bigErr)
+	obs.EndTurn(ctx, nil)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := obs.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var spanUpdate map[string]any
+	for _, ev := range cs.allEvents() {
+		if ev.Type == "span-update" {
+			spanUpdate = ev.Body.(map[string]any)
+			break
+		}
+	}
+	if spanUpdate == nil {
+		t.Fatal("expected a span-update event")
+	}
+
+	status, _ := spanUpdate["statusMessage"].(string)
+	if status == "" {
+		t.Fatal("statusMessage missing on errored tool span")
+	}
+	if len(status) > statusMessageCap+10 {
+		t.Errorf("statusMessage = %d bytes, want <= %d (+ ellipsis); banner would overflow", len(status), statusMessageCap)
+	}
+	if strings.Contains(status, "\n") {
+		t.Errorf("statusMessage contains newline; banner is single-line")
+	}
+
+	// Full error must remain in output so the user can still see it.
+	output, _ := spanUpdate["output"].(map[string]any)
+	if output == nil {
+		t.Fatal("output missing on errored tool span")
+	}
+	fullErr, _ := output["error"].(string)
+	if !strings.Contains(fullErr, "98 99 115") {
+		t.Error("full error text should be preserved in output.error, not just banner")
+	}
+}
+
+type errorString string
+
+func (e errorString) Error() string { return string(e) }

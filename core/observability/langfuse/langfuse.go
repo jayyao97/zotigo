@@ -3,6 +3,7 @@ package langfuse
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/observability"
@@ -118,7 +119,7 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 		body["sessionId"] = o.c.sessionID
 	}
 	if err != nil {
-		body["statusMessage"] = err.Error()
+		body["statusMessage"] = errCategoryLine(err)
 		body["level"] = "ERROR"
 	}
 	o.c.emit("trace-create", body) // Langfuse merges by id; reusing trace-create is the documented update path
@@ -195,7 +196,7 @@ func (o *observer) EndGeneration(ctx context.Context, output observability.Gener
 	}
 	if err != nil {
 		body["level"] = "ERROR"
-		body["statusMessage"] = err.Error()
+		body["statusMessage"] = errCategoryLine(err)
 	}
 	o.c.emit("generation-update", body)
 }
@@ -247,7 +248,7 @@ func (o *observer) EndTool(ctx context.Context, output any, err error) {
 	}
 	if err != nil {
 		body["level"] = "ERROR"
-		body["statusMessage"] = err.Error()
+		body["statusMessage"] = errCategoryLine(err)
 	}
 	o.c.emit("span-update", body)
 }
@@ -284,6 +285,44 @@ func (o *observer) Close(ctx context.Context) error {
 
 func nowISO() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)
+}
+
+// statusMessageCap is the maximum length of the short status string
+// we put in Langfuse's `statusMessage` field. The UI renders that
+// field in a fixed banner above the trace detail and in trace list
+// rows — it's meant for a one-line categorization (HTTP status
+// reason, error type), not the full error payload. Tool errors
+// pipe entire stderr dumps through err.Error(); without this
+// constraint, a single failed `go test` would push thousands of
+// output lines into the banner and break scrolling. Full error
+// text is preserved in `output` (see toolOutputBody), which is
+// scrollable.
+const statusMessageCap = 120
+
+// errCategoryLine extracts a short categorical status from err for
+// the Langfuse `statusMessage` slot. Takes the first line of
+// err.Error() and caps it at statusMessageCap runes, on the
+// assumption that error implementations put the most informative
+// summary up front (Go's idiom is `fmt.Errorf("doing X: %w", err)`,
+// and detail follows after newlines). Truncation respects rune
+// boundaries so multi-byte characters don't get cut mid-codepoint.
+func errCategoryLine(err error) string {
+	if err == nil {
+		return ""
+	}
+	s := err.Error()
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if len(s) <= statusMessageCap {
+		return s
+	}
+	cut := statusMessageCap
+	for cut > 0 && cut < len(s) && (s[cut]&0xC0) == 0x80 {
+		cut--
+	}
+	return s[:cut] + " ..."
 }
 
 // summarizeMessages produces the JSON shape Langfuse renders nicely
