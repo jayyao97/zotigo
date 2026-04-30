@@ -3,6 +3,7 @@ package langfuse
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 
@@ -93,9 +94,13 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 		"timestamp": nowISO(),
 		"name":      "turn",
 		"input":     userMsg.String(),
-	}
-	if o.c.sessionID != "" {
-		body["sessionId"] = o.c.sessionID
+		// Each turn gets its own Langfuse session — finest-grained
+		// scope. Cross-turn / cross-startup grouping is via
+		// metadata.zotigo_session, not sessionId. Format mirrors
+		// app-level conventions: readable timestamp + nano suffix
+		// for collision safety even when turns start in the same
+		// millisecond.
+		"sessionId": newSessionID(),
 	}
 	// Static (process-level) metadata first, then per-turn metadata —
 	// per-turn wins on key conflict because it's more specific. Skip
@@ -106,6 +111,14 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 	}
 	o.c.emit("trace-create", body)
 	return withTraceID(ctx, traceID)
+}
+
+// newSessionID mints a per-turn Langfuse session id. Format matches
+// readability concerns: `zotigo_<UTC date>_<nano>` so the Sessions
+// list sorts naturally and IDs are unique even under burst submission.
+func newSessionID() string {
+	now := time.Now().UTC()
+	return fmt.Sprintf("zotigo_%s_%09d", now.Format("20060102_150405"), now.Nanosecond())
 }
 
 // mergeMaps returns a new map combining a and b. b's keys win on
@@ -133,13 +146,12 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 	body := map[string]any{
 		"id": traceID,
 	}
-	// Re-stamp sessionId AND static metadata on the update so a
-	// partial earlier emit (e.g., trace-create dropped on a full
-	// buffer) still ends up associated with the right session and
-	// carries the process-level filters users rely on.
-	if o.c.sessionID != "" {
-		body["sessionId"] = o.c.sessionID
-	}
+	// No sessionId re-stamp on update: with per-turn session ids we
+	// don't know what StartTurn used here. If StartTurn was dropped
+	// on a full buffer, the trace doesn't exist server-side anyway,
+	// so an EndTurn update can't recover it. Re-stamping static
+	// metadata still helps because Langfuse merges metadata maps on
+	// trace updates.
 	if len(o.c.staticTrace) > 0 {
 		body["metadata"] = o.c.staticTrace
 	}
@@ -300,6 +312,19 @@ func toolOutputBody(output any, err error) any {
 		return json.RawMessage(b)
 	}
 	return output
+}
+
+// ResumeTrace overlays the trace identity from saved onto target,
+// returning a ctx that uses target's cancellation/deadline. Generation
+// and tool span IDs aren't carried because no span is mid-flight at
+// the agent's pause boundary — only the parent trace identity needs
+// to survive the gap.
+func (o *observer) ResumeTrace(target, saved context.Context) context.Context {
+	traceID := traceIDFrom(saved)
+	if traceID == "" {
+		return target
+	}
+	return withTraceID(target, traceID)
 }
 
 func (o *observer) Close(ctx context.Context) error {

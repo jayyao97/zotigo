@@ -80,6 +80,14 @@ type Observer interface {
 	StartTool(ctx context.Context, name, arguments string) context.Context
 	EndTool(ctx context.Context, output any, err error)
 
+	// ResumeTrace copies the trace identity (and only the trace
+	// identity) from saved onto target, returning a ctx that carries
+	// target's cancellation and deadline plus saved's trace span.
+	// Used to thread an in-flight turn's trace across an external
+	// pause boundary (manual approval) without coupling the resumed
+	// work to the original Run's cancellation.
+	ResumeTrace(target, saved context.Context) context.Context
+
 	// Close flushes any buffered events and shuts down background
 	// goroutines. Idempotent.
 	Close(ctx context.Context) error
@@ -100,4 +108,5 @@ func (Noop) StartGeneration(ctx context.Context, _ GenerationKind, _ string, _ [
 func (Noop) EndGeneration(_ context.Context, _ GenerationOutput, _ *protocol.Usage, _ error) {}
 func (Noop) StartTool(ctx context.Context, _, _ string) context.Context                      { return ctx }
 func (Noop) EndTool(_ context.Context, _ any, _ error)                                       {}
+func (Noop) ResumeTrace(target, _ context.Context) context.Context                           { return target }
 func (Noop) Close(_ context.Context) error                                                   { return nil }

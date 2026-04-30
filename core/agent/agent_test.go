@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/middleware"
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
@@ -2297,7 +2298,8 @@ func (r *recordingObserver) StartTool(ctx context.Context, name, _ string) conte
 func (r *recordingObserver) EndTool(_ context.Context, _ any, _ error) {
 	r.calls = append(r.calls, "EndTool")
 }
-func (r *recordingObserver) Close(_ context.Context) error { return nil }
+func (r *recordingObserver) ResumeTrace(target, _ context.Context) context.Context { return target }
+func (r *recordingObserver) Close(_ context.Context) error                         { return nil }
 
 func TestAgent_ObserverFiresExpectedHookSequence(t *testing.T) {
 	providers.Register("plain-mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
@@ -2360,4 +2362,209 @@ func equalStringSlice(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// traceMarkerKey is a context key the test observer uses to plant a
+// sentinel during StartTurn; subsequent Start* calls assert they
+// receive a ctx that still carries the sentinel, which proves the
+// trace context is threading correctly across pause/resume.
+type traceMarkerKey struct{}
+
+// traceTrackingObserver records each hook with whether the ctx it
+// received still carried the trace marker. Across the pause boundary
+// (need_approval → user approves), Start* calls in the resumed
+// continuation must still see the marker — otherwise their spans
+// would be orphaned in Langfuse.
+type traceTrackingObserver struct {
+	calls []string // "<method>:<inTrace?>"
+}
+
+func (o *traceTrackingObserver) record(method string, ctx context.Context) {
+	tag := "out"
+	if ctx.Value(traceMarkerKey{}) != nil {
+		tag = "in"
+	}
+	o.calls = append(o.calls, method+":"+tag)
+}
+
+func (o *traceTrackingObserver) StartTurn(ctx context.Context, _ protocol.Message, _ map[string]any) context.Context {
+	o.calls = append(o.calls, "StartTurn")
+	return context.WithValue(ctx, traceMarkerKey{}, "active")
+}
+func (o *traceTrackingObserver) EndTurn(ctx context.Context, _ error) {
+	o.record("EndTurn", ctx)
+}
+func (o *traceTrackingObserver) StartGeneration(ctx context.Context, kind observability.GenerationKind, _ string, _ []protocol.Message, _ []tools.Tool, _ map[string]any) context.Context {
+	o.record("StartGeneration:"+string(kind), ctx)
+	return ctx
+}
+func (o *traceTrackingObserver) EndGeneration(ctx context.Context, _ observability.GenerationOutput, _ *protocol.Usage, _ error) {
+	o.record("EndGeneration", ctx)
+}
+func (o *traceTrackingObserver) StartTool(ctx context.Context, name, _ string) context.Context {
+	o.record("StartTool:"+name, ctx)
+	return ctx
+}
+func (o *traceTrackingObserver) EndTool(ctx context.Context, _ any, _ error) {
+	o.record("EndTool", ctx)
+}
+func (o *traceTrackingObserver) ResumeTrace(target, saved context.Context) context.Context {
+	if v := saved.Value(traceMarkerKey{}); v != nil {
+		return context.WithValue(target, traceMarkerKey{}, v)
+	}
+	return target
+}
+func (o *traceTrackingObserver) Close(_ context.Context) error { return nil }
+
+// TestAgent_TracePersistsAcrossManualApproval guards the regression
+// where the Langfuse trace closed at need_approval and the approved
+// tool execution + follow-up generation became invisible. The trace
+// must stay open while the agent is paused, so that ApproveAndExecute
+// runs the tool with a ctx that still carries the trace ID.
+func TestAgent_TracePersistsAcrossManualApproval(t *testing.T) {
+	providers.Register("trace-pause-mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+
+	obs := &traceTrackingObserver{}
+	ag, err := agent.New(config.ProfileConfig{Provider: "trace-pause-mock"}, exec,
+		agent.WithObserver(obs),
+	)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	// ToolSpan must wrap tool dispatch so we can verify it receives the
+	// trace ctx after approval.
+	agent.WithMiddleware(middleware.ToolSpan(obs))(ag)
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	// First leg: model emits a tool call, agent pauses for approval.
+	events, err := ag.Run(context.Background(), "What time is it?")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for range events {
+	}
+	if got := ag.Snapshot().State; got != agent.StatePaused {
+		t.Fatalf("expected paused state, got %s", got)
+	}
+
+	// Second leg: user approves; tool executes; follow-up generation runs.
+	// The fresh context.Background() here mimics the TUI: it has no
+	// trace marker. The fix is for the agent to overlay the saved
+	// trace ctx so middleware downstream still sees the marker.
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	for range resumed {
+	}
+
+	// Every Start*/End* after StartTurn must have seen the trace marker.
+	// Specifically, the post-approval StartTool:get_time and the second
+	// StartGeneration:main are the regression sites — those would be
+	// "out" if the trace ctx wasn't restored on resume.
+	for _, c := range obs.calls {
+		if c == "StartTurn" {
+			continue // StartTurn plants the marker; ctx in is ambient
+		}
+		if !strings.HasSuffix(c, ":in") {
+			t.Errorf("hook %q saw ctx without trace marker — manual approval continuation lost the trace", c)
+		}
+	}
+
+	// Also assert the basic shape: turn opens once, closes once, and
+	// includes both pre-approval and post-approval phases.
+	var startTurns, endTurns int
+	for _, c := range obs.calls {
+		switch {
+		case c == "StartTurn":
+			startTurns++
+		case strings.HasPrefix(c, "EndTurn"):
+			endTurns++
+		}
+	}
+	if startTurns != 1 {
+		t.Errorf("StartTurn fired %d times, want 1 (single trace across the pause)", startTurns)
+	}
+	if endTurns != 1 {
+		t.Errorf("EndTurn fired %d times, want 1 (close once at true turn end)", endTurns)
+	}
+}
+
+// TestAgent_ApprovalContextOverridesSavedRunContext guards the property
+// that the saved trace context does NOT carry over the original Run
+// ctx's cancellation: the approval caller must be able to cancel the
+// resumed work with its own ctx, even if the original Run ctx is
+// already canceled. Implementation note: the pause-time snapshot uses
+// context.WithoutCancel and the resume path overlays only trace
+// identity onto the caller's live ctx.
+func TestAgent_ApprovalContextOverridesSavedRunContext(t *testing.T) {
+	providers.Register("ctx-override-mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+
+	obs := &traceTrackingObserver{}
+	ag, err := agent.New(config.ProfileConfig{Provider: "ctx-override-mock"}, exec,
+		agent.WithObserver(obs),
+	)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+	ag.RegisterTool(&TimeTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	// First leg: drive the agent to paused state with a cancelable
+	// parent ctx, then cancel it. With the old code, the canceled ctx
+	// was stored verbatim and replaced the approval ctx — making the
+	// resumed work fail spuriously with context.Canceled.
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	events, err := ag.Run(runCtx, "What time is it?")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for range events {
+	}
+	if got := ag.Snapshot().State; got != agent.StatePaused {
+		t.Fatalf("expected paused state, got %s", got)
+	}
+	cancelRun() // simulate user/Run-side cancellation while paused
+
+	// Second leg: approve with a fresh, NON-canceled ctx. If the agent
+	// stored the original Run ctx, this approval would inherit its
+	// canceled state. The fix decouples cancellation from trace state.
+	approveCtx := context.Background()
+	resumed, err := ag.ApproveAndExecutePendingActions(approveCtx)
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	for range resumed {
+	}
+
+	// The follow-up generation (post-tool-result) is the smoking gun:
+	// it only runs if the resumed turn's ctx wasn't canceled. With the
+	// old code, the saved (canceled) ctx leaked through and aborted
+	// the loop before the second generation could fire.
+	var generations int
+	for _, c := range obs.calls {
+		if strings.HasPrefix(c, "StartGeneration:") {
+			generations++
+		}
+	}
+	if generations < 2 {
+		t.Errorf("expected ≥2 generations (initial + post-approval), got %d in trail: %v", generations, obs.calls)
+	}
 }

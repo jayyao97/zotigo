@@ -42,18 +42,12 @@ type Config struct {
 	FlushInterval time.Duration // 0 → defaultFlushInterval
 	BufferSize    int           // 0 → defaultBufferSize
 
-	// SessionID groups every trace produced by this observer under a
-	// single Langfuse session. Empty means traces show up in Tracing
-	// but the Sessions view stays empty for this run. Set this to the
-	// zotigo session.ID so a single zotigo invocation is one Langfuse
-	// session even across many user turns.
-	SessionID string
-
 	// StaticTraceMetadata is merged into every trace-create event's
 	// metadata field. Use it for process-level facts that don't change
 	// across turns (zotigo_session, process_start, resumed) so users
 	// can filter Langfuse Sessions by metadata.zotigo_session and
-	// aggregate one logical thread across multiple --resume runs.
+	// aggregate every turn of a logical zotigo thread across multiple
+	// --resume runs even though each turn lives in its own session.
 	StaticTraceMetadata map[string]any
 }
 
@@ -70,7 +64,6 @@ type client struct {
 	host        string
 	auth        string // Basic auth header value, precomputed
 	httpClient  *http.Client
-	sessionID   string         // optional, sticky for the client's lifetime
 	staticTrace map[string]any // optional metadata merged into every trace-create
 
 	mu     sync.Mutex
@@ -104,7 +97,6 @@ func NewClient(cfg Config) *client {
 		host:        host,
 		auth:        basicAuth(cfg.PublicKey, cfg.SecretKey),
 		httpClient:  &http.Client{Timeout: defaultHTTPTimeout},
-		sessionID:   cfg.SessionID,
 		staticTrace: cfg.StaticTraceMetadata,
 		queue:       make(chan event, bufSize),
 		done:        make(chan struct{}),

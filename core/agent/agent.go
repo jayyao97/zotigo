@@ -46,6 +46,15 @@ type Agent struct {
 
 	observer observability.Observer // Noop by default; never nil
 
+	// activeTraceCtx is a values-only snapshot (context.WithoutCancel)
+	// of the in-flight turn's ctx, kept while the agent is paused for
+	// approval. On resume we overlay the trace identity onto the
+	// caller's live ctx via observer.ResumeTrace — the caller's ctx
+	// keeps providing cancellation/deadline so a fresh approval ctx
+	// can cancel the resumed work without being shadowed by the
+	// original Run's deadline. Cleared at end-of-turn.
+	activeTraceCtx context.Context
+
 	middlewares []Middleware
 
 	mu             sync.RWMutex
@@ -393,14 +402,14 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	go func() {
 		defer close(outCh)
 
-		// Open a turn span for fresh user input (a tool-result resume
-		// continues an existing turn — the trace was already opened on
-		// the user's original message). EndTurn is unconditional via
-		// defer so any exit path closes the trace; turnErr captures
-		// the cause when the goroutine exits abnormally so it surfaces
-		// in the trace's level/statusMessage.
+		// Trace lifecycle: fresh user input opens a trace; a tool-result
+		// continuation overlays the saved trace identity onto the
+		// caller's ctx so spans still nest under the original turn.
+		// EndTurn is deferred but skipped while we're paused — the
+		// turn resumes when the user approves.
 		var turnErr error
-		if msg.Role == protocol.RoleUser {
+		isFreshTurn := msg.Role == protocol.RoleUser
+		if isFreshTurn {
 			turnMeta := map[string]any{
 				"working_directory": a.executor.WorkDir(),
 				"platform":          a.executor.Platform(),
@@ -412,8 +421,33 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				turnMeta["thinking_level"] = a.cfg.ThinkingLevel
 			}
 			ctx = a.observer.StartTurn(ctx, msg, turnMeta)
-			defer func() { a.observer.EndTurn(ctx, turnErr) }()
+		} else {
+			a.mu.RLock()
+			saved := a.activeTraceCtx
+			a.mu.RUnlock()
+			if saved != nil {
+				ctx = a.observer.ResumeTrace(ctx, saved)
+			}
 		}
+		defer func() {
+			a.mu.RLock()
+			paused := a.state == StatePaused
+			a.mu.RUnlock()
+			if paused {
+				// Save a values-only snapshot. WithoutCancel detaches
+				// from the original Run's cancellation chain so the
+				// resumed work isn't pre-canceled by an aborted Run,
+				// and so we don't pin the parent ctx tree until resume.
+				a.mu.Lock()
+				a.activeTraceCtx = context.WithoutCancel(ctx)
+				a.mu.Unlock()
+				return
+			}
+			a.observer.EndTurn(ctx, turnErr)
+			a.mu.Lock()
+			a.activeTraceCtx = nil
+			a.mu.Unlock()
+		}()
 
 		emptyRecoveryAttempts := 0
 		const maxEmptyRecoveryAttempts = 1
@@ -796,10 +830,18 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 // ApproveAndExecutePendingActions executes all pending tool calls and continues.
 func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan protocol.Event, error) {
+	// Overlay the saved turn's trace identity onto the caller's ctx
+	// so middleware-emitted spans and the follow-up generation nest
+	// under the original trace, while keeping the caller's
+	// cancellation/deadline (the approval ctx, not the original Run ctx).
 	a.mu.RLock()
+	saved := a.activeTraceCtx
 	actions := make([]*PendingAction, len(a.pendingActions))
 	copy(actions, a.pendingActions)
 	a.mu.RUnlock()
+	if saved != nil {
+		ctx = a.observer.ResumeTrace(ctx, saved)
+	}
 	for _, action := range actions {
 		a.appendSafetyEvent(AuditEvent{
 			ToolCallID:      action.ToolCallID,
@@ -847,11 +889,18 @@ func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 		a.mu.Unlock()
 		return nil, fmt.Errorf("agent is not paused")
 	}
+	// Overlay saved trace identity onto the caller's ctx — the TUI
+	// denial path calls us without going through ApproveAndExecute,
+	// so it needs the same ctx threading.
+	saved := a.activeTraceCtx
 	a.pendingActions = nil
 	a.state = StateRunning
 	msg := protocol.NewToolMessage(outputs)
 	a.history = append(a.history, msg)
 	a.mu.Unlock()
+	if saved != nil {
+		ctx = a.observer.ResumeTrace(ctx, saved)
+	}
 
 	for _, output := range outputs {
 		if output.Type != protocol.ToolResultTypeExecutionDenied {
