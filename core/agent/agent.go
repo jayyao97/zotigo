@@ -396,10 +396,23 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		// Open a turn span for fresh user input (a tool-result resume
 		// continues an existing turn — the trace was already opened on
 		// the user's original message). EndTurn is unconditional via
-		// defer so any exit path closes the trace.
+		// defer so any exit path closes the trace; turnErr captures
+		// the cause when the goroutine exits abnormally so it surfaces
+		// in the trace's level/statusMessage.
+		var turnErr error
 		if msg.Role == protocol.RoleUser {
-			ctx = a.observer.StartTurn(ctx, msg)
-			defer func() { a.observer.EndTurn(ctx, nil) }()
+			turnMeta := map[string]any{
+				"working_directory": a.executor.WorkDir(),
+				"platform":          a.executor.Platform(),
+				"provider":          a.provider.Name(),
+				"model":             a.cfg.Model,
+				"approval_policy":   string(a.policy),
+			}
+			if a.cfg.ThinkingLevel != "" {
+				turnMeta["thinking_level"] = a.cfg.ThinkingLevel
+			}
+			ctx = a.observer.StartTurn(ctx, msg, turnMeta)
+			defer func() { a.observer.EndTurn(ctx, turnErr) }()
 		}
 
 		emptyRecoveryAttempts := 0
@@ -456,7 +469,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// iteration via endGen, which guards against double-firing
 			// when the iteration has multiple exit paths (success,
 			// reactive recovery, terminal error).
-			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, a.cfg.Model, msgs)
+			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, a.cfg.Model, msgs, toolList, nil)
 			genEnded := false
 			endGen := func(out observability.GenerationOutput, usage *protocol.Usage, gerr error) {
 				if genEnded {
@@ -472,6 +485,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				if a.tryReactiveRecover(ctx, err, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
+				turnErr = err
 				outCh <- protocol.NewErrorEvent(err)
 				return
 			}
@@ -503,6 +517,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						reactiveRetries < maxReactiveRetries {
 						reactiveErr = evt.Error
 					} else {
+						turnErr = evt.Error
 						outCh <- evt
 					}
 					for range stream {
@@ -558,6 +573,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				if a.tryReactiveRecover(ctx, reactiveErr, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
+				turnErr = reactiveErr
 				outCh <- protocol.NewErrorEvent(reactiveErr)
 				return
 			}
@@ -664,7 +680,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				var immediateResults []protocol.ToolResult
 
 				for _, tc := range currentToolCalls {
-					decision := a.classifyToolCall(tc)
+					decision := a.classifyToolCall(ctx, tc)
 					a.appendSafetyEvent(AuditEvent{
 						ToolCallID:         tc.ID,
 						ToolName:           tc.Name,
@@ -713,6 +729,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 					results, err := a.executePendingActions(ctx)
 					if err != nil {
+						turnErr = err
 						outCh <- protocol.NewErrorEvent(err)
 						return
 					}
@@ -1043,7 +1060,7 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 // gets a prompt. When the threshold is set to "off", the classifier is
 // never called but LevelHigh calls still require user approval ("off"
 // disables classifier calls, not safety).
-func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
+func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
 		return ActionDecision{
@@ -1117,7 +1134,7 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 
 	// At or above the threshold: consult the classifier (when enabled).
 	if !classifierDisabled {
-		if resp, ok := a.classifyWithSafetyClassifier(tc, riskLabel); ok {
+		if resp, ok := a.classifyWithSafetyClassifier(ctx, tc, riskLabel); ok {
 			return resp
 		}
 	}
@@ -1131,7 +1148,7 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 	}
 }
 
-func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel string) (ActionDecision, bool) {
+func (a *Agent) classifyWithSafetyClassifier(ctx context.Context, tc *protocol.ToolCall, riskLevel string) (ActionDecision, bool) {
 	if !a.cfg.Safety.Classifier.IsEnabled() {
 		return ActionDecision{}, false
 	}
@@ -1169,7 +1186,7 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 		rawCtx = summarizeClassifierRequest(req, limit)
 	}
 
-	resp, err := a.classifier.Classify(req)
+	resp, err := a.classifier.Classify(ctx, req)
 	if err != nil {
 		return ActionDecision{
 			Decision:   ExecutionDecisionRequireApproval,

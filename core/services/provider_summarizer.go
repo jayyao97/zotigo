@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 )
@@ -29,20 +30,53 @@ Conversation to summarize:
 
 `
 
-// ProviderSummarizer implements Summarizer using an LLM provider
+// ProviderSummarizer implements Summarizer using an LLM provider.
+//
+// When configured with an observer (via WithSummarizerObserver), each
+// SummarizeMessages / SummarizeText call emits a Langfuse generation
+// of kind=compactor so the compactor's hidden token cost shows up in
+// the trace tree alongside the main turn's generation.
 type ProviderSummarizer struct {
 	provider providers.Provider
+	observer observability.Observer
+	model    string // recorded on the generation; informational
 }
 
-// NewProviderSummarizer creates a summarizer that uses the given provider
-func NewProviderSummarizer(provider providers.Provider) *ProviderSummarizer {
-	return &ProviderSummarizer{
-		provider: provider,
+// SummarizerOption configures a ProviderSummarizer at construction.
+type SummarizerOption func(*ProviderSummarizer)
+
+// WithSummarizerObserver attaches an observability.Observer that
+// captures each summarization call as a generation. Pass model so the
+// observer records the same string the agent's main generation uses,
+// keeping cost rollups consistent across kinds.
+//
+// Passing nil observer is a silent no-op (Noop stays the default).
+func WithSummarizerObserver(o observability.Observer, model string) SummarizerOption {
+	return func(s *ProviderSummarizer) {
+		if o != nil {
+			s.observer = o
+		}
+		s.model = model
 	}
 }
 
-// SummarizeMessages generates a structured summary of messages using the LLM
-func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (string, error) {
+// NewProviderSummarizer creates a summarizer that uses the given provider.
+func NewProviderSummarizer(provider providers.Provider, opts ...SummarizerOption) *ProviderSummarizer {
+	s := &ProviderSummarizer{
+		provider: provider,
+		observer: observability.Noop{},
+	}
+	for _, opt := range opts {
+		opt(s)
+	}
+	return s
+}
+
+// SummarizeMessages generates a structured summary of messages using the LLM.
+//
+// Named returns (result, err) let the deferred EndGeneration capture
+// final state regardless of which return path the function takes.
+func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (result string, err error) {
 	var sb strings.Builder
 	sb.WriteString(conversationSummaryInstruction)
 
@@ -81,30 +115,44 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 		},
 	}
 
+	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, reqMessages, nil, nil)
+	var usage *protocol.Usage
+	defer func() {
+		s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err)
+	}()
+
 	// Stream the response
-	events, err := s.provider.StreamChat(ctx, reqMessages, nil)
-	if err != nil {
-		return "", fmt.Errorf("summarize request failed: %w", err)
+	events, sErr := s.provider.StreamChat(ctx, reqMessages, nil)
+	if sErr != nil {
+		err = fmt.Errorf("summarize request failed: %w", sErr)
+		return "", err
 	}
 
-	// Collect response
+	// Collect response + usage. Usage shows up in the finish event;
+	// missing it on a successful summary just leaves cost telemetry
+	// blank for that generation, never errors.
 	var response strings.Builder
 	for event := range events {
-		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
-			response.WriteString(event.ContentPartDelta.Text)
+		switch event.Type {
+		case protocol.EventTypeContentDelta:
+			if event.ContentPartDelta != nil {
+				response.WriteString(event.ContentPartDelta.Text)
+			}
+		case protocol.EventTypeFinish:
+			usage = event.Usage
 		}
 	}
 
-	result := response.String()
+	result = response.String()
 	if result == "" {
-		return "", fmt.Errorf("empty response from summarizer")
+		err = fmt.Errorf("empty response from summarizer")
+		return "", err
 	}
-
 	return result, nil
 }
 
-// SummarizeText generates a summary of text with a specific instruction
-func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, instruction string) (string, error) {
+// SummarizeText generates a summary of text with a specific instruction.
+func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, instruction string) (result string, err error) {
 	prompt := fmt.Sprintf("%s\n\nText to summarize:\n%s", instruction, text)
 
 	reqMessages := []protocol.Message{
@@ -116,22 +164,34 @@ func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, ins
 		},
 	}
 
-	events, err := s.provider.StreamChat(ctx, reqMessages, nil)
-	if err != nil {
-		return "", fmt.Errorf("summarize text request failed: %w", err)
+	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, reqMessages, nil, nil)
+	var usage *protocol.Usage
+	defer func() {
+		s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err)
+	}()
+
+	events, sErr := s.provider.StreamChat(ctx, reqMessages, nil)
+	if sErr != nil {
+		err = fmt.Errorf("summarize text request failed: %w", sErr)
+		return "", err
 	}
 
 	var response strings.Builder
 	for event := range events {
-		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
-			response.WriteString(event.ContentPartDelta.Text)
+		switch event.Type {
+		case protocol.EventTypeContentDelta:
+			if event.ContentPartDelta != nil {
+				response.WriteString(event.ContentPartDelta.Text)
+			}
+		case protocol.EventTypeFinish:
+			usage = event.Usage
 		}
 	}
 
-	result := response.String()
+	result = response.String()
 	if result == "" {
-		return "", fmt.Errorf("empty response from summarizer")
+		err = fmt.Errorf("empty response from summarizer")
+		return "", err
 	}
-
 	return result, nil
 }

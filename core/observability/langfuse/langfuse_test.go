@@ -69,8 +69,8 @@ func TestObserver_FullTurnLifecycle_EmitsExpectedEvents(t *testing.T) {
 	ctx := context.Background()
 	user := protocol.NewUserMessage("hello")
 
-	ctx = obs.StartTurn(ctx, user)
-	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "claude-test", []protocol.Message{user})
+	ctx = obs.StartTurn(ctx, user, nil)
+	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "claude-test", []protocol.Message{user}, nil, nil)
 	obs.EndGeneration(genCtx, observability.GenerationOutput{
 		Text:         "hi back",
 		FinishReason: protocol.FinishReasonStop,
@@ -130,9 +130,9 @@ func TestObserver_GenerationAndToolAreSiblings(t *testing.T) {
 	})
 
 	ctx := context.Background()
-	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("u"))
+	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("u"), nil)
 
-	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "m", nil)
+	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "m", nil, nil, nil)
 	obs.EndGeneration(genCtx, observability.GenerationOutput{}, nil, nil)
 
 	// Critical: pass the trace ctx (not genCtx) to StartTool so the tool

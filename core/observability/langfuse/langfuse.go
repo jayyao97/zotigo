@@ -8,6 +8,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // observer implements observability.Observer by emitting Langfuse
@@ -92,16 +93,23 @@ func toolIDFrom(ctx context.Context) string {
 
 // --- Lifecycle ---
 
-func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message) context.Context {
+func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, metadata map[string]any) context.Context {
 	traceID := newID()
 	o.recordStart(traceID)
 
-	o.c.emit("trace-create", map[string]any{
+	body := map[string]any{
 		"id":        traceID,
 		"timestamp": nowISO(),
 		"name":      "turn",
 		"input":     userMsg.String(),
-	})
+	}
+	if o.c.sessionID != "" {
+		body["sessionId"] = o.c.sessionID
+	}
+	if len(metadata) > 0 {
+		body["metadata"] = metadata
+	}
+	o.c.emit("trace-create", body)
 	return withTraceID(ctx, traceID)
 }
 
@@ -113,6 +121,12 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 	body := map[string]any{
 		"id": traceID,
 	}
+	// Re-stamp sessionId on the update so a partial earlier emit
+	// (e.g., trace-create dropped on a full buffer) still ends up
+	// associated with the right session.
+	if o.c.sessionID != "" {
+		body["sessionId"] = o.c.sessionID
+	}
 	if err != nil {
 		body["statusMessage"] = err.Error()
 		body["level"] = "ERROR"
@@ -121,7 +135,7 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 	o.consumeStart(traceID)
 }
 
-func (o *observer) StartGeneration(ctx context.Context, kind observability.GenerationKind, model string, msgs []protocol.Message) context.Context {
+func (o *observer) StartGeneration(ctx context.Context, kind observability.GenerationKind, model string, msgs []protocol.Message, toolList []tools.Tool, metadata map[string]any) context.Context {
 	traceID := traceIDFrom(ctx)
 	if traceID == "" {
 		return ctx
@@ -129,16 +143,32 @@ func (o *observer) StartGeneration(ctx context.Context, kind observability.Gener
 	genID := newID()
 	o.recordStart(genID)
 
+	// input = {messages, tools} — the full prompt surface the model
+	// saw on this call, including tool schemas (debugging "did the
+	// model see the right shape?" needs the schema, not just names).
+	input := map[string]any{
+		"messages": summarizeMessages(msgs),
+	}
+	if len(toolList) > 0 {
+		input["tools"] = summarizeTools(toolList)
+	}
+
+	// kind is sticky per-call; merge with caller metadata. caller
+	// values win on collision because per-call metadata is more
+	// specific than the bookkeeping tag.
+	merged := map[string]any{"kind": string(kind)}
+	for k, v := range metadata {
+		merged[k] = v
+	}
+
 	body := map[string]any{
 		"id":        genID,
 		"traceId":   traceID,
 		"name":      string(kind),
 		"startTime": nowISO(),
 		"model":     model,
-		"input":     summarizeMessages(msgs),
-		"metadata": map[string]string{
-			"kind": string(kind),
-		},
+		"input":     input,
+		"metadata":  merged,
 	}
 	o.c.emit("generation-create", body)
 	return withGenID(ctx, genID)
@@ -152,22 +182,27 @@ func (o *observer) EndGeneration(ctx context.Context, output observability.Gener
 	body := map[string]any{
 		"id":      genID,
 		"endTime": nowISO(),
-		"output": map[string]any{
-			"text":          output.Text,
-			"reasoning":     output.Reasoning,
-			"tool_calls":    output.ToolCalls,
-			"finish_reason": string(output.FinishReason),
-		},
+		"output":  renderOutput(output),
 	}
 	if usage != nil {
 		u := usage.Normalized()
+		// usage_details is Langfuse's modern free-form usage shape;
+		// it surfaces cache breakdown in the UI AND lets the server
+		// price cache reads at the discounted rate. The legacy
+		// `usage` block is kept as a redundant fallback for
+		// dashboards that don't yet read usage_details.
+		body["usage_details"] = map[string]any{
+			"input":                       u.InputTokens,
+			"output":                      u.OutputTokens,
+			"cache_read_input_tokens":     u.CacheReadInputTokens,
+			"cache_creation_input_tokens": u.CacheCreationInputTokens,
+			"total":                       u.TotalTokens,
+		}
 		body["usage"] = map[string]any{
-			"input":        u.InputTokens,
-			"output":       u.OutputTokens,
-			"total":        u.TotalTokens,
-			"cache_read":   u.CacheReadInputTokens,
-			"cache_create": u.CacheCreationInputTokens,
-			"unit":         "TOKENS",
+			"input":  u.TotalInput(), // full prompt size, including cached
+			"output": u.OutputTokens,
+			"total":  u.TotalTokens,
+			"unit":   "TOKENS",
 		}
 	}
 	if err != nil {
@@ -176,6 +211,23 @@ func (o *observer) EndGeneration(ctx context.Context, output observability.Gener
 	}
 	o.c.emit("generation-update", body)
 	o.consumeStart(genID)
+}
+
+// renderOutput picks the display shape for a generation's output.
+// Structured wins when set (classifier decisions, structured tool
+// args); otherwise we collapse the streaming-assembled fields into
+// a record so prose generations show up with text+reasoning+tool
+// calls all visible.
+func renderOutput(o observability.GenerationOutput) any {
+	if o.Structured != nil {
+		return o.Structured
+	}
+	return map[string]any{
+		"text":          o.Text,
+		"reasoning":     o.Reasoning,
+		"tool_calls":    o.ToolCalls,
+		"finish_reason": string(o.FinishReason),
+	}
 }
 
 func (o *observer) StartTool(ctx context.Context, name, arguments string) context.Context {
@@ -202,15 +254,10 @@ func (o *observer) EndTool(ctx context.Context, output any, err error) {
 	if spanID == "" {
 		return
 	}
-	// Tool outputs vary wildly (text, JSON, byte blobs); marshal best-effort.
-	outRendered := output
-	if b, mErr := json.Marshal(output); mErr == nil && len(b) < 200_000 {
-		outRendered = json.RawMessage(b)
-	}
 	body := map[string]any{
 		"id":      spanID,
 		"endTime": nowISO(),
-		"output":  outRendered,
+		"output":  toolOutputBody(output, err),
 	}
 	if err != nil {
 		body["level"] = "ERROR"
@@ -218,6 +265,30 @@ func (o *observer) EndTool(ctx context.Context, output any, err error) {
 	}
 	o.c.emit("span-update", body)
 	o.consumeStart(spanID)
+}
+
+// toolOutputBody picks what to render in the span's `output` slot.
+// On success the tool's raw return value flows through. On error we
+// surface the error message in the same place — without this, the
+// most visible UI region would render as "undefined" while the
+// actual diagnosis (build failure stderr, missing file, etc.) hides
+// in the small statusMessage banner. Partial results are preserved
+// when both an err and a non-nil result come back together.
+//
+// Outputs > 200KB collapse to a placeholder so a giant grep result
+// or file dump doesn't blow the trace payload.
+func toolOutputBody(output any, err error) any {
+	if err != nil {
+		body := map[string]any{"error": err.Error()}
+		if output != nil {
+			body["partial_result"] = output
+		}
+		return body
+	}
+	if b, mErr := json.Marshal(output); mErr == nil && len(b) < 200_000 {
+		return json.RawMessage(b)
+	}
+	return output
 }
 
 func (o *observer) Close(ctx context.Context) error {
@@ -253,6 +324,23 @@ func summarizeMessages(msgs []protocol.Message) []map[string]any {
 		out = append(out, map[string]any{
 			"role":    string(m.Role),
 			"content": m.String(),
+		})
+	}
+	return out
+}
+
+// summarizeTools projects each tool to {name, description, parameters}.
+// Schemas roughly double the trace payload but they're necessary for
+// debugging "did the model see the right tool surface" — a missing
+// required field or wrong type often shows up first as a tool call
+// with weird arguments, and only the schema explains why.
+func summarizeTools(toolList []tools.Tool) []map[string]any {
+	out := make([]map[string]any, 0, len(toolList))
+	for _, t := range toolList {
+		out = append(out, map[string]any{
+			"name":        t.Name(),
+			"description": t.Description(),
+			"parameters":  t.Schema(),
 		})
 	}
 	return out

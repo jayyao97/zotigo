@@ -15,6 +15,13 @@ import (
 // The middleware is a no-op when observer is nil or Noop — install it
 // unconditionally and let the observer choice dictate whether spans
 // actually get emitted.
+//
+// IMPORTANT: register this OUTERMOST in the middleware chain (i.e.
+// before any short-circuiting middleware like ReadTracker). Inner
+// middleware that returns (nil, err) without calling next would
+// otherwise bypass StartTool/EndTool entirely, leaving the trace
+// with a "phantom" tool call the model retried after but no
+// corresponding span explaining why.
 func ToolSpan(observer observability.Observer) agent.Middleware {
 	if observer == nil {
 		return nil

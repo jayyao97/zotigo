@@ -12,6 +12,7 @@ import (
 	"context"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // GenerationKind tags what triggered an LLM call so the trace UI can
@@ -31,11 +32,21 @@ const (
 // Assembled by the agent from the protocol.Event stream — observers
 // see the same normalized shape regardless of upstream provider, so
 // each provider needs zero observability code.
+//
+// Structured wins when set, replacing the prose-shaped fields below.
+// Use it for generations whose output is logically a typed value
+// (classifier decisions, structured tool args) — backends will
+// render the original JSON shape rather than a stringified summary.
 type GenerationOutput struct {
 	Text         string              // visible response text
 	Reasoning    string              // assembled thinking/reasoning content
 	ToolCalls    []protocol.ToolCall // tool calls the model decided to make
 	FinishReason protocol.FinishReason
+
+	// Structured, when non-nil, takes precedence over Text/Reasoning/
+	// ToolCalls in the rendered output. Observers should marshal it
+	// as the generation's output verbatim.
+	Structured any
 }
 
 // Observer captures lifecycle events for one user turn:
@@ -51,10 +62,19 @@ type GenerationOutput struct {
 // (best-effort flush). Close is the hard cut-over: anything still in
 // the buffer after its timeout is dropped, never blocks process exit.
 type Observer interface {
-	StartTurn(ctx context.Context, userMsg protocol.Message) context.Context
+	// StartTurn opens a trace span. metadata is sticky environment
+	// info that helps filter/group traces in the backend (working
+	// directory, platform, provider/model, approval policy).
+	// Pass nil when no metadata is meaningful.
+	StartTurn(ctx context.Context, userMsg protocol.Message, metadata map[string]any) context.Context
 	EndTurn(ctx context.Context, err error)
 
-	StartGeneration(ctx context.Context, kind GenerationKind, model string, msgs []protocol.Message) context.Context
+	// StartGeneration records the inputs to one LLM call. tools is the
+	// list available to the model on this call; nil for calls that
+	// pass no tools (e.g. the compactor's summarizer). metadata is
+	// per-call detail (classifier attempt number, risk level, etc.) —
+	// merged with the kind tag the observer always sets.
+	StartGeneration(ctx context.Context, kind GenerationKind, model string, msgs []protocol.Message, tools []tools.Tool, metadata map[string]any) context.Context
 	EndGeneration(ctx context.Context, output GenerationOutput, usage *protocol.Usage, err error)
 
 	StartTool(ctx context.Context, name, arguments string) context.Context
@@ -70,9 +90,11 @@ type Observer interface {
 // allocate.
 type Noop struct{}
 
-func (Noop) StartTurn(ctx context.Context, _ protocol.Message) context.Context { return ctx }
-func (Noop) EndTurn(_ context.Context, _ error)                                {}
-func (Noop) StartGeneration(ctx context.Context, _ GenerationKind, _ string, _ []protocol.Message) context.Context {
+func (Noop) StartTurn(ctx context.Context, _ protocol.Message, _ map[string]any) context.Context {
+	return ctx
+}
+func (Noop) EndTurn(_ context.Context, _ error) {}
+func (Noop) StartGeneration(ctx context.Context, _ GenerationKind, _ string, _ []protocol.Message, _ []tools.Tool, _ map[string]any) context.Context {
 	return ctx
 }
 func (Noop) EndGeneration(_ context.Context, _ GenerationOutput, _ *protocol.Usage, _ error) {}

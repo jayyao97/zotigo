@@ -17,8 +17,6 @@ import (
 	"net/http"
 	"sync"
 	"time"
-
-	"github.com/jayyao97/zotigo/core/debug"
 )
 
 // Default tunings — overridable via Config when needed. The buffer
@@ -43,6 +41,13 @@ type Config struct {
 	SecretKey     string        // Langfuse SECRET_KEY
 	FlushInterval time.Duration // 0 → defaultFlushInterval
 	BufferSize    int           // 0 → defaultBufferSize
+
+	// SessionID groups every trace produced by this observer under a
+	// single Langfuse session. Empty means traces show up in Tracing
+	// but the Sessions view stays empty for this run. Set this to the
+	// zotigo session.ID so a single zotigo invocation is one Langfuse
+	// session even across many user turns.
+	SessionID string
 }
 
 // event is one ingestion record. body is type-specific JSON shape
@@ -58,6 +63,7 @@ type client struct {
 	host       string
 	auth       string // Basic auth header value, precomputed
 	httpClient *http.Client
+	sessionID  string // optional, sticky for the client's lifetime
 
 	mu     sync.Mutex
 	closed bool
@@ -90,6 +96,7 @@ func NewClient(cfg Config) *client {
 		host:       host,
 		auth:       basicAuth(cfg.PublicKey, cfg.SecretKey),
 		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
+		sessionID:  cfg.SessionID,
 		queue:      make(chan event, bufSize),
 		done:       make(chan struct{}),
 	}
@@ -116,7 +123,8 @@ func (c *client) emit(eventType string, body any) {
 	select {
 	case c.queue <- ev:
 	default:
-		debug.Logf("langfuse: queue full, dropping %s event", eventType)
+		// drop silently when buffer is full — telemetry must not
+		// back-pressure the agent
 	}
 }
 
@@ -132,9 +140,9 @@ func (c *client) run(flushInterval time.Duration) {
 		if len(batch) == 0 {
 			return
 		}
-		if err := c.send(batch); err != nil {
-			debug.Logf("langfuse: flush failed (dropping %d events): %v", len(batch), err)
-		}
+		// best-effort send; failures drop the batch silently so a
+		// flaky backend can't snowball into a memory blow-up
+		_ = c.send(batch)
 		batch = batch[:0]
 	}
 

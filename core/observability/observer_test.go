@@ -19,11 +19,11 @@ func TestNoop_ReturnsCtxUnchanged(t *testing.T) {
 	var n observability.Noop
 	parent := context.WithValue(context.Background(), testKey{}, "marker")
 
-	ctx1 := n.StartTurn(parent, protocol.NewUserMessage("hi"))
+	ctx1 := n.StartTurn(parent, protocol.NewUserMessage("hi"), nil)
 	if ctx1 != parent {
 		t.Error("StartTurn should return the same ctx instance for Noop")
 	}
-	ctx2 := n.StartGeneration(parent, observability.GenerationMain, "model", nil)
+	ctx2 := n.StartGeneration(parent, observability.GenerationMain, "model", nil, nil, nil)
 	if ctx2 != parent {
 		t.Error("StartGeneration should return the same ctx instance for Noop")
 	}

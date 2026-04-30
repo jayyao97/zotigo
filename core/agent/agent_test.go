@@ -94,7 +94,7 @@ type StaticSafetyClassifier struct {
 	Err      error
 }
 
-func (c *StaticSafetyClassifier) Classify(req agent.SafetyClassifierRequest) (agent.SafetyClassifierResponse, error) {
+func (c *StaticSafetyClassifier) Classify(_ context.Context, req agent.SafetyClassifierRequest) (agent.SafetyClassifierResponse, error) {
 	if c.Err != nil {
 		return agent.SafetyClassifierResponse{}, c.Err
 	}
@@ -2276,14 +2276,14 @@ type recordingObserver struct {
 	calls []string
 }
 
-func (r *recordingObserver) StartTurn(ctx context.Context, _ protocol.Message) context.Context {
+func (r *recordingObserver) StartTurn(ctx context.Context, _ protocol.Message, _ map[string]any) context.Context {
 	r.calls = append(r.calls, "StartTurn")
 	return ctx
 }
 func (r *recordingObserver) EndTurn(_ context.Context, _ error) {
 	r.calls = append(r.calls, "EndTurn")
 }
-func (r *recordingObserver) StartGeneration(ctx context.Context, kind observability.GenerationKind, _ string, _ []protocol.Message) context.Context {
+func (r *recordingObserver) StartGeneration(ctx context.Context, kind observability.GenerationKind, _ string, _ []protocol.Message, _ []tools.Tool, _ map[string]any) context.Context {
 	r.calls = append(r.calls, "StartGeneration:"+string(kind))
 	return ctx
 }

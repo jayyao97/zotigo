@@ -34,14 +34,16 @@ import (
 
 // buildObserver wires up an observability.Observer from config.
 // Returns Noop when no backend is enabled — callers don't have to
-// special-case the disabled path.
-func buildObserver(cfg config.ObservabilityConfig) observability.Observer {
+// special-case the disabled path. sessionID groups all traces this
+// run produces under one Langfuse session.
+func buildObserver(cfg config.ObservabilityConfig, sessionID string) observability.Observer {
 	if cfg.Langfuse.IsEnabled() {
 		return langfuse.New(langfuse.Config{
 			Host:          cfg.Langfuse.Host,
 			PublicKey:     cfg.Langfuse.PublicKey,
 			SecretKey:     cfg.Langfuse.SecretKey,
 			FlushInterval: time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
+			SessionID:     sessionID,
 		})
 	}
 	return observability.Noop{}
@@ -208,7 +210,9 @@ func Run(args []string) int {
 	// Build observability backend before constructing the agent so it
 	// can be wired in as a single option. NewObserver returns Noop
 	// when langfuse credentials are absent; the agent never sees nil.
-	observer := buildObserver(cfg.Observability)
+	// session ID flows in so all traces of this run share a Langfuse
+	// session.
+	observer := buildObserver(cfg.Observability, currentSession.ID)
 	defer func() {
 		ctx, cancel := contextWithTimeout(2 * time.Second)
 		defer cancel()
@@ -222,8 +226,13 @@ func Run(args []string) int {
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
 		agent.WithObserver(observer),
-		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
+		// ToolSpan goes outermost so it observes every tool call,
+		// including ones that ReadTracker short-circuits with a
+		// "file changed on disk" rejection — without seeing those,
+		// the trace tree skips the rejected call and the next-gen
+		// "retry after error" looks unmotivated.
 		agent.WithMiddleware(middleware.ToolSpan(observer)),
+		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
@@ -246,7 +255,11 @@ func Run(args []string) int {
 					fmt.Sprintf("failed to create classifier provider %q: %v", classifierProfileName, err),
 				)(ag)
 			} else {
-				classifier := agent.NewProviderSafetyClassifier(classifierProvider, profile.Safety.Classifier)
+				classifier := agent.NewProviderSafetyClassifier(
+					classifierProvider,
+					profile.Safety.Classifier,
+					agent.WithClassifierObserver(observer, classifierProfile.Model),
+				)
 				agent.WithSafetyClassifier(classifier)(ag)
 			}
 		}
