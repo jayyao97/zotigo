@@ -113,12 +113,14 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 	return withTraceID(ctx, traceID)
 }
 
-// newSessionID mints a per-turn Langfuse session id. Format matches
-// readability concerns: `zotigo_<UTC date>_<nano>` so the Sessions
-// list sorts naturally and IDs are unique even under burst submission.
+// newSessionID mints a per-turn Langfuse session id. Format mirrors
+// zotigo's own session.ID convention (`sess_<unix_nano>`) so the
+// Sessions list is searchable by free-text prefix when metadata
+// filters aren't available, while the appended readable timestamp
+// lets users tell turns apart at a glance.
 func newSessionID() string {
 	now := time.Now().UTC()
-	return fmt.Sprintf("zotigo_%s_%09d", now.Format("20060102_150405"), now.Nanosecond())
+	return fmt.Sprintf("sess_%d_%s", now.UnixNano(), now.Format("20060102_150405"))
 }
 
 // mergeMaps returns a new map combining a and b. b's keys win on
