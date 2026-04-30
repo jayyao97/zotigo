@@ -48,6 +48,13 @@ type Config struct {
 	// zotigo session.ID so a single zotigo invocation is one Langfuse
 	// session even across many user turns.
 	SessionID string
+
+	// StaticTraceMetadata is merged into every trace-create event's
+	// metadata field. Use it for process-level facts that don't change
+	// across turns (zotigo_session, process_start, resumed) so users
+	// can filter Langfuse Sessions by metadata.zotigo_session and
+	// aggregate one logical thread across multiple --resume runs.
+	StaticTraceMetadata map[string]any
 }
 
 // event is one ingestion record. body is type-specific JSON shape
@@ -60,10 +67,11 @@ type event struct {
 }
 
 type client struct {
-	host       string
-	auth       string // Basic auth header value, precomputed
-	httpClient *http.Client
-	sessionID  string // optional, sticky for the client's lifetime
+	host        string
+	auth        string // Basic auth header value, precomputed
+	httpClient  *http.Client
+	sessionID   string         // optional, sticky for the client's lifetime
+	staticTrace map[string]any // optional metadata merged into every trace-create
 
 	mu     sync.Mutex
 	closed bool
@@ -93,12 +101,13 @@ func NewClient(cfg Config) *client {
 	}
 
 	c := &client{
-		host:       host,
-		auth:       basicAuth(cfg.PublicKey, cfg.SecretKey),
-		httpClient: &http.Client{Timeout: defaultHTTPTimeout},
-		sessionID:  cfg.SessionID,
-		queue:      make(chan event, bufSize),
-		done:       make(chan struct{}),
+		host:        host,
+		auth:        basicAuth(cfg.PublicKey, cfg.SecretKey),
+		httpClient:  &http.Client{Timeout: defaultHTTPTimeout},
+		sessionID:   cfg.SessionID,
+		staticTrace: cfg.StaticTraceMetadata,
+		queue:       make(chan event, bufSize),
+		done:        make(chan struct{}),
 	}
 	go c.run(flush)
 	return c

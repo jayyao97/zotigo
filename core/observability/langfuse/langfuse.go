@@ -97,11 +97,32 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 	if o.c.sessionID != "" {
 		body["sessionId"] = o.c.sessionID
 	}
-	if len(metadata) > 0 {
-		body["metadata"] = metadata
+	// Static (process-level) metadata first, then per-turn metadata —
+	// per-turn wins on key conflict because it's more specific. Skip
+	// the merge entirely when both sides are empty so we don't emit
+	// an unused metadata field.
+	if merged := mergeMaps(o.c.staticTrace, metadata); len(merged) > 0 {
+		body["metadata"] = merged
 	}
 	o.c.emit("trace-create", body)
 	return withTraceID(ctx, traceID)
+}
+
+// mergeMaps returns a new map combining a and b. b's keys win on
+// collision. Returns nil when both are empty so callers can skip
+// emitting the field entirely.
+func mergeMaps(a, b map[string]any) map[string]any {
+	if len(a) == 0 && len(b) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(a)+len(b))
+	for k, v := range a {
+		out[k] = v
+	}
+	for k, v := range b {
+		out[k] = v
+	}
+	return out
 }
 
 func (o *observer) EndTurn(ctx context.Context, err error) {
@@ -112,11 +133,15 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 	body := map[string]any{
 		"id": traceID,
 	}
-	// Re-stamp sessionId on the update so a partial earlier emit
-	// (e.g., trace-create dropped on a full buffer) still ends up
-	// associated with the right session.
+	// Re-stamp sessionId AND static metadata on the update so a
+	// partial earlier emit (e.g., trace-create dropped on a full
+	// buffer) still ends up associated with the right session and
+	// carries the process-level filters users rely on.
 	if o.c.sessionID != "" {
 		body["sessionId"] = o.c.sessionID
+	}
+	if len(o.c.staticTrace) > 0 {
+		body["metadata"] = o.c.staticTrace
 	}
 	if err != nil {
 		body["statusMessage"] = errCategoryLine(err)

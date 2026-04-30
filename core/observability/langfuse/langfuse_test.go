@@ -275,3 +275,77 @@ func TestStatusMessage_StaysShort_EvenForBigToolErrors(t *testing.T) {
 type errorString string
 
 func (e errorString) Error() string { return string(e) }
+
+// TestStaticTraceMetadata_AppearsOnEveryTraceCreate guards the
+// cross-startup grouping: app.go stamps zotigo_session / process_start
+// / resumed on every Langfuse session via StaticTraceMetadata so users
+// can filter Sessions by metadata.zotigo_session to aggregate one
+// logical thread across multiple --resume runs.
+func TestStaticTraceMetadata_AppearsOnEveryTraceCreate(t *testing.T) {
+	srv, cs := newCaptureServer(t)
+	defer srv.Close()
+
+	obs := New(Config{
+		Host:          srv.URL,
+		PublicKey:     "pk",
+		SecretKey:     "sk",
+		FlushInterval: 50 * time.Millisecond,
+		StaticTraceMetadata: map[string]any{
+			"zotigo_session": "sess_abc",
+			"process_start":  "2026-04-30T14:30:22Z",
+			"resumed":        false,
+		},
+	})
+
+	ctx := context.Background()
+	// Per-turn metadata should win on key collision.
+	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("hi"), map[string]any{
+		"working_directory": "/tmp/test",
+		"resumed":           true, // override static
+	})
+	obs.EndTurn(ctx, nil)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := obs.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var traceCreates []map[string]any
+	for _, ev := range cs.allEvents() {
+		if ev.Type == "trace-create" {
+			traceCreates = append(traceCreates, ev.Body.(map[string]any))
+		}
+	}
+	if len(traceCreates) == 0 {
+		t.Fatal("expected at least one trace-create event")
+	}
+
+	// Both StartTurn and EndTurn emit trace-create; both must carry
+	// the static fields (Langfuse merges by trace id, but missing
+	// fields on the update event would clear them in some backends).
+	for i, body := range traceCreates {
+		md, _ := body["metadata"].(map[string]any)
+		if md == nil {
+			t.Errorf("trace-create #%d has no metadata", i)
+			continue
+		}
+		if got, _ := md["zotigo_session"].(string); got != "sess_abc" {
+			t.Errorf("trace-create #%d zotigo_session = %q, want sess_abc", i, got)
+		}
+		if got, _ := md["process_start"].(string); got != "2026-04-30T14:30:22Z" {
+			t.Errorf("trace-create #%d process_start = %q, want 2026-04-30T14:30:22Z", i, got)
+		}
+	}
+
+	// Per-turn override: the StartTurn event's `resumed` should be true
+	// (overriding the static false). EndTurn doesn't take per-turn
+	// metadata so it carries only the static value (false).
+	startMeta := traceCreates[0]["metadata"].(map[string]any)
+	if got, _ := startMeta["resumed"].(bool); got != true {
+		t.Errorf("StartTurn metadata.resumed = %v, want true (per-turn override)", got)
+	}
+	if got, _ := startMeta["working_directory"].(string); got != "/tmp/test" {
+		t.Errorf("StartTurn metadata.working_directory missing per-turn field: %q", got)
+	}
+}

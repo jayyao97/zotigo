@@ -35,15 +35,18 @@ import (
 // buildObserver wires up an observability.Observer from config.
 // Returns Noop when no backend is enabled — callers don't have to
 // special-case the disabled path. sessionID groups all traces this
-// run produces under one Langfuse session.
-func buildObserver(cfg config.ObservabilityConfig, sessionID string) observability.Observer {
+// run produces under one Langfuse session; staticMeta is merged into
+// every trace's metadata so users can filter Langfuse Sessions by
+// process-level facts (zotigo_session, resumed flag, etc.).
+func buildObserver(cfg config.ObservabilityConfig, sessionID string, staticMeta map[string]any) observability.Observer {
 	if cfg.Langfuse.IsEnabled() {
 		return langfuse.New(langfuse.Config{
-			Host:          cfg.Langfuse.Host,
-			PublicKey:     cfg.Langfuse.PublicKey,
-			SecretKey:     cfg.Langfuse.SecretKey,
-			FlushInterval: time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
-			SessionID:     sessionID,
+			Host:                cfg.Langfuse.Host,
+			PublicKey:           cfg.Langfuse.PublicKey,
+			SecretKey:           cfg.Langfuse.SecretKey,
+			FlushInterval:       time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
+			SessionID:           sessionID,
+			StaticTraceMetadata: staticMeta,
 		})
 	}
 	return observability.Noop{}
@@ -210,9 +213,27 @@ func Run(args []string) int {
 	// Build observability backend before constructing the agent so it
 	// can be wired in as a single option. NewObserver returns Noop
 	// when langfuse credentials are absent; the agent never sees nil.
-	// session ID flows in so all traces of this run share a Langfuse
-	// session.
-	observer := buildObserver(cfg.Observability, currentSession.ID)
+	//
+	// The Langfuse sessionId is "<zotigo_session>_<readable_start>"
+	// so each zotigo invocation becomes a fresh Langfuse session
+	// that's always visible under recent filters (Langfuse's Sessions
+	// view orders by first-trace timestamp; long-lived zotigo
+	// sessions resumed across days would otherwise fall out of
+	// "Last 24h" / "Last 7d" filters). Readable date in the suffix
+	// lets users tell runs apart at a glance in the Sessions list.
+	//
+	// Static metadata layers on cross-startup grouping that doesn't
+	// rely on prefix matching: filter by metadata.zotigo_session to
+	// aggregate every Langfuse session that belongs to one logical
+	// zotigo thread, including --resume runs.
+	processStart := time.Now()
+	langfuseSessionID := fmt.Sprintf("%s_%s", currentSession.ID, processStart.Format("20060102_150405"))
+	staticMeta := map[string]any{
+		"zotigo_session": currentSession.ID,
+		"process_start":  processStart.Format(time.RFC3339),
+		"resumed":        doResume,
+	}
+	observer := buildObserver(cfg.Observability, langfuseSessionID, staticMeta)
 	defer func() {
 		ctx, cancel := contextWithTimeout(2 * time.Second)
 		defer cancel()
