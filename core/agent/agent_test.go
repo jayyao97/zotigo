@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -2266,4 +2267,97 @@ func buildSeedHistory(turns int) []protocol.Message {
 		})
 	}
 	return hist
+}
+
+// recordingObserver is a minimal observability.Observer that captures
+// the sequence of method calls. Used to verify the agent fires hooks
+// in the expected order.
+type recordingObserver struct {
+	calls []string
+}
+
+func (r *recordingObserver) StartTurn(ctx context.Context, _ protocol.Message) context.Context {
+	r.calls = append(r.calls, "StartTurn")
+	return ctx
+}
+func (r *recordingObserver) EndTurn(_ context.Context, _ error) {
+	r.calls = append(r.calls, "EndTurn")
+}
+func (r *recordingObserver) StartGeneration(ctx context.Context, kind observability.GenerationKind, _ string, _ []protocol.Message) context.Context {
+	r.calls = append(r.calls, "StartGeneration:"+string(kind))
+	return ctx
+}
+func (r *recordingObserver) EndGeneration(_ context.Context, _ observability.GenerationOutput, _ *protocol.Usage, _ error) {
+	r.calls = append(r.calls, "EndGeneration")
+}
+func (r *recordingObserver) StartTool(ctx context.Context, name, _ string) context.Context {
+	r.calls = append(r.calls, "StartTool:"+name)
+	return ctx
+}
+func (r *recordingObserver) EndTool(_ context.Context, _ any, _ error) {
+	r.calls = append(r.calls, "EndTool")
+}
+func (r *recordingObserver) Close(_ context.Context) error { return nil }
+
+func TestAgent_ObserverFiresExpectedHookSequence(t *testing.T) {
+	providers.Register("plain-mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &plainMockProvider{}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	rec := &recordingObserver{}
+	ag, err := agent.New(config.ProfileConfig{Provider: "plain-mock"}, exec,
+		agent.WithObserver(rec),
+	)
+	if err != nil {
+		t.Fatalf("agent: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "hi")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for range events {
+	}
+
+	// The mock returns a simple text reply with no tool calls, so we
+	// expect: StartTurn → StartGeneration:main → EndGeneration → EndTurn.
+	want := []string{"StartTurn", "StartGeneration:main", "EndGeneration", "EndTurn"}
+	if got := rec.calls; !equalStringSlice(got, want) {
+		t.Errorf("hook order = %v, want %v", got, want)
+	}
+}
+
+// plainMockProvider returns a single text reply, no tool calls — used
+// to exercise the simplest happy-path through the agent loop.
+type plainMockProvider struct{}
+
+func (p *plainMockProvider) Name() string { return "plain-mock" }
+func (p *plainMockProvider) StreamChat(_ context.Context, _ []protocol.Message, _ []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 4)
+	go func() {
+		defer close(ch)
+		ch <- protocol.NewTextDeltaEvent("ok")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "ok"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func equalStringSlice(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/services"
@@ -42,6 +43,8 @@ type Agent struct {
 	classifierUnavailableReason string
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
+
+	observer observability.Observer // Noop by default; never nil
 
 	middlewares []Middleware
 
@@ -123,6 +126,19 @@ func WithReminder(provider prompt.ReminderProvider) AgentOption {
 	}
 }
 
+// WithObserver wires an observability backend (typically Langfuse).
+// Passing nil resets to Noop. The agent always holds a non-nil
+// Observer so hot-path call sites can dispatch unconditionally.
+func WithObserver(obs observability.Observer) AgentOption {
+	return func(a *Agent) {
+		if obs == nil {
+			a.observer = observability.Noop{}
+			return
+		}
+		a.observer = obs
+	}
+}
+
 // New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
 func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) (*Agent, error) {
@@ -151,6 +167,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		turns:        make([]TurnAudit, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:   services.NewCompressor(compressorCfg),
+		observer:     observability.Noop{},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -376,6 +393,15 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	go func() {
 		defer close(outCh)
 
+		// Open a turn span for fresh user input (a tool-result resume
+		// continues an existing turn — the trace was already opened on
+		// the user's original message). EndTurn is unconditional via
+		// defer so any exit path closes the trace.
+		if msg.Role == protocol.RoleUser {
+			ctx = a.observer.StartTurn(ctx, msg)
+			defer func() { a.observer.EndTurn(ctx, nil) }()
+		}
+
 		emptyRecoveryAttempts := 0
 		const maxEmptyRecoveryAttempts = 1
 
@@ -424,8 +450,25 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				estimatedTokens,
 			)
 
-			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
+			// One generation per StreamChat invocation. genCtx flows
+			// into the provider so any future provider-side child spans
+			// would attach correctly. End is called exactly once per
+			// iteration via endGen, which guards against double-firing
+			// when the iteration has multiple exit paths (success,
+			// reactive recovery, terminal error).
+			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, a.cfg.Model, msgs)
+			genEnded := false
+			endGen := func(out observability.GenerationOutput, usage *protocol.Usage, gerr error) {
+				if genEnded {
+					return
+				}
+				genEnded = true
+				a.observer.EndGeneration(genCtx, out, usage, gerr)
+			}
+
+			stream, err := a.provider.StreamChat(genCtx, msgs, toolList)
 			if err != nil {
+				endGen(observability.GenerationOutput{}, nil, err)
 				if a.tryReactiveRecover(ctx, err, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
@@ -511,6 +554,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// mid-stream. Force a compaction and restart the outer
 			// loop so the same user turn gets retried once.
 			if reactiveErr != nil {
+				endGen(observability.GenerationOutput{}, nil, reactiveErr)
 				if a.tryReactiveRecover(ctx, reactiveErr, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
@@ -547,6 +591,27 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					asstMsg.Metadata = &protocol.MessageMetadata{}
 				}
 				asstMsg.Metadata.Usage = &normalized
+			}
+
+			// Generation completed normally — close it with the assembled
+			// output. Reasoning text is flattened from all blocks (we already
+			// have them in reasoningBlocks); tool calls are dereferenced into
+			// the flat shape Langfuse expects.
+			{
+				var reasoningText string
+				for _, rb := range reasoningBlocks {
+					reasoningText += rb.Text
+				}
+				calls := make([]protocol.ToolCall, 0, len(currentToolCalls))
+				for _, tc := range currentToolCalls {
+					calls = append(calls, *tc)
+				}
+				endGen(observability.GenerationOutput{
+					Text:         currentContent,
+					Reasoning:    reasoningText,
+					ToolCalls:    calls,
+					FinishReason: providerFinishReason,
+				}, providerUsage, nil)
 			}
 
 			debug.Logf(

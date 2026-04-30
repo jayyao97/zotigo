@@ -19,6 +19,34 @@ type Config struct {
 	Security       SecurityConfig           `mapstructure:"security" yaml:"security"`
 	UI             UIConfig                 `mapstructure:"ui" yaml:"ui"`
 	Tools          ToolsConfig              `mapstructure:"tools" yaml:"tools"`
+	Observability  ObservabilityConfig      `mapstructure:"observability,omitempty" yaml:"observability,omitempty"`
+}
+
+// ObservabilityConfig controls external trace ingestion. Currently
+// only Langfuse is wired in; future backends (OpenTelemetry, etc.)
+// would slot in alongside.
+type ObservabilityConfig struct {
+	Langfuse LangfuseConfig `mapstructure:"langfuse,omitempty" yaml:"langfuse,omitempty"`
+}
+
+// LangfuseConfig points the agent at a Langfuse project. Empty
+// PublicKey or SecretKey disables the integration entirely (the
+// agent falls back to a no-op observer). Host defaults to
+// https://cloud.langfuse.com when unset.
+type LangfuseConfig struct {
+	Enabled       bool   `mapstructure:"enabled,omitempty" yaml:"enabled,omitempty"`
+	Host          string `mapstructure:"host,omitempty" yaml:"host,omitempty"`
+	PublicKey     string `mapstructure:"public_key,omitempty" yaml:"public_key,omitempty"`
+	SecretKey     string `mapstructure:"secret_key,omitempty" yaml:"secret_key,omitempty"`
+	FlushInterval int    `mapstructure:"flush_interval_sec,omitempty" yaml:"flush_interval_sec,omitempty"`
+}
+
+// IsEnabled reports whether Langfuse should be wired in. Both keys
+// must be non-empty AND the explicit Enabled flag must be true —
+// having keys configured but Enabled=false is a valid state for
+// quickly toggling telemetry off without removing credentials.
+func (c LangfuseConfig) IsEnabled() bool {
+	return c.Enabled && c.PublicKey != "" && c.SecretKey != ""
 }
 
 // ProfileConfig defines a specific configuration for an AI model usage.

@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
+	"github.com/jayyao97/zotigo/core/observability"
+	"github.com/jayyao97/zotigo/core/observability/langfuse"
 	"github.com/jayyao97/zotigo/core/providers"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
@@ -28,6 +31,25 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
+
+// buildObserver wires up an observability.Observer from config.
+// Returns Noop when no backend is enabled — callers don't have to
+// special-case the disabled path.
+func buildObserver(cfg config.ObservabilityConfig) observability.Observer {
+	if cfg.Langfuse.IsEnabled() {
+		return langfuse.New(langfuse.Config{
+			Host:          cfg.Langfuse.Host,
+			PublicKey:     cfg.Langfuse.PublicKey,
+			SecretKey:     cfg.Langfuse.SecretKey,
+			FlushInterval: time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
+		})
+	}
+	return observability.Noop{}
+}
+
+func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
+}
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
 type KittyFilterWriter struct {
@@ -183,13 +205,25 @@ func Run(args []string) int {
 		}),
 	)
 
+	// Build observability backend before constructing the agent so it
+	// can be wired in as a single option. NewObserver returns Noop
+	// when langfuse credentials are absent; the agent never sees nil.
+	observer := buildObserver(cfg.Observability)
+	defer func() {
+		ctx, cancel := contextWithTimeout(2 * time.Second)
+		defer cancel()
+		_ = observer.Close(ctx)
+	}()
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithUserPromptWrapper(uw),
 		agent.WithSkillManager(sm),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
+		agent.WithObserver(observer),
 		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
+		agent.WithMiddleware(middleware.ToolSpan(observer)),
 	)
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
