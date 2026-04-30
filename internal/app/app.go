@@ -34,21 +34,20 @@ import (
 
 // buildObserver wires up an observability.Observer from config.
 // Returns Noop when no backend is enabled — callers don't have to
-// special-case the disabled path. staticMeta is merged into every
-// trace's metadata so users can filter Langfuse Sessions by
-// process-level facts (zotigo_session, process_start, resumed).
-//
-// Note: there's no fixed sessionID here — the langfuse observer mints
-// a new sessionId per turn so each trace lives in its own Langfuse
-// session. Cross-turn / cross-startup grouping happens via metadata
-// filtering instead.
-func buildObserver(cfg config.ObservabilityConfig, staticMeta map[string]any) observability.Observer {
+// special-case the disabled path. sessionIDPrefix is the zotigo
+// session.ID, used as the shared prefix on every per-turn Langfuse
+// sessionId so the Sessions list groups all turns of one invocation
+// together by free-text search. staticMeta is merged into every
+// trace's metadata so users can also filter by process-level facts
+// (zotigo_session, process_start, resumed).
+func buildObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticMeta map[string]any) observability.Observer {
 	if cfg.Langfuse.IsEnabled() {
 		return langfuse.New(langfuse.Config{
 			Host:                cfg.Langfuse.Host,
 			PublicKey:           cfg.Langfuse.PublicKey,
 			SecretKey:           cfg.Langfuse.SecretKey,
 			FlushInterval:       time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
+			SessionIDPrefix:     sessionIDPrefix,
 			StaticTraceMetadata: staticMeta,
 		})
 	}
@@ -217,19 +216,19 @@ func Run(args []string) int {
 	// can be wired in as a single option. NewObserver returns Noop
 	// when langfuse credentials are absent; the agent never sees nil.
 	//
-	// Langfuse session = one user turn. The langfuse observer mints
-	// a fresh sessionId in StartTurn so every trace has its own
-	// session. Cross-turn / cross-startup aggregation happens via
-	// metadata filtering — `zotigo_session` ties together every turn
-	// of one persistent zotigo thread (including --resume runs);
-	// `process_start` ties together every turn of one process.
+	// Each turn gets its own Langfuse session (so cost/usage stay
+	// turn-bounded) but the per-turn sessionIds share the zotigo
+	// session.ID as a prefix — that keeps every turn of one zotigo
+	// invocation grouped in Langfuse's Sessions list under a common
+	// search prefix. Static metadata adds cross-startup grouping for
+	// --resume runs (where the prefix changes).
 	processStart := time.Now()
 	staticMeta := map[string]any{
 		"zotigo_session": currentSession.ID,
 		"process_start":  processStart.Format(time.RFC3339),
 		"resumed":        doResume,
 	}
-	observer := buildObserver(cfg.Observability, staticMeta)
+	observer := buildObserver(cfg.Observability, currentSession.ID, staticMeta)
 	defer func() {
 		ctx, cancel := contextWithTimeout(2 * time.Second)
 		defer cancel()

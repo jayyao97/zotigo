@@ -95,12 +95,12 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 		"name":      "turn",
 		"input":     userMsg.String(),
 		// Each turn gets its own Langfuse session — finest-grained
-		// scope. Cross-turn / cross-startup grouping is via
-		// metadata.zotigo_session, not sessionId. Format mirrors
-		// app-level conventions: readable timestamp + nano suffix
-		// for collision safety even when turns start in the same
-		// millisecond.
-		"sessionId": newSessionID(),
+		// scope so token usage and cost stay turn-bounded. The
+		// prefix matches the zotigo session.ID so the Sessions list
+		// still groups every turn of one zotigo invocation together
+		// by free-text search; metadata filters provide the same
+		// grouping plus cross-startup --resume coverage.
+		"sessionId": newSessionID(o.c.sessionIDPrefix),
 	}
 	// Static (process-level) metadata first, then per-turn metadata —
 	// per-turn wins on key conflict because it's more specific. Skip
@@ -113,14 +113,18 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 	return withTraceID(ctx, traceID)
 }
 
-// newSessionID mints a per-turn Langfuse session id. Format mirrors
-// zotigo's own session.ID convention (`sess_<unix_nano>`) so the
-// Sessions list is searchable by free-text prefix when metadata
-// filters aren't available, while the appended readable timestamp
-// lets users tell turns apart at a glance.
-func newSessionID() string {
-	now := time.Now().UTC()
-	return fmt.Sprintf("sess_%d_%s", now.UnixNano(), now.Format("20060102_150405"))
+// newSessionID mints a per-turn Langfuse session id of the form
+// `<prefix>_<readable_date>`. The shared prefix is the zotigo
+// session.ID so every turn of one zotigo invocation shows up in the
+// Sessions list under a common search prefix; the timestamp suffix
+// disambiguates per-turn sessions within that group. Falls back to a
+// timestamp-only id when prefix is empty.
+func newSessionID(prefix string) string {
+	stamp := time.Now().UTC().Format("20060102_150405.000000000")
+	if prefix == "" {
+		return stamp
+	}
+	return fmt.Sprintf("%s_%s", prefix, stamp)
 }
 
 // mergeMaps returns a new map combining a and b. b's keys win on

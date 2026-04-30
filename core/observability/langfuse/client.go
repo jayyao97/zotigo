@@ -42,6 +42,15 @@ type Config struct {
 	FlushInterval time.Duration // 0 → defaultFlushInterval
 	BufferSize    int           // 0 → defaultBufferSize
 
+	// SessionIDPrefix is the stable prefix every per-turn sessionId
+	// shares within one zotigo invocation. Mint a new Langfuse session
+	// per turn (so cost/usage stay turn-scoped) but keep the prefix
+	// constant so the Sessions list groups all turns of one zotigo
+	// session together by free-text search even when metadata filters
+	// aren't available. Empty → the observer falls back to a
+	// timestamp-only id.
+	SessionIDPrefix string
+
 	// StaticTraceMetadata is merged into every trace-create event's
 	// metadata field. Use it for process-level facts that don't change
 	// across turns (zotigo_session, process_start, resumed) so users
@@ -61,10 +70,11 @@ type event struct {
 }
 
 type client struct {
-	host        string
-	auth        string // Basic auth header value, precomputed
-	httpClient  *http.Client
-	staticTrace map[string]any // optional metadata merged into every trace-create
+	host            string
+	auth            string // Basic auth header value, precomputed
+	httpClient      *http.Client
+	sessionIDPrefix string         // optional prefix for per-turn sessionIds
+	staticTrace     map[string]any // optional metadata merged into every trace-create
 
 	mu     sync.Mutex
 	closed bool
@@ -94,12 +104,13 @@ func NewClient(cfg Config) *client {
 	}
 
 	c := &client{
-		host:        host,
-		auth:        basicAuth(cfg.PublicKey, cfg.SecretKey),
-		httpClient:  &http.Client{Timeout: defaultHTTPTimeout},
-		staticTrace: cfg.StaticTraceMetadata,
-		queue:       make(chan event, bufSize),
-		done:        make(chan struct{}),
+		host:            host,
+		auth:            basicAuth(cfg.PublicKey, cfg.SecretKey),
+		httpClient:      &http.Client{Timeout: defaultHTTPTimeout},
+		sessionIDPrefix: cfg.SessionIDPrefix,
+		staticTrace:     cfg.StaticTraceMetadata,
+		queue:           make(chan event, bufSize),
+		done:            make(chan struct{}),
 	}
 	go c.run(flush)
 	return c
