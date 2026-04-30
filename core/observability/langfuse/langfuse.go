@@ -120,7 +120,7 @@ func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, meta
 // disambiguates per-turn sessions within that group. Falls back to a
 // timestamp-only id when prefix is empty.
 func newSessionID(prefix string) string {
-	stamp := time.Now().UTC().Format("20060102_150405.000000000")
+	stamp := time.Now().UTC().Format("20060102_150405")
 	if prefix == "" {
 		return stamp
 	}
