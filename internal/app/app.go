@@ -2,6 +2,7 @@ package app
 
 import (
 	"bytes"
+	"context"
 	"flag"
 	"fmt"
 	"os"
@@ -19,6 +20,8 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
+	"github.com/jayyao97/zotigo/core/observability"
+	"github.com/jayyao97/zotigo/core/observability/langfuse"
 	"github.com/jayyao97/zotigo/core/providers"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
@@ -28,6 +31,32 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
+
+// buildObserver wires up an observability.Observer from config.
+// Returns Noop when no backend is enabled — callers don't have to
+// special-case the disabled path. sessionIDPrefix is the zotigo
+// session.ID, used as the shared prefix on every per-turn Langfuse
+// sessionId so the Sessions list groups all turns of one invocation
+// together by free-text search. staticMeta is merged into every
+// trace's metadata so users can also filter by process-level facts
+// (zotigo_session, process_start, resumed).
+func buildObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticMeta map[string]any) observability.Observer {
+	if cfg.Langfuse.IsEnabled() {
+		return langfuse.New(langfuse.Config{
+			Host:                cfg.Langfuse.Host,
+			PublicKey:           cfg.Langfuse.PublicKey,
+			SecretKey:           cfg.Langfuse.SecretKey,
+			FlushInterval:       time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
+			SessionIDPrefix:     sessionIDPrefix,
+			StaticTraceMetadata: staticMeta,
+		})
+	}
+	return observability.Noop{}
+}
+
+func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), d)
+}
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
 type KittyFilterWriter struct {
@@ -183,12 +212,42 @@ func Run(args []string) int {
 		}),
 	)
 
+	// Build observability backend before constructing the agent so it
+	// can be wired in as a single option. NewObserver returns Noop
+	// when langfuse credentials are absent; the agent never sees nil.
+	//
+	// Each turn gets its own Langfuse session (so cost/usage stay
+	// turn-bounded) but the per-turn sessionIds share the zotigo
+	// session.ID as a prefix — that keeps every turn of one zotigo
+	// invocation grouped in Langfuse's Sessions list under a common
+	// search prefix. Static metadata adds cross-startup grouping for
+	// --resume runs (where the prefix changes).
+	processStart := time.Now()
+	staticMeta := map[string]any{
+		"zotigo_session": currentSession.ID,
+		"process_start":  processStart.Format(time.RFC3339),
+		"resumed":        doResume,
+	}
+	observer := buildObserver(cfg.Observability, currentSession.ID, staticMeta)
+	defer func() {
+		ctx, cancel := contextWithTimeout(2 * time.Second)
+		defer cancel()
+		_ = observer.Close(ctx)
+	}()
+
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
 		agent.WithUserPromptWrapper(uw),
 		agent.WithSkillManager(sm),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
 		agent.WithTranscriptDir(transcriptDir),
+		agent.WithObserver(observer),
+		// ToolSpan goes outermost so it observes every tool call,
+		// including ones that ReadTracker short-circuits with a
+		// "file changed on disk" rejection — without seeing those,
+		// the trace tree skips the rejected call and the next-gen
+		// "retry after error" looks unmotivated.
+		agent.WithMiddleware(middleware.ToolSpan(observer)),
 		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
 	)
 	if err != nil {
@@ -212,7 +271,11 @@ func Run(args []string) int {
 					fmt.Sprintf("failed to create classifier provider %q: %v", classifierProfileName, err),
 				)(ag)
 			} else {
-				classifier := agent.NewProviderSafetyClassifier(classifierProvider, profile.Safety.Classifier)
+				classifier := agent.NewProviderSafetyClassifier(
+					classifierProvider,
+					profile.Safety.Classifier,
+					agent.WithClassifierObserver(observer, classifierProfile.Model),
+				)
 				agent.WithSafetyClassifier(classifier)(ag)
 			}
 		}

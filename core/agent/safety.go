@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/config"
@@ -73,8 +74,13 @@ type SafetyClassifierResponse struct {
 }
 
 // SafetyClassifier provides contextual decisions for high-risk actions.
+//
+// ctx flows in so implementations can attach observability spans
+// (Langfuse generations, OpenTelemetry, ...) to the active turn —
+// without it the classifier's hidden token cost is invisible in
+// trace tools.
 type SafetyClassifier interface {
-	Classify(req SafetyClassifierRequest) (SafetyClassifierResponse, error)
+	Classify(ctx context.Context, req SafetyClassifierRequest) (SafetyClassifierResponse, error)
 }
 
 // WithSafetyClassifier registers the classifier used for contextual safety decisions.

@@ -11,6 +11,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -25,11 +26,30 @@ type ProviderSafetyClassifier struct {
 	timeout   time.Duration
 	maxRecent int
 	maxChars  int
+
+	observer observability.Observer // Noop by default; never nil
+	model    string                 // recorded on classifier generations
+}
+
+// ClassifierOption configures a ProviderSafetyClassifier at construction.
+type ClassifierOption func(*ProviderSafetyClassifier)
+
+// WithClassifierObserver attaches an Observer that captures each
+// classifier call as a generation of kind=classifier. Without this,
+// the classifier's hidden token cost (a full LLM round-trip per
+// gated tool call) doesn't show up in trace tools.
+func WithClassifierObserver(o observability.Observer, model string) ClassifierOption {
+	return func(c *ProviderSafetyClassifier) {
+		if o != nil {
+			c.observer = o
+		}
+		c.model = model
+	}
 }
 
 // NewProviderSafetyClassifier creates a classifier backed by the given provider
 // and classifier configuration.
-func NewProviderSafetyClassifier(p providers.Provider, cfg config.SafetyClassifierConfig) *ProviderSafetyClassifier {
+func NewProviderSafetyClassifier(p providers.Provider, cfg config.SafetyClassifierConfig, opts ...ClassifierOption) *ProviderSafetyClassifier {
 	timeout := time.Duration(cfg.TimeoutMs) * time.Millisecond
 	if timeout <= 0 {
 		// Real-world classifier calls routinely take 10–20s even with
@@ -48,12 +68,17 @@ func NewProviderSafetyClassifier(p providers.Provider, cfg config.SafetyClassifi
 	if maxChars <= 0 {
 		maxChars = 1200
 	}
-	return &ProviderSafetyClassifier{
+	c := &ProviderSafetyClassifier{
 		provider:  p,
 		timeout:   timeout,
 		maxRecent: maxRecent,
 		maxChars:  maxChars,
+		observer:  observability.Noop{},
 	}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
 }
 
 const classifierToolName = "record_decision"
@@ -120,7 +145,7 @@ func (classifierDecisionTool) Classify(tools.SafetyCall) tools.SafetyDecision {
 const classifierMaxAttempts = 2
 
 // Classify implements SafetyClassifier.
-func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (SafetyClassifierResponse, error) {
+func (c *ProviderSafetyClassifier) Classify(ctx context.Context, req SafetyClassifierRequest) (SafetyClassifierResponse, error) {
 	userPrompt := c.buildUserPrompt(req)
 	debug.Logf(
 		"classifier start provider=%s tool=%s risk=%s prompt_chars=%d args_chars=%d",
@@ -133,7 +158,7 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 
 	var lastErr error
 	for attempt := 1; attempt <= classifierMaxAttempts; attempt++ {
-		resp, err, retriable := c.classifyOnce(req, userPrompt, attempt)
+		resp, err, retriable := c.classifyOnce(ctx, req, userPrompt, attempt)
 		if err == nil {
 			return resp, nil
 		}
@@ -152,8 +177,12 @@ func (c *ProviderSafetyClassifier) Classify(req SafetyClassifierRequest) (Safety
 // (stream setup errors, provider stream errors, context deadline)
 // from semantic failures (empty response, unparseable decision) —
 // only the former are worth another attempt.
-func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, userPrompt string, attempt int) (SafetyClassifierResponse, error, bool) {
-	ctx, cancel := context.WithTimeout(context.Background(), c.timeout)
+//
+// parentCtx flows in from Classify — derived (not replaced) when we
+// install our own per-attempt timeout so the active turn's traceID
+// stays accessible for observability.
+func (c *ProviderSafetyClassifier) classifyOnce(parentCtx context.Context, req SafetyClassifierRequest, userPrompt string, attempt int) (SafetyClassifierResponse, error, bool) {
+	ctx, cancel := context.WithTimeout(parentCtx, c.timeout)
 	defer cancel()
 
 	start := time.Now()
@@ -167,11 +196,40 @@ func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, use
 		},
 	}
 
-	stream, err := c.provider.StreamChat(ctx, msgs, []tools.Tool{classifierDecisionTool{}},
+	// Wrap the classifier's StreamChat in a Generation span so each
+	// attempt shows up in the trace as kind=classifier. Only the first
+	// attempt opens a span; retries after transport errors are
+	// already covered by the parent generation's error annotation —
+	// emitting one span per retry would clutter the trace tree.
+	var (
+		genCtx   = ctx
+		genEnded = false
+		usage    *protocol.Usage
+	)
+	if attempt == 1 {
+		genCtx = c.observer.StartGeneration(ctx, observability.GenerationClassifier, c.model, msgs,
+			[]tools.Tool{classifierDecisionTool{}},
+			map[string]any{
+				"tool_under_review": req.ToolName,
+				"risk_level":        req.RiskLevel,
+				"is_git_repo":       req.IsGitRepo,
+				"has_snapshot":      req.HasSnapshot,
+			})
+	}
+	endGen := func(out observability.GenerationOutput, gerr error) {
+		if attempt != 1 || genEnded {
+			return
+		}
+		genEnded = true
+		c.observer.EndGeneration(genCtx, out, usage, gerr)
+	}
+
+	stream, err := c.provider.StreamChat(genCtx, msgs, []tools.Tool{classifierDecisionTool{}},
 		providers.WithToolChoiceTool(classifierToolName),
 		providers.WithReasoningEffort("low"),
 	)
 	if err != nil {
+		endGen(observability.GenerationOutput{}, err)
 		debug.Logf("classifier error provider=%s tool=%s attempt=%d duration=%s err=%v",
 			c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), err)
 		return SafetyClassifierResponse{}, fmt.Errorf("classifier stream: %w", err), true
@@ -189,8 +247,11 @@ func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, use
 			if evt.ContentPartDelta != nil && evt.ContentPartDelta.Type != protocol.ContentTypeReasoning {
 				textBuf.WriteString(evt.ContentPartDelta.Text)
 			}
+		case protocol.EventTypeFinish:
+			usage = evt.Usage
 		case protocol.EventTypeError:
 			if evt.Error != nil {
+				endGen(observability.GenerationOutput{}, evt.Error)
 				debug.Logf("classifier stream error provider=%s tool=%s attempt=%d duration=%s err=%v",
 					c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), evt.Error)
 				return SafetyClassifierResponse{}, evt.Error, true
@@ -201,6 +262,7 @@ func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, use
 	// Context deadline exceeded mid-stream shows up here rather than as
 	// an explicit error event on some providers.
 	if ctx.Err() != nil && toolArgs == "" && textBuf.Len() == 0 {
+		endGen(observability.GenerationOutput{}, ctx.Err())
 		debug.Logf("classifier deadline provider=%s tool=%s attempt=%d duration=%s err=%v",
 			c.provider.Name(), req.ToolName, attempt, time.Since(start).Round(time.Millisecond), ctx.Err())
 		return SafetyClassifierResponse{}, ctx.Err(), true
@@ -219,13 +281,27 @@ func (c *ProviderSafetyClassifier) classifyOnce(req SafetyClassifierRequest, use
 		resp, err = parseClassifierResponse(textBuf.String())
 		source = "text_fallback"
 	default:
+		endGen(observability.GenerationOutput{}, fmt.Errorf("empty response"))
 		return SafetyClassifierResponse{}, fmt.Errorf("classifier returned empty response"), false
 	}
 	if err != nil {
+		endGen(observability.GenerationOutput{Text: textBuf.String()}, err)
 		debug.Logf("classifier parse error provider=%s tool=%s source=%s attempt=%d duration=%s err=%v",
 			c.provider.Name(), req.ToolName, source, attempt, time.Since(start).Round(time.Millisecond), err)
 		return SafetyClassifierResponse{}, err, false
 	}
+
+	// Successful classify — close the generation with the parsed
+	// decision as structured output. Backends serialize it verbatim
+	// so the trace shows {decision, reason, requires_snapshot}
+	// instead of a flattened "decision=allow reason=..." string.
+	endGen(observability.GenerationOutput{
+		Structured: map[string]any{
+			"decision":          string(resp.Decision),
+			"reason":            resp.Reason,
+			"requires_snapshot": resp.RequiresSnapshot,
+		},
+	}, nil)
 
 	debug.Logf(
 		"classifier end provider=%s tool=%s source=%s attempt=%d duration=%s decision=%s snapshot=%t",

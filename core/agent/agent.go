@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/services"
@@ -42,6 +43,17 @@ type Agent struct {
 	classifierUnavailableReason string
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
+
+	observer observability.Observer // Noop by default; never nil
+
+	// activeTraceCtx is a values-only snapshot (context.WithoutCancel)
+	// of the in-flight turn's ctx, kept while the agent is paused for
+	// approval. On resume we overlay the trace identity onto the
+	// caller's live ctx via observer.ResumeTrace — the caller's ctx
+	// keeps providing cancellation/deadline so a fresh approval ctx
+	// can cancel the resumed work without being shadowed by the
+	// original Run's deadline. Cleared at end-of-turn.
+	activeTraceCtx context.Context
 
 	middlewares []Middleware
 
@@ -123,6 +135,19 @@ func WithReminder(provider prompt.ReminderProvider) AgentOption {
 	}
 }
 
+// WithObserver wires an observability backend (typically Langfuse).
+// Passing nil resets to Noop. The agent always holds a non-nil
+// Observer so hot-path call sites can dispatch unconditionally.
+func WithObserver(obs observability.Observer) AgentOption {
+	return func(a *Agent) {
+		if obs == nil {
+			a.observer = observability.Noop{}
+			return
+		}
+		a.observer = obs
+	}
+}
+
 // New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
 func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) (*Agent, error) {
@@ -151,6 +176,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		turns:        make([]TurnAudit, 0),
 		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:   services.NewCompressor(compressorCfg),
+		observer:     observability.Noop{},
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -376,6 +402,53 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	go func() {
 		defer close(outCh)
 
+		// Trace lifecycle: fresh user input opens a trace; a tool-result
+		// continuation overlays the saved trace identity onto the
+		// caller's ctx so spans still nest under the original turn.
+		// EndTurn is deferred but skipped while we're paused — the
+		// turn resumes when the user approves.
+		var turnErr error
+		isFreshTurn := msg.Role == protocol.RoleUser
+		if isFreshTurn {
+			turnMeta := map[string]any{
+				"working_directory": a.executor.WorkDir(),
+				"platform":          a.executor.Platform(),
+				"provider":          a.provider.Name(),
+				"model":             a.cfg.Model,
+				"approval_policy":   string(a.policy),
+			}
+			if a.cfg.ThinkingLevel != "" {
+				turnMeta["thinking_level"] = a.cfg.ThinkingLevel
+			}
+			ctx = a.observer.StartTurn(ctx, msg, turnMeta)
+		} else {
+			a.mu.RLock()
+			saved := a.activeTraceCtx
+			a.mu.RUnlock()
+			if saved != nil {
+				ctx = a.observer.ResumeTrace(ctx, saved)
+			}
+		}
+		defer func() {
+			a.mu.RLock()
+			paused := a.state == StatePaused
+			a.mu.RUnlock()
+			if paused {
+				// Save a values-only snapshot. WithoutCancel detaches
+				// from the original Run's cancellation chain so the
+				// resumed work isn't pre-canceled by an aborted Run,
+				// and so we don't pin the parent ctx tree until resume.
+				a.mu.Lock()
+				a.activeTraceCtx = context.WithoutCancel(ctx)
+				a.mu.Unlock()
+				return
+			}
+			a.observer.EndTurn(ctx, turnErr)
+			a.mu.Lock()
+			a.activeTraceCtx = nil
+			a.mu.Unlock()
+		}()
+
 		emptyRecoveryAttempts := 0
 		const maxEmptyRecoveryAttempts = 1
 
@@ -424,11 +497,29 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				estimatedTokens,
 			)
 
-			stream, err := a.provider.StreamChat(ctx, msgs, toolList)
+			// One generation per StreamChat invocation. genCtx flows
+			// into the provider so any future provider-side child spans
+			// would attach correctly. End is called exactly once per
+			// iteration via endGen, which guards against double-firing
+			// when the iteration has multiple exit paths (success,
+			// reactive recovery, terminal error).
+			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, a.cfg.Model, msgs, toolList, nil)
+			genEnded := false
+			endGen := func(out observability.GenerationOutput, usage *protocol.Usage, gerr error) {
+				if genEnded {
+					return
+				}
+				genEnded = true
+				a.observer.EndGeneration(genCtx, out, usage, gerr)
+			}
+
+			stream, err := a.provider.StreamChat(genCtx, msgs, toolList)
 			if err != nil {
+				endGen(observability.GenerationOutput{}, nil, err)
 				if a.tryReactiveRecover(ctx, err, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
+				turnErr = err
 				outCh <- protocol.NewErrorEvent(err)
 				return
 			}
@@ -460,6 +551,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						reactiveRetries < maxReactiveRetries {
 						reactiveErr = evt.Error
 					} else {
+						turnErr = evt.Error
 						outCh <- evt
 					}
 					for range stream {
@@ -511,9 +603,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// mid-stream. Force a compaction and restart the outer
 			// loop so the same user turn gets retried once.
 			if reactiveErr != nil {
+				endGen(observability.GenerationOutput{}, nil, reactiveErr)
 				if a.tryReactiveRecover(ctx, reactiveErr, &reactiveRetries, maxReactiveRetries, outCh) {
 					continue
 				}
+				turnErr = reactiveErr
 				outCh <- protocol.NewErrorEvent(reactiveErr)
 				return
 			}
@@ -547,6 +641,27 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					asstMsg.Metadata = &protocol.MessageMetadata{}
 				}
 				asstMsg.Metadata.Usage = &normalized
+			}
+
+			// Generation completed normally — close it with the assembled
+			// output. Reasoning text is flattened from all blocks (we already
+			// have them in reasoningBlocks); tool calls are dereferenced into
+			// the flat shape Langfuse expects.
+			{
+				var reasoningText string
+				for _, rb := range reasoningBlocks {
+					reasoningText += rb.Text
+				}
+				calls := make([]protocol.ToolCall, 0, len(currentToolCalls))
+				for _, tc := range currentToolCalls {
+					calls = append(calls, *tc)
+				}
+				endGen(observability.GenerationOutput{
+					Text:         currentContent,
+					Reasoning:    reasoningText,
+					ToolCalls:    calls,
+					FinishReason: providerFinishReason,
+				}, providerUsage, nil)
 			}
 
 			debug.Logf(
@@ -599,7 +714,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				var immediateResults []protocol.ToolResult
 
 				for _, tc := range currentToolCalls {
-					decision := a.classifyToolCall(tc)
+					decision := a.classifyToolCall(ctx, tc)
 					a.appendSafetyEvent(AuditEvent{
 						ToolCallID:         tc.ID,
 						ToolName:           tc.Name,
@@ -648,6 +763,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 					results, err := a.executePendingActions(ctx)
 					if err != nil {
+						turnErr = err
 						outCh <- protocol.NewErrorEvent(err)
 						return
 					}
@@ -714,10 +830,18 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 // ApproveAndExecutePendingActions executes all pending tool calls and continues.
 func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan protocol.Event, error) {
+	// Overlay the saved turn's trace identity onto the caller's ctx
+	// so middleware-emitted spans and the follow-up generation nest
+	// under the original trace, while keeping the caller's
+	// cancellation/deadline (the approval ctx, not the original Run ctx).
 	a.mu.RLock()
+	saved := a.activeTraceCtx
 	actions := make([]*PendingAction, len(a.pendingActions))
 	copy(actions, a.pendingActions)
 	a.mu.RUnlock()
+	if saved != nil {
+		ctx = a.observer.ResumeTrace(ctx, saved)
+	}
 	for _, action := range actions {
 		a.appendSafetyEvent(AuditEvent{
 			ToolCallID:      action.ToolCallID,
@@ -765,11 +889,18 @@ func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 		a.mu.Unlock()
 		return nil, fmt.Errorf("agent is not paused")
 	}
+	// Overlay saved trace identity onto the caller's ctx — the TUI
+	// denial path calls us without going through ApproveAndExecute,
+	// so it needs the same ctx threading.
+	saved := a.activeTraceCtx
 	a.pendingActions = nil
 	a.state = StateRunning
 	msg := protocol.NewToolMessage(outputs)
 	a.history = append(a.history, msg)
 	a.mu.Unlock()
+	if saved != nil {
+		ctx = a.observer.ResumeTrace(ctx, saved)
+	}
 
 	for _, output := range outputs {
 		if output.Type != protocol.ToolResultTypeExecutionDenied {
@@ -978,7 +1109,7 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 // gets a prompt. When the threshold is set to "off", the classifier is
 // never called but LevelHigh calls still require user approval ("off"
 // disables classifier calls, not safety).
-func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
+func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
 		return ActionDecision{
@@ -1052,7 +1183,7 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 
 	// At or above the threshold: consult the classifier (when enabled).
 	if !classifierDisabled {
-		if resp, ok := a.classifyWithSafetyClassifier(tc, riskLabel); ok {
+		if resp, ok := a.classifyWithSafetyClassifier(ctx, tc, riskLabel); ok {
 			return resp
 		}
 	}
@@ -1066,7 +1197,7 @@ func (a *Agent) classifyToolCall(tc *protocol.ToolCall) ActionDecision {
 	}
 }
 
-func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel string) (ActionDecision, bool) {
+func (a *Agent) classifyWithSafetyClassifier(ctx context.Context, tc *protocol.ToolCall, riskLevel string) (ActionDecision, bool) {
 	if !a.cfg.Safety.Classifier.IsEnabled() {
 		return ActionDecision{}, false
 	}
@@ -1104,7 +1235,7 @@ func (a *Agent) classifyWithSafetyClassifier(tc *protocol.ToolCall, riskLevel st
 		rawCtx = summarizeClassifierRequest(req, limit)
 	}
 
-	resp, err := a.classifier.Classify(req)
+	resp, err := a.classifier.Classify(ctx, req)
 	if err != nil {
 		return ActionDecision{
 			Decision:   ExecutionDecisionRequireApproval,

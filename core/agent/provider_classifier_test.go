@@ -70,7 +70,7 @@ func TestClassifier_RetriesOnStreamSetupError(t *testing.T) {
 	}
 	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
 
-	resp, err := c.Classify(SafetyClassifierRequest{ToolName: "shell", RiskLevel: "normal"})
+	resp, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell", RiskLevel: "normal"})
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -94,7 +94,7 @@ func TestClassifier_RetriesOnStreamErrorEvent(t *testing.T) {
 	}
 	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
 
-	resp, err := c.Classify(SafetyClassifierRequest{ToolName: "shell", RiskLevel: "high"})
+	resp, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell", RiskLevel: "high"})
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
@@ -118,7 +118,7 @@ func TestClassifier_DoesNotRetryOnEmptyResponse(t *testing.T) {
 	}
 	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
 
-	_, err := c.Classify(SafetyClassifierRequest{ToolName: "shell"})
+	_, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell"})
 	if err == nil {
 		t.Fatal("expected error")
 	}
@@ -147,7 +147,7 @@ func TestClassifier_DoesNotRetryOnUnparseableDecision(t *testing.T) {
 	}
 	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
 
-	_, err := c.Classify(SafetyClassifierRequest{ToolName: "shell"})
+	_, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell"})
 	if err == nil {
 		t.Fatal("expected parse error")
 	}
@@ -169,7 +169,7 @@ func TestClassifier_GivesUpAfterMaxAttempts(t *testing.T) {
 	}
 	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
 
-	_, err := c.Classify(SafetyClassifierRequest{ToolName: "shell"})
+	_, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell"})
 	if err == nil {
 		t.Fatal("expected error after exhausting retries")
 	}
@@ -192,7 +192,7 @@ func TestClassifier_DefaultTimeoutApplied(t *testing.T) {
 		t.Fatalf("expected positive timeout, got %s", c.timeout)
 	}
 
-	resp, err := c.Classify(SafetyClassifierRequest{ToolName: "shell"})
+	resp, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell"})
 	if err != nil {
 		t.Fatalf("classify: %v", err)
 	}
