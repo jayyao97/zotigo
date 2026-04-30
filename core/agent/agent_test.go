@@ -80,6 +80,9 @@ func (t *TimeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelLow}
 }
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	return "12:00", nil
 }
 
@@ -2554,17 +2557,25 @@ func TestAgent_ApprovalContextOverridesSavedRunContext(t *testing.T) {
 	for range resumed {
 	}
 
-	// The follow-up generation (post-tool-result) is the smoking gun:
-	// it only runs if the resumed turn's ctx wasn't canceled. With the
-	// old code, the saved (canceled) ctx leaked through and aborted
-	// the loop before the second generation could fire.
-	var generations int
-	for _, c := range obs.calls {
-		if strings.HasPrefix(c, "StartGeneration:") {
-			generations++
+	// Smoking gun: the tool itself checks ctx.Err() (see TimeTool.Execute);
+	// if the canceled run ctx leaked through to executePendingActions,
+	// the tool would return context.Canceled and the result message in
+	// history would be an error result. The fix decouples the saved
+	// trace ctx from cancellation, so the tool sees the fresh approval
+	// ctx and runs cleanly.
+	hist := ag.Snapshot().History
+	var sawCleanToolResult bool
+	for _, m := range hist {
+		if m.Role != protocol.RoleTool {
+			continue
+		}
+		for _, p := range m.Content {
+			if p.ToolResult != nil && !p.ToolResult.IsError {
+				sawCleanToolResult = true
+			}
 		}
 	}
-	if generations < 2 {
-		t.Errorf("expected ≥2 generations (initial + post-approval), got %d in trail: %v", generations, obs.calls)
+	if !sawCleanToolResult {
+		t.Errorf("expected a non-error tool result post-approval; canceled run ctx likely leaked. calls: %v", obs.calls)
 	}
 }
