@@ -3,7 +3,6 @@ package langfuse
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/observability"
@@ -22,14 +21,6 @@ import (
 // requiring observers to track stacks.
 type observer struct {
 	c *client
-
-	// Span start times keyed by observation ID. Langfuse expects an
-	// endTime relative to a startTime, but its update events carry
-	// only endTime — we compute the duration locally so the API
-	// doesn't have to re-derive it. Lock contention here is bounded
-	// because spans are short-lived and per-turn.
-	mu     sync.Mutex
-	starts map[string]time.Time
 }
 
 // New constructs a Langfuse-backed observer. Returns Noop when
@@ -40,7 +31,7 @@ func New(cfg Config) observability.Observer {
 	if c == nil {
 		return observability.Noop{}
 	}
-	return &observer{c: c, starts: map[string]time.Time{}}
+	return &observer{c: c}
 }
 
 // --- Context-keyed IDs ---
@@ -95,7 +86,6 @@ func toolIDFrom(ctx context.Context) string {
 
 func (o *observer) StartTurn(ctx context.Context, userMsg protocol.Message, metadata map[string]any) context.Context {
 	traceID := newID()
-	o.recordStart(traceID)
 
 	body := map[string]any{
 		"id":        traceID,
@@ -132,7 +122,6 @@ func (o *observer) EndTurn(ctx context.Context, err error) {
 		body["level"] = "ERROR"
 	}
 	o.c.emit("trace-create", body) // Langfuse merges by id; reusing trace-create is the documented update path
-	o.consumeStart(traceID)
 }
 
 func (o *observer) StartGeneration(ctx context.Context, kind observability.GenerationKind, model string, msgs []protocol.Message, toolList []tools.Tool, metadata map[string]any) context.Context {
@@ -141,7 +130,6 @@ func (o *observer) StartGeneration(ctx context.Context, kind observability.Gener
 		return ctx
 	}
 	genID := newID()
-	o.recordStart(genID)
 
 	// input = {messages, tools} — the full prompt surface the model
 	// saw on this call, including tool schemas (debugging "did the
@@ -210,7 +198,6 @@ func (o *observer) EndGeneration(ctx context.Context, output observability.Gener
 		body["statusMessage"] = err.Error()
 	}
 	o.c.emit("generation-update", body)
-	o.consumeStart(genID)
 }
 
 // renderOutput picks the display shape for a generation's output.
@@ -236,7 +223,6 @@ func (o *observer) StartTool(ctx context.Context, name, arguments string) contex
 		return ctx
 	}
 	spanID := newID()
-	o.recordStart(spanID)
 
 	body := map[string]any{
 		"id":        spanID,
@@ -264,7 +250,6 @@ func (o *observer) EndTool(ctx context.Context, output any, err error) {
 		body["statusMessage"] = err.Error()
 	}
 	o.c.emit("span-update", body)
-	o.consumeStart(spanID)
 }
 
 // toolOutputBody picks what to render in the span's `output` slot.
@@ -296,18 +281,6 @@ func (o *observer) Close(ctx context.Context) error {
 }
 
 // --- Helpers ---
-
-func (o *observer) recordStart(id string) {
-	o.mu.Lock()
-	o.starts[id] = time.Now()
-	o.mu.Unlock()
-}
-
-func (o *observer) consumeStart(id string) {
-	o.mu.Lock()
-	delete(o.starts, id)
-	o.mu.Unlock()
-}
 
 func nowISO() string {
 	return time.Now().UTC().Format(time.RFC3339Nano)

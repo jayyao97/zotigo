@@ -107,18 +107,24 @@ func NewClient(cfg Config) *client {
 // emit queues an event for async flush. Drops silently if the buffer
 // is full or the client is closed — the caller must not block on
 // telemetry.
+//
+// The send is performed under the same lock that guards `closed` so
+// a concurrent Close() can't observe closed=false then race ahead and
+// `close(c.queue)` before this select runs — that ordering would
+// panic with "send on closed channel". Holding the lock across the
+// non-blocking send is cheap (no I/O, no allocation under lock) and
+// correctness-critical.
 func (c *client) emit(eventType string, body any) {
-	c.mu.Lock()
-	closed := c.closed
-	c.mu.Unlock()
-	if closed {
-		return
-	}
 	ev := event{
 		ID:        newID(),
 		Type:      eventType,
 		Timestamp: time.Now().UTC().Format(time.RFC3339Nano),
 		Body:      body,
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.closed {
+		return
 	}
 	select {
 	case c.queue <- ev:
