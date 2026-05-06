@@ -62,6 +62,31 @@ func TestConvertToAnthropicParams_SystemPrompt(t *testing.T) {
 	}
 }
 
+func TestConvertToAnthropicParams_CachesFirstSystemBlock(t *testing.T) {
+	msgs := []protocol.Message{
+		protocol.NewSystemMessage("static system"),
+		protocol.NewSystemMessage("dynamic system"),
+		protocol.NewUserMessage("Hi"),
+	}
+
+	params, err := convertToAnthropicParams(msgs, nil, providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if len(params.System) != 2 {
+		t.Fatalf("Expected 2 system blocks, got %d", len(params.System))
+	}
+
+	b, _ := json.Marshal(params.System)
+	jsonStr := string(b)
+	if !strings.Contains(jsonStr, `"text":"static system","cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("Expected cache_control on first system block: %s", jsonStr)
+	}
+	if strings.Contains(jsonStr, `"text":"dynamic system","cache_control"`) {
+		t.Fatalf("Expected dynamic system block to stay uncached: %s", jsonStr)
+	}
+}
+
 func TestConvertToAnthropicParams_AssistantWithToolCall(t *testing.T) {
 	msg := protocol.NewAssistantMessage("Let me check.")
 	msg.AddToolCall(protocol.ToolCall{
@@ -199,6 +224,53 @@ func TestConvertToAnthropicParams_Tools(t *testing.T) {
 	}
 	if !strings.Contains(jsonStr, `"path"`) {
 		t.Errorf("Expected path property in schema: %s", jsonStr)
+	}
+}
+
+func TestConvertToAnthropicParams_CachesLastMessageBlock(t *testing.T) {
+	params, err := convertToAnthropicParams([]protocol.Message{
+		protocol.NewUserMessage("first"),
+		protocol.NewAssistantMessage("first answer"),
+		protocol.NewUserMessage("second"),
+	}, nil, providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	if len(params.Messages) != 3 {
+		t.Fatalf("Expected 3 messages, got %d", len(params.Messages))
+	}
+	b, _ := json.Marshal(params.Messages[2])
+	jsonStr := string(b)
+	if !strings.Contains(jsonStr, `"text":"second"`) {
+		t.Fatalf("Expected final user text in params: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("Expected cache_control on final message block: %s", jsonStr)
+	}
+
+	b, _ = json.Marshal(params.Messages[0])
+	if strings.Contains(string(b), `"cache_control"`) {
+		t.Fatalf("Expected only final message block to get cache_control, got: %s", string(b))
+	}
+}
+
+func TestConvertToAnthropicParams_CachesFinalToolResultBlock(t *testing.T) {
+	tr := protocol.NewTextToolResult("call_1", "success", false)
+	params, err := convertToAnthropicParams([]protocol.Message{
+		protocol.NewToolMessage([]protocol.ToolResult{tr}),
+	}, nil, providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+
+	b, _ := json.Marshal(params.Messages[0])
+	jsonStr := string(b)
+	if !strings.Contains(jsonStr, `"type":"tool_result"`) {
+		t.Fatalf("Expected tool_result block, got: %s", jsonStr)
+	}
+	if !strings.Contains(jsonStr, `"cache_control":{"type":"ephemeral"}`) {
+		t.Fatalf("Expected cache_control on final tool_result block: %s", jsonStr)
 	}
 }
 

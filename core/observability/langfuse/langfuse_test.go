@@ -161,6 +161,131 @@ func TestObserver_GenerationAndToolAreSiblings(t *testing.T) {
 	}
 }
 
+func TestObserver_EndGeneration_UsesLangfuseUsageDetails(t *testing.T) {
+	srv, cs := newCaptureServer(t)
+	defer srv.Close()
+
+	obs := New(Config{
+		Host:          srv.URL,
+		PublicKey:     "pk",
+		SecretKey:     "sk",
+		FlushInterval: 50 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("u"), nil)
+	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "m", nil, nil, nil)
+	obs.EndGeneration(genCtx, observability.GenerationOutput{}, &protocol.Usage{
+		InputTokens:              10,
+		OutputTokens:             5,
+		CacheCreationInputTokens: 30,
+		CacheReadInputTokens:     40,
+	}, nil)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := obs.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var updateBody map[string]any
+	for _, ev := range cs.allEvents() {
+		if ev.Type != "generation-update" {
+			continue
+		}
+		var ok bool
+		updateBody, ok = ev.Body.(map[string]any)
+		if !ok {
+			t.Fatalf("generation-update body has type %T", ev.Body)
+		}
+		break
+	}
+	if updateBody == nil {
+		t.Fatal("missing generation-update event")
+	}
+	if _, ok := updateBody["usage_details"]; ok {
+		t.Fatal("generation-update used snake_case usage_details; Langfuse ingestion expects usageDetails")
+	}
+	if _, ok := updateBody["usage"]; ok {
+		t.Fatal("generation-update should not include deprecated usage alongside usageDetails")
+	}
+	usageDetails, ok := updateBody["usageDetails"].(map[string]any)
+	if !ok {
+		t.Fatalf("usageDetails missing or wrong type: %#v", updateBody["usageDetails"])
+	}
+	assertNumber(t, usageDetails, "input", 10)
+	assertNumber(t, usageDetails, "output", 5)
+	assertNumber(t, usageDetails, "cache_creation_input_tokens", 30)
+	assertNumber(t, usageDetails, "cache_read_input_tokens", 40)
+	assertNumber(t, usageDetails, "total", 85)
+}
+
+func TestObserver_EndGeneration_ReportsZeroCacheUsageDetails(t *testing.T) {
+	srv, cs := newCaptureServer(t)
+	defer srv.Close()
+
+	obs := New(Config{
+		Host:          srv.URL,
+		PublicKey:     "pk",
+		SecretKey:     "sk",
+		FlushInterval: 50 * time.Millisecond,
+	})
+
+	ctx := context.Background()
+	ctx = obs.StartTurn(ctx, protocol.NewUserMessage("u"), nil)
+	genCtx := obs.StartGeneration(ctx, observability.GenerationMain, "m", nil, nil, nil)
+	obs.EndGeneration(genCtx, observability.GenerationOutput{}, &protocol.Usage{
+		InputTokens:  10,
+		OutputTokens: 5,
+	}, nil)
+
+	closeCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := obs.Close(closeCtx); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	var usageDetails map[string]any
+	for _, ev := range cs.allEvents() {
+		if ev.Type != "generation-update" {
+			continue
+		}
+		body, ok := ev.Body.(map[string]any)
+		if !ok {
+			t.Fatalf("generation-update body has type %T", ev.Body)
+		}
+		usageDetails, ok = body["usageDetails"].(map[string]any)
+		if !ok {
+			t.Fatalf("usageDetails missing or wrong type: %#v", body["usageDetails"])
+		}
+		break
+	}
+	if usageDetails == nil {
+		t.Fatal("missing generation-update event")
+	}
+	assertNumber(t, usageDetails, "input", 10)
+	assertNumber(t, usageDetails, "output", 5)
+	assertNumber(t, usageDetails, "cache_creation_input_tokens", 0)
+	assertNumber(t, usageDetails, "cache_read_input_tokens", 0)
+	assertNumber(t, usageDetails, "total", 15)
+}
+
+func assertNumber(t *testing.T, m map[string]any, key string, want float64) {
+	t.Helper()
+	var got float64
+	switch v := m[key].(type) {
+	case int:
+		got = float64(v)
+	case float64:
+		got = v
+	default:
+		t.Fatalf("%s has type %T, want number", key, m[key])
+	}
+	if got != want {
+		t.Fatalf("%s = %.0f, want %.0f", key, got, want)
+	}
+}
+
 func TestNewClient_NilOnMissingCredentials(t *testing.T) {
 	if c := NewClient(Config{PublicKey: ""}); c != nil {
 		t.Error("NewClient should return nil when PublicKey is empty")

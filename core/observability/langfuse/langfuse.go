@@ -218,24 +218,20 @@ func (o *observer) EndGeneration(ctx context.Context, output observability.Gener
 	}
 	if usage != nil {
 		u := usage.Normalized()
-		// usage_details is Langfuse's modern free-form usage shape;
-		// it surfaces cache breakdown in the UI AND lets the server
-		// price cache reads at the discounted rate. The legacy
-		// `usage` block is kept as a redundant fallback for
-		// dashboards that don't yet read usage_details.
-		body["usage_details"] = map[string]any{
+		// usageDetails is Langfuse's modern free-form usage shape; it
+		// surfaces cache breakdown in the UI and lets the server price
+		// cache reads at the discounted rate. Do not also emit the
+		// deprecated `usage` block: Langfuse may render that legacy
+		// prompt total instead of the usageDetails breakdown, hiding
+		// cache_read_input_tokens.
+		usageDetails := map[string]any{
 			"input":                       u.InputTokens,
 			"output":                      u.OutputTokens,
 			"cache_read_input_tokens":     u.CacheReadInputTokens,
 			"cache_creation_input_tokens": u.CacheCreationInputTokens,
 			"total":                       u.TotalTokens,
 		}
-		body["usage"] = map[string]any{
-			"input":  u.TotalInput(), // full prompt size, including cached
-			"output": u.OutputTokens,
-			"total":  u.TotalTokens,
-			"unit":   "TOKENS",
-		}
+		body["usageDetails"] = usageDetails
 	}
 	if err != nil {
 		body["level"] = "ERROR"
