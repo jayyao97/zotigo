@@ -2,7 +2,9 @@ package tui
 
 import (
 	"fmt"
+	"strings"
 	"time"
+	"unicode/utf8"
 
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
@@ -12,7 +14,7 @@ import (
 var (
 	titleStyle        = lipgloss.NewStyle().MarginLeft(2).Bold(true).Foreground(lipgloss.Color("205"))
 	itemStyle         = lipgloss.NewStyle().PaddingLeft(4)
-	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("170")).Bold(true)
+	selectedItemStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("230")).Background(lipgloss.Color("62")).Bold(true)
 	descStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	//nolint:unused // Staged for the locked-session indicator on the resume picker.
 	lockedStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
@@ -24,6 +26,7 @@ type SessionSelectionModel struct {
 	cursor        int
 	offset        int
 	height        int
+	width         int
 	pendingDelete bool
 	statusMsg     string
 	ChosenID      string
@@ -42,13 +45,15 @@ func (m SessionSelectionModel) Init() tea.Cmd {
 	return nil
 }
 
-// visibleRows returns how many session rows fit on screen given the current
-// terminal height, reserving space for the title (2 lines) and footer (2 lines).
-// Returns 0 to signal "height unknown, render everything" (first frame before
-// WindowSizeMsg arrives).
+const defaultVisibleSessionRows = 12
+
+// visibleRows returns how many single-line session rows fit on screen given the
+// current terminal height, reserving space for the title and footer. Before the
+// first WindowSizeMsg, render a conservative page instead of the full list so a
+// long resume history cannot overflow the terminal.
 func (m SessionSelectionModel) visibleRows() int {
 	if m.height <= 0 {
-		return 0
+		return defaultVisibleSessionRows
 	}
 	return max(m.height-4, 3)
 }
@@ -99,6 +104,7 @@ func (m SessionSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
+		m.width = msg.Width
 		return m.clampOffset(), nil
 	case tea.KeyPressMsg:
 		key := msg.String()
@@ -190,11 +196,15 @@ func (m SessionSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m SessionSelectionModel) View() tea.View {
+	return tea.NewView(m.viewString())
+}
+
+func (m SessionSelectionModel) viewString() string {
 	if m.ChosenID != "" {
-		return tea.NewView("")
+		return ""
 	}
 	if m.quitting {
-		return tea.NewView("Bye!\n")
+		return "Bye!\n"
 	}
 
 	s := titleStyle.Render("Resume a Session") + "\n\n"
@@ -202,15 +212,12 @@ func (m SessionSelectionModel) View() tea.View {
 	if len(m.sessions) == 0 {
 		s += itemStyle.Render("No previous sessions found for this project.") + "\n"
 		s += itemStyle.Render("Press 'q' to quit, or run without --resume to start a new one.") + "\n"
-		return tea.NewView(s)
+		return s
 	}
 
-	start, end := 0, len(m.sessions)
 	visible := m.visibleRows()
-	if visible > 0 && len(m.sessions) > visible {
-		start = m.offset
-		end = min(start+visible, len(m.sessions))
-	}
+	start := m.offset
+	end := min(start+visible, len(m.sessions))
 
 	for i := start; i < end; i++ {
 		sess := m.sessions[i]
@@ -230,14 +237,7 @@ func (m SessionSelectionModel) View() tea.View {
 			ts = sess.UpdatedAt.Format("Jan 02 15:04")
 		}
 
-		// Prompt Preview
-		prompt := sess.LastPrompt
-		if prompt == "" {
-			prompt = "(No messages)"
-		}
-		if len(prompt) > 40 {
-			prompt = prompt[:37] + "..."
-		}
+		prompt := sessionPromptPreview(sess.LastPrompt, m.previewWidth())
 
 		line := fmt.Sprintf("%s [%s] %s", ts, sess.ID[5:13], prompt)
 
@@ -270,5 +270,50 @@ func (m SessionSelectionModel) View() tea.View {
 	default:
 		s += descStyle.Render("Use ↑/↓ to navigate • Enter to select • d to delete • Esc to quit") + "\n"
 	}
-	return tea.NewView(s)
+	return s
+}
+
+func (m SessionSelectionModel) previewWidth() int {
+	if m.width <= 0 {
+		return 44
+	}
+	// Indent + cursor + timestamp + id + spaces leave roughly this much
+	// horizontal room for the prompt on a normal terminal.
+	return max(m.width-28, 12)
+}
+
+func sessionPromptPreview(prompt string, maxWidth int) string {
+	prompt = strings.Join(strings.Fields(prompt), " ")
+	if prompt == "" {
+		prompt = "(No messages)"
+	}
+	return truncateDisplay(prompt, maxWidth)
+}
+
+func truncateDisplay(s string, maxWidth int) string {
+	if maxWidth <= 0 || lipgloss.Width(s) <= maxWidth {
+		return s
+	}
+	const ellipsis = "..."
+	if maxWidth <= len(ellipsis) {
+		return ellipsis[:maxWidth]
+	}
+	limit := maxWidth - len(ellipsis)
+	var b strings.Builder
+	width := 0
+	for len(s) > 0 {
+		r, size := utf8.DecodeRuneInString(s)
+		if r == utf8.RuneError && size == 0 {
+			break
+		}
+		ch := s[:size]
+		w := lipgloss.Width(ch)
+		if width+w > limit {
+			break
+		}
+		b.WriteString(ch)
+		width += w
+		s = s[size:]
+	}
+	return b.String() + ellipsis
 }

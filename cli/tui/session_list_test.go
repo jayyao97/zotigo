@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,8 +65,8 @@ func keyPress(s string) tea.KeyPressMsg {
 
 func TestVisibleRows_UnknownHeight(t *testing.T) {
 	m := newTestSessionsModel(50, 0, 0)
-	if got := m.visibleRows(); got != 0 {
-		t.Fatalf("unknown height should signal 0 (render all), got %d", got)
+	if got := m.visibleRows(); got != defaultVisibleSessionRows {
+		t.Fatalf("unknown height should render conservative page, got %d", got)
 	}
 }
 
@@ -211,5 +212,50 @@ func TestDelete_CursorClampsWhenLastRowDeleted(t *testing.T) {
 	}
 	if got.cursor != 1 {
 		t.Fatalf("cursor should clamp to new last index 1, got %d", got.cursor)
+	}
+}
+
+func TestView_UnknownHeightDoesNotRenderFullLongList(t *testing.T) {
+	m, _ := newTestModelWithStore(t, 50, 0, 0)
+	view := m.viewString()
+
+	if strings.Contains(view, "1–50 of 50") {
+		t.Fatalf("unknown-height view rendered the full long list:\n%s", view)
+	}
+	if !strings.Contains(view, fmt.Sprintf("1–%d of 50", defaultVisibleSessionRows)) {
+		t.Fatalf("unknown-height view should render one conservative page, got:\n%s", view)
+	}
+}
+
+func TestView_SessionRowsStaySingleLine(t *testing.T) {
+	m, _ := newTestModelWithStore(t, 20, 0, 8)
+	m.width = 48
+	m.sessions[0].LastPrompt = "<system-reminder>\n## Skills\n\n### Available skills"
+	m.sessions[1].LastPrompt = "再详细解释一下方程法、假设法和列表法"
+
+	view := m.viewString()
+	if strings.Contains(view, "## Skills") {
+		t.Fatalf("prompt preview should collapse embedded newlines, got:\n%s", view)
+	}
+	if strings.Contains(view, "�") {
+		t.Fatalf("prompt preview should not split UTF-8 runes, got:\n%s", view)
+	}
+	if got := strings.Count(view, "[test"); got != m.visibleRows() {
+		t.Fatalf("expected exactly %d rendered session rows, got %d:\n%s", m.visibleRows(), got, view)
+	}
+}
+
+func TestSessionPromptPreview(t *testing.T) {
+	got := sessionPromptPreview("再详细解释一下方程法、假设法和列表法", 12)
+	if strings.Contains(got, "�") {
+		t.Fatalf("preview split UTF-8 rune: %q", got)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Fatalf("long preview should end with ellipsis, got %q", got)
+	}
+
+	got = sessionPromptPreview("<system-reminder>\n## Skills", 80)
+	if strings.Contains(got, "\n") {
+		t.Fatalf("preview should collapse newlines, got %q", got)
 	}
 }
