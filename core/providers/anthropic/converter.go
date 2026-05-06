@@ -103,6 +103,7 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, t
 			}
 		}
 	}
+	markLastMessageBlockCacheable(anthropicMsgs)
 
 	params := anthropic.MessageNewParams{
 		Messages:  anthropicMsgs,
@@ -179,6 +180,26 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, t
 	}
 
 	return params, nil
+}
+
+func markLastMessageBlockCacheable(msgs []anthropic.MessageParam) {
+	if len(msgs) == 0 {
+		return
+	}
+	parts := msgs[len(msgs)-1].Content
+	for i := len(parts) - 1; i >= 0; i-- {
+		switch {
+		case parts[i].OfText != nil:
+			parts[i].OfText.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			return
+		case parts[i].OfToolUse != nil:
+			parts[i].OfToolUse.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			return
+		case parts[i].OfToolResult != nil:
+			parts[i].OfToolResult.CacheControl = anthropic.NewCacheControlEphemeralParam()
+			return
+		}
+	}
 }
 
 // convertToolResult converts a protocol ToolResult to an Anthropic ContentBlockParamUnion

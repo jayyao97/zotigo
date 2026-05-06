@@ -78,17 +78,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	if level == "" {
 		level = p.thinkingLevel
 	}
-	if level != "" {
-		params.Thinking = anthropic.ThinkingConfigParamUnion{
-			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
-				Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
-			},
-		}
-		params.OutputConfig.Effort = effortFromLevel(level)
-		if want := maxTokensForLevel(level); params.MaxTokens < want {
-			params.MaxTokens = want
-		}
-	}
+	applyThinkingConfig(&params, level, resolved.ToolChoice)
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
@@ -109,15 +99,13 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 		// Track usage across events:
 		//   - message_start carries input_tokens / cache_creation_input_tokens
 		//     / cache_read_input_tokens (absolute, not delta).
-		//   - message_delta carries the final output_tokens.
+		//   - message_delta carries the final cumulative usage.
 		//
-		// Trap: message_delta ALSO restates cache_creation/cache_read as
-		// cumulative absolute values — they're the same numbers as
-		// message_start, not increments. Clients that add them on top of
-		// message_start (LangChain.js, early Cline) end up with cache
+		// Trap: message_delta restates input/cache values as cumulative
+		// absolute values, not increments. Clients that add them on top
+		// of message_start (LangChain.js, early Cline) end up with cache
 		// counts that exceed input_tokens, which is impossible. We dodge
-		// this by (a) only reading OutputTokens from message_delta and
-		// (b) using `=` everywhere, never `+=`. Don't change either.
+		// this by using `=` everywhere, never `+=`. Don't change that.
 		var usage protocol.Usage
 
 		for stream.Next() {
@@ -125,16 +113,12 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 
 			switch event.Type {
 			case "message_start":
-				// Capture input token counts from the initial message
-				if event.Message.Usage.InputTokens > 0 {
-					usage.InputTokens = int(event.Message.Usage.InputTokens)
-				}
-				if event.Message.Usage.CacheCreationInputTokens > 0 {
-					usage.CacheCreationInputTokens = int(event.Message.Usage.CacheCreationInputTokens)
-				}
-				if event.Message.Usage.CacheReadInputTokens > 0 {
-					usage.CacheReadInputTokens = int(event.Message.Usage.CacheReadInputTokens)
-				}
+				updateUsage(&usage,
+					event.Message.Usage.InputTokens,
+					event.Message.Usage.CacheCreationInputTokens,
+					event.Message.Usage.CacheReadInputTokens,
+					event.Message.Usage.OutputTokens,
+				)
 
 			case "content_block_start":
 				switch event.ContentBlock.Type {
@@ -222,9 +206,12 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				}
 
 			case "message_delta":
-				if event.Usage.OutputTokens > 0 {
-					usage.OutputTokens = int(event.Usage.OutputTokens)
-				}
+				updateUsage(&usage,
+					event.Usage.InputTokens,
+					event.Usage.CacheCreationInputTokens,
+					event.Usage.CacheReadInputTokens,
+					event.Usage.OutputTokens,
+				)
 				if event.Delta.StopReason != "" {
 					reason := mapStopReason(event.Delta.StopReason)
 					finishEvt := protocol.NewFinishEvent(reason)
@@ -244,6 +231,38 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}()
 
 	return ch, nil
+}
+
+func applyThinkingConfig(params *anthropic.MessageNewParams, level string, toolChoice providers.ToolChoice) {
+	// Anthropic rejects thinking when tool_choice forces tool use.
+	// Classifier calls pin record_decision, so those must stay
+	// non-thinking even when the main profile has thinking enabled.
+	if level != "" && toolChoice.Mode == providers.ToolChoiceAuto {
+		params.Thinking = anthropic.ThinkingConfigParamUnion{
+			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
+				Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,
+			},
+		}
+		params.OutputConfig.Effort = effortFromLevel(level)
+		if want := maxTokensForLevel(level); params.MaxTokens < want {
+			params.MaxTokens = want
+		}
+	}
+}
+
+func updateUsage(usage *protocol.Usage, input, cacheCreate, cacheRead, output int64) {
+	if input > 0 {
+		usage.InputTokens = int(input)
+	}
+	if cacheCreate > 0 {
+		usage.CacheCreationInputTokens = int(cacheCreate)
+	}
+	if cacheRead > 0 {
+		usage.CacheReadInputTokens = int(cacheRead)
+	}
+	if output > 0 {
+		usage.OutputTokens = int(output)
+	}
 }
 
 func mapStopReason(reason anthropic.StopReason) protocol.FinishReason {
