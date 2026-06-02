@@ -80,6 +80,11 @@ func (t *Transport) Send(ctx context.Context, event protocol.Event) error {
 			})
 		}
 
+	case protocol.EventTypeToolProgress:
+		if event.ToolResult != nil && event.ToolResult.Text != "" {
+			return t.server.SendTextChunk(ctx, t.sessionID, event.ToolResult.Text+"\n")
+		}
+
 	case protocol.EventTypeError:
 		if event.Error != nil {
 			return t.server.SendTextChunk(ctx, t.sessionID, fmt.Sprintf("Error: %v", event.Error))

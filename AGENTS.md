@@ -129,7 +129,6 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - One logical change per commit. Squash WIP commits before pushing.
 - Branch names: `<kind>/<slug>` — `feat/`, `fix/`, `refactor/`, `docs/`, `chore/`. Examples: `feat/openai-reasoning-content`, `refactor/rename-hooks`.
 - PRs go to `master`. Title mirrors the commit subject. Body: Summary, Test plan, optional Notes / Dependencies.
-- Trailer: every commit ends with `Co-Authored-By: Claude ...` when an agent contributed.
 
 ## Boundaries
 

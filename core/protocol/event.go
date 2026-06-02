@@ -11,6 +11,7 @@ const (
 	// Tool Call Stream
 	EventTypeToolCallDelta  EventType = "tool_call_delta"
 	EventTypeToolCallEnd    EventType = "tool_call_end"
+	EventTypeToolProgress   EventType = "tool_progress"
 	EventTypeToolResultDone EventType = "tool_result_done"
 
 	// Control

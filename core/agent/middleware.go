@@ -4,6 +4,7 @@ import (
 	"context"
 
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -38,6 +39,29 @@ type ToolCall struct {
 // invokes the tool itself; every middleware between wraps its outer
 // neighbor.
 type Next func(ctx context.Context, call *ToolCall) (any, error)
+
+type toolEventSinkKey struct{}
+
+// ToolEventSink emits observational events from long-running tools.
+// It is optional: most tools ignore it and return a final ToolResult only.
+type ToolEventSink func(protocol.Event)
+
+type ToolOutputWithMetadata interface {
+	ToolOutputText() string
+	ToolResultMetadata() map[string]any
+}
+
+func withToolEventSink(ctx context.Context, sink ToolEventSink) context.Context {
+	if sink == nil {
+		return ctx
+	}
+	return context.WithValue(ctx, toolEventSinkKey{}, sink)
+}
+
+func ToolEventSinkFromContext(ctx context.Context) (ToolEventSink, bool) {
+	sink, ok := ctx.Value(toolEventSinkKey{}).(ToolEventSink)
+	return sink, ok && sink != nil
+}
 
 // Middleware is a tool-call wrapper in the HTTP-handler-middleware
 // style: given the next link, it returns a new link that does whatever

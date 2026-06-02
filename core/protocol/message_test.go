@@ -106,6 +106,7 @@ func TestUsageHelpers(t *testing.T) {
 func TestSessionAndLastTurnUsage(t *testing.T) {
 	usage1 := &protocol.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
 	usage2 := &protocol.Usage{InputTokens: 30, CacheReadInputTokens: 100, OutputTokens: 7, TotalTokens: 137}
+	toolUsage := &protocol.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}
 
 	history := []protocol.Message{
 		protocol.NewUserMessage("hi"),
@@ -116,12 +117,12 @@ func TestSessionAndLastTurnUsage(t *testing.T) {
 		protocol.NewUserMessage("again"),
 		{
 			Role:     protocol.RoleAssistant,
-			Metadata: &protocol.MessageMetadata{Usage: usage2},
+			Metadata: &protocol.MessageMetadata{Usage: usage2, ToolUsage: toolUsage},
 		},
 	}
 
 	total := protocol.SessionUsage(history)
-	if total.InputTokens != 40 || total.CacheReadInputTokens != 100 || total.OutputTokens != 12 || total.TotalTokens != 152 {
+	if total.InputTokens != 43 || total.CacheReadInputTokens != 100 || total.OutputTokens != 14 || total.TotalTokens != 157 {
 		t.Errorf("SessionUsage wrong: %+v", total)
 	}
 
@@ -129,7 +130,7 @@ func TestSessionAndLastTurnUsage(t *testing.T) {
 	if !ok {
 		t.Fatal("LastTurnUsage returned ok=false on populated history")
 	}
-	if last.OutputTokens != 7 {
+	if last.OutputTokens != 7 || last.InputTokens != 30 || last.TotalTokens != 137 {
 		t.Errorf("LastTurnUsage returned wrong turn: %+v", last)
 	}
 

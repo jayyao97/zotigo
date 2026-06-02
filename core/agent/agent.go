@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -57,11 +58,12 @@ type Agent struct {
 
 	middlewares []Middleware
 
-	mu             sync.RWMutex
-	state          State
-	history        []protocol.Message
-	pendingActions []*PendingAction
-	turns          []TurnAudit
+	mu              sync.RWMutex
+	state           State
+	history         []protocol.Message
+	pendingActions  []*PendingAction
+	deferredActions []*PendingAction
+	turns           []TurnAudit
 }
 
 // AgentOption configures an Agent during construction.
@@ -328,15 +330,18 @@ func (a *Agent) Snapshot() Snapshot {
 	copy(hist, a.history)
 	pending := make([]*PendingAction, len(a.pendingActions))
 	copy(pending, a.pendingActions)
+	deferred := make([]*PendingAction, len(a.deferredActions))
+	copy(deferred, a.deferredActions)
 	turns := make([]TurnAudit, len(a.turns))
 	copy(turns, a.turns)
 	return Snapshot{
-		State:          a.state,
-		History:        hist,
-		PendingActions: pending,
-		TurnSafety:     a.turnSafety,
-		Turns:          turns,
-		CreatedAt:      time.Now(),
+		State:           a.state,
+		History:         hist,
+		PendingActions:  pending,
+		DeferredActions: deferred,
+		TurnSafety:      a.turnSafety,
+		Turns:           turns,
+		CreatedAt:       time.Now(),
 	}
 }
 
@@ -347,6 +352,7 @@ func (a *Agent) Restore(s Snapshot) {
 	a.state = s.State
 	a.history = s.History
 	a.pendingActions = s.PendingActions
+	a.deferredActions = s.DeferredActions
 	a.turnSafety = s.TurnSafety
 	if s.Turns == nil {
 		a.turns = make([]TurnAudit, 0)
@@ -631,6 +637,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			for _, tc := range currentToolCalls {
 				asstMsg.AddToolCall(*tc)
 			}
+			a.mu.RLock()
+			toolUsage := usageFromLastToolMessage(a.history)
+			a.mu.RUnlock()
 			if providerUsage != nil {
 				// Normalize before persisting so consumers (cost cmd, TUI
 				// status line) can rely on TotalTokens being populated even
@@ -641,6 +650,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					asstMsg.Metadata = &protocol.MessageMetadata{}
 				}
 				asstMsg.Metadata.Usage = &normalized
+			}
+			if !isZeroUsage(toolUsage) {
+				normalized := toolUsage.Normalized()
+				if asstMsg.Metadata == nil {
+					asstMsg.Metadata = &protocol.MessageMetadata{}
+				}
+				asstMsg.Metadata.ToolUsage = &normalized
 			}
 
 			// Generation completed normally — close it with the assembled
@@ -711,9 +727,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			if len(currentToolCalls) > 0 {
 				var autoCalls []*PendingAction
 				var approvalCalls []*PendingAction
-				var immediateResults []protocol.ToolResult
+				var blockedCalls []*PendingAction
 
-				for _, tc := range currentToolCalls {
+				for i, tc := range currentToolCalls {
 					decision := a.classifyToolCall(ctx, tc)
 					a.appendSafetyEvent(AuditEvent{
 						ToolCallID:         tc.ID,
@@ -738,6 +754,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						Name:       tc.Name,
 						Arguments:  tc.Arguments,
 						Decision:   decision,
+						Order:      i,
 						ToolCall:   tc,
 					}
 					switch decision.Decision {
@@ -746,44 +763,36 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					case ExecutionDecisionRequireApproval:
 						approvalCalls = append(approvalCalls, action)
 					case ExecutionDecisionBlock:
-						immediateResults = append(immediateResults, protocol.ToolResult{
-							ToolCallID: tc.ID,
-							ToolName:   tc.Name,
-							Type:       protocol.ToolResultTypeExecutionDenied,
-							Reason:     decision.Reason,
-							IsError:    true,
-						})
+						blockedCalls = append(blockedCalls, action)
 					}
-				}
-
-				if len(autoCalls) > 0 {
-					a.mu.Lock()
-					a.pendingActions = append(a.pendingActions, autoCalls...)
-					a.mu.Unlock()
-
-					results, err := a.executePendingActions(ctx)
-					if err != nil {
-						turnErr = err
-						outCh <- protocol.NewErrorEvent(err)
-						return
-					}
-					immediateResults = append(immediateResults, results...)
-				}
-
-				if len(immediateResults) > 0 {
-					for i := range immediateResults {
-						outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &immediateResults[i]}
-					}
-					toolMsg := protocol.NewToolMessage(immediateResults)
-					a.mu.Lock()
-					a.history = append(a.history, toolMsg)
-					a.mu.Unlock()
 				}
 
 				if len(approvalCalls) > 0 {
 					a.mu.Lock()
 					a.state = StatePaused
 					a.pendingActions = append(a.pendingActions, approvalCalls...)
+					a.deferredActions = append(a.deferredActions, autoCalls...)
+					a.deferredActions = append(a.deferredActions, blockedCalls...)
+					a.mu.Unlock()
+					continue
+				}
+
+				executableCalls := orderedActions(append(autoCalls, blockedCalls...))
+				if len(executableCalls) > 0 {
+					results, err := a.executeActions(ctx, executableCalls, func(event protocol.Event) {
+						outCh <- event
+					}, true)
+					if err != nil {
+						turnErr = err
+						outCh <- protocol.NewErrorEvent(err)
+						return
+					}
+					for i := range results {
+						outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+					}
+					toolMsg := protocol.NewToolMessage(results)
+					a.mu.Lock()
+					a.history = append(a.history, toolMsg)
 					a.mu.Unlock()
 				}
 
@@ -838,6 +847,8 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	saved := a.activeTraceCtx
 	actions := make([]*PendingAction, len(a.pendingActions))
 	copy(actions, a.pendingActions)
+	deferred := make([]*PendingAction, len(a.deferredActions))
+	copy(deferred, a.deferredActions)
 	a.mu.RUnlock()
 	if saved != nil {
 		ctx = a.observer.ResumeTrace(ctx, saved)
@@ -859,31 +870,22 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 		})
 	}
 
-	results, err := a.executePendingActions(ctx)
-	if err != nil {
+	resolvedActions := orderedActions(append(deferred, actions...))
+	a.mu.RLock()
+	exec := a.executor
+	a.mu.RUnlock()
+	if err := a.ensureSnapshotForActions(ctx, exec, resolvedActions); err != nil {
 		return nil, err
 	}
-	innerCh, err := a.SubmitToolOutputs(ctx, results)
-	if err != nil {
-		return nil, err
-	}
-
-	// Prepend tool result events before the inner stream.
-	outCh := make(chan protocol.Event, len(results)+100)
-	for i := range results {
-		outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
-	}
-	go func() {
-		defer close(outCh)
-		for evt := range innerCh {
-			outCh <- evt
-		}
-	}()
-	return outCh, nil
+	return a.executeResolvedPendingActions(ctx, resolvedActions, false)
 }
 
 // SubmitToolOutputs submits tool results and resumes the agent loop.
 func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolResult) (<-chan protocol.Event, error) {
+	return a.submitToolOutputs(ctx, outputs, true)
+}
+
+func (a *Agent) submitToolOutputs(ctx context.Context, outputs []protocol.ToolResult, mergeDeferred bool) (<-chan protocol.Event, error) {
 	a.mu.Lock()
 	if a.state != StatePaused {
 		a.mu.Unlock()
@@ -893,8 +895,14 @@ func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 	// denial path calls us without going through ApproveAndExecute,
 	// so it needs the same ctx threading.
 	saved := a.activeTraceCtx
+	deferred := make([]*PendingAction, len(a.deferredActions))
+	copy(deferred, a.deferredActions)
 	a.pendingActions = nil
+	a.deferredActions = nil
 	a.state = StateRunning
+	if mergeDeferred && len(deferred) > 0 {
+		outputs = mergeDeferredSkippedResults(deferred, outputs, "another tool call in the batch was denied")
+	}
 	msg := protocol.NewToolMessage(outputs)
 	a.history = append(a.history, msg)
 	a.mu.Unlock()
@@ -922,67 +930,85 @@ func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 	return a.Run(ctx, "")
 }
 
-func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResult, error) {
+func (a *Agent) ResolvePendingActions(ctx context.Context, decisions map[string]protocol.ToolResult) (<-chan protocol.Event, error) {
 	a.mu.RLock()
-	actions := a.pendingActions
+	pending := append([]*PendingAction(nil), a.pendingActions...)
+	deferred := append([]*PendingAction(nil), a.deferredActions...)
+	a.mu.RUnlock()
+	if len(pending) == 0 {
+		return nil, fmt.Errorf("agent is not paused")
+	}
+
+	var approved []*PendingAction
+	var denied []protocol.ToolResult
+	deniedReasons := make([]string, 0)
+	for _, action := range pending {
+		result, ok := decisions[action.ToolCallID]
+		if !ok || result.Type != protocol.ToolResultTypeExecutionDenied {
+			approved = append(approved, action)
+			continue
+		}
+		if result.ToolName == "" {
+			result.ToolName = action.Name
+		}
+		if result.Reason == "" {
+			result.Reason = "User denied permission"
+		}
+		result.IsError = true
+		denied = append(denied, result)
+		deniedReasons = append(deniedReasons, result.Reason)
+	}
+
+	if len(denied) > 0 {
+		reason := commonDenialReason(deniedReasons)
+		for _, action := range approved {
+			denied = append(denied, skippedToolResult(action, reason))
+		}
+		outputs := mergeDeferredSkippedResults(deferred, denied, reason)
+		outputs = sortToolResultsByActionOrder(outputs, append(deferred, pending...))
+		innerCh, err := a.submitToolOutputs(ctx, outputs, false)
+		if err != nil {
+			return nil, err
+		}
+		return prependToolResultEvents(outputs, innerCh), nil
+	}
+
+	return a.executeResolvedPendingActions(ctx, orderedActions(append(deferred, approved...)), true)
+}
+
+func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) ([]protocol.ToolResult, error) {
+	a.mu.RLock()
 	exec := a.executor
 	a.mu.RUnlock()
 
-	if err := a.ensureSnapshotForActions(ctx, exec, actions); err != nil {
+	if ensureSnapshot {
+		if err := a.ensureSnapshotForActions(ctx, exec, actions); err != nil {
+			return nil, err
+		}
+	}
+
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
-	var results []protocol.ToolResult
-	for _, action := range actions {
-		// A loop-detector warning is prefixed to the real tool result
-		// (rather than appended as a separate ToolResult) so the tool
-		// call ID stays unique within the tool-role message we emit —
-		// OpenAI Chat Completions rejects a request whose messages
-		// contain two tool-role entries with the same tool_call_id.
-		var loopWarning string
-		if a.loopDetector != nil {
-			status := a.loopDetector.RecordCall(action.Name, action.Arguments)
-			if status.IsLooping {
-				loopWarning = fmt.Sprintf(
-					"<system-reminder>\nLoop detected: %s\nSuggestion: %s\nProceeding with execution anyway.\n</system-reminder>\n\n",
-					status.Pattern, status.Suggestion,
-				)
-			}
-		}
-
-		prefixed := func(text string) string {
-			if loopWarning == "" {
-				return text
-			}
-			return loopWarning + text
-		}
-
-		tool, ok := a.tools[action.Name]
-		if !ok {
-			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: Tool %s not found", action.Name)), true)
-			tr.ToolName = action.Name
-			results = append(results, tr)
+	results := make([]protocol.ToolResult, len(actions))
+	for start := 0; start < len(actions); {
+		if !canRunActionConcurrently(actions[start]) {
+			results[start] = a.executePendingAction(ctx, exec, actions[start], a.recordLoopWarning(actions[start]), eventSink)
+			start++
 			continue
 		}
-		call := &ToolCall{
-			Tool:      tool,
-			Name:      action.Name,
-			Arguments: action.Arguments,
-			Executor:  exec,
+
+		end := start + 1
+		for end < len(actions) && canRunActionConcurrently(actions[end]) {
+			end++
 		}
-		invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {
-			return c.Tool.Execute(ctx, c.Executor, c.Arguments)
-		})
-		res, err := invoke(ctx, call)
-		if err != nil {
-			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: %v", err)), true)
-			tr.ToolName = action.Name
-			results = append(results, tr)
-		} else {
-			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(formatToolOutput(res)), false)
-			tr.ToolName = action.Name
-			results = append(results, tr)
+		warnings := make([]string, end-start)
+		for i, action := range actions[start:end] {
+			warnings[i] = a.recordLoopWarning(action)
 		}
+		a.executePendingActionGroup(ctx, exec, actions[start:end], warnings, results[start:end], eventSink)
+		start = end
 	}
 	// Inject reminders into the last tool result
 	if len(results) > 0 && a.reminderBuilder != nil {
@@ -1006,8 +1032,219 @@ func (a *Agent) executePendingActions(ctx context.Context) ([]protocol.ToolResul
 
 	a.mu.Lock()
 	a.pendingActions = nil
+	a.deferredActions = nil
 	a.mu.Unlock()
 	return results, nil
+}
+
+func (a *Agent) executeResolvedPendingActions(ctx context.Context, actions []*PendingAction, ensureSnapshot bool) (<-chan protocol.Event, error) {
+	outCh := make(chan protocol.Event, len(actions)+100)
+	go func() {
+		defer close(outCh)
+		results, err := a.executeActions(ctx, actions, func(event protocol.Event) {
+			outCh <- event
+		}, ensureSnapshot)
+		if err != nil {
+			outCh <- protocol.NewErrorEvent(err)
+			return
+		}
+		innerCh, err := a.SubmitToolOutputs(ctx, results)
+		if err != nil {
+			outCh <- protocol.NewErrorEvent(err)
+			return
+		}
+		for i := range results {
+			outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+		}
+		for event := range innerCh {
+			outCh <- event
+		}
+	}()
+	return outCh, nil
+}
+
+func prependToolResultEvents(results []protocol.ToolResult, innerCh <-chan protocol.Event) <-chan protocol.Event {
+	outCh := make(chan protocol.Event, len(results)+100)
+	for i := range results {
+		outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+	}
+	go func() {
+		defer close(outCh)
+		for evt := range innerCh {
+			outCh <- evt
+		}
+	}()
+	return outCh
+}
+
+func canRunActionConcurrently(action *PendingAction) bool {
+	if action == nil {
+		return false
+	}
+	if action.Decision.RequiresSnapshot {
+		return false
+	}
+	if action.Decision.Decision == ExecutionDecisionAutoExecute &&
+		action.Decision.RiskLevel == tools.LevelSafe.String() &&
+		!action.Decision.RequiresSnapshot {
+		return true
+	}
+	return isApprovedReadOnlySubagent(action)
+}
+
+func isApprovedReadOnlySubagent(action *PendingAction) bool {
+	if action.Decision.Decision != ExecutionDecisionRequireApproval || action.Name != "spawn" {
+		return false
+	}
+	var args struct {
+		AgentType string `json:"agent_type"`
+	}
+	if err := json.Unmarshal([]byte(action.Arguments), &args); err != nil {
+		return false
+	}
+	return args.AgentType == "explore"
+}
+
+func orderedActions(actions []*PendingAction) []*PendingAction {
+	ordered := append([]*PendingAction(nil), actions...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return ordered[i].Order < ordered[j].Order
+	})
+	return ordered
+}
+
+func mergeDeferredSkippedResults(deferred []*PendingAction, outputs []protocol.ToolResult, reason string) []protocol.ToolResult {
+	results := make([]protocol.ToolResult, 0, len(deferred)+len(outputs))
+	for _, action := range deferred {
+		results = append(results, skippedToolResult(action, reason))
+	}
+	results = append(results, outputs...)
+
+	orderByID := make(map[string]int, len(deferred)+len(outputs))
+	for _, action := range deferred {
+		orderByID[action.ToolCallID] = action.Order
+	}
+	for i, output := range outputs {
+		if _, ok := orderByID[output.ToolCallID]; !ok {
+			orderByID[output.ToolCallID] = len(deferred) + i
+		}
+	}
+	sort.SliceStable(results, func(i, j int) bool {
+		return orderByID[results[i].ToolCallID] < orderByID[results[j].ToolCallID]
+	})
+	return results
+}
+
+func skippedToolResult(action *PendingAction, reason string) protocol.ToolResult {
+	if reason == "" {
+		reason = "another tool call in the batch was denied"
+	}
+	return protocol.ToolResult{
+		ToolCallID: action.ToolCallID,
+		ToolName:   action.Name,
+		Type:       protocol.ToolResultTypeExecutionDenied,
+		Reason:     "Skipped because " + reason,
+		IsError:    true,
+	}
+}
+
+func sortToolResultsByActionOrder(results []protocol.ToolResult, actions []*PendingAction) []protocol.ToolResult {
+	orderByID := make(map[string]int, len(actions))
+	for _, action := range actions {
+		orderByID[action.ToolCallID] = action.Order
+	}
+	ordered := append([]protocol.ToolResult(nil), results...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return orderByID[ordered[i].ToolCallID] < orderByID[ordered[j].ToolCallID]
+	})
+	return ordered
+}
+
+func commonDenialReason(reasons []string) string {
+	for _, reason := range reasons {
+		reason = strings.TrimSpace(reason)
+		if reason != "" {
+			return reason
+		}
+	}
+	return "another tool call in the batch was denied"
+}
+
+func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink) {
+	var wg sync.WaitGroup
+	for i, action := range actions {
+		i, action := i, action
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results[i] = a.executePendingAction(ctx, exec, action, warnings[i], eventSink)
+		}()
+	}
+	wg.Wait()
+}
+
+func (a *Agent) recordLoopWarning(action *PendingAction) string {
+	// A loop-detector warning is prefixed to the real tool result (rather than
+	// appended as a separate ToolResult) so the tool call ID stays unique within
+	// the tool-role message we emit.
+	if a.loopDetector == nil {
+		return ""
+	}
+	status := a.loopDetector.RecordCall(action.Name, action.Arguments)
+	if !status.IsLooping {
+		return ""
+	}
+	return fmt.Sprintf(
+		"<system-reminder>\nLoop detected: %s\nSuggestion: %s\nProceeding with execution anyway.\n</system-reminder>\n\n",
+		status.Pattern,
+		status.Suggestion,
+	)
+}
+
+func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor, action *PendingAction, loopWarning string, eventSink ToolEventSink) protocol.ToolResult {
+	prefixed := func(text string) string {
+		if loopWarning == "" {
+			return text
+		}
+		return loopWarning + text
+	}
+
+	if action.Decision.Decision == ExecutionDecisionBlock {
+		return protocol.ToolResult{
+			ToolCallID: action.ToolCallID,
+			ToolName:   action.Name,
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     action.Decision.Reason,
+			IsError:    true,
+		}
+	}
+
+	tool, ok := a.tools[action.Name]
+	if !ok {
+		tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: Tool %s not found", action.Name)), true)
+		tr.ToolName = action.Name
+		return tr
+	}
+	call := &ToolCall{
+		Tool:      tool,
+		Name:      action.Name,
+		Arguments: action.Arguments,
+		Executor:  exec,
+	}
+	ctx = withToolEventSink(ctx, eventSink)
+	invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {
+		return c.Tool.Execute(ctx, c.Executor, c.Arguments)
+	})
+	res, err := invoke(ctx, call)
+	if err != nil {
+		tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: %v", err)), true)
+		tr.ToolName = action.Name
+		return tr
+	}
+	tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(formatToolOutput(res)), false)
+	tr.ToolName = action.Name
+	tr.Metadata = toolResultMetadata(res)
+	return tr
 }
 
 func (a *Agent) startNewTurn(userPrompt string) {
@@ -1108,7 +1345,8 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 // LevelMedium. Manual threshold is fixed at LevelLow — any mutation
 // gets a prompt. When the threshold is set to "off", the classifier is
 // never called but LevelHigh calls still require user approval ("off"
-// disables classifier calls, not safety).
+// disables classifier calls, not safety). Tools can set RequiresApproval
+// for scope-expansion cases that must be user-approved even in Auto mode.
 func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
@@ -1136,6 +1374,16 @@ func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) Act
 			Source:    SafetyDecisionSourceHardRule,
 			Reason:    decision.Reason,
 			RiskLevel: riskLabel,
+		}
+	}
+
+	if decision.RequiresApproval {
+		return ActionDecision{
+			Decision:         ExecutionDecisionRequireApproval,
+			Source:           SafetyDecisionSourceHardRule,
+			Reason:           decision.Reason,
+			RiskLevel:        riskLabel,
+			RequiresSnapshot: decision.RequiresSnapshot,
 		}
 	}
 
@@ -1439,6 +1687,8 @@ func mapExecutionDecision(decision ExecutionDecision) SafetyClassifierDecision {
 // Slices are joined with newlines instead of Go's default bracket format.
 func formatToolOutput(v any) string {
 	switch val := v.(type) {
+	case ToolOutputWithMetadata:
+		return val.ToolOutputText()
 	case string:
 		return val
 	case []string:
@@ -1452,6 +1702,90 @@ func formatToolOutput(v any) string {
 	default:
 		return fmt.Sprintf("%v", v)
 	}
+}
+
+func toolResultMetadata(v any) map[string]any {
+	withMetadata, ok := v.(ToolOutputWithMetadata)
+	if !ok {
+		return nil
+	}
+	metadata := withMetadata.ToolResultMetadata()
+	if len(metadata) == 0 {
+		return nil
+	}
+	return metadata
+}
+
+func usageFromLastToolMessage(history []protocol.Message) protocol.Usage {
+	if len(history) == 0 || history[len(history)-1].Role != protocol.RoleTool {
+		return protocol.Usage{}
+	}
+	var total protocol.Usage
+	for _, part := range history[len(history)-1].Content {
+		if part.Type != protocol.ContentTypeToolResult || part.ToolResult == nil {
+			continue
+		}
+		total = total.Add(usageFromToolResultMetadata(part.ToolResult.Metadata))
+	}
+	return total.Normalized()
+}
+
+func usageFromToolResultMetadata(metadata map[string]any) protocol.Usage {
+	if len(metadata) == 0 {
+		return protocol.Usage{}
+	}
+	switch usage := metadata["usage"].(type) {
+	case protocol.Usage:
+		return usage.Normalized()
+	case *protocol.Usage:
+		if usage == nil {
+			return protocol.Usage{}
+		}
+		return usage.Normalized()
+	case map[string]any:
+		return usageFromMap(usage).Normalized()
+	case map[string]int:
+		return protocol.Usage{
+			InputTokens:              usage["input_tokens"],
+			OutputTokens:             usage["output_tokens"],
+			TotalTokens:              usage["total_tokens"],
+			CacheCreationInputTokens: usage["cache_creation_input_tokens"],
+			CacheReadInputTokens:     usage["cache_read_input_tokens"],
+		}.Normalized()
+	default:
+		return protocol.Usage{}
+	}
+}
+
+func usageFromMap(values map[string]any) protocol.Usage {
+	return protocol.Usage{
+		InputTokens:              intFromAny(values["input_tokens"]),
+		OutputTokens:             intFromAny(values["output_tokens"]),
+		TotalTokens:              intFromAny(values["total_tokens"]),
+		CacheCreationInputTokens: intFromAny(values["cache_creation_input_tokens"]),
+		CacheReadInputTokens:     intFromAny(values["cache_read_input_tokens"]),
+	}
+}
+
+func intFromAny(v any) int {
+	switch n := v.(type) {
+	case int:
+		return n
+	case int64:
+		return int(n)
+	case float64:
+		return int(n)
+	default:
+		return 0
+	}
+}
+
+func isZeroUsage(usage protocol.Usage) bool {
+	return usage.InputTokens == 0 &&
+		usage.OutputTokens == 0 &&
+		usage.TotalTokens == 0 &&
+		usage.CacheCreationInputTokens == 0 &&
+		usage.CacheReadInputTokens == 0
 }
 
 func (a *Agent) buildContext() []protocol.Message {

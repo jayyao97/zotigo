@@ -84,6 +84,8 @@ type ApprovalResult struct {
 	ToolCallID string
 	// Approved is true if the user approved this tool call
 	Approved bool
+	// Reason carries the user's denial reason when Approved is false.
+	Reason string
 	// ModifiedArgs allows the user to modify arguments (optional)
 	ModifiedArgs string
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/transport"
 )
 
 var (
@@ -53,6 +54,9 @@ type Model struct {
 	thinking           bool
 	approving          bool
 	approvalChoice     int
+	approvalItemChoice int
+	pendingApprovals   []*agent.PendingAction
+	approvalDecisions  map[string]bool
 	pendingToolName    string
 	pendingToolArgs    string
 	err                error
@@ -114,7 +118,7 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
 		m.approving = true
 		m.approvalChoice = 0
-		m.pendingToolName = formatPendingActions(snap.PendingActions)
+		m.setPendingApprovals(snap.PendingActions)
 	}
 
 	return m
@@ -241,8 +245,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				switch m.approvalChoice {
 				case 0: // Accept
-					return m.submitApproval(true)
+					if len(m.pendingApprovals) > 1 {
+						return m.acceptCurrentApproval()
+					}
+					return m.submitApproval()
 				case 1: // Deny → back to input
+					if len(m.pendingApprovals) > 1 {
+						return m.denyCurrentApproval("")
+					}
 					return m.denyAndReturn("")
 				case 2: // Feedback textarea → deny with text
 					v := m.input.Value()
@@ -250,6 +260,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil // empty text, do nothing
 					}
 					m.input.Reset()
+					if len(m.pendingApprovals) > 1 {
+						return m.denyCurrentApproval(v)
+					}
 					return m.denyAndReturn(v)
 				}
 			}
@@ -459,6 +472,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
 				}
 			}
+		case protocol.EventTypeToolProgress:
+			if msg.ToolResult != nil {
+				rendered := formatToolResult(msg.ToolResult, 10)
+				m.currentAsstMsg += rendered + "\n"
+				if cmd := m.flushStreamedLines(); cmd != nil {
+					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
+				}
+			}
 		case protocol.EventTypeFinish:
 			m.thinking = false
 			m.streamingReasoning = false
@@ -477,7 +498,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if msg.FinishReason == "need_approval" {
 					m.approving = true
 					m.approvalChoice = 0
-					m.pendingToolName = formatPendingActions(snap.PendingActions)
+					m.setPendingApprovals(snap.PendingActions)
 					m.pendingToolArgs = ""
 					m.saveSession()
 					if len(batchCmds) > 0 {
@@ -509,7 +530,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if msg.FinishReason == "need_approval" {
 				m.approving = true
 				m.approvalChoice = 0
-				m.pendingToolName = formatPendingActions(snap.PendingActions)
+				m.setPendingApprovals(snap.PendingActions)
 				m.pendingToolArgs = ""
 
 				m.currentAsstMsg = ""
@@ -607,33 +628,14 @@ func (m *Model) buildCmdEnv(output *strings.Builder) *commands.Environment {
 	}
 }
 
-func (m Model) submitApproval(approved bool) (Model, tea.Cmd) {
+func (m Model) submitApproval() (Model, tea.Cmd) {
 	m.approving = false
-	status := "✅ Approved"
-	if !approved {
-		status = "🚫 Denied"
-	}
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
+	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, "✅ Approved")
 	m.thinking = true
 	m.turnStartTime = time.Now()
 
 	cmd := func() tea.Msg {
-		var ch <-chan protocol.Event
-		var err error
-		if approved {
-			ch, err = m.agent.ApproveAndExecutePendingActions(m.ctx)
-		} else {
-			snap := m.agent.Snapshot()
-			var outputs []protocol.ToolResult
-			for _, act := range snap.PendingActions {
-				outputs = append(outputs, protocol.ToolResult{
-					ToolCallID: act.ToolCallID,
-					Type:       protocol.ToolResultTypeExecutionDenied,
-					Reason:     "User denied in TUI",
-				})
-			}
-			ch, err = m.agent.SubmitToolOutputs(m.ctx, outputs)
-		}
+		ch, err := m.agent.ApproveAndExecutePendingActions(m.ctx)
 		if err != nil {
 			return errMsg(err)
 		}
@@ -641,6 +643,106 @@ func (m Model) submitApproval(approved bool) (Model, tea.Cmd) {
 	}
 
 	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+}
+
+func (m *Model) setPendingApprovals(actions []*agent.PendingAction) {
+	m.pendingApprovals = append([]*agent.PendingAction(nil), actions...)
+	m.approvalDecisions = make(map[string]bool, len(actions))
+	m.approvalItemChoice = 0
+	m.pendingToolName = formatPendingActions(actions)
+}
+
+func (m Model) acceptCurrentApproval() (Model, tea.Cmd) {
+	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
+		return m, nil
+	}
+	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = true
+	if m.approvalItemChoice < len(m.pendingApprovals)-1 {
+		m.approvalItemChoice++
+		m.approvalChoice = 0
+		return m, nil
+	}
+	return m.submitApprovalBatch("")
+}
+
+func (m Model) denyCurrentApproval(reason string) (Model, tea.Cmd) {
+	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
+		return m, nil
+	}
+	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = false
+	return m.submitApprovalBatch(reason)
+}
+
+func (m Model) submitApprovalBatch(reason string) (Model, tea.Cmd) {
+	m.approving = false
+	if strings.TrimSpace(reason) == "" {
+		reason = "User denied in TUI"
+	}
+
+	results := make([]transport.ApprovalResult, 0, len(m.pendingApprovals))
+	denied := 0
+	approved := 0
+	for _, action := range m.pendingApprovals {
+		approvedDecision, decided := m.approvalDecisions[action.ToolCallID]
+		if !decided {
+			continue
+		}
+		result := transport.ApprovalResult{ToolCallID: action.ToolCallID, Approved: approvedDecision}
+		if !approvedDecision {
+			result.Reason = reason
+			denied++
+		} else {
+			approved++
+		}
+		results = append(results, result)
+	}
+
+	status := fmt.Sprintf("✅ Approved %d", approved)
+	if denied > 0 {
+		status = fmt.Sprintf("🚫 Denied %d/%d · skipped all pending calls", denied, len(m.pendingApprovals))
+	}
+	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
+	m.thinking = true
+	m.turnStartTime = time.Now()
+
+	cmd := func() tea.Msg {
+		ch, err := m.agent.ResolvePendingActions(m.ctx, deniedToolResultsFromTUI(results, m.pendingApprovals))
+		if err != nil {
+			return errMsg(err)
+		}
+		return streamReadyMsg(ch)
+	}
+
+	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+}
+
+func deniedToolResultsFromTUI(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
+	byID := make(map[string]*agent.PendingAction, len(pending))
+	for _, action := range pending {
+		byID[action.ToolCallID] = action
+	}
+	denied := make(map[string]protocol.ToolResult)
+	for _, result := range results {
+		if result.Approved {
+			continue
+		}
+		action, ok := byID[result.ToolCallID]
+		if !ok {
+			continue
+		}
+		reason := result.Reason
+		if reason == "" {
+			reason = "User denied in TUI"
+		}
+		denied[result.ToolCallID] = protocol.ToolResult{
+			ToolCallID: result.ToolCallID,
+			ToolName:   action.Name,
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     reason,
+			IsError:    true,
+		}
+	}
+	return denied
 }
 
 func (m Model) denyAndReturn(feedback string) (Model, tea.Cmd) {
@@ -662,8 +764,10 @@ func (m Model) denyAndReturn(feedback string) (Model, tea.Cmd) {
 	for _, act := range snap.PendingActions {
 		outputs = append(outputs, protocol.ToolResult{
 			ToolCallID: act.ToolCallID,
+			ToolName:   act.Name,
 			Type:       protocol.ToolResultTypeExecutionDenied,
 			Reason:     reason,
+			IsError:    true,
 		})
 	}
 
@@ -743,7 +847,28 @@ func (m Model) View() tea.View {
 	}
 
 	if m.approving {
-		sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
+		if len(m.pendingApprovals) > 1 {
+			current := m.pendingApprovals[m.approvalItemChoice]
+			tc := current.ToolCall
+			if tc == nil {
+				tc = &protocol.ToolCall{Name: current.Name, Arguments: current.Arguments}
+			}
+			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + formatToolCall(tc) + "\n")
+			sb.WriteString(blurredChoice.Render(fmt.Sprintf("  Approval %d/%d", m.approvalItemChoice+1, len(m.pendingApprovals))) + "\n")
+			if hint := approvalHintForAction(current); hint != "" {
+				sb.WriteString(blurredChoice.Render("  " + hint))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
+			if len(m.pendingApprovals) == 1 {
+				if hint := approvalHintForAction(m.pendingApprovals[0]); hint != "" {
+					sb.WriteString(blurredChoice.Render("  " + hint))
+					sb.WriteString("\n")
+				}
+			}
+		}
 
 		// Accept line
 		if m.approvalChoice == 0 {
@@ -753,10 +878,11 @@ func (m Model) View() tea.View {
 		}
 
 		// Deny line
+		denyLabel := denyLabelForApprovalCount(len(m.pendingApprovals))
 		if m.approvalChoice == 1 {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Deny")))
+			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel)))
 		} else {
-			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Deny")))
+			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render(denyLabel)))
 		}
 
 		// Feedback input line
@@ -1137,13 +1263,14 @@ func formatToolCall(tc *protocol.ToolCall) string {
 		return name + "()"
 	}
 
+	if tc.Name == "spawn" {
+		return formatSpawnToolCall(name, args)
+	}
+
 	// Try the known primary arg first.
 	if key, ok := primaryArgKey[tc.Name]; ok {
 		if v, found := args[key]; found {
-			s := fmt.Sprintf("%v", v)
-			if len(s) > 80 {
-				s = s[:77] + "..."
-			}
+			s := truncateToolArg(fmt.Sprintf("%v", v))
 			return fmt.Sprintf("%s(%s)", name, s)
 		}
 	}
@@ -1154,17 +1281,78 @@ func formatToolCall(tc *protocol.ToolCall) string {
 		if len(s) > 200 {
 			continue // skip large values
 		}
-		if len(s) > 80 {
-			s = s[:77] + "..."
-		}
+		s = truncateToolArg(s)
 		return fmt.Sprintf("%s(%s=%s)", name, k, s)
 	}
 
 	return name + "(...)"
 }
 
+func formatSpawnToolCall(name string, args map[string]any) string {
+	var parts []string
+	if v, ok := args["name"]; ok {
+		parts = append(parts, "name="+truncateToolArg(fmt.Sprintf("%v", v)))
+	}
+	if v, ok := args["agent_type"]; ok {
+		parts = append(parts, "agent_type="+truncateToolArg(fmt.Sprintf("%v", v)))
+	}
+	if v, ok := args["workdir"]; ok {
+		parts = append(parts, "workdir="+truncateToolArg(fmt.Sprintf("%v", v)))
+	}
+	if len(parts) == 0 {
+		if v, ok := args["description"]; ok {
+			parts = append(parts, "description="+truncateToolArg(fmt.Sprintf("%v", v)))
+		}
+	}
+	if len(parts) == 0 {
+		return name + "(...)"
+	}
+	return fmt.Sprintf("%s(%s)", name, strings.Join(parts, ", "))
+}
+
+func approvalHintForAction(action *agent.PendingAction) string {
+	if action == nil || action.Name != "spawn" {
+		return ""
+	}
+	arguments := action.Arguments
+	if arguments == "" && action.ToolCall != nil {
+		arguments = action.ToolCall.Arguments
+	}
+	var args map[string]any
+	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+		return ""
+	}
+	agentType := fmt.Sprintf("%v", args["agent_type"])
+	if agentType == "explore" {
+		return ""
+	}
+	return "child agent may run write/shell tools inside its workdir without further prompts"
+}
+
+func denyLabelForApprovalCount(count int) string {
+	if count > 1 {
+		return "Deny batch"
+	}
+	return "Deny"
+}
+
+func truncateToolArg(s string) string {
+	if len(s) > 80 {
+		return s[:77] + "..."
+	}
+	return s
+}
+
 // formatToolResult renders tool result lines with ⎿ prefix and indentation.
 func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
+	if tr.Type == protocol.ToolResultTypeExecutionDenied {
+		reason := strings.TrimSpace(tr.Reason)
+		if reason == "" {
+			reason = "permission denied"
+		}
+		return "  " + errorStyle.Render("⎿  Denied: "+reason)
+	}
+
 	if tr.IsError || tr.Type == protocol.ToolResultTypeErrorText || tr.Type == protocol.ToolResultTypeErrorJSON {
 		errText := tr.Text
 		if errText == "" {
@@ -1193,10 +1381,6 @@ func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
 			text = string(b)
 		}
 	}
-	if tr.Type == protocol.ToolResultTypeExecutionDenied {
-		text = "Denied: " + tr.Reason
-	}
-
 	if text == "" {
 		return resultStyle.Render("  ⎿  (No output)")
 	}
