@@ -8,7 +8,9 @@ import (
 	osexec "os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/agent/prompt"
@@ -84,6 +86,215 @@ func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args str
 		return nil, err
 	}
 	return "12:00", nil
+}
+
+type BatchToolProvider struct {
+	Step      int
+	Tools     []string
+	Arguments []string
+}
+
+func (p *BatchToolProvider) Name() string { return "batch_mock" }
+
+func (p *BatchToolProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 10)
+	go func() {
+		defer close(ch)
+		p.Step++
+		if p.Step == 1 {
+			toolNames := p.Tools
+			if len(toolNames) == 0 {
+				toolNames = []string{"safe_a", "safe_b"}
+			}
+			for i, name := range toolNames {
+				ch <- protocol.Event{
+					Type:  protocol.EventTypeToolCallEnd,
+					Index: i,
+					ToolCall: &protocol.ToolCall{
+						ID:        fmt.Sprintf("call_%d", i+1),
+						Name:      name,
+						Arguments: p.toolArguments(i),
+					},
+				}
+			}
+			ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+			return
+		}
+		ch <- protocol.NewTextDeltaEvent("done")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "done"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func (p *BatchToolProvider) toolArguments(i int) string {
+	if i >= 0 && i < len(p.Arguments) && p.Arguments[i] != "" {
+		return p.Arguments[i]
+	}
+	return "{}"
+}
+
+type BlockingSafeTool struct {
+	name    string
+	started chan<- string
+	release <-chan struct{}
+}
+
+func (t *BlockingSafeTool) Name() string        { return t.name }
+func (t *BlockingSafeTool) Description() string { return t.name }
+func (t *BlockingSafeTool) Schema() any         { return nil }
+func (t *BlockingSafeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
+func (t *BlockingSafeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	select {
+	case t.started <- t.name:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-t.release:
+		return t.name + " done", nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+type ProgressTool struct {
+	name string
+}
+
+func (t *ProgressTool) Name() string        { return t.name }
+func (t *ProgressTool) Description() string { return t.name }
+func (t *ProgressTool) Schema() any         { return nil }
+func (t *ProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
+func (t *ProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+		sink(protocol.Event{
+			Type: protocol.EventTypeToolProgress,
+			ToolResult: &protocol.ToolResult{
+				ToolCallID: "progress",
+				ToolName:   t.name,
+				Type:       protocol.ToolResultTypeText,
+				Text:       "progress event",
+			},
+		})
+	}
+	return "final result", ctx.Err()
+}
+
+type ApprovalProgressTool struct {
+	name string
+}
+
+func (t *ApprovalProgressTool) Name() string        { return t.name }
+func (t *ApprovalProgressTool) Description() string { return t.name }
+func (t *ApprovalProgressTool) Schema() any         { return nil }
+func (t *ApprovalProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
+}
+func (t *ApprovalProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+		sink(protocol.Event{
+			Type: protocol.EventTypeToolProgress,
+			ToolResult: &protocol.ToolResult{
+				ToolCallID: "approval-progress",
+				ToolName:   t.name,
+				Type:       protocol.ToolResultTypeText,
+				Text:       "approval progress event",
+			},
+		})
+	}
+	return "approval final result", ctx.Err()
+}
+
+type UsageMetadataTool struct {
+	name  string
+	usage protocol.Usage
+}
+
+func (t *UsageMetadataTool) Name() string        { return t.name }
+func (t *UsageMetadataTool) Description() string { return t.name }
+func (t *UsageMetadataTool) Schema() any         { return nil }
+func (t *UsageMetadataTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
+func (t *UsageMetadataTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	return usageToolOutput{text: "usage result", usage: t.usage}, ctx.Err()
+}
+
+type usageToolOutput struct {
+	text  string
+	usage protocol.Usage
+}
+
+func (o usageToolOutput) ToolOutputText() string {
+	return o.text
+}
+
+func (o usageToolOutput) ToolResultMetadata() map[string]any {
+	return map[string]any{"usage": o.usage}
+}
+
+type CountingApprovalTool struct {
+	name  string
+	calls *int
+}
+
+func (t *CountingApprovalTool) Name() string        { return t.name }
+func (t *CountingApprovalTool) Description() string { return t.name }
+func (t *CountingApprovalTool) Schema() any         { return nil }
+func (t *CountingApprovalTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
+}
+func (t *CountingApprovalTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	*t.calls = *t.calls + 1
+	return t.name + " done", ctx.Err()
+}
+
+type ApprovalRequiredTool struct {
+	name string
+}
+
+func (t *ApprovalRequiredTool) Name() string        { return t.name }
+func (t *ApprovalRequiredTool) Description() string { return t.name }
+func (t *ApprovalRequiredTool) Schema() any         { return nil }
+func (t *ApprovalRequiredTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
+}
+func (t *ApprovalRequiredTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	return t.name + " done", ctx.Err()
+}
+
+type BlockingApprovalTool struct {
+	name    string
+	started chan<- string
+	release <-chan struct{}
+}
+
+func (t *BlockingApprovalTool) Name() string        { return t.name }
+func (t *BlockingApprovalTool) Description() string { return t.name }
+func (t *BlockingApprovalTool) Schema() any         { return nil }
+func (t *BlockingApprovalTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
+}
+func (t *BlockingApprovalTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
+	select {
+	case t.started <- args:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-t.release:
+		return "approved tool done", nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 }
 
 type ShellCallProvider struct {
@@ -273,6 +484,442 @@ func TestAgentReActLoop(t *testing.T) {
 	}
 	if content != "It is 12:00" {
 		t.Errorf("Expected 'It is 12:00', got '%s'", content)
+	}
+}
+
+func TestAgentExecutesSafeToolBatchConcurrently(t *testing.T) {
+	providers.Register("batch-safe", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "batch-safe"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(
+			&BlockingSafeTool{name: "safe_a", started: started, release: release},
+			&BlockingSafeTool{name: "safe_b", started: started, release: release},
+		),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := ag.Run(ctx, "run both")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	done := make(chan protocol.FinishReason, 1)
+	go func() {
+		var finish protocol.FinishReason
+		for e := range events {
+			if e.Type == protocol.EventTypeFinish {
+				finish = e.FinishReason
+			}
+		}
+		done <- finish
+	}()
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case name := <-started:
+			seen[name] = true
+		case <-time.After(500 * time.Millisecond):
+			releaseOnce.Do(func() { close(release) })
+			t.Fatalf("expected both safe tools to start before either was released, saw %v", seen)
+		}
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case finish := <-done:
+		if finish != protocol.FinishReasonStop {
+			t.Fatalf("expected stop finish, got %s", finish)
+		}
+	case <-ctx.Done():
+		t.Fatalf("agent did not finish: %v", ctx.Err())
+	}
+}
+
+func TestAgentStreamsToolProgressEvents(t *testing.T) {
+	providers.Register("tool-progress", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"progress_tool"}}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "tool-progress"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&ProgressTool{name: "progress_tool"}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := ag.Run(ctx, "run progress tool")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+
+	var progressTexts []string
+	var resultTexts []string
+	for event := range events {
+		if event.Type == protocol.EventTypeToolProgress && event.ToolResult != nil {
+			progressTexts = append(progressTexts, event.ToolResult.Text)
+		}
+		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
+			resultTexts = append(resultTexts, event.ToolResult.Text)
+		}
+	}
+
+	if len(progressTexts) != 1 || progressTexts[0] != "progress event" {
+		t.Fatalf("expected progress event, got %v", progressTexts)
+	}
+	if len(resultTexts) != 1 || !strings.Contains(resultTexts[0], "final result") {
+		t.Fatalf("expected final tool result event, got %v", resultTexts)
+	}
+}
+
+func TestAgentStreamsToolProgressAfterApproval(t *testing.T) {
+	providers.Register("approval-progress", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"approval_progress_tool"}}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "approval-progress"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&ApprovalProgressTool{name: "approval_progress_tool"}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := ag.Run(ctx, "run approval progress tool")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for event := range events {
+		lastEvent = event
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("expected need_approval, got %s", lastEvent.FinishReason)
+	}
+
+	resumed, err := ag.ApproveAndExecutePendingActions(ctx)
+	if err != nil {
+		t.Fatalf("ApproveAndExecutePendingActions returned error: %v", err)
+	}
+	var progressTexts []string
+	var resultTexts []string
+	for event := range resumed {
+		if event.Type == protocol.EventTypeToolProgress && event.ToolResult != nil {
+			progressTexts = append(progressTexts, event.ToolResult.Text)
+		}
+		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
+			resultTexts = append(resultTexts, event.ToolResult.Text)
+		}
+	}
+	if len(progressTexts) != 1 || progressTexts[0] != "approval progress event" {
+		t.Fatalf("expected approval progress event, got %v", progressTexts)
+	}
+	if len(resultTexts) != 1 || !strings.Contains(resultTexts[0], "approval final result") {
+		t.Fatalf("expected approval final result event, got %v", resultTexts)
+	}
+}
+
+func TestAgentAddsToolResultUsageToSessionUsage(t *testing.T) {
+	providers.Register("tool-usage", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"usage_tool"}}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	childUsage := protocol.Usage{InputTokens: 11, OutputTokens: 7, TotalTokens: 18}
+	ag, err := agent.New(config.ProfileConfig{Provider: "tool-usage"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&UsageMetadataTool{name: "usage_tool", usage: childUsage}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	events, err := ag.Run(ctx, "run usage tool")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	for range events {
+	}
+
+	total := protocol.SessionUsage(ag.Snapshot().History).Normalized()
+	if total != childUsage {
+		t.Fatalf("session usage should include tool result usage: got %+v want %+v", total, childUsage)
+	}
+}
+
+func TestAgentDefersAutoToolsUntilBatchApproval(t *testing.T) {
+	providers.Register("batch-with-approval", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"safe_a", "needs_approval", "safe_b"}}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "batch-with-approval"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(
+			&BlockingSafeTool{name: "safe_a", started: started, release: release},
+			&ApprovalRequiredTool{name: "needs_approval"},
+			&BlockingSafeTool{name: "safe_b", started: started, release: release},
+		),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "run gated batch")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("expected need_approval, got %s", lastEvent.FinishReason)
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("safe tool %s started before batch approval", name)
+	default:
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	done := make(chan protocol.FinishReason, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		approvedEvents, err := ag.ApproveAndExecutePendingActions(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		var finish protocol.FinishReason
+		for e := range approvedEvents {
+			if e.Type == protocol.EventTypeFinish {
+				finish = e.FinishReason
+			}
+		}
+		done <- finish
+	}()
+
+	select {
+	case name := <-started:
+		if name != "safe_a" {
+			t.Fatalf("expected first safe action to start after approval, got %s", name)
+		}
+	case err := <-errCh:
+		t.Fatalf("ApproveAndExecutePendingActions returned error: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("safe action did not start after approval: %v", ctx.Err())
+	}
+	releaseOnce.Do(func() { close(release) })
+
+	select {
+	case finish := <-done:
+		if finish != protocol.FinishReasonStop {
+			t.Fatalf("expected stop finish, got %s", finish)
+		}
+	case err := <-errCh:
+		t.Fatalf("ApproveAndExecutePendingActions returned error: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("agent did not finish after approval: %v", ctx.Err())
+	}
+}
+
+func TestAgentRunsApprovedExploreSubagentsConcurrently(t *testing.T) {
+	providers.Register("approved-subagents", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{
+			Tools:     []string{"spawn", "spawn"},
+			Arguments: []string{`{"agent_type":"explore","name":"one"}`, `{"agent_type":"explore","name":"two"}`},
+		}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	ag, err := agent.New(config.ProfileConfig{Provider: "approved-subagents"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&BlockingApprovalTool{name: "spawn", started: started, release: release}),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "run two approved subagents")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("expected need_approval, got %s", lastEvent.FinishReason)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		approvedEvents, err := ag.ApproveAndExecutePendingActions(ctx)
+		if err != nil {
+			errCh <- err
+			return
+		}
+		for range approvedEvents {
+		}
+		errCh <- nil
+	}()
+
+	seen := map[string]bool{}
+	for len(seen) < 2 {
+		select {
+		case args := <-started:
+			seen[args] = true
+		case err := <-errCh:
+			if err != nil {
+				t.Fatalf("ApproveAndExecutePendingActions returned error: %v", err)
+			}
+			t.Fatalf("agent finished before both approved subagents started, saw %v", seen)
+		case <-time.After(500 * time.Millisecond):
+			releaseOnce.Do(func() { close(release) })
+			t.Fatalf("expected both approved explore subagents to start concurrently, saw %v", seen)
+		}
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	if err := <-errCh; err != nil {
+		t.Fatalf("ApproveAndExecutePendingActions returned error: %v", err)
+	}
+}
+
+func TestAgentRejectsWholeBatchWhenAnyPendingActionDenied(t *testing.T) {
+	providers.Register("batch-partial-approval", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"approve_me", "deny_me"}}, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	approveCalls := 0
+	denyCalls := 0
+	ag, err := agent.New(config.ProfileConfig{Provider: "batch-partial-approval"}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(
+			&CountingApprovalTool{name: "approve_me", calls: &approveCalls},
+			&CountingApprovalTool{name: "deny_me", calls: &denyCalls},
+		),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "run partial approvals")
+	if err != nil {
+		t.Fatalf("Run error: %v", err)
+	}
+	var lastEvent protocol.Event
+	for e := range events {
+		lastEvent = e
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("expected need_approval, got %s", lastEvent.FinishReason)
+	}
+
+	resolved, err := ag.ResolvePendingActions(context.Background(), map[string]protocol.ToolResult{
+		"call_2": {
+			ToolCallID: "call_2",
+			ToolName:   "deny_me",
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     "reject only second",
+			IsError:    true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("ResolvePendingActions returned error: %v", err)
+	}
+	var toolResults []protocol.ToolResult
+	for e := range resolved {
+		if e.Type == protocol.EventTypeToolResultDone && e.ToolResult != nil {
+			toolResults = append(toolResults, *e.ToolResult)
+		}
+	}
+
+	if approveCalls != 0 {
+		t.Fatalf("approved action should not execute when another pending action is denied, got %d", approveCalls)
+	}
+	if denyCalls != 0 {
+		t.Fatalf("denied action should not execute, got %d", denyCalls)
+	}
+	if len(toolResults) < 2 {
+		t.Fatalf("expected tool results for approved and denied actions, got %v", toolResults)
+	}
+	if toolResults[0].ToolCallID != "call_1" || !toolResults[0].IsError || !strings.Contains(toolResults[0].Reason, "reject only second") {
+		t.Fatalf("first result should be skipped with denial reason, got %#v", toolResults[0])
+	}
+	if toolResults[1].ToolCallID != "call_2" || !toolResults[1].IsError || !strings.Contains(toolResults[1].Reason, "reject only second") {
+		t.Fatalf("second result should be denied action, got %#v", toolResults[1])
 	}
 }
 

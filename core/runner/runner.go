@@ -165,33 +165,9 @@ func (r *Runner) SubmitApproval(ctx context.Context, results []transport.Approva
 		return fmt.Errorf("agent is not waiting for approval")
 	}
 
-	allApproved := true
-	for _, result := range results {
-		if !result.Approved {
-			allApproved = false
-			break
-		}
-	}
-
 	var eventCh <-chan protocol.Event
 	var err error
-
-	if allApproved {
-		eventCh, err = r.agent.ApproveAndExecutePendingActions(ctx)
-	} else {
-		// Any denial → deny all pending actions (consistent with drainWithApprovalLoop).
-		// The agent doesn't support partial approval natively.
-		outputs := make([]protocol.ToolResult, len(snap.PendingActions))
-		for i, action := range snap.PendingActions {
-			outputs[i] = protocol.ToolResult{
-				ToolCallID: action.ToolCallID,
-				Type:       protocol.ToolResultTypeExecutionDenied,
-				Reason:     "User denied permission",
-				IsError:    true,
-			}
-		}
-		eventCh, err = r.agent.SubmitToolOutputs(ctx, outputs)
-	}
+	eventCh, err = r.agent.ResolvePendingActions(ctx, deniedResultsFromApprovals(results, snap.PendingActions))
 
 	if err != nil {
 		return err
@@ -199,6 +175,35 @@ func (r *Runner) SubmitApproval(ctx context.Context, results []transport.Approva
 
 	_, err = r.streamEvents(ctx, eventCh, false)
 	return err
+}
+
+func deniedResultsFromApprovals(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
+	known := make(map[string]*agent.PendingAction, len(pending))
+	for _, action := range pending {
+		known[action.ToolCallID] = action
+	}
+	denied := make(map[string]protocol.ToolResult)
+	for _, result := range results {
+		if result.Approved {
+			continue
+		}
+		action, ok := known[result.ToolCallID]
+		if !ok {
+			continue
+		}
+		reason := result.Reason
+		if reason == "" {
+			reason = "User denied permission"
+		}
+		denied[result.ToolCallID] = protocol.ToolResult{
+			ToolCallID: result.ToolCallID,
+			ToolName:   action.Name,
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     reason,
+			IsError:    true,
+		}
+	}
+	return denied
 }
 
 // GetPendingApprovals returns the current pending tool calls awaiting approval.
@@ -298,28 +303,7 @@ func (r *Runner) drainWithApprovalLoop(ctx context.Context, eventCh <-chan proto
 			return err
 		}
 
-		allApproved := len(results) > 0
-		for _, res := range results {
-			if !res.Approved {
-				allApproved = false
-				break
-			}
-		}
-
-		if allApproved {
-			eventCh, err = r.agent.ApproveAndExecutePendingActions(ctx)
-		} else {
-			outputs := make([]protocol.ToolResult, len(snap.PendingActions))
-			for i, pa := range snap.PendingActions {
-				outputs[i] = protocol.ToolResult{
-					ToolCallID: pa.ToolCallID,
-					Type:       protocol.ToolResultTypeExecutionDenied,
-					Reason:     "User denied permission",
-					IsError:    true,
-				}
-			}
-			eventCh, err = r.agent.SubmitToolOutputs(ctx, outputs)
-		}
+		eventCh, err = r.agent.ResolvePendingActions(ctx, deniedResultsFromApprovals(results, snap.PendingActions))
 
 		if err != nil {
 			return err

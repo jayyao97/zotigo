@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
@@ -12,6 +13,73 @@ func makeToolResult(text string) *protocol.ToolResult {
 	return &protocol.ToolResult{
 		ToolCallID: "test",
 		Text:       text,
+	}
+}
+
+func TestFormatToolCall_SpawnIncludesWorkDir(t *testing.T) {
+	tc := &protocol.ToolCall{
+		Name:      "spawn",
+		Arguments: `{"name":"session-code-map","description":"map code","prompt":"Find files","agent_type":"explore","workdir":"/Users/yaotianjia/workspace/zotigo"}`,
+	}
+
+	got := formatToolCall(tc)
+	if !strings.Contains(got, "name=session-code-map") {
+		t.Fatalf("spawn tool call should include name, got %q", got)
+	}
+	if !strings.Contains(got, "agent_type=explore") {
+		t.Fatalf("spawn tool call should include agent_type, got %q", got)
+	}
+	if !strings.Contains(got, "workdir=/Users/yaotianjia/workspace/zotigo") {
+		t.Fatalf("spawn tool call should include workdir, got %q", got)
+	}
+}
+
+func TestApprovalHintForAction_GeneralPurposeSpawn(t *testing.T) {
+	action := &agent.PendingAction{
+		Name:      "spawn",
+		Arguments: `{"name":"worker","agent_type":"general-purpose","workdir":"/tmp/project"}`,
+	}
+
+	got := approvalHintForAction(action)
+	if !strings.Contains(got, "write/shell") {
+		t.Fatalf("general-purpose spawn approval should disclose child auto behavior, got %q", got)
+	}
+}
+
+func TestApprovalHintForAction_ExploreSpawn(t *testing.T) {
+	action := &agent.PendingAction{
+		Name:      "spawn",
+		Arguments: `{"name":"reader","agent_type":"explore","workdir":"/tmp/project"}`,
+	}
+
+	if got := approvalHintForAction(action); got != "" {
+		t.Fatalf("explore spawn should not show write/shell hint, got %q", got)
+	}
+}
+
+func TestDenyLabelForApprovalCount(t *testing.T) {
+	if got := denyLabelForApprovalCount(1); got != "Deny" {
+		t.Fatalf("single approval deny label = %q, want Deny", got)
+	}
+	if got := denyLabelForApprovalCount(2); got != "Deny batch" {
+		t.Fatalf("multi approval deny label = %q, want Deny batch", got)
+	}
+}
+
+func TestFormatToolResult_ExecutionDeniedShowsReason(t *testing.T) {
+	tr := &protocol.ToolResult{
+		ToolCallID: "test",
+		Type:       protocol.ToolResultTypeExecutionDenied,
+		Reason:     "not this one",
+		IsError:    true,
+	}
+
+	got := formatToolResult(tr, 0)
+	if !strings.Contains(got, "Denied: not this one") {
+		t.Fatalf("execution denied should show reason, got %q", got)
+	}
+	if strings.Contains(got, "<nil>") {
+		t.Fatalf("execution denied should not render nil JSON as error text, got %q", got)
 	}
 }
 

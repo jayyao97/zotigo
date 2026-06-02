@@ -254,3 +254,29 @@ func TestBuildResponseParams_DropsReasoningWithoutEncryptedContent(t *testing.T)
 		t.Errorf("did not expect reasoning input item, got %s", js)
 	}
 }
+
+func TestBuildResponseParams_ToolResultExecutionDeniedIncludesReason(t *testing.T) {
+	msgs := []protocol.Message{
+		protocol.NewToolMessage([]protocol.ToolResult{
+			{
+				ToolCallID: "call_123",
+				ToolName:   "spawn",
+				Type:       protocol.ToolResultTypeExecutionDenied,
+				Reason:     "改成开 3 个吧",
+				IsError:    true,
+			},
+		}),
+	}
+
+	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	if err != nil {
+		t.Fatalf("build: %v", err)
+	}
+	js := marshalJSON(t, params)
+	if !strings.Contains(js, `"call_id":"call_123"`) {
+		t.Errorf("expected tool call id in input, got %s", js)
+	}
+	if !strings.Contains(js, "User denied execution: 改成开 3 个吧") {
+		t.Errorf("expected denial reason in tool output, got %s", js)
+	}
+}

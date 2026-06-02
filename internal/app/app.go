@@ -281,22 +281,33 @@ func Run(args []string) int {
 		}
 	}
 
-	ag.RegisterTool(&builtin.ReadFileTool{})
-	ag.RegisterTool(&builtin.WriteFileTool{})
-	ag.RegisterTool(&builtin.EditTool{})
+	childTools := []tools.Tool{
+		&builtin.ReadFileTool{},
+		&builtin.WriteFileTool{},
+		&builtin.EditTool{},
+	}
+	for _, tool := range childTools {
+		ag.RegisterTool(tool)
+	}
 
 	shellTool, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
 	if err != nil {
 		fmt.Println("Error creating shell tool:", err)
 		return 1
 	}
+	childTools = append(childTools, shellTool)
 	ag.RegisterTool(shellTool)
-	ag.RegisterTool(&builtin.GrepTool{})
-	ag.RegisterTool(&builtin.GlobTool{})
+	grepTool := &builtin.GrepTool{}
+	globTool := &builtin.GlobTool{}
+	childTools = append(childTools, grepTool, globTool)
+	ag.RegisterTool(grepTool)
+	ag.RegisterTool(globTool)
 
 	lspManager := lsp.NewManager(cwd)
 	defer func() { _ = lspManager.StopAll() }()
-	ag.RegisterTool(builtin.NewLSPTool(lspManager))
+	lspTool := builtin.NewLSPTool(lspManager)
+	childTools = append(childTools, lspTool)
+	ag.RegisterTool(lspTool)
 
 	webClient := builtin.NewWebClient(builtin.WebConfig{
 		TavilyAPIKey: cfg.Tools.Web.TavilyAPIKey,
@@ -305,9 +316,14 @@ func Run(args []string) int {
 		MaxPageSize:  cfg.Tools.Web.MaxPageSize,
 	})
 	if sp := builtin.NewSearchProvider(webClient); sp != nil {
-		ag.RegisterTool(builtin.NewWebSearchTool(sp))
+		webSearchTool := builtin.NewWebSearchTool(sp)
+		childTools = append(childTools, webSearchTool)
+		ag.RegisterTool(webSearchTool)
 	}
-	ag.RegisterTool(builtin.NewWebFetchTool(webClient))
+	webFetchTool := builtin.NewWebFetchTool(webClient)
+	childTools = append(childTools, webFetchTool)
+	ag.RegisterTool(webFetchTool)
+	ag.RegisterTool(builtin.NewSpawnTool(profile, childTools))
 
 	cmdRegistry := commands.NewRegistry()
 	cmdbuiltin.RegisterAll(cmdRegistry)

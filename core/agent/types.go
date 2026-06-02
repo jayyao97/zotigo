@@ -16,12 +16,13 @@ const (
 
 // Snapshot represents the serializable state of the agent.
 type Snapshot struct {
-	State          State              `json:"state"`
-	History        []protocol.Message `json:"history"`
-	PendingActions []*PendingAction   `json:"pending_actions,omitempty"`
-	TurnSafety     TurnSafetyState    `json:"turn_safety,omitempty"`
-	Turns          []TurnAudit        `json:"turns,omitempty"`
-	CreatedAt      time.Time          `json:"created_at"`
+	State           State              `json:"state"`
+	History         []protocol.Message `json:"history"`
+	PendingActions  []*PendingAction   `json:"pending_actions,omitempty"`
+	DeferredActions []*PendingAction   `json:"deferred_actions,omitempty"`
+	TurnSafety      TurnSafetyState    `json:"turn_safety,omitempty"`
+	Turns           []TurnAudit        `json:"turns,omitempty"`
+	CreatedAt       time.Time          `json:"created_at"`
 }
 
 // PendingAction represents a tool call that needs approval or execution result.
@@ -30,6 +31,7 @@ type PendingAction struct {
 	Name       string             `json:"name"`
 	Arguments  string             `json:"arguments"`
 	Decision   ActionDecision     `json:"decision,omitempty"`
+	Order      int                `json:"order,omitempty"`
 	ToolCall   *protocol.ToolCall `json:"-"` // Internal reference
 }
 

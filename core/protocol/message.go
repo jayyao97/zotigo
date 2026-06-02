@@ -17,10 +17,11 @@ type Message struct {
 }
 
 type MessageMetadata struct {
-	Provider string         `json:"provider,omitempty"`
-	Model    string         `json:"model,omitempty"`
-	Usage    *Usage         `json:"usage,omitempty"`
-	Raw      map[string]any `json:"raw,omitempty"`
+	Provider  string         `json:"provider,omitempty"`
+	Model     string         `json:"model,omitempty"`
+	Usage     *Usage         `json:"usage,omitempty"`
+	ToolUsage *Usage         `json:"tool_usage,omitempty"`
+	Raw       map[string]any `json:"raw,omitempty"`
 }
 
 // Usage normalizes token-accounting fields across providers.
@@ -80,9 +81,15 @@ func SessionUsage(history []Message) Usage {
 			continue
 		}
 		if msg.Metadata == nil || msg.Metadata.Usage == nil {
+			if msg.Metadata != nil && msg.Metadata.ToolUsage != nil {
+				total = total.Add(msg.Metadata.ToolUsage.Normalized())
+			}
 			continue
 		}
 		total = total.Add(msg.Metadata.Usage.Normalized())
+		if msg.Metadata.ToolUsage != nil {
+			total = total.Add(msg.Metadata.ToolUsage.Normalized())
+		}
 	}
 	return total
 }

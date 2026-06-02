@@ -94,6 +94,7 @@ type SafetyDecision struct {
 	Level            SafetyLevel
 	Reason           string
 	RequiresSnapshot bool
+	RequiresApproval bool
 }
 
 // Tool defines an executable capability available to the agent.

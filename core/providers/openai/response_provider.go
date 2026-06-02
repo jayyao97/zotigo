@@ -446,7 +446,7 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 					OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
 						CallID: part.ToolResult.ToolCallID,
 						Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-							OfString: param.NewOpt(part.ToolResult.Text),
+							OfString: param.NewOpt(responseToolOutputString(part.ToolResult)),
 						},
 					},
 				})
@@ -515,6 +515,29 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 	}
 
 	return params, nil
+}
+
+func responseToolOutputString(tr *protocol.ToolResult) string {
+	if tr == nil {
+		return ""
+	}
+	if tr.JSON != nil {
+		b, _ := json.Marshal(tr.JSON)
+		return string(b)
+	}
+	if tr.Type == protocol.ToolResultTypeExecutionDenied {
+		return fmt.Sprintf("User denied execution: %s", tr.Reason)
+	}
+	if tr.Type == protocol.ToolResultTypeContent {
+		var text strings.Builder
+		for _, c := range tr.Content {
+			if c.Type == protocol.ContentTypeText {
+				text.WriteString(c.Text)
+			}
+		}
+		return text.String()
+	}
+	return tr.Text
 }
 
 type responseStreamError struct {
