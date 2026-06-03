@@ -200,6 +200,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.SetHeight(m.inputLineCount())
 			return m, nil
 		}
+		m.input.InsertString(msg.Content)
+		m.input.SetHeight(m.inputLineCount())
+		return m, nil
 
 	case tea.KeyPressMsg:
 		keyStr := msg.String()
