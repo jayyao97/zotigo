@@ -4,6 +4,8 @@ import (
 	"testing"
 	"time"
 
+	"charm.land/bubbles/v2/textarea"
+	tea "charm.land/bubbletea/v2"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/session"
 )
@@ -123,6 +125,24 @@ func TestRenderAgentBanner(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestPasteMsgInsertsMultilineTextOnce(t *testing.T) {
+	ta := textarea.New()
+	ta.Focus()
+	ta.Prompt = ""
+	ta.SetWidth(80)
+	ta.SetHeight(1)
+
+	m := Model{input: ta}
+	pasted := "first line\nsecond line\nthird line"
+
+	updated, _ := m.Update(tea.PasteMsg{Content: pasted})
+	got := updated.(Model).input.Value()
+
+	if got != pasted {
+		t.Fatalf("paste should insert content once, got %q", got)
 	}
 }
 
