@@ -21,6 +21,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/sessionadapter"
 )
 
 var (
@@ -943,71 +944,11 @@ func (m Model) saveSession() {
 		snap.History = append(snap.History, partialMsg)
 	}
 
-	lastPrompt := ""
-	if len(snap.History) > 0 {
-		lastMsg := snap.History[len(snap.History)-1]
-		if lastMsg.Role == protocol.RoleUser {
-			lastPrompt = lastMsg.String()
-		} else {
-			for i := len(snap.History) - 1; i >= 0; i-- {
-				if snap.History[i].Role == protocol.RoleUser {
-					lastPrompt = snap.History[i].String()
-					break
-				}
-			}
-		}
-	}
-
 	sess, err := m.sessionMgr.Load(m.sessionID)
 	if err == nil {
-		sess.AgentSnapshot = snap
-		sess.Turns = convertAgentTurns(snap.Turns)
-		if lastPrompt != "" {
-			sess.LastPrompt = lastPrompt
-		}
+		sessionadapter.ApplySnapshot(sess, snap, sessionadapter.LastUserPrompt(snap.History))
 		_ = m.sessionMgr.Save(sess)
 	}
-}
-
-func convertAgentTurns(turns []agent.TurnAudit) []session.Turn {
-	result := make([]session.Turn, len(turns))
-	for i, turn := range turns {
-		result[i] = session.Turn{
-			ID:                turn.ID,
-			CreatedAt:         turn.CreatedAt,
-			UpdatedAt:         turn.UpdatedAt,
-			UserPromptSummary: turn.UserPromptSummary,
-			SnapshotStatus:    session.SnapshotStatus(turn.SnapshotStatus),
-			SnapshotID:        turn.SnapshotID,
-		}
-		if len(turn.SafetyEvents) > 0 {
-			result[i].SafetyEvents = make([]session.SafetyEvent, len(turn.SafetyEvents))
-			for j, event := range turn.SafetyEvents {
-				result[i].SafetyEvents[j] = session.SafetyEvent{
-					Timestamp:          event.Timestamp,
-					TurnID:             event.TurnID,
-					ToolCallID:         event.ToolCallID,
-					ToolName:           event.ToolName,
-					ToolArgsSummary:    event.ToolArgsSummary,
-					DecisionSource:     session.SafetyDecisionSource(event.DecisionSource),
-					Decision:           session.SafetyDecision(event.Decision),
-					Reason:             event.Reason,
-					RiskLevel:          event.RiskLevel,
-					SnapshotStatus:     session.SnapshotStatus(event.SnapshotStatus),
-					SnapshotID:         event.SnapshotID,
-					ClassifierProvider: event.ClassifierProvider,
-					ClassifierModel:    event.ClassifierModel,
-					ContextSummary: session.ContextSummary{
-						UserPrompt:    event.ContextSummary.UserPrompt,
-						RecentActions: event.ContextSummary.RecentActions,
-						Trigger:       event.ContextSummary.Trigger,
-					},
-					RawContext: event.RawContext,
-				}
-			}
-		}
-	}
-	return result
 }
 
 func renderMessage(msg protocol.Message) (string, bool) {

@@ -3,9 +3,9 @@ package main
 import (
 	"os"
 
-	"github.com/jayyao97/zotigo/internal/app"
+	"github.com/jayyao97/zotigo/internal/cliapp"
 )
 
 func main() {
-	os.Exit(app.Run(os.Args[1:]))
+	os.Exit(cliapp.Run(os.Args[1:]))
 }

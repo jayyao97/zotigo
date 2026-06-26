@@ -1,4 +1,4 @@
-package app
+package cliapp
 
 import (
 	"bytes"
@@ -22,7 +22,6 @@ import (
 	"github.com/jayyao97/zotigo/core/middleware"
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/observability/langfuse"
-	"github.com/jayyao97/zotigo/core/providers"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
@@ -30,17 +29,10 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/internal/wiring"
 )
 
-// buildObserver wires up an observability.Observer from config.
-// Returns Noop when no backend is enabled — callers don't have to
-// special-case the disabled path. sessionIDPrefix is the zotigo
-// session.ID, used as the shared prefix on every per-turn Langfuse
-// sessionId so the Sessions list groups all turns of one invocation
-// together by free-text search. staticMeta is merged into every
-// trace's metadata so users can also filter by process-level facts
-// (zotigo_session, process_start, resumed).
-func buildObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticMeta map[string]any) observability.Observer {
+func newObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticMeta map[string]any) observability.Observer {
 	if cfg.Langfuse.IsEnabled() {
 		return langfuse.New(langfuse.Config{
 			Host:                cfg.Langfuse.Host,
@@ -54,8 +46,13 @@ func buildObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, stati
 	return observability.Noop{}
 }
 
-func contextWithTimeout(d time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), d)
+func newSkillReminderWrapper(sm *skills.SkillManager) *prompt.UserPromptWrapper {
+	return prompt.NewUserPromptWrapper(
+		prompt.WithContext("system-reminder", func(_ prompt.PromptContext) string {
+			_ = sm.Load()
+			return sm.BuildSkillIndex()
+		}),
+	)
 }
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
@@ -174,29 +171,18 @@ func Run(args []string) int {
 	// ShellPolicy in Classify; file-path safety by tools' in-workdir checks.
 	exec := localExec
 
-	pbOpts := []prompt.SystemPromptOption{
-		prompt.WithDynamicSection("environment", func(ctx prompt.PromptContext) string {
-			return fmt.Sprintf("Working directory: %s\nPlatform: %s",
-				ctx.WorkDir, ctx.Platform)
-		}),
-	}
-
-	if data, err := os.ReadFile(filepath.Join(cwd, "AGENTS.md")); err == nil {
-		content := string(data)
-		pbOpts = append(pbOpts, prompt.WithDynamicSection("project_instructions", func(_ prompt.PromptContext) string {
-			return content
-		}))
-	}
-
-	pb := prompt.NewSystemPromptBuilder(pbOpts...)
+	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
+		WorkDir:                    cwd,
+		IncludeProjectInstructions: true,
+	})
 
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
 	readTracker := tools.NewReadTracker(cwd)
 
-	sm := skills.NewSkillManager(cwd)
-	if err := sm.Load(); err != nil {
+	sm, err := wiring.NewSkillManager(cwd)
+	if err != nil {
 		fmt.Printf("Warning: failed to load skills: %v\n", err)
 	}
 
@@ -205,16 +191,11 @@ func Run(args []string) int {
 	// Anthropic's ephemeral prompt cache keeps hitting on the history
 	// prefix; small open models (Qwen, Llama) see the listing because it
 	// rides on the user message rather than a third system block.
-	uw := prompt.NewUserPromptWrapper(
-		prompt.WithContext("system-reminder", func(_ prompt.PromptContext) string {
-			_ = sm.Load() // re-scan disk so new skill files are picked up
-			return sm.BuildSkillIndex()
-		}),
-	)
+	uw := newSkillReminderWrapper(sm)
 
 	// Build observability backend before constructing the agent so it
-	// can be wired in as a single option. NewObserver returns Noop
-	// when langfuse credentials are absent; the agent never sees nil.
+	// can be wired in as a single option. newObserver returns Noop when
+	// langfuse credentials are absent; the agent never sees nil.
 	//
 	// Each turn gets its own Langfuse session (so cost/usage stay
 	// turn-bounded) but the per-turn sessionIds share the zotigo
@@ -228,102 +209,59 @@ func Run(args []string) int {
 		"process_start":  processStart.Format(time.RFC3339),
 		"resumed":        doResume,
 	}
-	observer := buildObserver(cfg.Observability, currentSession.ID, staticMeta)
+	observer := newObserver(cfg.Observability, currentSession.ID, staticMeta)
 	defer func() {
-		ctx, cancel := contextWithTimeout(2 * time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = observer.Close(ctx)
 	}()
 
-	ag, err := agent.New(profile, exec,
-		agent.WithSystemPromptBuilder(pb),
-		agent.WithUserPromptWrapper(uw),
-		agent.WithSkillManager(sm),
-		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
-		agent.WithTranscriptDir(transcriptDir),
-		agent.WithObserver(observer),
+	ag, err := wiring.NewAgent(wiring.AgentConfig{
+		Config:         cfg,
+		ProfileName:    profileName,
+		Profile:        profile,
+		Executor:       exec,
+		PromptBuilder:  pb,
+		UserWrapper:    uw,
+		ApprovalPolicy: agent.ApprovalPolicyAuto,
+		TranscriptDir:  transcriptDir,
+		Observer:       observer,
 		// ToolSpan goes outermost so it observes every tool call,
 		// including ones that ReadTracker short-circuits with a
 		// "file changed on disk" rejection — without seeing those,
 		// the trace tree skips the rejected call and the next-gen
 		// "retry after error" looks unmotivated.
-		agent.WithMiddleware(middleware.ToolSpan(observer)),
-		agent.WithMiddleware(middleware.ReadTracker(readTracker)),
-	)
+		Middleware: []agent.Middleware{
+			middleware.ToolSpan(observer),
+			middleware.ReadTracker(readTracker),
+		},
+		ConfigureClassifier: true,
+	})
 	if err != nil {
 		fmt.Println("Error creating agent:", err)
 		return 1
 	}
+	// Preserve the CLI's construction-time skill semantics: skill files are
+	// listed in prompts, but skill dirs are not added to auto-approved read
+	// scope. ACP intentionally uses SetSkillManager for the broader scope.
+	agent.WithSkillManager(sm)(ag)
 
 	if doResume {
 		ag.Restore(currentSession.AgentSnapshot)
 	}
 
-	if profile.Safety.Classifier.IsEnabled() {
-		classifierProfileName, classifierProfile, err := cfg.ResolveClassifierProfile(profileName)
-		if err != nil {
-			ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
-			agent.WithClassifierUnavailableReason(err.Error())(ag)
-		} else {
-			agent.WithClassifierProfile(classifierProfileName, classifierProfile)(ag)
-			if classifierProvider, err := providers.NewProvider(classifierProfile); err != nil {
-				agent.WithClassifierUnavailableReason(
-					fmt.Sprintf("failed to create classifier provider %q: %v", classifierProfileName, err),
-				)(ag)
-			} else {
-				classifier := agent.NewProviderSafetyClassifier(
-					classifierProvider,
-					profile.Safety.Classifier,
-					agent.WithClassifierObserver(observer, classifierProfile.Model),
-				)
-				agent.WithSafetyClassifier(classifier)(ag)
-			}
-		}
-	}
-
-	childTools := []tools.Tool{
-		&builtin.ReadFileTool{},
-		&builtin.WriteFileTool{},
-		&builtin.EditTool{},
-	}
-	for _, tool := range childTools {
-		ag.RegisterTool(tool)
-	}
-
-	shellTool, err := builtin.NewShellTool(builtin.WithPolicy(builtin.DefaultShellPolicy()))
-	if err != nil {
-		fmt.Println("Error creating shell tool:", err)
-		return 1
-	}
-	childTools = append(childTools, shellTool)
-	ag.RegisterTool(shellTool)
-	grepTool := &builtin.GrepTool{}
-	globTool := &builtin.GlobTool{}
-	childTools = append(childTools, grepTool, globTool)
-	ag.RegisterTool(grepTool)
-	ag.RegisterTool(globTool)
-
 	lspManager := lsp.NewManager(cwd)
 	defer func() { _ = lspManager.StopAll() }()
-	lspTool := builtin.NewLSPTool(lspManager)
-	childTools = append(childTools, lspTool)
-	ag.RegisterTool(lspTool)
-
-	webClient := builtin.NewWebClient(builtin.WebConfig{
-		TavilyAPIKey: cfg.Tools.Web.TavilyAPIKey,
-		UserAgent:    cfg.Tools.Web.UserAgent,
-		Timeout:      time.Duration(cfg.Tools.Web.TimeoutSec) * time.Second,
-		MaxPageSize:  cfg.Tools.Web.MaxPageSize,
-	})
-	if sp := builtin.NewSearchProvider(webClient); sp != nil {
-		webSearchTool := builtin.NewWebSearchTool(sp)
-		childTools = append(childTools, webSearchTool)
-		ag.RegisterTool(webSearchTool)
+	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
+		Config:      cfg,
+		Profile:     profile,
+		ShellPolicy: builtin.DefaultShellPolicy(),
+		LSPManager:  lspManager,
+		Spawn:       true,
+	}); err != nil {
+		fmt.Println("Error registering tools:", err)
+		return 1
 	}
-	webFetchTool := builtin.NewWebFetchTool(webClient)
-	childTools = append(childTools, webFetchTool)
-	ag.RegisterTool(webFetchTool)
-	ag.RegisterTool(builtin.NewSpawnTool(profile, childTools))
 
 	cmdRegistry := commands.NewRegistry()
 	cmdbuiltin.RegisterAll(cmdRegistry)
