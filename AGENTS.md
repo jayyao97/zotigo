@@ -33,7 +33,10 @@ There is a **pre-commit hook** (`.git/hooks/pre-commit`) that runs `gofmt -l` on
 Top‑level:
 - `cmd/zotigo/` — TUI entrypoint, `cmd/acp/` — ACP server entrypoint
 - `cli/` — TUI (`tui/`) and slash commands (`commands/`)
-- `internal/app/` — wiring (provider + tools + middleware + skills + transport)
+- `internal/cliapp/` — CLI/TUI application wiring
+- `internal/acpserver/` — ACP server application wiring
+- `internal/wiring/` — shared agent, tool, and prompt assembly
+- `internal/sessionadapter/` — `agent.Snapshot` to `core/session` persistence mapping
 - `core/` — protocol‑first runtime
 - `tests/e2e/` — provider end‑to‑end tests (build tag `e2e`)
 - `docs/` — architecture notes (e.g. `extension-points.md`)
@@ -60,7 +63,7 @@ Inside `core/`:
 - **Shell**: `shell` with a read‑only command whitelist baked into `ShellTool` policy. Directory creation, deletion, listing — all go through Shell, not dedicated tools.
 - **Web**: `web_search` (Tavily), `web_fetch`.
 - **LSP**: `lsp` (definition / references / diagnostics).
-- Registration site: `internal/app/app.go` via `ag.RegisterTool(...)`. There is no `CreateDefaultRegistry` — the agent gets exactly the tools its host wires in.
+- Registration site: `internal/wiring/tools.go` via `ag.RegisterTool(...)`, with host-specific options passed by each app. There is no `CreateDefaultRegistry` — the agent gets exactly the tools its host wires in.
 - The `Executor` interface is intentionally narrow: `ReadFile / WriteFile / Stat / Exec` plus `WorkDir / Platform / Init / Close`. New filesystem capabilities should come through Shell unless they need structured returns.
 
 ## Extension Points
@@ -155,7 +158,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - Add features, refactors, or abstractions beyond what the task asked for; flag drive‑by ideas in the response, don't smuggle them into the diff.
 
 ## Common Task Guides
-- **Add a tool**: implement under `core/tools/builtin/`, satisfy `tools.Tool` (`Name / Description / Schema / Classify / Execute`), register in `internal/app/app.go`. Provide a complete JSON Schema and a `Classify` that scopes the call.
+- **Add a tool**: implement under `core/tools/builtin/`, satisfy `tools.Tool` (`Name / Description / Schema / Classify / Execute`), register in `internal/wiring/tools.go`. Provide a complete JSON Schema and a `Classify` that scopes the call.
 - **Add a provider**: implement under `core/providers/<name>/`, satisfy `providers.Provider`, register the factory in `init()`. Map provider events into `protocol.Event` (text deltas → `ContentDelta`, tool calls → `ToolCallDelta` + `ToolCallEnd`, finish → `NewFinishEvent`).
 - **Add a middleware**: write `func(next agent.Next) agent.Next`. Place under `core/middleware/`, register via `agent.WithMiddleware(...)`.
 - **Add a runner listener**: extend `runner.Listeners` only if you genuinely need a new turn‑level milestone; otherwise just provide one of the existing four callbacks at construction.
@@ -163,7 +166,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 
 ## Quick Troubleshooting
 - Provider not selected: check `~/.zotigo/config.yaml` `default_profile` and the profile's `provider / model / api_key`.
-- Tools not firing: confirm registration in `internal/app/app.go`; `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
+- Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in `internal/cliapp/app.go` or `internal/acpserver/app.go`; `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
 - Classifier silent‑failing: look for `provider classifier timeout` in debug logs. Default is 20s; lower `safety.classifier.timeout_ms` only after confirming the underlying model is fast enough.
 - Empty output / loop: `ZOTIGO_DEBUG=true`; check for the loop‑guard `<system-reminder>` in the latest tool result. The runner ends a turn on `FinishReason == stop`.
 - gofmt pre‑commit failure: run `gofmt -w` on the listed files, re‑stage, retry the commit.
