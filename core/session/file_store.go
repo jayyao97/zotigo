@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +11,9 @@ import (
 	"strconv"
 	"sync"
 	"syscall"
+	"time"
+
+	"github.com/bytedance/sonic"
 )
 
 // FileStore implements Store using the local filesystem.
@@ -83,6 +87,65 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 	return s.updateRegistry(sess.Metadata)
 }
 
+func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item DisplayItem) (DisplayItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := os.Stat(s.sessionPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return DisplayItem{}, fmt.Errorf("session not found: %s", id)
+		}
+		return DisplayItem{}, fmt.Errorf("stat session file: %w", err)
+	}
+
+	items, err := s.readDisplayItemsLocked(id)
+	if err != nil {
+		return DisplayItem{}, err
+	}
+	sequence := uint64(1)
+	if len(items) > 0 {
+		sequence = items[len(items)-1].Sequence + 1
+	}
+	item.Sequence = sequence
+	if item.ID == "" {
+		item.ID = fmt.Sprintf("item_%s_%d", id, sequence)
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+
+	data, err := sonic.Marshal(item)
+	if err != nil {
+		return DisplayItem{}, fmt.Errorf("marshal display item: %w", err)
+	}
+	file, err := os.OpenFile(s.displayLogPath(id), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return DisplayItem{}, fmt.Errorf("open display log: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+	if _, err := file.Write(append(data, '\n')); err != nil {
+		return DisplayItem{}, fmt.Errorf("write display log: %w", err)
+	}
+	return item, nil
+}
+
+func (s *FileStore) ListDisplayItems(ctx context.Context, id string) ([]DisplayItem, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if _, err := os.Stat(s.sessionPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("stat session file: %w", err)
+	}
+	items, err := s.readDisplayItemsLocked(id)
+	if err != nil {
+		return nil, true, err
+	}
+	return items, true, nil
+}
+
 // Delete removes a session by ID.
 func (s *FileStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
@@ -97,6 +160,7 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	// Remove lock file if exists
 	lockPath := s.lockPath(id)
 	_ = os.Remove(lockPath)
+	_ = os.Remove(s.displayLogPath(id))
 
 	// Update registry
 	return s.removeFromRegistry(id)
@@ -220,8 +284,42 @@ func (s *FileStore) sessionPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".json")
 }
 
+func (s *FileStore) displayLogPath(id string) string {
+	return filepath.Join(s.rootDir, "sessions", id+".display.jsonl")
+}
+
 func (s *FileStore) lockPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".lock")
+}
+
+func (s *FileStore) readDisplayItemsLocked(id string) ([]DisplayItem, error) {
+	file, err := os.Open(s.displayLogPath(id))
+	if os.IsNotExist(err) {
+		return []DisplayItem{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("open display log: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	var items []DisplayItem
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var item DisplayItem
+		if err := sonic.Unmarshal(line, &item); err != nil {
+			return nil, fmt.Errorf("unmarshal display log item: %w", err)
+		}
+		items = append(items, item)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("read display log: %w", err)
+	}
+	return items, nil
 }
 
 // Registry represents the index file structure.

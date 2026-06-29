@@ -1,17 +1,36 @@
 package zotigod
 
 import (
+	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/protocol"
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 type sessionListResponse struct {
 	Sessions []Session `json:"sessions"`
+}
+
+type fakeDisplayItemSource struct {
+	items map[string][]zotigosession.DisplayItem
+	err   error
+}
+
+func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
+	if s.err != nil {
+		return nil, false, s.err
+	}
+	items, ok := s.items[sessionID]
+	return items, ok, nil
 }
 
 func createSession(t *testing.T, handler http.Handler) Session {
@@ -124,6 +143,254 @@ func TestSessionsGetByID(t *testing.T) {
 	}
 	if got.ID != created.ID || got.State != SessionStateCreated {
 		t.Fatalf("unexpected session: %#v", got)
+	}
+}
+
+func TestSessionItemsRejectMissingSession(t *testing.T) {
+	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/missing/items", nil))
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
+	}
+}
+
+func TestSessionItemsDefaultLimitReturnsRecentItemsAscending(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = makeDisplayItems(60)
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
+
+	if len(resp.Items) != defaultItemsLimit {
+		t.Fatalf("expected %d items, got %d", defaultItemsLimit, len(resp.Items))
+	}
+	if resp.Items[0].Sequence != 11 || resp.Items[49].Sequence != 60 {
+		t.Fatalf("expected recent 11..60, got %d..%d", resp.Items[0].Sequence, resp.Items[49].Sequence)
+	}
+	if resp.PrevCursor != "11" || resp.NextCursor != "" || !resp.HasMore {
+		t.Fatalf("unexpected cursors: %#v", resp)
+	}
+}
+
+func TestSessionItemsLimitMax(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = makeDisplayItems(210)
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items?limit=200")
+
+	if len(resp.Items) != maxItemsLimit {
+		t.Fatalf("expected %d items, got %d", maxItemsLimit, len(resp.Items))
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/items?limit=201", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+	}
+}
+
+func TestSessionItemsCursorPagination(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = makeDisplayItems(5)
+
+	after := getItems(t, handler, "/sessions/"+created.ID+"/items?after=2&limit=2")
+	assertItemSequences(t, after.Items, []uint64{3, 4})
+
+	before := getItems(t, handler, "/sessions/"+created.ID+"/items?before=5&limit=2")
+	assertItemSequences(t, before.Items, []uint64{3, 4})
+}
+
+func TestSessionItemsRejectInvalidCursor(t *testing.T) {
+	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+
+	tests := []string{
+		"/sessions/missing/items?after=abc",
+		"/sessions/missing/items?before=0",
+		"/sessions/missing/items?after=1&before=2",
+	}
+	for _, path := range tests {
+		t.Run(path, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status %d, got %d", http.StatusBadRequest, rec.Code)
+			}
+		})
+	}
+}
+
+func TestSessionItemsPublicResponseDoesNotExposeInternalSession(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = makeDisplayItems(1)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/items", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	body := rec.Body.String()
+	for _, internalField := range []string{"agent_snapshot", "display_log", "turns"} {
+		if strings.Contains(body, internalField) {
+			t.Fatalf("response leaked internal field %q: %s", internalField, body)
+		}
+	}
+}
+
+func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = []zotigosession.DisplayItem{{
+		ID:       "item_tool_result",
+		Sequence: 1,
+		Type:     zotigosession.DisplayItemAssistantMessage,
+		Role:     string(protocol.RoleAssistant),
+		Content: []zotigosession.DisplayContentPart{{
+			Type:    string(protocol.ContentTypeToolResult),
+			Summary: "captured",
+			ToolResult: &zotigosession.DisplayToolResult{
+				ToolCallID: "call-1",
+				ToolName:   "screenshot",
+				ResultType: string(protocol.ToolResultTypeContent),
+				Content: []zotigosession.DisplayToolResultContentPart{{
+					Type: string(protocol.ContentTypeText),
+					Text: "captured",
+				}, {
+					Type: string(protocol.ContentTypeImage),
+					Image: &zotigosession.DisplayMediaPart{
+						URL:       "file:///tmp/screenshot.png",
+						MediaType: "image/png",
+					},
+				}},
+			},
+		}},
+		CreatedAt: time.Now().UTC(),
+	}}
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
+
+	if len(resp.Items) != 1 || len(resp.Items[0].Content) != 1 {
+		t.Fatalf("unexpected items response: %#v", resp)
+	}
+	if resp.Items[0].Content[0].Summary != "captured" {
+		t.Fatalf("expected display summary, got %#v", resp.Items[0].Content[0])
+	}
+	result := resp.Items[0].Content[0].ToolResult
+	if result == nil {
+		t.Fatalf("expected structured tool result, got %#v", resp.Items[0].Content[0])
+	}
+	if result.ToolCallID != "call-1" || result.ToolName != "screenshot" || result.ResultType != string(protocol.ToolResultTypeContent) {
+		t.Fatalf("unexpected tool result: %#v", result)
+	}
+	if len(result.Content) != 2 {
+		t.Fatalf("expected structured content parts, got %#v", result.Content)
+	}
+	if result.Content[0].Type != string(protocol.ContentTypeText) || result.Content[0].Text != "captured" {
+		t.Fatalf("unexpected text content part: %#v", result.Content[0])
+	}
+	if result.Content[1].Image == nil || result.Content[1].Image.URL != "file:///tmp/screenshot.png" {
+		t.Fatalf("unexpected image content part: %#v", result.Content[1])
+	}
+}
+
+func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = []zotigosession.DisplayItem{{
+		ID:       "item_tool_call",
+		Sequence: 1,
+		Type:     zotigosession.DisplayItemAssistantMessage,
+		Role:     string(protocol.RoleAssistant),
+		Content: []zotigosession.DisplayContentPart{{
+			Type:    string(protocol.ContentTypeToolCall),
+			Summary: "Shell(git status)",
+			ToolCall: &zotigosession.DisplayToolCall{
+				ID:        "call-1",
+				Name:      "shell",
+				Arguments: `{"command":"git status"}`,
+			},
+		}},
+		CreatedAt: time.Now().UTC(),
+	}}
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
+
+	if len(resp.Items) != 1 || len(resp.Items[0].Content) != 1 {
+		t.Fatalf("unexpected items response: %#v", resp)
+	}
+	if resp.Items[0].Content[0].Summary != "Shell(git status)" {
+		t.Fatalf("expected display summary, got %#v", resp.Items[0].Content[0])
+	}
+	call := resp.Items[0].Content[0].ToolCall
+	if call == nil {
+		t.Fatalf("expected structured tool call, got %#v", resp.Items[0].Content[0])
+	}
+	if call.ID != "call-1" || call.Name != "shell" || call.Arguments != `{"command":"git status"}` {
+		t.Fatalf("unexpected tool call: %#v", call)
+	}
+}
+
+func TestSessionItemsReadsStoredSessionWithoutRegistryEntry(t *testing.T) {
+	source := &fakeDisplayItemSource{
+		items: map[string][]zotigosession.DisplayItem{
+			"sess-stored": makeDisplayItems(2),
+		},
+	}
+	handler := newHandler(newSessionRegistry(), source)
+
+	resp := getItems(t, handler, "/sessions/sess-stored/items")
+
+	assertItemSequences(t, resp.Items, []uint64{1, 2})
+}
+
+func TestStoredDisplayItemSourceReadsDisplayLog(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	sess := &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:        "sess-store",
+			CreatedAt: time.Now().UTC(),
+			UpdatedAt: time.Now().UTC(),
+		},
+		AgentSnapshot: agent.Snapshot{
+			History: []protocol.Message{protocol.NewUserMessage("runtime summary")},
+		},
+	}
+	if err := store.Put(context.Background(), sess); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, zotigosession.DisplayItem{
+		Type:    zotigosession.DisplayItemUserMessage,
+		Role:    string(protocol.RoleUser),
+		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "display prompt"}},
+	}); err != nil {
+		t.Fatalf("append display item: %v", err)
+	}
+
+	source := storedDisplayItemSource{store: store}
+	items, ok, err := source.LoadItems(context.Background(), "sess-store")
+	if err != nil {
+		t.Fatalf("load items: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected session to exist")
+	}
+	if len(items) != 1 || items[0].Content[0].Text != "display prompt" {
+		t.Fatalf("unexpected items: %#v", items)
 	}
 }
 
@@ -582,4 +849,47 @@ func attachWorker(t *testing.T, handler http.Handler, id string) Session {
 		t.Fatalf("decode attach response: %v", err)
 	}
 	return session
+}
+
+func getItems(t *testing.T, handler http.Handler, path string) itemsResponse {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var resp itemsResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode items response: %v", err)
+	}
+	return resp
+}
+
+func makeDisplayItems(count int) []zotigosession.DisplayItem {
+	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	items := make([]zotigosession.DisplayItem, 0, count)
+	for i := 1; i <= count; i++ {
+		items = append(items, zotigosession.DisplayItem{
+			ID:        fmt.Sprintf("item_sess-test_%d", i),
+			Sequence:  uint64(i),
+			Type:      zotigosession.DisplayItemUserMessage,
+			Role:      string(protocol.RoleUser),
+			Content:   []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "message"}},
+			CreatedAt: base.Add(time.Duration(i) * time.Second),
+		})
+	}
+	return items
+}
+
+func assertItemSequences(t *testing.T, items []itemResponse, expected []uint64) {
+	t.Helper()
+	if len(items) != len(expected) {
+		t.Fatalf("expected %d items, got %d", len(expected), len(items))
+	}
+	for idx, sequence := range expected {
+		if items[idx].Sequence != sequence {
+			t.Fatalf("item %d: expected sequence %d, got %d", idx, sequence, items[idx].Sequence)
+		}
+	}
 }

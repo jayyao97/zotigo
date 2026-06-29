@@ -151,6 +151,7 @@ func canTransition(state SessionState, from []SessionState) bool {
 
 type handler struct {
 	registry *sessionRegistry
+	items    displayItemSource
 }
 
 type finishSessionRequest struct {
@@ -210,8 +211,20 @@ func Run(args []string) int {
 }
 
 func NewHandler() http.Handler {
+	items, err := newStoredDisplayItemSource()
+	if err != nil {
+		items = failingDisplayItemSource{err: err}
+	}
+	return newHandler(newSessionRegistry(), items)
+}
+
+func newHandler(registry *sessionRegistry, items displayItemSource) http.Handler {
+	if items == nil {
+		items = failingDisplayItemSource{err: errors.New("display item source is not configured")}
+	}
 	handler := &handler{
-		registry: newSessionRegistry(),
+		registry: registry,
+		items:    items,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
@@ -253,6 +266,8 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	switch action {
 	case "":
 		h.handleSessionGet(w, r, id)
+	case "items":
+		h.handleSessionItems(w, r, id)
 	case "start":
 		h.handleSessionStart(w, r, id)
 	default:
@@ -300,6 +315,33 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 	}
 	session, err := h.registry.Start(id)
 	h.writeTransition(w, session, err)
+}
+
+func (h *handler) handleSessionItems(w http.ResponseWriter, r *http.Request, id string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	query, err := parseDisplayItemQuery(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	_, inRegistry := h.registry.Get(id)
+	items, inStore, err := h.items.LoadItems(r.Context(), id)
+	if err != nil {
+		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if !inRegistry && !inStore {
+		http.NotFound(w, r)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, buildItemsResponse(items, query))
 }
 
 func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id string) {

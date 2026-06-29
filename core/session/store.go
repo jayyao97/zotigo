@@ -14,6 +14,12 @@ type Store interface {
 	// Put stores a session.
 	Put(ctx context.Context, sess *Session) error
 
+	// AppendDisplayItem appends one display-log item to the session's per-session log.
+	AppendDisplayItem(ctx context.Context, id string, item DisplayItem) (DisplayItem, error)
+
+	// ListDisplayItems returns the session's per-session display log.
+	ListDisplayItems(ctx context.Context, id string) ([]DisplayItem, bool, error)
+
 	// Delete removes a session by ID.
 	Delete(ctx context.Context, id string) error
 

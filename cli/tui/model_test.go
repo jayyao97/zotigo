@@ -85,11 +85,11 @@ func TestPasteMsgInsertsMultilineTextOnce(t *testing.T) {
 	ta.SetWidth(80)
 	ta.SetHeight(1)
 
-	m := Model{input: ta}
+	m := &Model{input: ta}
 	pasted := "first line\nsecond line\nthird line"
 
 	updated, _ := m.Update(tea.PasteMsg{Content: pasted})
-	got := updated.(Model).input.Value()
+	got := updated.(*Model).input.Value()
 
 	if got != pasted {
 		t.Fatalf("paste should insert content once, got %q", got)

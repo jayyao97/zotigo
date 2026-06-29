@@ -13,6 +13,7 @@ type PromptConfig struct {
 	WorkDir                    string
 	Transport                  string
 	IncludeProjectInstructions bool
+	SkillManager               *skills.SkillManager
 }
 
 func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
@@ -34,6 +35,13 @@ func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
 				return content
 			}))
 		}
+	}
+
+	if cfg.SkillManager != nil {
+		opts = append(opts, prompt.WithDynamicSection("available_skills", func(_ prompt.PromptContext) string {
+			_ = cfg.SkillManager.Load()
+			return cfg.SkillManager.BuildSkillIndex()
+		}))
 	}
 
 	return prompt.NewSystemPromptBuilder(opts...)
