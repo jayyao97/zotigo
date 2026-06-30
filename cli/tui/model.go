@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/charmbracelet/x/ansi"
 	"github.com/jayyao97/zotigo/cli/commands"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -47,6 +49,11 @@ type Model struct {
 	cmdRegistry        *commands.Registry
 	ctx                context.Context
 	input              textarea.Model
+	transcript         []string
+	viewport           viewport.Model
+	viewportContent    string
+	viewportEnabled    bool
+	viewportAutoScroll bool
 	currentAsstMsg     string
 	thinking           bool
 	approving          bool
@@ -74,6 +81,7 @@ type Model struct {
 type streamReadyMsg <-chan protocol.Event
 type errMsg error
 type denialSettledMsg struct{}
+type transcriptMsg string
 
 func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) *Model {
 	ta := textarea.New()
@@ -97,13 +105,21 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	styles.Blurred.CursorLine = lipgloss.NewStyle()
 	ta.SetStyles(styles)
 
+	vp := viewport.New()
+	vp.SoftWrap = false
+	vp.MouseWheelEnabled = true
+	viewportEnabled := shouldUseViewportRenderer()
+
 	m := Model{
-		agent:       ag,
-		sessionMgr:  sessMgr,
-		sessionID:   sessID,
-		cmdRegistry: cmdRegistry,
-		ctx:         context.Background(),
-		input:       ta,
+		agent:              ag,
+		sessionMgr:         sessMgr,
+		sessionID:          sessID,
+		cmdRegistry:        cmdRegistry,
+		ctx:                context.Background(),
+		input:              ta,
+		viewport:           vp,
+		viewportEnabled:    viewportEnabled,
+		viewportAutoScroll: true,
 		// Keep the local auto-approve toggle in sync with the agent's
 		// actual policy — new sessions default to Auto, and resuming
 		// a session inherits whatever policy was active. Without this
@@ -129,6 +145,20 @@ func (m *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
+func (m *Model) commitLine(s string) tea.Cmd {
+	if !m.viewportEnabled {
+		return tea.Println(s)
+	}
+	return func() tea.Msg { return transcriptMsg(s) }
+}
+
+func (m *Model) appendTranscript(s string) {
+	m.transcript = append(m.transcript, s)
+	if m.viewportAutoScroll {
+		m.viewport.GotoBottom()
+	}
+}
+
 func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
 	items, truncated := m.initialDisplayItems()
 
@@ -140,19 +170,19 @@ func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
 	header := headerStyle.Render("── " + headerText + " ──")
 
 	var cmds []tea.Cmd
-	cmds = append(cmds, tea.Println(header))
-	cmds = append(cmds, tea.Println(renderAgentBanner(m.agent.Describe())))
+	cmds = append(cmds, m.commitLine(header))
+	cmds = append(cmds, m.commitLine(renderAgentBanner(m.agent.Describe())))
 	if truncated {
-		cmds = append(cmds, tea.Println(headerStyle.Render("── (...earlier messages truncated...) ──")))
+		cmds = append(cmds, m.commitLine(headerStyle.Render("── (...earlier messages truncated...) ──")))
 	}
-	cmds = append(cmds, tea.Println(""))
+	cmds = append(cmds, m.commitLine(""))
 
 	for _, item := range items {
 		if str, ok := renderDisplayItem(item); ok {
-			cmds = append(cmds, tea.Println(str))
+			cmds = append(cmds, m.commitLine(str))
 		}
 	}
-	cmds = append(cmds, tea.Println(""))
+	cmds = append(cmds, m.commitLine(""))
 	return tea.Sequence(cmds...)
 }
 
@@ -190,6 +220,22 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case transcriptMsg:
+		m.appendTranscript(string(msg))
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if !m.viewportEnabled {
+			break
+		}
+		m.updateViewportContent()
+		beforeY := m.viewport.YOffset()
+		beforeBottom := m.viewport.AtBottom()
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.viewportAutoScroll = m.viewport.AtBottom()
+		m.logViewportScroll("viewport-update", msg.Button, beforeY, beforeBottom)
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -203,6 +249,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.input.SetWidth(inputWidth)
 		m.input.SetHeight(m.inputLineCount())
+		m.viewport.SetWidth(m.width)
 
 		if !m.initialPrinted {
 			m.initialPrinted = true
@@ -239,7 +286,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyStr == "ctrl+c" || keyStr == "esc" {
 			m.saveSession()
 			if summary := renderUsageSummary(m.agent); summary != "" {
-				return m, tea.Sequence(tea.Println("\n"+summary), tea.Quit)
+				return m, tea.Sequence(m.commitLine("\n"+summary), tea.Quit)
 			}
 			return m, tea.Quit
 		}
@@ -334,10 +381,10 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					env := m.buildCmdEnv(&output)
 					err := cmd.Execute(m.ctx, env, args)
 					if err != nil {
-						return m, tea.Println(errorStyle.Render("✗ ") + "Error: " + err.Error())
+						return m, m.commitLine(errorStyle.Render("✗ ") + "Error: " + err.Error())
 					}
 					if output.Len() > 0 {
-						return m, tea.Println(output.String())
+						return m, m.commitLine(output.String())
 					}
 					return m, nil
 				}
@@ -422,7 +469,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendDisplayItem(displayMessageItem(session.DisplayItemUserMessage, protocol.RoleUser, msg))
 
 			userMsgStr, _ := renderMessage(msg)
-			return m, tea.Batch(tea.Println(userMsgStr), m.startRun(msg))
+			return m, tea.Batch(m.commitLine(userMsgStr), m.startRun(msg))
 		}
 	case streamReadyMsg:
 		m.eventCh = msg
@@ -529,7 +576,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Lines were incrementally committed — just flush the remaining tail
 				var batchCmds []tea.Cmd
 				if m.currentAsstMsg != "" {
-					batchCmds = append(batchCmds, tea.Println(m.currentAsstMsg))
+					batchCmds = append(batchCmds, m.commitLine(m.currentAsstMsg))
 				}
 				m.currentAsstMsg = ""
 				m.streamFlushed = 0
@@ -547,7 +594,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				batchCmds = append(batchCmds, tea.Println(timingSuffix))
+				batchCmds = append(batchCmds, m.commitLine(timingSuffix))
 				m.eventCh = nil
 				m.appendTurnCompleted(msg.FinishReason)
 				m.saveSession()
@@ -578,7 +625,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.appendTurnPaused()
 				m.saveSession()
 				if formattedMsg != "" {
-					return m, tea.Println(formattedMsg)
+					return m, m.commitLine(formattedMsg)
 				}
 				return m, nil
 			}
@@ -588,9 +635,9 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendTurnCompleted(msg.FinishReason)
 			m.saveSession()
 			if formattedMsg != "" {
-				return m, tea.Sequence(tea.Println(formattedMsg), tea.Println(timingSuffix))
+				return m, tea.Sequence(m.commitLine(formattedMsg), m.commitLine(timingSuffix))
 			}
-			return m, tea.Println(timingSuffix)
+			return m, m.commitLine(timingSuffix)
 
 		case protocol.EventTypeError:
 			m.err = msg.Error
@@ -598,7 +645,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.appendTurnFailed(msg.Error)
 			m.saveSession()
 			errStr := "\n" + errorStyle.Render("✗ ") + "Error: " + fmt.Sprintf("%v", msg.Error)
-			return m, tea.Println(errStr)
+			return m, m.commitLine(errStr)
 		}
 		return m, waitForNextEvent(m.eventCh)
 
@@ -617,7 +664,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.saveSession()
 		}
 		errStr := "\n" + errorStyle.Render("✗ ") + "System Error: " + fmt.Sprintf("%v", msg)
-		return m, tea.Println(errStr)
+		return m, m.commitLine(errStr)
 	}
 
 	if !m.approving || m.approvalChoice == 2 {
@@ -695,7 +742,7 @@ func (m *Model) submitApproval() (*Model, tea.Cmd) {
 		return streamReadyMsg(ch)
 	}
 
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
 }
 
 func (m *Model) setPendingApprovals(actions []*agent.PendingAction) {
@@ -766,7 +813,7 @@ func (m *Model) submitApprovalBatch(reason string) (*Model, tea.Cmd) {
 		return streamReadyMsg(ch)
 	}
 
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
 }
 
 func deniedToolResultsFromTUI(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
@@ -839,7 +886,7 @@ func (m *Model) denyAndReturn(feedback string) (*Model, tea.Cmd) {
 			}
 			return denialSettledMsg{}
 		}
-		return m, tea.Batch(tea.Println(approvalMsg), cmd)
+		return m, tea.Batch(m.commitLine(approvalMsg), cmd)
 	}
 
 	// Deny with feedback: keep thinking, agent continues with user feedback
@@ -852,7 +899,7 @@ func (m *Model) denyAndReturn(feedback string) (*Model, tea.Cmd) {
 		}
 		return streamReadyMsg(ch)
 	}
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
+	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
 }
 
 func waitForNextEvent(ch <-chan protocol.Event) tea.Cmd {
@@ -883,15 +930,10 @@ func (m *Model) flushStreamedLines() tea.Cmd {
 		prefix = "\n"
 	}
 	m.streamFlushed++
-	return tea.Println(prefix + toCommit)
+	return m.commitLine(prefix + toCommit)
 }
 
-func (m *Model) View() tea.View {
-	// Wait for WindowSizeMsg to initialize width.
-	if m.width == 0 {
-		return tea.NewView("")
-	}
-
+func (m *Model) inlineView() tea.View {
 	var sb strings.Builder
 
 	if m.thinking && m.currentAsstMsg != "" {
@@ -981,6 +1023,233 @@ func (m *Model) View() tea.View {
 	sb.WriteString("\n")
 
 	return tea.NewView(sb.String())
+}
+
+func (m *Model) View() tea.View {
+	// Wait for WindowSizeMsg to initialize width.
+	if m.width == 0 {
+		if !m.viewportEnabled {
+			return tea.NewView("")
+		}
+		return altScreenView("")
+	}
+	if !m.viewportEnabled {
+		return m.inlineView()
+	}
+
+	live := m.liveView()
+	viewportHeight := m.height - viewLineCount(live)
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+	m.viewport.SetWidth(m.width)
+	m.viewport.SetHeight(viewportHeight)
+	m.updateViewportContent()
+	if m.viewportAutoScroll {
+		m.viewport.GotoBottom()
+	}
+
+	var sb strings.Builder
+	sb.WriteString(m.viewport.View())
+	if live != "" {
+		sb.WriteString("\n")
+		sb.WriteString(live)
+	}
+
+	return altScreenView(sb.String())
+}
+
+func altScreenView(s string) tea.View {
+	view := tea.NewView(s)
+	view.AltScreen = true
+	view.MouseMode = tea.MouseModeCellMotion
+	return view
+}
+
+func (m *Model) liveView() string {
+	var sb strings.Builder
+
+	if m.approving {
+		if len(m.pendingApprovals) > 1 {
+			current := m.pendingApprovals[m.approvalItemChoice]
+			tc := current.ToolCall
+			if tc == nil {
+				tc = &protocol.ToolCall{Name: current.Name, Arguments: current.Arguments}
+			}
+			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + formatToolCall(tc) + "\n")
+			sb.WriteString(blurredChoice.Render(fmt.Sprintf("  Approval %d/%d", m.approvalItemChoice+1, len(m.pendingApprovals))) + "\n")
+			if hint := approvalHintForAction(current); hint != "" {
+				sb.WriteString(blurredChoice.Render("  " + hint))
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		} else {
+			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
+			if len(m.pendingApprovals) == 1 {
+				if hint := approvalHintForAction(m.pendingApprovals[0]); hint != "" {
+					sb.WriteString(blurredChoice.Render("  " + hint))
+					sb.WriteString("\n")
+				}
+			}
+		}
+
+		// Accept line
+		if m.approvalChoice == 0 {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Accept")))
+		} else {
+			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Accept")))
+		}
+
+		// Deny line
+		denyLabel := denyLabelForApprovalCount(len(m.pendingApprovals))
+		if m.approvalChoice == 1 {
+			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel)))
+		} else {
+			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render(denyLabel)))
+		}
+
+		// Feedback input line
+		if m.approvalChoice == 2 {
+			sb.WriteString("  " + focusedChoice.Render("> ") + m.input.View())
+		} else {
+			placeholder := "Send feedback..."
+			if v := m.input.Value(); v != "" {
+				placeholder = v
+			}
+			sb.WriteString(fmt.Sprintf("    %s", blurredChoice.Render(placeholder)))
+		}
+	} else {
+		// Only show indicator when auto-approve is on
+		if m.autoApprove {
+			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
+			sb.WriteString("\n")
+		}
+
+		if status := renderUsageStatus(m.agent); status != "" {
+			sb.WriteString(status)
+			sb.WriteString("\n")
+		}
+
+		// Prefix the first visual line with a prompt arrow, then pad wrapped lines equally.
+		prompt := promptStyle.Render("➜ ")
+		pad := strings.Repeat(" ", lipgloss.Width(prompt))
+		taView := m.input.View()
+		lines := strings.Split(taView, "\n")
+		for i := range lines {
+			if i == 0 {
+				lines[i] = prompt + lines[i]
+			} else {
+				lines[i] = pad + lines[i]
+			}
+		}
+		content := strings.Join(lines, "\n")
+		sb.WriteString(inputStyle.Render(content))
+	}
+
+	sb.WriteString("\n")
+
+	return sb.String()
+}
+
+func (m *Model) transcriptContent() string {
+	if !m.thinking {
+		return strings.Join(m.transcript, "\n")
+	}
+
+	parts := append([]string(nil), m.transcript...)
+	if m.currentAsstMsg != "" {
+		parts = append(parts, m.currentAsstMsg)
+	} else {
+		parts = append(parts, asstMarkerStyle.Render("⏺ ")+"Thinking...")
+	}
+	return strings.Join(parts, "\n")
+}
+
+func (m *Model) updateViewportContent() {
+	content := wrapViewportContent(m.transcriptContent(), m.viewport.Width())
+	if content == m.viewportContent {
+		return
+	}
+	m.viewport.SetContent(content)
+	m.viewportContent = content
+}
+
+func wrapViewportContent(content string, width int) string {
+	if width <= 0 {
+		return content
+	}
+	lines := strings.Split(content, "\n")
+	wrapped := make([]string, 0, len(lines))
+	for _, line := range lines {
+		if line == "" {
+			wrapped = append(wrapped, line)
+			continue
+		}
+		for lineWidth := ansi.StringWidth(line); lineWidth > width; lineWidth = ansi.StringWidth(line) {
+			wrapped = append(wrapped, ansi.Cut(line, 0, width))
+			line = ansi.Cut(line, width, lineWidth)
+		}
+		wrapped = append(wrapped, line)
+	}
+	return strings.Join(wrapped, "\n")
+}
+
+func (m *Model) logViewportScroll(action string, button tea.MouseButton, beforeY int, beforeBottom bool) {
+	if os.Getenv("ZOTIGO_SCROLL_DEBUG") == "" {
+		return
+	}
+	file, err := os.OpenFile("/tmp/zotigo-scroll-debug.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+	if err != nil {
+		return
+	}
+	defer file.Close()
+
+	_, _ = fmt.Fprintf(
+		file,
+		"%s action=%s button=%v before_y=%d after_y=%d before_bottom=%t after_bottom=%t auto=%t height=%d width=%d percent=%.3f lines=%d thinking=%t current_len=%d\n",
+		time.Now().Format(time.RFC3339Nano),
+		action,
+		button,
+		beforeY,
+		m.viewport.YOffset(),
+		beforeBottom,
+		m.viewport.AtBottom(),
+		m.viewportAutoScroll,
+		m.viewport.Height(),
+		m.viewport.Width(),
+		m.viewport.ScrollPercent(),
+		viewportContentLineCount(m.viewportContent),
+		m.thinking,
+		len(m.currentAsstMsg),
+	)
+}
+
+func viewportContentLineCount(content string) int {
+	if content == "" {
+		return 0
+	}
+	return strings.Count(content, "\n") + 1
+}
+
+func viewLineCount(s string) int {
+	if s == "" {
+		return 0
+	}
+	return strings.Count(s, "\n") + 1
+}
+
+func shouldUseViewportRenderer() bool {
+	return !isJetBrainsTerminal()
+}
+
+func isJetBrainsTerminal() bool {
+	for _, value := range []string{os.Getenv("TERMINAL_EMULATOR"), os.Getenv("TERM_PROGRAM")} {
+		value = strings.ToLower(value)
+		if strings.Contains(value, "jetbrains") || strings.Contains(value, "jediterm") {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *Model) saveSession() {

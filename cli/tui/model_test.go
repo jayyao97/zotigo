@@ -96,6 +96,24 @@ func TestPasteMsgInsertsMultilineTextOnce(t *testing.T) {
 	}
 }
 
+func TestShouldUseViewportRendererDisablesJetBrainsTerminal(t *testing.T) {
+	t.Setenv("TERMINAL_EMULATOR", "JetBrains-JediTerm")
+	t.Setenv("TERM_PROGRAM", "")
+
+	if shouldUseViewportRenderer() {
+		t.Fatal("expected JetBrains terminal to use inline renderer")
+	}
+}
+
+func TestShouldUseViewportRendererAllowsOtherTerminals(t *testing.T) {
+	t.Setenv("TERMINAL_EMULATOR", "")
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+
+	if !shouldUseViewportRenderer() {
+		t.Fatal("expected non-JetBrains terminal to use viewport renderer")
+	}
+}
+
 func containsSubstr(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {
