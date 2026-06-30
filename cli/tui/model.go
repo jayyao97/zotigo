@@ -2,25 +2,21 @@ package tui
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
-	"runtime"
 	"strings"
 	"time"
 
 	"charm.land/bubbles/v2/textarea"
+	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
 	"github.com/jayyao97/zotigo/cli/commands"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 )
 
@@ -39,9 +35,6 @@ var (
 	blurredChoice       = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	inputStyle          = lipgloss.NewStyle().Border(lipgloss.RoundedBorder()).BorderForeground(lipgloss.Color("62")).Padding(0, 1)
 	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
-
-	// reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
-	reBlankRun = regexp.MustCompile(`\n{3,}`)
 )
 
 type Model struct {
@@ -51,6 +44,11 @@ type Model struct {
 	cmdRegistry        *commands.Registry
 	ctx                context.Context
 	input              textarea.Model
+	transcript         []string
+	viewport           viewport.Model
+	viewportContent    string
+	viewportEnabled    bool
+	viewportAutoScroll bool
 	currentAsstMsg     string
 	thinking           bool
 	approving          bool
@@ -69,14 +67,17 @@ type Model struct {
 	autoApprove        bool
 	streamFlushed      int // lines already committed to scrollback during streaming
 	turnStartTime      time.Time
+	displayTurnID      string
+	displayAsstContent []session.DisplayContentPart
 	needsAsstMarker    bool // next text content block should get a ⏺ prefix
 	streamingReasoning bool // currently streaming reasoning content
 }
 
 type streamReadyMsg <-chan protocol.Event
 type errMsg error
+type denialSettledMsg struct{}
 
-func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) Model {
+func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Zotigo..."
 	ta.Focus()
@@ -98,13 +99,21 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	styles.Blurred.CursorLine = lipgloss.NewStyle()
 	ta.SetStyles(styles)
 
+	vp := viewport.New()
+	vp.SoftWrap = false
+	vp.MouseWheelEnabled = true
+	viewportEnabled := shouldUseViewportRenderer()
+
 	m := Model{
-		agent:       ag,
-		sessionMgr:  sessMgr,
-		sessionID:   sessID,
-		cmdRegistry: cmdRegistry,
-		ctx:         context.Background(),
-		input:       ta,
+		agent:              ag,
+		sessionMgr:         sessMgr,
+		sessionID:          sessID,
+		cmdRegistry:        cmdRegistry,
+		ctx:                context.Background(),
+		input:              ta,
+		viewport:           vp,
+		viewportEnabled:    viewportEnabled,
+		viewportAutoScroll: true,
 		// Keep the local auto-approve toggle in sync with the agent's
 		// actual policy — new sessions default to Auto, and resuming
 		// a session inherits whatever policy was active. Without this
@@ -120,54 +129,93 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 		m.approving = true
 		m.approvalChoice = 0
 		m.setPendingApprovals(snap.PendingActions)
+		m.restoreOpenDisplayTurnID()
 	}
 
-	return m
+	return &m
 }
 
-func (m Model) Init() tea.Cmd {
+func (m *Model) Init() tea.Cmd {
 	return textarea.Blink
 }
 
-func (m Model) printInitialHistory(isRepaint bool) tea.Cmd {
-	snap := m.agent.Snapshot()
-	history := snap.History
-	const maxHistory = 100
-	truncated := false
-	if len(history) > maxHistory {
-		history = history[len(history)-maxHistory:]
-		truncated = true
-	}
+func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
+	items, truncated := m.initialDisplayItems()
 
 	headerText := "Welcome to Zotigo CLI"
-	if len(snap.History) > 0 {
+	if len(items) > 0 {
 		headerText = "Welcome back to Zotigo CLI"
 	}
 
 	header := headerStyle.Render("── " + headerText + " ──")
 
 	var cmds []tea.Cmd
-	cmds = append(cmds, tea.Println(header))
-	cmds = append(cmds, tea.Println(renderAgentBanner(m.agent.Describe())))
+	cmds = append(cmds, m.commitLine(header))
+	cmds = append(cmds, m.commitLine(renderAgentBanner(m.agent.Describe())))
 	if truncated {
-		cmds = append(cmds, tea.Println(headerStyle.Render("── (...earlier messages truncated...) ──")))
+		cmds = append(cmds, m.commitLine(headerStyle.Render("── (...earlier messages truncated...) ──")))
 	}
-	cmds = append(cmds, tea.Println(""))
+	cmds = append(cmds, m.commitLine(""))
 
-	for _, msg := range history {
-		if str, ok := renderMessage(msg); ok {
-			cmds = append(cmds, tea.Println(str))
+	for _, item := range items {
+		if str, ok := renderDisplayItem(item); ok {
+			cmds = append(cmds, m.commitLine(str))
 		}
 	}
-	cmds = append(cmds, tea.Println(""))
+	cmds = append(cmds, m.commitLine(""))
 	return tea.Sequence(cmds...)
 }
 
-func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m *Model) initialDisplayItems() ([]session.DisplayItem, bool) {
+	if m.sessionMgr == nil || m.sessionID == "" {
+		return nil, false
+	}
+	items, ok, err := m.sessionMgr.ListDisplayItems(m.sessionID)
+	if err != nil || !ok {
+		return nil, false
+	}
+
+	const maxHistory = 100
+	truncated := false
+	if len(items) > maxHistory {
+		items = items[len(items)-maxHistory:]
+		truncated = true
+	}
+	return items, truncated
+}
+
+func (m *Model) restoreOpenDisplayTurnID() {
+	if m.sessionMgr == nil || m.sessionID == "" {
+		return
+	}
+	items, ok, err := m.sessionMgr.ListDisplayItems(m.sessionID)
+	if err != nil || !ok {
+		return
+	}
+	m.displayTurnID = lastOpenDisplayTurnID(items)
+}
+
+func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	var cmd tea.Cmd
 
 	switch msg := msg.(type) {
+	case transcriptMsg:
+		m.appendTranscript(string(msg))
+		return m, nil
+
+	case tea.MouseWheelMsg:
+		if !m.viewportEnabled {
+			break
+		}
+		m.updateViewportContent()
+		beforeY := m.viewport.YOffset()
+		beforeBottom := m.viewport.AtBottom()
+		m.viewport, cmd = m.viewport.Update(msg)
+		m.viewportAutoScroll = m.viewport.AtBottom()
+		m.logViewportScroll("viewport-update", msg.Button, beforeY, beforeBottom)
+		return m, cmd
+
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
@@ -181,6 +229,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.input.SetWidth(inputWidth)
 		m.input.SetHeight(m.inputLineCount())
+		m.viewport.SetWidth(m.width)
 
 		if !m.initialPrinted {
 			m.initialPrinted = true
@@ -217,7 +266,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if keyStr == "ctrl+c" || keyStr == "esc" {
 			m.saveSession()
 			if summary := renderUsageSummary(m.agent); summary != "" {
-				return m, tea.Sequence(tea.Println("\n"+summary), tea.Quit)
+				return m, tea.Sequence(m.commitLine("\n"+summary), tea.Quit)
 			}
 			return m, tea.Quit
 		}
@@ -312,10 +361,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					env := m.buildCmdEnv(&output)
 					err := cmd.Execute(m.ctx, env, args)
 					if err != nil {
-						return m, tea.Println(errorStyle.Render("✗ ") + "Error: " + err.Error())
+						return m, m.commitLine(errorStyle.Render("✗ ") + "Error: " + err.Error())
 					}
 					if output.Len() > 0 {
-						return m, tea.Println(output.String())
+						return m, m.commitLine(output.String())
 					}
 					return m, nil
 				}
@@ -389,15 +438,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.input.Reset()
 			m.thinking = true
 			m.turnStartTime = time.Now()
+			m.displayTurnID = fmt.Sprintf("turn_%d", m.turnStartTime.UnixNano())
 			m.needsAsstMarker = true
 			m.currentAsstMsg = ""
+			m.displayAsstContent = nil
+			m.appendDisplayItem(session.DisplayItem{
+				Type: session.DisplayItemTurnStarted,
+				Turn: &session.DisplayTurn{ID: m.displayTurnID},
+			})
+			m.appendDisplayItem(displayMessageItem(session.DisplayItemUserMessage, protocol.RoleUser, msg))
 
 			userMsgStr, _ := renderMessage(msg)
-			return m, tea.Batch(tea.Println(userMsgStr), m.startRun(msg))
+			return m, tea.Batch(m.commitLine(userMsgStr), m.startRun(msg))
 		}
 	case streamReadyMsg:
 		m.eventCh = msg
 		m.currentAsstMsg = ""
+		m.displayAsstContent = nil
 		m.streamFlushed = 0
 		m.needsAsstMarker = true
 		return m, waitForNextEvent(m.eventCh)
@@ -430,8 +487,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				if isReasoning {
 					m.currentAsstMsg += reasoningStyle.Render(msg.ContentPartDelta.Text)
+					m.appendAssistantDisplayPart(string(protocol.ContentTypeReasoning), msg.ContentPartDelta.Text)
 				} else {
 					m.currentAsstMsg += msg.ContentPartDelta.Text
+					m.appendAssistantDisplayPart(string(protocol.ContentTypeText), msg.ContentPartDelta.Text)
 				}
 				if cmd := m.flushStreamedLines(); cmd != nil {
 					if pendingFlush != nil {
@@ -462,6 +521,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				placeholder := fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCall.Name))
 				full := toolMarkerStyle.Render("⏺ ") + formatToolCall(msg.ToolCall) + "\n"
 				m.currentAsstMsg = strings.Replace(m.currentAsstMsg, placeholder, full, 1)
+				m.appendToolCallDisplayPart(msg.ToolCall)
 				m.needsAsstMarker = true
 				// Flush tool call to scrollback so next content starts fresh
 				if cmd := m.flushStreamedLines(); cmd != nil {
@@ -470,16 +530,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case protocol.EventTypeToolResultDone:
 			if msg.ToolResult != nil {
-				rendered := formatToolResult(msg.ToolResult, 10)
+				rendered := renderProtocolToolResult(msg.ToolResult)
 				m.currentAsstMsg += rendered + "\n"
+				m.appendToolResultDisplayPart(msg.ToolResult)
 				if cmd := m.flushStreamedLines(); cmd != nil {
 					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
 				}
 			}
 		case protocol.EventTypeToolProgress:
 			if msg.ToolResult != nil {
-				rendered := formatToolResult(msg.ToolResult, 10)
+				rendered := renderProtocolToolResult(msg.ToolResult)
 				m.currentAsstMsg += rendered + "\n"
+				m.appendToolResultDisplayPart(msg.ToolResult)
 				if cmd := m.flushStreamedLines(); cmd != nil {
 					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
 				}
@@ -494,7 +556,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				// Lines were incrementally committed — just flush the remaining tail
 				var batchCmds []tea.Cmd
 				if m.currentAsstMsg != "" {
-					batchCmds = append(batchCmds, tea.Println(m.currentAsstMsg))
+					batchCmds = append(batchCmds, m.commitLine(m.currentAsstMsg))
 				}
 				m.currentAsstMsg = ""
 				m.streamFlushed = 0
@@ -504,6 +566,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.approvalChoice = 0
 					m.setPendingApprovals(snap.PendingActions)
 					m.pendingToolArgs = ""
+					m.appendTurnPaused()
 					m.saveSession()
 					if len(batchCmds) > 0 {
 						return m, tea.Batch(batchCmds...)
@@ -511,8 +574,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					return m, nil
 				}
 
-				batchCmds = append(batchCmds, tea.Println(timingSuffix))
+				batchCmds = append(batchCmds, m.commitLine(timingSuffix))
 				m.eventCh = nil
+				m.appendTurnCompleted(msg.FinishReason)
 				m.saveSession()
 				return m, tea.Sequence(batchCmds...)
 			}
@@ -538,28 +602,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.pendingToolArgs = ""
 
 				m.currentAsstMsg = ""
+				m.appendTurnPaused()
 				m.saveSession()
 				if formattedMsg != "" {
-					return m, tea.Println(formattedMsg)
+					return m, m.commitLine(formattedMsg)
 				}
 				return m, nil
 			}
 
 			m.currentAsstMsg = ""
 			m.eventCh = nil
+			m.appendTurnCompleted(msg.FinishReason)
 			m.saveSession()
 			if formattedMsg != "" {
-				return m, tea.Sequence(tea.Println(formattedMsg), tea.Println(timingSuffix))
+				return m, tea.Sequence(m.commitLine(formattedMsg), m.commitLine(timingSuffix))
 			}
-			return m, tea.Println(timingSuffix)
+			return m, m.commitLine(timingSuffix)
 
 		case protocol.EventTypeError:
 			m.err = msg.Error
 			m.thinking = false
+			m.appendTurnFailed(msg.Error)
+			m.saveSession()
 			errStr := "\n" + errorStyle.Render("✗ ") + "Error: " + fmt.Sprintf("%v", msg.Error)
-			return m, tea.Println(errStr)
+			return m, m.commitLine(errStr)
 		}
 		return m, waitForNextEvent(m.eventCh)
+
+	case denialSettledMsg:
+		m.saveSession()
+		return m, nil
 
 	case errMsg:
 		if strings.Contains(msg.Error(), "agent is not paused") {
@@ -567,8 +639,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.err = msg
 		m.thinking = false
+		if m.eventCh != nil || m.approving || m.hasOpenDisplayTurn() {
+			m.appendTurnFailed(msg)
+			m.saveSession()
+		}
 		errStr := "\n" + errorStyle.Render("✗ ") + "System Error: " + fmt.Sprintf("%v", msg)
-		return m, tea.Println(errStr)
+		return m, m.commitLine(errStr)
 	}
 
 	if !m.approving || m.approvalChoice == 2 {
@@ -609,7 +685,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-func (m Model) startRun(msg protocol.Message) tea.Cmd {
+func (m *Model) startRun(msg protocol.Message) tea.Cmd {
 	return func() tea.Msg {
 		ch, err := m.agent.RunMessage(m.ctx, msg)
 		if err != nil {
@@ -630,178 +706,6 @@ func (m *Model) buildCmdEnv(output *strings.Builder) *commands.Environment {
 			m.agent.Restore(agent.Snapshot{})
 		},
 	}
-}
-
-func (m Model) submitApproval() (Model, tea.Cmd) {
-	m.approving = false
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, "✅ Approved")
-	m.thinking = true
-	m.turnStartTime = time.Now()
-
-	cmd := func() tea.Msg {
-		ch, err := m.agent.ApproveAndExecutePendingActions(m.ctx)
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
-}
-
-func (m *Model) setPendingApprovals(actions []*agent.PendingAction) {
-	m.pendingApprovals = append([]*agent.PendingAction(nil), actions...)
-	m.approvalDecisions = make(map[string]bool, len(actions))
-	m.approvalItemChoice = 0
-	m.pendingToolName = formatPendingActions(actions)
-}
-
-func (m Model) acceptCurrentApproval() (Model, tea.Cmd) {
-	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
-		return m, nil
-	}
-	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = true
-	if m.approvalItemChoice < len(m.pendingApprovals)-1 {
-		m.approvalItemChoice++
-		m.approvalChoice = 0
-		return m, nil
-	}
-	return m.submitApprovalBatch("")
-}
-
-func (m Model) denyCurrentApproval(reason string) (Model, tea.Cmd) {
-	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
-		return m, nil
-	}
-	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = false
-	return m.submitApprovalBatch(reason)
-}
-
-func (m Model) submitApprovalBatch(reason string) (Model, tea.Cmd) {
-	m.approving = false
-	if strings.TrimSpace(reason) == "" {
-		reason = "User denied in TUI"
-	}
-
-	results := make([]transport.ApprovalResult, 0, len(m.pendingApprovals))
-	denied := 0
-	approved := 0
-	for _, action := range m.pendingApprovals {
-		approvedDecision, decided := m.approvalDecisions[action.ToolCallID]
-		if !decided {
-			continue
-		}
-		result := transport.ApprovalResult{ToolCallID: action.ToolCallID, Approved: approvedDecision}
-		if !approvedDecision {
-			result.Reason = reason
-			denied++
-		} else {
-			approved++
-		}
-		results = append(results, result)
-	}
-
-	status := fmt.Sprintf("✅ Approved %d", approved)
-	if denied > 0 {
-		status = fmt.Sprintf("🚫 Denied %d/%d · skipped all pending calls", denied, len(m.pendingApprovals))
-	}
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
-	m.thinking = true
-	m.turnStartTime = time.Now()
-
-	cmd := func() tea.Msg {
-		ch, err := m.agent.ResolvePendingActions(m.ctx, deniedToolResultsFromTUI(results, m.pendingApprovals))
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
-}
-
-func deniedToolResultsFromTUI(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
-	byID := make(map[string]*agent.PendingAction, len(pending))
-	for _, action := range pending {
-		byID[action.ToolCallID] = action
-	}
-	denied := make(map[string]protocol.ToolResult)
-	for _, result := range results {
-		if result.Approved {
-			continue
-		}
-		action, ok := byID[result.ToolCallID]
-		if !ok {
-			continue
-		}
-		reason := result.Reason
-		if reason == "" {
-			reason = "User denied in TUI"
-		}
-		denied[result.ToolCallID] = protocol.ToolResult{
-			ToolCallID: result.ToolCallID,
-			ToolName:   action.Name,
-			Type:       protocol.ToolResultTypeExecutionDenied,
-			Reason:     reason,
-			IsError:    true,
-		}
-	}
-	return denied
-}
-
-func (m Model) denyAndReturn(feedback string) (Model, tea.Cmd) {
-	m.approving = false
-
-	reason := "User denied"
-	if feedback != "" {
-		reason = feedback
-	}
-
-	status := "🚫 Denied"
-	if feedback != "" {
-		status = fmt.Sprintf("🚫 Denied (feedback: %s)", feedback)
-	}
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
-
-	snap := m.agent.Snapshot()
-	var outputs []protocol.ToolResult
-	for _, act := range snap.PendingActions {
-		outputs = append(outputs, protocol.ToolResult{
-			ToolCallID: act.ToolCallID,
-			ToolName:   act.Name,
-			Type:       protocol.ToolResultTypeExecutionDenied,
-			Reason:     reason,
-			IsError:    true,
-		})
-	}
-
-	if feedback == "" {
-		// Simple deny: back to input mode
-		m.thinking = false
-		cmd := func() tea.Msg {
-			ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
-			if err != nil {
-				return errMsg(err)
-			}
-			// Drain the channel so agent settles, but don't continue the loop
-			for range ch {
-			}
-			return nil
-		}
-		return m, tea.Batch(tea.Println(approvalMsg), cmd)
-	}
-
-	// Deny with feedback: keep thinking, agent continues with user feedback
-	m.thinking = true
-	m.turnStartTime = time.Now()
-	cmd := func() tea.Msg {
-		ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-	return m, tea.Batch(tea.Println(approvalMsg), cmd)
 }
 
 func waitForNextEvent(ch <-chan protocol.Event) tea.Cmd {
@@ -832,107 +736,10 @@ func (m *Model) flushStreamedLines() tea.Cmd {
 		prefix = "\n"
 	}
 	m.streamFlushed++
-	return tea.Println(prefix + toCommit)
+	return m.commitLine(prefix + toCommit)
 }
 
-func (m Model) View() tea.View {
-	// Wait for WindowSizeMsg to initialize width.
-	if m.width == 0 {
-		return tea.NewView("")
-	}
-
-	var sb strings.Builder
-
-	if m.thinking && m.currentAsstMsg != "" {
-		sb.WriteString(m.currentAsstMsg)
-		sb.WriteString("\n")
-	} else if m.thinking {
-		sb.WriteString(asstMarkerStyle.Render("⏺ ") + "Thinking...\n")
-	}
-
-	if m.approving {
-		if len(m.pendingApprovals) > 1 {
-			current := m.pendingApprovals[m.approvalItemChoice]
-			tc := current.ToolCall
-			if tc == nil {
-				tc = &protocol.ToolCall{Name: current.Name, Arguments: current.Arguments}
-			}
-			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + formatToolCall(tc) + "\n")
-			sb.WriteString(blurredChoice.Render(fmt.Sprintf("  Approval %d/%d", m.approvalItemChoice+1, len(m.pendingApprovals))) + "\n")
-			if hint := approvalHintForAction(current); hint != "" {
-				sb.WriteString(blurredChoice.Render("  " + hint))
-				sb.WriteString("\n")
-			}
-			sb.WriteString("\n")
-		} else {
-			sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
-			if len(m.pendingApprovals) == 1 {
-				if hint := approvalHintForAction(m.pendingApprovals[0]); hint != "" {
-					sb.WriteString(blurredChoice.Render("  " + hint))
-					sb.WriteString("\n")
-				}
-			}
-		}
-
-		// Accept line
-		if m.approvalChoice == 0 {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Accept")))
-		} else {
-			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Accept")))
-		}
-
-		// Deny line
-		denyLabel := denyLabelForApprovalCount(len(m.pendingApprovals))
-		if m.approvalChoice == 1 {
-			sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel)))
-		} else {
-			sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render(denyLabel)))
-		}
-
-		// Feedback input line
-		if m.approvalChoice == 2 {
-			sb.WriteString("  " + focusedChoice.Render("> ") + m.input.View())
-		} else {
-			placeholder := "Send feedback..."
-			if v := m.input.Value(); v != "" {
-				placeholder = v
-			}
-			sb.WriteString(fmt.Sprintf("    %s", blurredChoice.Render(placeholder)))
-		}
-	} else {
-		// Only show indicator when auto-approve is on
-		if m.autoApprove {
-			sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
-			sb.WriteString("\n")
-		}
-
-		if status := renderUsageStatus(m.agent); status != "" {
-			sb.WriteString(status)
-			sb.WriteString("\n")
-		}
-
-		// Prefix the first visual line with a prompt arrow, then pad wrapped lines equally.
-		prompt := promptStyle.Render("➜ ")
-		pad := strings.Repeat(" ", lipgloss.Width(prompt))
-		taView := m.input.View()
-		lines := strings.Split(taView, "\n")
-		for i := range lines {
-			if i == 0 {
-				lines[i] = prompt + lines[i]
-			} else {
-				lines[i] = pad + lines[i]
-			}
-		}
-		content := strings.Join(lines, "\n")
-		sb.WriteString(inputStyle.Render(content))
-	}
-
-	sb.WriteString("\n")
-
-	return tea.NewView(sb.String())
-}
-
-func (m Model) saveSession() {
+func (m *Model) saveSession() {
 	if m.sessionMgr == nil || m.sessionID == "" {
 		return
 	}
@@ -946,503 +753,10 @@ func (m Model) saveSession() {
 
 	sess, err := m.sessionMgr.Load(m.sessionID)
 	if err == nil {
+		if contextCompacted(sess, snap) {
+			_, _ = m.sessionMgr.AppendDisplayItem(m.sessionID, session.DisplayItem{Type: session.DisplayItemContextCompacted})
+		}
 		sessionadapter.ApplySnapshot(sess, snap, sessionadapter.LastUserPrompt(snap.History))
 		_ = m.sessionMgr.Save(sess)
 	}
-}
-
-func renderMessage(msg protocol.Message) (string, bool) {
-	switch msg.Role {
-	case protocol.RoleUser:
-		text := msg.String()
-		if text == "" {
-			return "", false
-		}
-		return "\n" + userMarkerStyle.Render("❯ ") + text, true
-
-	case protocol.RoleAssistant:
-		var parts []string
-		for _, p := range msg.Content {
-			switch p.Type {
-			case protocol.ContentTypeText:
-				if p.Text != "" {
-					parts = append(parts, "\n"+asstMarkerStyle.Render("⏺ ")+p.Text)
-				}
-			case protocol.ContentTypeReasoning:
-				if p.Text != "" {
-					parts = append(parts, "\n"+reasoningLabelStyle.Render("⏺ Thinking: ")+reasoningStyle.Render(p.Text))
-				}
-			case protocol.ContentTypeToolCall:
-				if p.ToolCall != nil {
-					parts = append(parts, "\n"+toolMarkerStyle.Render("⏺ ")+formatToolCall(p.ToolCall))
-				}
-			}
-		}
-		if len(parts) == 0 {
-			return "", false
-		}
-		return strings.Join(parts, ""), true
-
-	case protocol.RoleTool:
-		var parts []string
-		for _, p := range msg.Content {
-			if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
-				parts = append(parts, formatToolResult(p.ToolResult, 10))
-			}
-		}
-		if len(parts) == 0 {
-			return "", false
-		}
-		return "\n" + strings.Join(parts, "\n"), true
-
-	default:
-		return "", false
-	}
-}
-
-func (m Model) inputLineCount() int {
-	val := m.input.Value()
-	if val == "" {
-		return 1
-	}
-
-	w := m.input.Width()
-	if w < 1 {
-		w = 1
-	}
-
-	lines := 0
-	lastLineRemainder := 0
-	for _, line := range strings.Split(val, "\n") {
-		if line == "" {
-			lines++
-			lastLineRemainder = w
-			continue
-		}
-		lineWidth := lipgloss.Width(line)
-		visualLines := (lineWidth + w - 1) / w
-		if visualLines < 1 {
-			visualLines = 1
-		}
-		lines += visualLines
-		lastLineRemainder = w - (lineWidth % w)
-		if lastLineRemainder == w {
-			lastLineRemainder = 0
-		}
-	}
-
-	if lines < 1 {
-		lines = 1
-	}
-	// Reserve one more line when the current visual line is full.
-	if lastLineRemainder == 0 {
-		lines++
-	}
-	return lines
-}
-
-func isImagePath(s string) bool {
-	ext := strings.ToLower(filepath.Ext(s))
-	switch ext {
-	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp":
-		return true
-	}
-	return false
-}
-
-func (m *Model) handlePaste(content string) (string, bool) {
-	trimmed := strings.TrimSpace(content)
-
-	if !strings.Contains(trimmed, "\n") && isImagePath(trimmed) {
-		if newPath, err := m.storeImage(trimmed); err == nil {
-			return fmt.Sprintf("@%s", newPath), true
-		}
-	}
-
-	return "", false
-}
-
-func (m *Model) storeImage(srcPath string) (string, error) {
-	// Save to current directory's .zotigo folder for shorter paths
-	uploadDir := ".zotigo/uploads"
-	if err := os.MkdirAll(uploadDir, 0755); err != nil {
-		return "", err
-	}
-
-	ext := filepath.Ext(srcPath)
-	filename := fmt.Sprintf("img_%d%s", time.Now().UnixNano(), ext)
-	destPath := filepath.Join(uploadDir, filename)
-
-	src, err := os.Open(srcPath)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = src.Close() }()
-
-	dst, err := os.Create(destPath)
-	if err != nil {
-		return "", err
-	}
-	defer func() { _ = dst.Close() }()
-
-	if _, err := io.Copy(dst, src); err != nil {
-		return "", err
-	}
-
-	return destPath, nil
-}
-
-func isSpecialKey(k tea.KeyPressMsg) bool {
-	// Keys that should always be forwarded to textarea even without Text:
-	// navigation, deletion, modifiers, function keys, etc.
-	s := k.String()
-	switch {
-	case strings.HasPrefix(s, "ctrl+"),
-		strings.HasPrefix(s, "alt+"),
-		strings.HasPrefix(s, "shift+"):
-		return true
-	}
-	switch k.Code {
-	case tea.KeyUp, tea.KeyDown, tea.KeyLeft, tea.KeyRight,
-		tea.KeyHome, tea.KeyEnd, tea.KeyPgUp, tea.KeyPgDown,
-		tea.KeyDelete, tea.KeyBackspace, tea.KeyTab,
-		tea.KeyEnter, tea.KeyEscape:
-		return true
-	}
-	return false
-}
-
-func (m *Model) pasteImageFromClipboard() (string, bool) {
-	// Only support Mac for now via osascript
-	if runtime.GOOS != "darwin" {
-		return "", false
-	}
-
-	// Save to current directory's .zotigo folder for shorter paths
-	uploadDir := ".zotigo/uploads"
-	_ = os.MkdirAll(uploadDir, 0755)
-
-	filename := fmt.Sprintf("paste_%d.png", time.Now().UnixNano())
-	relPath := filepath.Join(uploadDir, filename)
-
-	// AppleScript needs absolute path
-	absPath, err := filepath.Abs(relPath)
-	if err != nil {
-		return "", false
-	}
-
-	// AppleScript to save clipboard to file
-	script := fmt.Sprintf(`try
-		set theFile to (open for access POSIX file "%s" with write permission)
-		set eof theFile to 0
-		write (the clipboard as «class PNGf») to theFile
-		close access theFile
-		return "OK"
-	on error
-		try
-			close access theFile
-		end try
-		return "ERR"
-	end try`, absPath)
-
-	cmd := exec.Command("osascript", "-e", script)
-	out, err := cmd.Output()
-
-	if err == nil && strings.TrimSpace(string(out)) == "OK" {
-		info, err := os.Stat(relPath)
-		if err == nil && info.Size() > 0 {
-			return relPath, true // Return relative path for display
-		}
-	}
-	_ = os.Remove(relPath)
-
-	return "", false
-}
-
-// primaryArgKey maps tool names to the single most informative argument.
-var primaryArgKey = map[string]string{
-	"shell":           "command",
-	"bash":            "command",
-	"execute_command": "command",
-	"read_file":       "path",
-	"write_file":      "path",
-	"edit_file":       "path",
-	"create_file":     "path",
-	"delete_file":     "path",
-	"list_files":      "path",
-	"search_files":    "pattern",
-	"search":          "query",
-	"web_search":      "query",
-	"grep":            "pattern",
-	"find":            "pattern",
-}
-
-// toPascalCase converts a snake_case name to PascalCase, e.g. "read_file" → "ReadFile".
-func toPascalCase(s string) string {
-	parts := strings.Split(s, "_")
-	for i, p := range parts {
-		if len(p) > 0 {
-			parts[i] = strings.ToUpper(p[:1]) + p[1:]
-		}
-	}
-	return strings.Join(parts, "")
-}
-
-// formatDuration formats a duration for the timing footer.
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	m := int(d.Minutes())
-	s := int(d.Seconds()) % 60
-	return fmt.Sprintf("%dm %ds", m, s)
-}
-
-// formatToolCall returns a compact summary like "Shell(git status)" or "ReadFile(path=src/main.go)".
-func formatToolCall(tc *protocol.ToolCall) string {
-	name := toPascalCase(tc.Name)
-
-	var args map[string]any
-	if err := json.Unmarshal([]byte(tc.Arguments), &args); err != nil || len(args) == 0 {
-		return name + "()"
-	}
-
-	if tc.Name == "spawn" {
-		return formatSpawnToolCall(name, args)
-	}
-
-	// Try the known primary arg first.
-	if key, ok := primaryArgKey[tc.Name]; ok {
-		if v, found := args[key]; found {
-			s := truncateToolArg(fmt.Sprintf("%v", v))
-			return fmt.Sprintf("%s(%s)", name, s)
-		}
-	}
-
-	// Fallback: pick the first non-large arg.
-	for k, v := range args {
-		s := fmt.Sprintf("%v", v)
-		if len(s) > 200 {
-			continue // skip large values
-		}
-		s = truncateToolArg(s)
-		return fmt.Sprintf("%s(%s=%s)", name, k, s)
-	}
-
-	return name + "(...)"
-}
-
-func formatSpawnToolCall(name string, args map[string]any) string {
-	var parts []string
-	if v, ok := args["name"]; ok {
-		parts = append(parts, "name="+truncateToolArg(fmt.Sprintf("%v", v)))
-	}
-	if v, ok := args["agent_type"]; ok {
-		parts = append(parts, "agent_type="+truncateToolArg(fmt.Sprintf("%v", v)))
-	}
-	if v, ok := args["workdir"]; ok {
-		parts = append(parts, "workdir="+truncateToolArg(fmt.Sprintf("%v", v)))
-	}
-	if len(parts) == 0 {
-		if v, ok := args["description"]; ok {
-			parts = append(parts, "description="+truncateToolArg(fmt.Sprintf("%v", v)))
-		}
-	}
-	if len(parts) == 0 {
-		return name + "(...)"
-	}
-	return fmt.Sprintf("%s(%s)", name, strings.Join(parts, ", "))
-}
-
-func approvalHintForAction(action *agent.PendingAction) string {
-	if action == nil || action.Name != "spawn" {
-		return ""
-	}
-	arguments := action.Arguments
-	if arguments == "" && action.ToolCall != nil {
-		arguments = action.ToolCall.Arguments
-	}
-	var args map[string]any
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
-		return ""
-	}
-	agentType := fmt.Sprintf("%v", args["agent_type"])
-	if agentType == "explore" {
-		return ""
-	}
-	return "child agent may run write/shell tools inside its workdir without further prompts"
-}
-
-func denyLabelForApprovalCount(count int) string {
-	if count > 1 {
-		return "Deny batch"
-	}
-	return "Deny"
-}
-
-func truncateToolArg(s string) string {
-	if len(s) > 80 {
-		return s[:77] + "..."
-	}
-	return s
-}
-
-// formatToolResult renders tool result lines with ⎿ prefix and indentation.
-func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
-	if tr.Type == protocol.ToolResultTypeExecutionDenied {
-		reason := strings.TrimSpace(tr.Reason)
-		if reason == "" {
-			reason = "permission denied"
-		}
-		return "  " + errorStyle.Render("⎿  Denied: "+reason)
-	}
-
-	if tr.IsError || tr.Type == protocol.ToolResultTypeErrorText || tr.Type == protocol.ToolResultTypeErrorJSON {
-		errText := tr.Text
-		if errText == "" {
-			errText = fmt.Sprintf("%v", tr.JSON)
-		}
-		if len(errText) > 200 {
-			errText = errText[:197] + "..."
-		}
-		return "  " + errorStyle.Render("⎿  Error: "+errText)
-	}
-
-	text := tr.Text
-	if text == "" && tr.JSON != nil {
-		// If JSON is a slice/array, join elements as lines for readability.
-		switch arr := tr.JSON.(type) {
-		case []any:
-			var lines []string
-			for _, item := range arr {
-				lines = append(lines, fmt.Sprintf("%v", item))
-			}
-			text = strings.Join(lines, "\n")
-		case []string:
-			text = strings.Join(arr, "\n")
-		default:
-			b, _ := json.Marshal(tr.JSON)
-			text = string(b)
-		}
-	}
-	if text == "" {
-		return resultStyle.Render("  ⎿  (No output)")
-	}
-
-	// Compress runs of 2+ blank lines into a single blank line for display.
-	text = reBlankRun.ReplaceAllString(text, "\n\n")
-	text = strings.TrimRight(text, " \t\n\r")
-
-	// Hard cap on total characters to handle single-line mega outputs (e.g. JSON blobs).
-	const maxDisplayChars = 300
-	charTruncated := false
-	if len(text) > maxDisplayChars {
-		text = text[:maxDisplayChars]
-		charTruncated = true
-	}
-
-	lines := strings.Split(text, "\n")
-	totalLines := len(lines)
-
-	if maxLines > 0 && totalLines > maxLines {
-		lines = lines[:maxLines]
-	}
-
-	var sb strings.Builder
-	for i, line := range lines {
-		if i == 0 {
-			sb.WriteString("  ⎿  " + line)
-		} else {
-			sb.WriteString("\n     " + line)
-		}
-	}
-
-	if maxLines > 0 && totalLines > maxLines {
-		sb.WriteString(fmt.Sprintf("\n     ... (%d lines total)", totalLines))
-	} else if charTruncated {
-		sb.WriteString("\n     ... (output truncated)")
-	}
-
-	return resultStyle.Render(sb.String())
-}
-
-// formatPendingActions builds the approval header string from pending tool actions.
-// Includes the classifier/policy reason when available so users can see why
-// approval was requested.
-func formatPendingActions(actions []*agent.PendingAction) string {
-	var parts []string
-	for _, act := range actions {
-		tc := act.ToolCall
-		if tc == nil {
-			tc = &protocol.ToolCall{Name: act.Name, Arguments: act.Arguments}
-		}
-		line := formatToolCall(tc)
-		if reason := strings.TrimSpace(act.Decision.Reason); reason != "" {
-			badge := ""
-			switch act.Decision.Source {
-			case agent.SafetyDecisionSourceClassifier:
-				badge = "classifier"
-			case agent.SafetyDecisionSourceHardRule:
-				badge = "policy"
-			}
-			if act.Decision.RiskLevel != "" && act.Decision.RiskLevel != "normal" {
-				badge = strings.TrimSpace(badge + " " + act.Decision.RiskLevel)
-			}
-			if badge != "" {
-				line += fmt.Sprintf("\n  ⚠ [%s] %s", badge, reason)
-			} else {
-				line += fmt.Sprintf("\n  ⚠ %s", reason)
-			}
-			if act.Decision.RequiresSnapshot {
-				line += " (snapshot will be created)"
-			}
-		}
-		parts = append(parts, line)
-	}
-	return strings.Join(parts, "\n")
-}
-
-// renderAgentBanner formats the resolved agent configuration into a
-// compact, non-secret banner shown right under the welcome header.
-// Fields that are unset (e.g. no classifier configured) are omitted so
-// the block stays tight.
-func renderAgentBanner(d agent.Description) string {
-	subStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
-
-	var rows []string
-	add := func(k, v string) {
-		if strings.TrimSpace(v) == "" {
-			return
-		}
-		rows = append(rows, "  "+keyStyle.Render(k+":")+" "+subStyle.Render(v))
-	}
-
-	add("Provider", d.Provider)
-	add("Model", d.Model)
-	if d.ThinkingLevel != "" {
-		add("Thinking", d.ThinkingLevel)
-	}
-	add("Policy", string(d.ApprovalPolicy))
-
-	switch {
-	case d.ClassifierAvailable:
-		cls := d.ClassifierProvider
-		if d.ClassifierModel != "" {
-			cls += " / " + d.ClassifierModel
-		}
-		if d.ReviewThreshold != "" {
-			cls += " (threshold=" + d.ReviewThreshold + ")"
-		}
-		add("Classifier", cls)
-	case d.ClassifierEnabled:
-		// Enabled in config but not wired — usually means the resolver
-		// failed (missing classifier profile). Surface it so the user
-		// isn't surprised when approvals start firing.
-		add("Classifier", "enabled but unavailable (falling back to approval)")
-	default:
-		add("Classifier", "off")
-	}
-
-	return strings.Join(rows, "\n")
 }

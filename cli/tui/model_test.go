@@ -85,14 +85,32 @@ func TestPasteMsgInsertsMultilineTextOnce(t *testing.T) {
 	ta.SetWidth(80)
 	ta.SetHeight(1)
 
-	m := Model{input: ta}
+	m := &Model{input: ta}
 	pasted := "first line\nsecond line\nthird line"
 
 	updated, _ := m.Update(tea.PasteMsg{Content: pasted})
-	got := updated.(Model).input.Value()
+	got := updated.(*Model).input.Value()
 
 	if got != pasted {
 		t.Fatalf("paste should insert content once, got %q", got)
+	}
+}
+
+func TestShouldUseViewportRendererDisablesJetBrainsTerminal(t *testing.T) {
+	t.Setenv("TERMINAL_EMULATOR", "JetBrains-JediTerm")
+	t.Setenv("TERM_PROGRAM", "")
+
+	if shouldUseViewportRenderer() {
+		t.Fatal("expected JetBrains terminal to use inline renderer")
+	}
+}
+
+func TestShouldUseViewportRendererAllowsOtherTerminals(t *testing.T) {
+	t.Setenv("TERMINAL_EMULATOR", "")
+	t.Setenv("TERM_PROGRAM", "iTerm.app")
+
+	if !shouldUseViewportRenderer() {
+		t.Fatal("expected non-JetBrains terminal to use viewport renderer")
 	}
 }
 

@@ -20,8 +20,8 @@ type AgentConfig struct {
 	Profile     config.ProfileConfig
 	Executor    executor.Executor
 
-	PromptBuilder *prompt.SystemPromptBuilder
-	UserWrapper   *prompt.UserPromptWrapper
+	PromptBuilder      *prompt.SystemPromptBuilder
+	UserContextBuilder *prompt.UserContextBuilder
 
 	ApprovalPolicy agent.ApprovalPolicy
 	TranscriptDir  string
@@ -40,8 +40,8 @@ func NewAgent(cfg AgentConfig) (*agent.Agent, error) {
 	if cfg.PromptBuilder != nil {
 		opts = append(opts, agent.WithSystemPromptBuilder(cfg.PromptBuilder))
 	}
-	if cfg.UserWrapper != nil {
-		opts = append(opts, agent.WithUserPromptWrapper(cfg.UserWrapper))
+	if cfg.UserContextBuilder != nil {
+		opts = append(opts, agent.WithUserContextBuilder(cfg.UserContextBuilder))
 	}
 	if cfg.TranscriptDir != "" {
 		opts = append(opts, agent.WithTranscriptDir(cfg.TranscriptDir))

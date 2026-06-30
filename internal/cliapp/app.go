@@ -15,7 +15,6 @@ import (
 	cmdbuiltin "github.com/jayyao97/zotigo/cli/commands/builtin"
 	"github.com/jayyao97/zotigo/cli/tui"
 	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
@@ -26,7 +25,6 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/internal/wiring"
@@ -44,15 +42,6 @@ func newObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticM
 		})
 	}
 	return observability.Noop{}
-}
-
-func newSkillReminderWrapper(sm *skills.SkillManager) *prompt.UserPromptWrapper {
-	return prompt.NewUserPromptWrapper(
-		prompt.WithContext("system-reminder", func(_ prompt.PromptContext) string {
-			_ = sm.Load()
-			return sm.BuildSkillIndex()
-		}),
-	)
 }
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
@@ -171,11 +160,6 @@ func Run(args []string) int {
 	// ShellPolicy in Classify; file-path safety by tools' in-workdir checks.
 	exec := localExec
 
-	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-		WorkDir:                    cwd,
-		IncludeProjectInstructions: true,
-	})
-
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
@@ -186,12 +170,14 @@ func Run(args []string) int {
 		fmt.Printf("Warning: failed to load skills: %v\n", err)
 	}
 
-	// Fossilize the current skill listing into each user message as a
-	// <system-reminder>. Each message is byte-identical once stored, so
-	// Anthropic's ephemeral prompt cache keeps hitting on the history
-	// prefix; small open models (Qwen, Llama) see the listing because it
-	// rides on the user message rather than a third system block.
-	uw := newSkillReminderWrapper(sm)
+	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
+		WorkDir:      cwd,
+		SkillManager: sm,
+	})
+	ucb := wiring.NewUserContextBuilder(wiring.PromptConfig{
+		WorkDir:                    cwd,
+		IncludeProjectInstructions: true,
+	})
 
 	// Build observability backend before constructing the agent so it
 	// can be wired in as a single option. newObserver returns Noop when
@@ -217,15 +203,15 @@ func Run(args []string) int {
 	}()
 
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
-		Config:         cfg,
-		ProfileName:    profileName,
-		Profile:        profile,
-		Executor:       exec,
-		PromptBuilder:  pb,
-		UserWrapper:    uw,
-		ApprovalPolicy: agent.ApprovalPolicyAuto,
-		TranscriptDir:  transcriptDir,
-		Observer:       observer,
+		Config:             cfg,
+		ProfileName:        profileName,
+		Profile:            profile,
+		Executor:           exec,
+		PromptBuilder:      pb,
+		UserContextBuilder: ucb,
+		ApprovalPolicy:     agent.ApprovalPolicyAuto,
+		TranscriptDir:      transcriptDir,
+		Observer:           observer,
 		// ToolSpan goes outermost so it observes every tool call,
 		// including ones that ReadTracker short-circuits with a
 		// "file changed on disk" rejection — without seeing those,

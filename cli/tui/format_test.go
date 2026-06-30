@@ -7,6 +7,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/session"
 )
 
 func makeToolResult(text string) *protocol.ToolResult {
@@ -205,5 +206,25 @@ func TestFormatToolResult_CharTruncation_ShortNotAffected(t *testing.T) {
 
 	if strings.Contains(got, "output truncated") {
 		t.Errorf("short output should not trigger char truncation, got:\n%s", got)
+	}
+}
+
+func TestRenderDisplayItemToolResultUsesStructuredResultWithoutSummary(t *testing.T) {
+	item := session.DisplayItem{
+		Type: session.DisplayItemAssistantMessage,
+		Content: []session.DisplayContentPart{{
+			Type: string(protocol.ContentTypeToolResult),
+			ToolResult: &session.DisplayToolResult{
+				Text: "captured\noutput",
+			},
+		}},
+	}
+
+	got, ok := renderDisplayItem(item)
+	if !ok {
+		t.Fatal("expected display item to render")
+	}
+	if !strings.Contains(got, "captured") || !strings.Contains(got, "output") {
+		t.Fatalf("expected structured tool result output, got %q", got)
 	}
 }

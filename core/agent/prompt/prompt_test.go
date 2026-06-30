@@ -124,48 +124,40 @@ func TestSystemPromptBuilder_EmptyStaticPrompt(t *testing.T) {
 	}
 }
 
-func TestUserPromptWrapper_NoContext(t *testing.T) {
-	w := NewUserPromptWrapper()
-	result := w.Wrap("Hello world", PromptContext{})
-	if result != "Hello world" {
-		t.Errorf("Expected raw input unchanged, got '%s'", result)
+func TestUserContextBuilderNoContext(t *testing.T) {
+	w := NewUserContextBuilder()
+	result := w.BuildMetaUserContext(PromptContext{})
+	if result != "" {
+		t.Errorf("Expected empty context, got '%s'", result)
 	}
 }
 
-func TestUserPromptWrapper_WithContext(t *testing.T) {
-	w := NewUserPromptWrapper(
+func TestUserContextBuilderWithContext(t *testing.T) {
+	w := NewUserContextBuilder(
 		WithContext("file", func(_ PromptContext) string { return "main.go contents here" }),
 	)
 
-	result := w.Wrap("Fix the bug", PromptContext{})
-	if strings.Contains(result, "<user_query>") {
-		t.Error("wrapper should no longer emit <user_query> tags; raw user text rides bare")
+	result := w.BuildMetaUserContext(PromptContext{})
+	if !strings.Contains(result, "<user_context>") {
+		t.Errorf("context should be wrapped in <user_context>, got %q", result)
 	}
 	if !strings.Contains(result, "<file>") || !strings.Contains(result, "main.go contents here") {
 		t.Error("context section should be rendered as <file>...</file>")
 	}
-
-	// Context must come BEFORE the user's text so next-token prediction
-	// anchors on the user's actual question, not on background context.
-	fileIdx := strings.Index(result, "<file>")
-	userIdx := strings.Index(result, "Fix the bug")
-	if fileIdx < 0 || userIdx < 0 {
-		t.Fatalf("both parts should be present; got %q", result)
-	}
-	if fileIdx >= userIdx {
-		t.Errorf("context section must precede the user text, got %q", result)
+	if strings.Contains(result, "Fix the bug") {
+		t.Errorf("real user input should not be part of meta context: %q", result)
 	}
 }
 
-func TestUserPromptWrapper_SkipEmpty(t *testing.T) {
-	w := NewUserPromptWrapper(
+func TestUserContextBuilderSkipEmpty(t *testing.T) {
+	w := NewUserContextBuilder(
 		WithContext("empty", func(_ PromptContext) string { return "" }),
 		WithContext("whitespace", func(_ PromptContext) string { return "   " }),
 	)
 
-	result := w.Wrap("Hello", PromptContext{})
-	if result != "Hello" {
-		t.Errorf("Expected raw input (no context added), got '%s'", result)
+	result := w.BuildMetaUserContext(PromptContext{})
+	if result != "" {
+		t.Errorf("Expected empty context, got '%s'", result)
 	}
 }
 
@@ -215,9 +207,9 @@ func TestDynamicContext_EmptyProvider(t *testing.T) {
 	}
 }
 
-func TestUserPromptWrapper_LazyContext(t *testing.T) {
+func TestUserContextBuilderLazyContext(t *testing.T) {
 	var receivedCtx PromptContext
-	w := NewUserPromptWrapper(
+	w := NewUserContextBuilder(
 		WithContext("info", func(ctx PromptContext) string {
 			receivedCtx = ctx
 			return "dir=" + ctx.WorkDir
@@ -225,7 +217,7 @@ func TestUserPromptWrapper_LazyContext(t *testing.T) {
 	)
 
 	pctx := PromptContext{WorkDir: "/my/project", SessionID: "sess-123"}
-	result := w.Wrap("query", pctx)
+	result := w.BuildMetaUserContext(pctx)
 
 	if receivedCtx.WorkDir != "/my/project" {
 		t.Errorf("Provider should receive WorkDir '/my/project', got '%s'", receivedCtx.WorkDir)
@@ -234,6 +226,22 @@ func TestUserPromptWrapper_LazyContext(t *testing.T) {
 		t.Errorf("Provider should receive SessionID 'sess-123', got '%s'", receivedCtx.SessionID)
 	}
 	if !strings.Contains(result, "dir=/my/project") {
-		t.Errorf("Wrapped result should contain provider output, got '%s'", result)
+		t.Errorf("Context result should contain provider output, got '%s'", result)
+	}
+}
+
+func TestUserContextBuilderAttributedSection(t *testing.T) {
+	w := NewUserContextBuilder(
+		WithAttributedContext("project_instructions", `source="AGENTS.md"`, func(_ PromptContext) string {
+			return "project rules"
+		}),
+	)
+
+	result := w.BuildMetaUserContext(PromptContext{})
+	if !strings.Contains(result, `<project_instructions source="AGENTS.md">`) {
+		t.Fatalf("expected attributed opening tag, got %q", result)
+	}
+	if !strings.Contains(result, "</project_instructions>") {
+		t.Fatalf("expected normal closing tag, got %q", result)
 	}
 }

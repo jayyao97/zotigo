@@ -101,6 +101,14 @@ func (m *Manager) Save(sess *Session) error {
 	return m.store.Put(context.Background(), sess)
 }
 
+func (m *Manager) AppendDisplayItem(id string, item DisplayItem) (DisplayItem, error) {
+	return m.store.AppendDisplayItem(context.Background(), id, item)
+}
+
+func (m *Manager) ListDisplayItems(id string) ([]DisplayItem, bool, error) {
+	return m.store.ListDisplayItems(context.Background(), id)
+}
+
 // Delete removes a session from the store.
 func (m *Manager) Delete(id string) error {
 	return m.store.Delete(context.Background(), id)
