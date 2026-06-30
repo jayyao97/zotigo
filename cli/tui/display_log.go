@@ -141,7 +141,6 @@ func displayToolResultFromProtocol(result *protocol.ToolResult) *session.Display
 		Reason:     result.Reason,
 		Content:    displayToolResultContentFromProtocol(result.Content),
 		IsError:    result.IsError,
-		Metadata:   result.Metadata,
 	}
 }
 

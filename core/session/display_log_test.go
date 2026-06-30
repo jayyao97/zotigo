@@ -36,6 +36,89 @@ func TestManagerAppendDisplayItemAssignsMonotonicSequence(t *testing.T) {
 	}
 }
 
+func TestManagerAppendDisplayItemTruncatesPartialTail(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	manager := NewManagerWithStore(store)
+	sess, err := manager.CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+		t.Fatalf("append first item: %v", err)
+	}
+	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), `{"id":"partial"`); err != nil {
+		t.Fatalf("append partial item: %v", err)
+	}
+
+	second, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemAssistantMessage})
+	if err != nil {
+		t.Fatalf("append second item: %v", err)
+	}
+	if second.Sequence != 2 {
+		t.Fatalf("expected second sequence 2, got %d", second.Sequence)
+	}
+	items, ok, err := manager.ListDisplayItems(sess.ID)
+	if err != nil {
+		t.Fatalf("list display items: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected session to exist")
+	}
+	assertDisplaySequences(t, items, []uint64{1, 2})
+}
+
+func TestManagerListDisplayItemsIgnoresPartialFinalLine(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	manager := NewManagerWithStore(store)
+	sess, err := manager.CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+		t.Fatalf("append item: %v", err)
+	}
+	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), `{"id":"partial"`); err != nil {
+		t.Fatalf("append partial item: %v", err)
+	}
+
+	items, ok, err := manager.ListDisplayItems(sess.ID)
+	if err != nil {
+		t.Fatalf("list display items: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected session to exist")
+	}
+	assertDisplaySequences(t, items, []uint64{1})
+}
+
+func TestManagerListDisplayItemsRejectsMalformedCompleteLine(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	manager := NewManagerWithStore(store)
+	sess, err := manager.CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+		t.Fatalf("append item: %v", err)
+	}
+	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), "{bad-json}\n"); err != nil {
+		t.Fatalf("append malformed item: %v", err)
+	}
+
+	if _, _, err := manager.ListDisplayItems(sess.ID); err == nil {
+		t.Fatal("expected malformed complete line to fail")
+	}
+}
+
 func TestPageDisplayItemsDefaultsToRecentItemsInAscendingOrder(t *testing.T) {
 	items := makeDisplayItems(60)
 
@@ -179,4 +262,14 @@ func assertDisplaySequences(t *testing.T, items []DisplayItem, expected []uint64
 			t.Fatalf("item %d: expected sequence %d, got %d", idx, sequence, items[idx].Sequence)
 		}
 	}
+}
+
+func appendRawDisplayLog(path string, data string) error {
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = file.Close() }()
+	_, err = file.WriteString(data)
+	return err
 }

@@ -130,17 +130,17 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 
 	// Accept line
 	if m.approvalChoice == 0 {
-		sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Accept")))
+		fmt.Fprintf(sb, "  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render("Accept"))
 	} else {
-		sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render("Accept")))
+		fmt.Fprintf(sb, "    %s\n", blurredChoice.Render("Accept"))
 	}
 
 	// Deny line
 	denyLabel := denyLabelForApprovalCount(len(m.pendingApprovals))
 	if m.approvalChoice == 1 {
-		sb.WriteString(fmt.Sprintf("  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel)))
+		fmt.Fprintf(sb, "  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel))
 	} else {
-		sb.WriteString(fmt.Sprintf("    %s\n", blurredChoice.Render(denyLabel)))
+		fmt.Fprintf(sb, "    %s\n", blurredChoice.Render(denyLabel))
 	}
 
 	// Feedback input line
@@ -151,7 +151,7 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 		if v := m.input.Value(); v != "" {
 			placeholder = v
 		}
-		sb.WriteString(fmt.Sprintf("    %s", blurredChoice.Render(placeholder)))
+		fmt.Fprintf(sb, "    %s", blurredChoice.Render(placeholder))
 	}
 }
 
@@ -234,7 +234,7 @@ func (m *Model) logViewportScroll(action string, button tea.MouseButton, beforeY
 	if err != nil {
 		return
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 
 	_, _ = fmt.Fprintf(
 		file,

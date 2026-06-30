@@ -42,7 +42,6 @@ type DisplayToolResult struct {
 	Reason     string                         `json:"reason,omitempty"`
 	Content    []DisplayToolResultContentPart `json:"content,omitempty"`
 	IsError    bool                           `json:"is_error,omitempty"`
-	Metadata   map[string]any                 `json:"metadata,omitempty"`
 }
 
 type DisplayToolResultContentPart struct {

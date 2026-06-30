@@ -2502,6 +2502,87 @@ func (p *AlwaysEmptyProvider) StreamChat(ctx context.Context, messages []protoco
 	return ch, nil
 }
 
+type ContextCaptureProvider struct {
+	Messages []protocol.Message
+}
+
+func (p *ContextCaptureProvider) Name() string { return "context-capture" }
+
+func (p *ContextCaptureProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.Messages = append([]protocol.Message(nil), messages...)
+
+	ch := make(chan protocol.Event, 4)
+	go func() {
+		defer close(ch)
+		ch <- protocol.NewTextDeltaEvent("ok")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "ok"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
+func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("context-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "context-capture"}
+	ag, err := agent.New(cfg, exec,
+		agent.WithSystemPromptBuilder(prompt.NewSystemPromptBuilder(prompt.WithStaticPrompt("base system"))),
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithContext("environment", func(ctx prompt.PromptContext) string {
+				return "cwd=" + ctx.WorkDir
+			}),
+		)),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "real request")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for range events {
+	}
+
+	if len(prov.Messages) < 3 {
+		t.Fatalf("expected system, meta user context, and real user messages; got %d", len(prov.Messages))
+	}
+	if prov.Messages[0].Role != protocol.RoleSystem {
+		t.Fatalf("expected first message system, got %s", prov.Messages[0].Role)
+	}
+	if prov.Messages[1].Role != protocol.RoleUser || !strings.Contains(prov.Messages[1].String(), "<user_context>") {
+		t.Fatalf("expected second message to be meta user context, got %#v", prov.Messages[1])
+	}
+	if !strings.Contains(prov.Messages[1].String(), "cwd="+tmpDir) {
+		t.Fatalf("expected context message to include workdir, got %q", prov.Messages[1].String())
+	}
+	if prov.Messages[2].Role != protocol.RoleUser || prov.Messages[2].String() != "real request" {
+		t.Fatalf("expected third message to be real user request, got %#v", prov.Messages[2])
+	}
+
+	history := ag.Snapshot().History
+	if len(history) == 0 || history[0].Role != protocol.RoleUser {
+		t.Fatalf("expected history to start with real user message, got %#v", history)
+	}
+	if history[0].String() != "real request" {
+		t.Fatalf("expected history user message to stay unwrapped, got %q", history[0].String())
+	}
+	if strings.Contains(history[0].String(), "<user_context>") {
+		t.Fatalf("context message should not be persisted in history: %q", history[0].String())
+	}
+}
+
 func TestAgentEmptyResponseRecovery(t *testing.T) {
 	prov := &EmptyThenTextProvider{SecondCallTxt: "recovered"}
 	providers.Register("empty-then-text", func(cfg config.ProfileConfig) (providers.Provider, error) {

@@ -30,7 +30,7 @@ type Agent struct {
 	tools         map[string]tools.Tool
 	policy        ApprovalPolicy
 	promptBuilder *prompt.SystemPromptBuilder
-	userWrapper   *prompt.UserPromptWrapper
+	userContext   *prompt.UserContextBuilder
 
 	reminderBuilder *prompt.ReminderBuilder
 
@@ -74,9 +74,16 @@ func WithSystemPromptBuilder(pb *prompt.SystemPromptBuilder) AgentOption {
 	return func(a *Agent) { a.promptBuilder = pb }
 }
 
-// WithUserPromptWrapper sets the wrapper used to add context to user messages.
+// WithUserPromptWrapper sets the builder used to add transient user-context
+// messages. Deprecated: use WithUserContextBuilder.
 func WithUserPromptWrapper(uw *prompt.UserPromptWrapper) AgentOption {
-	return func(a *Agent) { a.userWrapper = uw }
+	return func(a *Agent) { a.userContext = uw }
+}
+
+// WithUserContextBuilder sets the builder used to add transient user-context
+// messages before the real user turn without persisting them in history.
+func WithUserContextBuilder(uc *prompt.UserContextBuilder) AgentOption {
+	return func(a *Agent) { a.userContext = uc }
 }
 
 // WithApprovalPolicy sets the tool approval policy.
@@ -377,16 +384,6 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		if a.state == StatePaused {
 			a.mu.Unlock()
 			return nil, fmt.Errorf("cannot add user input while agent is paused")
-		}
-
-		// Wrap user messages with context if wrapper is set
-		if msg.Role == protocol.RoleUser && a.userWrapper != nil {
-			pctx := prompt.PromptContext{
-				WorkDir:  a.executor.WorkDir(),
-				Platform: a.executor.Platform(),
-				Model:    a.cfg.Model,
-			}
-			msg = a.wrapUserMessage(msg, pctx)
 		}
 
 		a.history = append(a.history, msg)
@@ -1797,12 +1794,10 @@ func (a *Agent) buildContext() []protocol.Message {
 		Model:    a.cfg.Model,
 	}
 
-	// System prompt messages (static + dynamic, each as separate message).
-	// System array stays ≤ 2 messages so Anthropic can keep ephemeral cache
-	// on block[0] and small models can rely on first-system attention.
-	// Dynamic content that would otherwise land in a third system message
-	// (skill index, per-turn snapshots) rides the latest user message via
-	// userTurnReminders instead.
+	// System prompt messages. The first block is the stable product prompt; any
+	// system-scoped dynamic capability context, such as available skills, stays
+	// in later system blocks. Project/environment/date context is injected below
+	// as a transient user-context message so it does not enter history.
 	if a.promptBuilder != nil {
 		for _, text := range a.promptBuilder.BuildMessages(pctx) {
 			msgs = append(msgs, protocol.NewSystemMessage(text))
@@ -1825,43 +1820,37 @@ func (a *Agent) buildContext() []protocol.Message {
 		history = a.compressor.TruncateToolResults(history, 2000)
 	}
 
+	if a.userContext != nil {
+		history = a.withUserContextMessage(history, pctx)
+	}
+
 	msgs = append(msgs, history...)
 	return msgs
 }
 
-// wrapUserMessage applies the UserPromptWrapper to a user message.
-// It extracts text content, wraps it, and preserves non-text parts (images, etc.).
-func (a *Agent) wrapUserMessage(msg protocol.Message, pctx prompt.PromptContext) protocol.Message {
-	var rawTexts []string
-	var nonTextParts []protocol.ContentPart
-	for _, p := range msg.Content {
-		if p.Type == protocol.ContentTypeText {
-			rawTexts = append(rawTexts, p.Text)
-		} else {
-			nonTextParts = append(nonTextParts, p)
+func (a *Agent) withUserContextMessage(history []protocol.Message, pctx prompt.PromptContext) []protocol.Message {
+	contextText := a.userContext.BuildMetaUserContext(pctx)
+	if contextText == "" {
+		return history
+	}
+
+	userIdx := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == protocol.RoleUser {
+			userIdx = i
+			break
 		}
 	}
-
-	if len(rawTexts) == 0 {
-		return msg
+	if userIdx < 0 {
+		return history
 	}
 
-	wrapped := a.userWrapper.Wrap(strings.Join(rawTexts, "\n"), pctx)
-
-	var newContent []protocol.ContentPart
-	newContent = append(newContent, protocol.ContentPart{
-		Type: protocol.ContentTypeText,
-		Text: wrapped,
-	})
-	newContent = append(newContent, nonTextParts...)
-
-	return protocol.Message{
-		ID:        msg.ID,
-		Role:      msg.Role,
-		Content:   newContent,
-		Metadata:  msg.Metadata,
-		CreatedAt: msg.CreatedAt,
-	}
+	meta := protocol.NewUserMessage(contextText)
+	out := make([]protocol.Message, 0, len(history)+1)
+	out = append(out, history[:userIdx]...)
+	out = append(out, meta)
+	out = append(out, history[userIdx:]...)
+	return out
 }
 
 // safeDirs returns all directories that are safe for auto-approved read access.

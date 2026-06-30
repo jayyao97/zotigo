@@ -10,10 +10,13 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 )
 
-func TestSystemPromptBuilderIncludesSkillsInDynamicSystemMessage(t *testing.T) {
+func TestPromptBuildersSplitSkillsAndUserContext(t *testing.T) {
 	workDir := t.TempDir()
 	userSkillsDir := filepath.Join(t.TempDir(), "skills")
 	agentsDir := filepath.Join(t.TempDir(), "agents-skills")
+	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("Follow project rules."), 0644); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.MkdirAll(filepath.Join(userSkillsDir, "demo-skill"), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -32,28 +35,53 @@ Use this skill for tests.
 		t.Fatal(err)
 	}
 
-	builder := NewSystemPromptBuilder(PromptConfig{
+	systemBuilder := NewSystemPromptBuilder(PromptConfig{
 		WorkDir:      workDir,
 		SkillManager: sm,
 	})
-	messages := builder.BuildMessages(prompt.PromptContext{
+	systemMessages := systemBuilder.BuildMessages(prompt.PromptContext{
 		WorkDir:  workDir,
 		Platform: "linux",
 	})
 
-	if len(messages) != 2 {
-		t.Fatalf("expected static plus dynamic system messages, got %d", len(messages))
+	if len(systemMessages) != 2 {
+		t.Fatalf("expected static plus skills system messages, got %d", len(systemMessages))
 	}
-	if strings.Contains(messages[0], "demo-skill") {
-		t.Fatalf("skill index should not be merged into static system message: %s", messages[0])
+	if strings.Contains(systemMessages[0], "demo-skill") {
+		t.Fatalf("skill index should not be merged into static system message: %s", systemMessages[0])
 	}
-	if !strings.Contains(messages[1], "<environment>") {
-		t.Fatalf("dynamic message should include environment section: %s", messages[1])
+	if strings.Contains(systemMessages[1], "<environment>") {
+		t.Fatalf("environment should not be in system prompt: %s", systemMessages[1])
 	}
-	if !strings.Contains(messages[1], "<available_skills>") {
-		t.Fatalf("dynamic message should include available skills section: %s", messages[1])
+	if !strings.Contains(systemMessages[1], "<available_skills>") {
+		t.Fatalf("dynamic system message should include available skills section: %s", systemMessages[1])
 	}
-	if !strings.Contains(messages[1], "demo-skill") {
-		t.Fatalf("dynamic message should include skill index: %s", messages[1])
+	if !strings.Contains(systemMessages[1], "demo-skill") {
+		t.Fatalf("dynamic system message should include skill index: %s", systemMessages[1])
+	}
+
+	userContextBuilder := NewUserContextBuilder(PromptConfig{
+		WorkDir:                    workDir,
+		Transport:                  "test transport",
+		IncludeProjectInstructions: true,
+	})
+	context := userContextBuilder.BuildMetaUserContext(prompt.PromptContext{
+		WorkDir:  workDir,
+		Platform: "linux",
+	})
+	for _, want := range []string{
+		"<user_context>",
+		"<environment>",
+		"working_directory: " + workDir,
+		"platform: linux",
+		"transport: test transport",
+		"current_date:",
+		"timezone:",
+		`<project_instructions source="AGENTS.md">`,
+		"Follow project rules.",
+	} {
+		if !strings.Contains(context, want) {
+			t.Fatalf("user context missing %q:\n%s", want, context)
+		}
 	}
 }

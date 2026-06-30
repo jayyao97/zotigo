@@ -1,7 +1,7 @@
 package session
 
 import (
-	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -15,6 +15,8 @@ import (
 
 	"github.com/bytedance/sonic"
 )
+
+const displayLogTailScanBlockSize = 4096
 
 // FileStore implements Store using the local filesystem.
 // Sessions are stored as JSON files in a configurable directory.
@@ -98,14 +100,16 @@ func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item Displ
 		return DisplayItem{}, fmt.Errorf("stat session file: %w", err)
 	}
 
-	items, err := s.readDisplayItemsLocked(id)
+	lastSequence, completeEndOffset, err := s.lastDisplaySequenceLocked(id)
 	if err != nil {
 		return DisplayItem{}, err
 	}
-	sequence := uint64(1)
-	if len(items) > 0 {
-		sequence = items[len(items)-1].Sequence + 1
+	if completeEndOffset >= 0 {
+		if err := s.truncateDisplayLogTailLocked(id, completeEndOffset); err != nil {
+			return DisplayItem{}, err
+		}
 	}
+	sequence := lastSequence + 1
 	item.Sequence = sequence
 	if item.ID == "" {
 		item.ID = fmt.Sprintf("item_%s_%d", id, sequence)
@@ -293,33 +297,149 @@ func (s *FileStore) lockPath(id string) string {
 }
 
 func (s *FileStore) readDisplayItemsLocked(id string) ([]DisplayItem, error) {
-	file, err := os.Open(s.displayLogPath(id))
+	data, err := os.ReadFile(s.displayLogPath(id))
 	if os.IsNotExist(err) {
 		return []DisplayItem{}, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("open display log: %w", err)
+		return nil, fmt.Errorf("read display log: %w", err)
 	}
-	defer func() { _ = file.Close() }()
 
 	var items []DisplayItem
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
+	lines := bytes.Split(data, []byte{'\n'})
+	endedWithNewline := len(data) == 0 || data[len(data)-1] == '\n'
+	for idx, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
+		line = bytes.TrimSuffix(line, []byte{'\r'})
 		var item DisplayItem
 		if err := sonic.Unmarshal(line, &item); err != nil {
+			if idx == len(lines)-1 && !endedWithNewline {
+				break
+			}
 			return nil, fmt.Errorf("unmarshal display log item: %w", err)
 		}
 		items = append(items, item)
 	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("read display log: %w", err)
-	}
 	return items, nil
+}
+
+func (s *FileStore) lastDisplaySequenceLocked(id string) (uint64, int64, error) {
+	path := s.displayLogPath(id)
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return 0, -1, nil
+	}
+	if err != nil {
+		return 0, -1, fmt.Errorf("open display log: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return 0, -1, fmt.Errorf("stat display log: %w", err)
+	}
+	size := info.Size()
+	if size == 0 {
+		return 0, 0, nil
+	}
+
+	completeEndOffset := size
+	lastByte, err := readFileByte(file, size-1)
+	if err != nil {
+		return 0, -1, err
+	}
+	if lastByte != '\n' {
+		newlineOffset, err := previousDisplayLogNewline(file, size-1)
+		if err != nil {
+			return 0, -1, err
+		}
+		if newlineOffset < 0 {
+			return 0, 0, nil
+		}
+		completeEndOffset = newlineOffset + 1
+	}
+
+	lineEnd := completeEndOffset
+	for lineEnd > 0 {
+		b, err := readFileByte(file, lineEnd-1)
+		if err != nil {
+			return 0, -1, err
+		}
+		if b != '\n' && b != '\r' {
+			break
+		}
+		lineEnd--
+	}
+	if lineEnd == 0 {
+		return 0, completeEndOffset, nil
+	}
+
+	lineStart, err := previousDisplayLogNewline(file, lineEnd)
+	if err != nil {
+		return 0, -1, err
+	}
+	lineStart++
+
+	line := make([]byte, lineEnd-lineStart)
+	if _, err := file.ReadAt(line, lineStart); err != nil {
+		return 0, -1, fmt.Errorf("read display log tail: %w", err)
+	}
+	line = bytes.TrimSuffix(line, []byte{'\r'})
+
+	var item DisplayItem
+	if err := sonic.Unmarshal(line, &item); err != nil {
+		return 0, -1, fmt.Errorf("unmarshal display log tail item: %w", err)
+	}
+	return item.Sequence, completeEndOffset, nil
+}
+
+func (s *FileStore) truncateDisplayLogTailLocked(id string, completeEndOffset int64) error {
+	path := s.displayLogPath(id)
+	info, err := os.Stat(path)
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("stat display log: %w", err)
+	}
+	if info.Size() <= completeEndOffset {
+		return nil
+	}
+	if err := os.Truncate(path, completeEndOffset); err != nil {
+		return fmt.Errorf("truncate display log tail: %w", err)
+	}
+	return nil
+}
+
+func previousDisplayLogNewline(file *os.File, before int64) (int64, error) {
+	for offset := before; offset > 0; {
+		readSize := int64(displayLogTailScanBlockSize)
+		if offset < readSize {
+			readSize = offset
+		}
+		start := offset - readSize
+		buf := make([]byte, readSize)
+		if _, err := file.ReadAt(buf, start); err != nil {
+			return -1, fmt.Errorf("scan display log tail: %w", err)
+		}
+		for idx := len(buf) - 1; idx >= 0; idx-- {
+			if buf[idx] == '\n' {
+				return start + int64(idx), nil
+			}
+		}
+		offset = start
+	}
+	return -1, nil
+}
+
+func readFileByte(file *os.File, offset int64) (byte, error) {
+	var buf [1]byte
+	if _, err := file.ReadAt(buf[:], offset); err != nil {
+		return 0, fmt.Errorf("read display log byte: %w", err)
+	}
+	return buf[0], nil
 }
 
 // Registry represents the index file structure.

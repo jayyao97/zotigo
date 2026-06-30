@@ -78,7 +78,6 @@ type itemToolResultResponse struct {
 	Reason     string                          `json:"reason,omitempty"`
 	Content    []itemToolResultContentResponse `json:"content,omitempty"`
 	IsError    bool                            `json:"is_error,omitempty"`
-	Metadata   map[string]any                  `json:"metadata,omitempty"`
 }
 
 type itemToolResultContentResponse struct {
@@ -219,7 +218,6 @@ func publicDisplayToolResult(result *zotigosession.DisplayToolResult) *itemToolR
 		Reason:     result.Reason,
 		Content:    publicDisplayToolResultContent(result.Content),
 		IsError:    result.IsError,
-		Metadata:   result.Metadata,
 	}
 }
 

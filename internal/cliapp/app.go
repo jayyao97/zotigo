@@ -171,9 +171,12 @@ func Run(args []string) int {
 	}
 
 	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
+		WorkDir:      cwd,
+		SkillManager: sm,
+	})
+	ucb := wiring.NewUserContextBuilder(wiring.PromptConfig{
 		WorkDir:                    cwd,
 		IncludeProjectInstructions: true,
-		SkillManager:               sm,
 	})
 
 	// Build observability backend before constructing the agent so it
@@ -200,14 +203,15 @@ func Run(args []string) int {
 	}()
 
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
-		Config:         cfg,
-		ProfileName:    profileName,
-		Profile:        profile,
-		Executor:       exec,
-		PromptBuilder:  pb,
-		ApprovalPolicy: agent.ApprovalPolicyAuto,
-		TranscriptDir:  transcriptDir,
-		Observer:       observer,
+		Config:             cfg,
+		ProfileName:        profileName,
+		Profile:            profile,
+		Executor:           exec,
+		PromptBuilder:      pb,
+		UserContextBuilder: ucb,
+		ApprovalPolicy:     agent.ApprovalPolicyAuto,
+		TranscriptDir:      transcriptDir,
+		Observer:           observer,
 		// ToolSpan goes outermost so it observes every tool call,
 		// including ones that ReadTracker short-circuits with a
 		// "file changed on disk" rejection — without seeing those,

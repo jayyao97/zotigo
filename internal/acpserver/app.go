@@ -108,11 +108,6 @@ func (s *serverState) onSessionNew(ctx context.Context, params acp.SessionNewPar
 	sessionID := fmt.Sprintf("acp-%d", time.Now().UnixNano())
 	exec := acp.NewRemoteExecutor(s.server, sessionID, workDir)
 
-	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-		WorkDir:   workDir,
-		Transport: "ACP (Editor Integration)",
-	})
-
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
@@ -120,13 +115,23 @@ func (s *serverState) onSessionNew(ctx context.Context, params acp.SessionNewPar
 	if err != nil {
 		s.logger.Printf("Warning: failed to load skills: %v", err)
 	}
+	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
+		WorkDir:      workDir,
+		SkillManager: sm,
+	})
+	ucb := wiring.NewUserContextBuilder(wiring.PromptConfig{
+		WorkDir:                    workDir,
+		Transport:                  "ACP (Editor Integration)",
+		IncludeProjectInstructions: true,
+	})
 
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
-		Profile:        s.profile,
-		Executor:       exec,
-		PromptBuilder:  pb,
-		ApprovalPolicy: agent.ApprovalPolicyManual,
-		TranscriptDir:  transcriptDir,
+		Profile:            s.profile,
+		Executor:           exec,
+		PromptBuilder:      pb,
+		UserContextBuilder: ucb,
+		ApprovalPolicy:     agent.ApprovalPolicyManual,
+		TranscriptDir:      transcriptDir,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create agent: %w", err)
