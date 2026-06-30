@@ -530,7 +530,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case protocol.EventTypeToolResultDone:
 			if msg.ToolResult != nil {
-				rendered := formatToolResult(msg.ToolResult, 10)
+				rendered := renderProtocolToolResult(msg.ToolResult)
 				m.currentAsstMsg += rendered + "\n"
 				m.appendToolResultDisplayPart(msg.ToolResult)
 				if cmd := m.flushStreamedLines(); cmd != nil {
@@ -539,7 +539,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case protocol.EventTypeToolProgress:
 			if msg.ToolResult != nil {
-				rendered := formatToolResult(msg.ToolResult, 10)
+				rendered := renderProtocolToolResult(msg.ToolResult)
 				m.currentAsstMsg += rendered + "\n"
 				m.appendToolResultDisplayPart(msg.ToolResult)
 				if cmd := m.flushStreamedLines(); cmd != nil {

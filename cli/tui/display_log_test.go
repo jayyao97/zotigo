@@ -92,9 +92,6 @@ func TestAppendTurnPausedFlushesVisibleAssistantContent(t *testing.T) {
 	if got[0].Type != session.DisplayItemAssistantMessage {
 		t.Fatalf("expected assistant_message, got %s", got[0].Type)
 	}
-	if got[0].Content[0].Summary != "Shell(git status)" {
-		t.Fatalf("expected visible tool call summary, got %#v", got[0].Content)
-	}
 	if got[0].Content[0].ToolCall == nil {
 		t.Fatalf("expected structured tool call, got %#v", got[0].Content[0])
 	}
@@ -141,8 +138,8 @@ func TestAppendTurnInterruptedClosesPausedTurn(t *testing.T) {
 	if got[len(got)-2].Content[0].ToolResult.ResultType != string(protocol.ToolResultTypeExecutionDenied) {
 		t.Fatalf("expected execution-denied result type, got %#v", got[len(got)-2].Content[0].ToolResult)
 	}
-	if got[len(got)-2].Content[0].Summary != "Denied: User denied" {
-		t.Fatalf("expected denied summary, got %#v", got[len(got)-2].Content[0])
+	if text := toolResultTextFromDisplay(got[len(got)-2].Content[0].ToolResult, defaultToolResultMaxLines); text != "Denied: User denied" {
+		t.Fatalf("expected denied text from structured result, got %q", text)
 	}
 }
 

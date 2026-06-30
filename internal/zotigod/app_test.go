@@ -257,8 +257,7 @@ func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
 		Type:     zotigosession.DisplayItemAssistantMessage,
 		Role:     string(protocol.RoleAssistant),
 		Content: []zotigosession.DisplayContentPart{{
-			Type:    string(protocol.ContentTypeToolResult),
-			Summary: "captured",
+			Type: string(protocol.ContentTypeToolResult),
 			ToolResult: &zotigosession.DisplayToolResult{
 				ToolCallID: "call-1",
 				ToolName:   "screenshot",
@@ -282,9 +281,6 @@ func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
 
 	if len(resp.Items) != 1 || len(resp.Items[0].Content) != 1 {
 		t.Fatalf("unexpected items response: %#v", resp)
-	}
-	if resp.Items[0].Content[0].Summary != "captured" {
-		t.Fatalf("expected display summary, got %#v", resp.Items[0].Content[0])
 	}
 	result := resp.Items[0].Content[0].ToolResult
 	if result == nil {
@@ -314,8 +310,7 @@ func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
 		Type:     zotigosession.DisplayItemAssistantMessage,
 		Role:     string(protocol.RoleAssistant),
 		Content: []zotigosession.DisplayContentPart{{
-			Type:    string(protocol.ContentTypeToolCall),
-			Summary: "Shell(git status)",
+			Type: string(protocol.ContentTypeToolCall),
 			ToolCall: &zotigosession.DisplayToolCall{
 				ID:        "call-1",
 				Name:      "shell",
@@ -329,9 +324,6 @@ func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
 
 	if len(resp.Items) != 1 || len(resp.Items[0].Content) != 1 {
 		t.Fatalf("unexpected items response: %#v", resp)
-	}
-	if resp.Items[0].Content[0].Summary != "Shell(git status)" {
-		t.Fatalf("expected display summary, got %#v", resp.Items[0].Content[0])
 	}
 	call := resp.Items[0].Content[0].ToolCall
 	if call == nil {

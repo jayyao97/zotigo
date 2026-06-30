@@ -101,7 +101,6 @@ func (m *Model) appendToolCallDisplayPart(call *protocol.ToolCall) {
 	}
 	m.displayAsstContent = append(m.displayAsstContent, session.DisplayContentPart{
 		Type:     string(protocol.ContentTypeToolCall),
-		Summary:  formatToolCall(call),
 		ToolCall: displayToolCallFromProtocol(call),
 	})
 }
@@ -123,7 +122,6 @@ func (m *Model) appendToolResultDisplayPart(result *protocol.ToolResult) {
 	}
 	m.displayAsstContent = append(m.displayAsstContent, session.DisplayContentPart{
 		Type:       string(protocol.ContentTypeToolResult),
-		Summary:    displayToolResultText(result, 10),
 		ToolResult: displayToolResultFromProtocol(result),
 	})
 }
@@ -239,24 +237,12 @@ func displayText(parts []session.DisplayContentPart) string {
 func partDisplayText(part session.DisplayContentPart) string {
 	switch part.Type {
 	case string(protocol.ContentTypeToolCall):
-		if part.Summary != "" {
-			return part.Summary
-		}
-		if part.Text != "" {
-			return part.Text
-		}
 		if part.ToolCall != nil {
 			return formatDisplayToolCall(part.ToolCall)
 		}
 	case string(protocol.ContentTypeToolResult):
-		if part.Summary != "" {
-			return part.Summary
-		}
-		if part.Text != "" {
-			return part.Text
-		}
 		if part.ToolResult != nil {
-			return displayToolResultTextFromDisplay(part.ToolResult, 10)
+			return toolResultTextFromDisplay(part.ToolResult, defaultToolResultMaxLines)
 		}
 	default:
 		return part.Text

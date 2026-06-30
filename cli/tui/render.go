@@ -16,6 +16,12 @@ import (
 // reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
 var reBlankRun = regexp.MustCompile(`\n{3,}`)
 
+const (
+	defaultToolResultMaxLines = 10
+	maxToolResultDisplayChars = 300
+	maxToolResultErrorChars   = 200
+)
+
 func renderDisplayItem(item session.DisplayItem) (string, bool) {
 	switch item.Type {
 	case session.DisplayItemUserMessage:
@@ -40,16 +46,13 @@ func renderDisplayItem(item session.DisplayItem) (string, bool) {
 				}
 				parts = append(parts, "\n"+reasoningLabelStyle.Render("⏺ Thinking: ")+reasoningStyle.Render(part.Text))
 			case string(protocol.ContentTypeToolCall):
-				summary := part.Summary
-				if summary == "" && part.ToolCall != nil {
-					summary = formatDisplayToolCall(part.ToolCall)
-				}
+				summary := formatDisplayToolCall(part.ToolCall)
 				if summary == "" {
 					continue
 				}
 				parts = append(parts, "\n"+toolMarkerStyle.Render("⏺ ")+summary)
 			case string(protocol.ContentTypeToolResult):
-				rendered := renderDisplayToolResult(part)
+				rendered := renderDisplayToolResult(part.ToolResult)
 				if rendered == "" {
 					continue
 				}
@@ -75,27 +78,11 @@ func renderDisplayItem(item session.DisplayItem) (string, bool) {
 	}
 }
 
-func renderDisplayToolResult(part session.DisplayContentPart) string {
-	text := part.Summary
-	if text == "" {
-		text = part.Text
-	}
-	if text == "" && part.ToolResult != nil {
-		text = displayToolResultTextFromDisplay(part.ToolResult, 10)
-	}
-	if text == "" {
+func renderDisplayToolResult(result *session.DisplayToolResult) string {
+	if result == nil {
 		return ""
 	}
-	lines := strings.Split(text, "\n")
-	var sb strings.Builder
-	for idx, line := range lines {
-		if idx == 0 {
-			sb.WriteString("  ⎿  " + line)
-		} else {
-			sb.WriteString("\n     " + line)
-		}
-	}
-	return resultStyle.Render(sb.String())
+	return renderToolResultFromDisplay(result, defaultToolResultMaxLines)
 }
 
 func renderMessage(msg protocol.Message) (string, bool) {
@@ -134,7 +121,7 @@ func renderMessage(msg protocol.Message) (string, bool) {
 		var parts []string
 		for _, p := range msg.Content {
 			if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
-				parts = append(parts, formatToolResult(p.ToolResult, 10))
+				parts = append(parts, renderProtocolToolResult(p.ToolResult))
 			}
 		}
 		if len(parts) == 0 {
@@ -275,151 +262,27 @@ func truncateToolArg(s string) string {
 	return s
 }
 
+func renderProtocolToolResult(tr *protocol.ToolResult) string {
+	return formatToolResult(tr, defaultToolResultMaxLines)
+}
+
 // formatToolResult renders tool result lines with ⎿ prefix and indentation.
 func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
-	if tr.Type == protocol.ToolResultTypeExecutionDenied {
-		reason := strings.TrimSpace(tr.Reason)
-		if reason == "" {
-			reason = "permission denied"
-		}
-		return "  " + errorStyle.Render("⎿  Denied: "+reason)
-	}
-
-	if tr.IsError || tr.Type == protocol.ToolResultTypeErrorText || tr.Type == protocol.ToolResultTypeErrorJSON {
-		errText := tr.Text
-		if errText == "" {
-			errText = fmt.Sprintf("%v", tr.JSON)
-		}
-		if len(errText) > 200 {
-			errText = errText[:197] + "..."
-		}
-		return "  " + errorStyle.Render("⎿  Error: "+errText)
-	}
-
-	text := tr.Text
-	if text == "" && tr.JSON != nil {
-		// If JSON is a slice/array, join elements as lines for readability.
-		switch arr := tr.JSON.(type) {
-		case []any:
-			var lines []string
-			for _, item := range arr {
-				lines = append(lines, fmt.Sprintf("%v", item))
-			}
-			text = strings.Join(lines, "\n")
-		case []string:
-			text = strings.Join(arr, "\n")
-		default:
-			b, _ := json.Marshal(tr.JSON)
-			text = string(b)
-		}
-	}
-	if text == "" {
-		return resultStyle.Render("  ⎿  (No output)")
-	}
-
-	// Compress runs of 2+ blank lines into a single blank line for display.
-	text = reBlankRun.ReplaceAllString(text, "\n\n")
-	text = strings.TrimRight(text, " \t\n\r")
-
-	// Hard cap on total characters to handle single-line mega outputs (e.g. JSON blobs).
-	const maxDisplayChars = 300
-	charTruncated := false
-	if len(text) > maxDisplayChars {
-		text = text[:maxDisplayChars]
-		charTruncated = true
-	}
-
-	lines := strings.Split(text, "\n")
-	totalLines := len(lines)
-
-	if maxLines > 0 && totalLines > maxLines {
-		lines = lines[:maxLines]
-	}
-
-	var sb strings.Builder
-	for i, line := range lines {
-		if i == 0 {
-			sb.WriteString("  ⎿  " + line)
-		} else {
-			sb.WriteString("\n     " + line)
-		}
-	}
-
-	if maxLines > 0 && totalLines > maxLines {
-		sb.WriteString(fmt.Sprintf("\n     ... (%d lines total)", totalLines))
-	} else if charTruncated {
-		sb.WriteString("\n     ... (output truncated)")
-	}
-
-	return resultStyle.Render(sb.String())
+	return renderToolResultFromDisplay(displayToolResultFromProtocol(tr), maxLines)
 }
 
-func displayToolResultText(tr *protocol.ToolResult, maxLines int) string {
-	if tr.Type == protocol.ToolResultTypeExecutionDenied {
-		reason := strings.TrimSpace(tr.Reason)
-		if reason == "" {
-			reason = "permission denied"
-		}
-		return "Denied: " + reason
-	}
-
-	if tr.IsError || tr.Type == protocol.ToolResultTypeErrorText || tr.Type == protocol.ToolResultTypeErrorJSON {
-		errText := tr.Text
-		if errText == "" {
-			errText = fmt.Sprintf("%v", tr.JSON)
-		}
-		if len(errText) > 200 {
-			errText = errText[:197] + "..."
-		}
-		return "Error: " + errText
-	}
-
-	text := tr.Text
-	if text == "" && tr.JSON != nil {
-		switch arr := tr.JSON.(type) {
-		case []any:
-			var lines []string
-			for _, item := range arr {
-				lines = append(lines, fmt.Sprintf("%v", item))
-			}
-			text = strings.Join(lines, "\n")
-		case []string:
-			text = strings.Join(arr, "\n")
-		default:
-			b, _ := json.Marshal(tr.JSON)
-			text = string(b)
-		}
-	}
+func renderToolResultFromDisplay(tr *session.DisplayToolResult, maxLines int) string {
+	text := toolResultTextFromDisplay(tr, maxLines)
 	if text == "" {
-		return "(No output)"
+		return ""
 	}
-
-	text = reBlankRun.ReplaceAllString(text, "\n\n")
-	text = strings.TrimRight(text, " \t\n\r")
-
-	const maxDisplayChars = 300
-	charTruncated := false
-	if len(text) > maxDisplayChars {
-		text = text[:maxDisplayChars]
-		charTruncated = true
-	}
-
-	lines := strings.Split(text, "\n")
-	totalLines := len(lines)
-	if maxLines > 0 && totalLines > maxLines {
-		lines = lines[:maxLines]
-	}
-
-	result := strings.Join(lines, "\n")
-	if maxLines > 0 && totalLines > maxLines {
-		result += fmt.Sprintf("\n... (%d lines total)", totalLines)
-	} else if charTruncated {
-		result += "\n... (output truncated)"
-	}
-	return result
+	return renderToolResultText(text, toolResultIsError(tr))
 }
 
-func displayToolResultTextFromDisplay(tr *session.DisplayToolResult, maxLines int) string {
+func toolResultTextFromDisplay(tr *session.DisplayToolResult, maxLines int) string {
+	if tr == nil {
+		return ""
+	}
 	if tr.ResultType == string(protocol.ToolResultTypeExecutionDenied) {
 		reason := strings.TrimSpace(tr.Reason)
 		if reason == "" {
@@ -433,28 +296,13 @@ func displayToolResultTextFromDisplay(tr *session.DisplayToolResult, maxLines in
 		if errText == "" {
 			errText = fmt.Sprintf("%v", tr.JSON)
 		}
-		if len(errText) > 200 {
-			errText = errText[:197] + "..."
+		if len(errText) > maxToolResultErrorChars {
+			errText = errText[:maxToolResultErrorChars-3] + "..."
 		}
 		return "Error: " + errText
 	}
 
-	text := tr.Text
-	if text == "" && tr.JSON != nil {
-		switch arr := tr.JSON.(type) {
-		case []any:
-			var lines []string
-			for _, item := range arr {
-				lines = append(lines, fmt.Sprintf("%v", item))
-			}
-			text = strings.Join(lines, "\n")
-		case []string:
-			text = strings.Join(arr, "\n")
-		default:
-			b, _ := json.Marshal(tr.JSON)
-			text = string(b)
-		}
-	}
+	text := toolResultOutputText(tr.Text, tr.JSON)
 	if text == "" {
 		return "(No output)"
 	}
@@ -462,10 +310,9 @@ func displayToolResultTextFromDisplay(tr *session.DisplayToolResult, maxLines in
 	text = reBlankRun.ReplaceAllString(text, "\n\n")
 	text = strings.TrimRight(text, " \t\n\r")
 
-	const maxDisplayChars = 300
 	charTruncated := false
-	if len(text) > maxDisplayChars {
-		text = text[:maxDisplayChars]
+	if len(text) > maxToolResultDisplayChars {
+		text = text[:maxToolResultDisplayChars]
 		charTruncated = true
 	}
 
@@ -482,6 +329,58 @@ func displayToolResultTextFromDisplay(tr *session.DisplayToolResult, maxLines in
 		result += "\n... (output truncated)"
 	}
 	return result
+}
+
+func toolResultIsError(tr *session.DisplayToolResult) bool {
+	if tr == nil {
+		return false
+	}
+	return tr.ResultType == string(protocol.ToolResultTypeExecutionDenied) ||
+		tr.IsError ||
+		tr.ResultType == string(protocol.ToolResultTypeErrorText) ||
+		tr.ResultType == string(protocol.ToolResultTypeErrorJSON)
+}
+
+func renderToolResultText(text string, isError bool) string {
+	if text == "" {
+		return ""
+	}
+	if isError {
+		return "  " + errorStyle.Render("⎿  "+text)
+	}
+
+	lines := strings.Split(text, "\n")
+	var sb strings.Builder
+	for idx, line := range lines {
+		if idx == 0 {
+			sb.WriteString("  ⎿  " + line)
+		} else {
+			sb.WriteString("\n     " + line)
+		}
+	}
+	return resultStyle.Render(sb.String())
+}
+
+func toolResultOutputText(text string, jsonValue any) string {
+	if text != "" {
+		return text
+	}
+	if jsonValue == nil {
+		return ""
+	}
+	switch arr := jsonValue.(type) {
+	case []any:
+		var lines []string
+		for _, item := range arr {
+			lines = append(lines, fmt.Sprintf("%v", item))
+		}
+		return strings.Join(lines, "\n")
+	case []string:
+		return strings.Join(arr, "\n")
+	default:
+		b, _ := json.Marshal(jsonValue)
+		return string(b)
+	}
 }
 
 // formatPendingActions builds the approval header string from pending tool actions.

@@ -59,7 +59,6 @@ Response:
       "content": [
         {
           "type": "tool_call",
-          "summary": "Shell(git status)",
           "tool_call": {
             "id": "call_123",
             "name": "shell",
@@ -68,7 +67,6 @@ Response:
         },
         {
           "type": "tool_result",
-          "summary": "Denied: User denied",
           "tool_result": {
             "tool_call_id": "call_123",
             "tool_name": "shell",
@@ -118,10 +116,9 @@ from runtime state.
 
 Message content parts are zotigod display DTOs, not runtime protocol structs.
 Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
-For structured parts such as `tool_call` and `tool_result`, `summary` is a lossy
-display projection only; desktop clients should use the structured `tool_call`
-and `tool_result` objects for state, filtering, and detailed rendering. `text`
-is reserved for actual text content parts.
+For structured parts such as `tool_call` and `tool_result`, desktop clients
+should use the structured `tool_call` and `tool_result` objects for rendering,
+state, filtering, and details. `text` is reserved for actual text content parts.
 
 Old sessions that do not have a per-session display log return an empty item
 list. zotigo may later add an explicit best-effort migration path, but this

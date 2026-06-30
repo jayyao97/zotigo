@@ -22,7 +22,6 @@ const (
 type DisplayContentPart struct {
 	Type       string             `json:"type"`
 	Text       string             `json:"text,omitempty"`
-	Summary    string             `json:"summary,omitempty"`
 	ToolCall   *DisplayToolCall   `json:"tool_call,omitempty"`
 	ToolResult *DisplayToolResult `json:"tool_result,omitempty"`
 }

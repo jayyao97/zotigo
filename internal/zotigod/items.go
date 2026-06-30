@@ -58,7 +58,6 @@ type itemResponse struct {
 type itemContentResponse struct {
 	Type       string                  `json:"type"`
 	Text       string                  `json:"text,omitempty"`
-	Summary    string                  `json:"summary,omitempty"`
 	ToolCall   *itemToolCallResponse   `json:"tool_call,omitempty"`
 	ToolResult *itemToolResultResponse `json:"tool_result,omitempty"`
 }
@@ -186,7 +185,6 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart) []itemCont
 		parts = append(parts, itemContentResponse{
 			Type:       part.Type,
 			Text:       part.Text,
-			Summary:    part.Summary,
 			ToolCall:   publicDisplayToolCall(part.ToolCall),
 			ToolResult: publicDisplayToolResult(part.ToolResult),
 		})
