@@ -12,9 +12,17 @@ state and display history.
 - `GET /sessions/{id}`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
+- `POST /sessions/{id}/approvals/{approval_id}`
 
 Internal worker endpoints under `/internal/sessions/...` are not public desktop
 API and may change without compatibility guarantees.
+
+Current internal worker endpoints include:
+
+- `POST /internal/sessions/{id}/worker/attach`
+- `POST /internal/sessions/{id}/worker/finish`
+- `POST /internal/sessions/{id}/approvals`
+- `GET /internal/sessions/{id}/approvals/{approval_id}`
 
 ## Read session display items
 
@@ -44,7 +52,7 @@ Response:
 {
   "items": [
     {
-      "id": "item_sess-1_1",
+      "id": "item_sess_8f0e12ab34cd56ef_1",
       "sequence": 1,
       "type": "user_message",
       "role": "user",
@@ -52,7 +60,7 @@ Response:
       "created_at": "2026-01-02T03:04:05Z"
     },
     {
-      "id": "item_sess-1_2",
+      "id": "item_sess_8f0e12ab34cd56ef_2",
       "sequence": 2,
       "type": "assistant_message",
       "role": "assistant",
@@ -79,7 +87,7 @@ Response:
       "created_at": "2026-01-02T03:04:06Z"
     },
     {
-      "id": "item_sess-1_3",
+      "id": "item_sess_8f0e12ab34cd56ef_3",
       "sequence": 3,
       "type": "turn_completed",
       "turn": {
@@ -108,11 +116,17 @@ Current item types include:
 - `turn_completed`
 - `turn_failed`
 - `turn_interrupted`
+- `approval_request`
+- `approval_decision`
 - `context_compacted`
 
 `turn_paused` with `reason: "need_approval"` is not a completed turn. Desktop
 should use explicit turn lifecycle items instead of inferring turn completion
 from runtime state.
+
+`approval_request` and `approval_decision` are display-log items, not command
+messages. Desktop clients render approval UI from these items, but submit the
+user's decision through the public approval endpoint below.
 
 Message content parts are zotigod display DTOs, not runtime protocol structs.
 Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
@@ -131,4 +145,116 @@ Status codes:
   `items` array.
 - `400`: invalid pagination parameters.
 - `404`: session not found.
+- `405`: method not allowed.
+
+## Human approval flow
+
+When a worker needs human approval, it creates an approval request through the
+internal worker API. zotigod appends an `approval_request` display item as the
+durable approval record, best-effort appends `turn_paused` with
+`reason: "need_approval"` for display replay, and transitions the daemon session
+state to `paused` when it is still running.
+
+The persisted approval source of truth is the display log. zotigod reconstructs
+pending and resolved approval requests from `approval_request` and
+`approval_decision` items, so public approval submission can continue after a
+zotigod restart as long as the session display log is still present.
+
+Desktop clients using this flow must support the `paused` session state and the
+`approval_request` / `approval_decision` item payloads before enabling HITL UI.
+
+Worker create request:
+
+`POST /internal/sessions/{id}/approvals`
+
+```json
+{
+  "turn_id": "turn_123",
+  "pending": [
+    {
+      "tool_call_id": "call_123",
+      "tool_name": "shell",
+      "arguments": "{\"command\":\"git status\"}",
+      "description": "Run shell command",
+      "reason": "requires user approval",
+      "risk_level": "medium",
+      "source": "classifier",
+      "requires_snapshot": true
+    }
+  ]
+}
+```
+
+Response:
+
+```json
+{
+  "id": "apr_8f0e12ab34cd56ef",
+  "session_id": "sess_8f0e12ab34cd56ef",
+  "turn_id": "turn_123",
+  "status": "pending",
+  "pending": [
+    {
+      "tool_call_id": "call_123",
+      "tool_name": "shell",
+      "arguments": "{\"command\":\"git status\"}",
+      "description": "Run shell command",
+      "reason": "requires user approval",
+      "risk_level": "medium",
+      "source": "classifier",
+      "requires_snapshot": true
+    }
+  ],
+  "created_at": "2026-01-02T03:04:05Z"
+}
+```
+
+Desktop submit decision:
+
+`POST /sessions/{id}/approvals/{approval_id}`
+
+```json
+{
+  "decisions": [
+    {
+      "tool_call_id": "call_123",
+      "approved": true
+    }
+  ]
+}
+```
+
+Denied decisions can include a reason:
+
+```json
+{
+  "decisions": [
+    {
+      "tool_call_id": "call_123",
+      "approved": false,
+      "reason": "not now"
+    }
+  ]
+}
+```
+
+The decision request must include exactly one decision for each pending tool
+call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected.
+After a valid decision, zotigod appends an `approval_decision` item. If the
+current daemon registry still has the session in `paused`, zotigod moves it back
+to `running`; if the session is absent or already terminal, the durable decision
+is still accepted and returned without an in-memory state transition.
+
+Workers can poll the internal read endpoint until the request is resolved:
+
+`GET /internal/sessions/{id}/approvals/{approval_id}`
+
+Status codes:
+
+- `201`: approval request created.
+- `200`: approval request returned or decision accepted.
+- `400`: invalid request body or decision set.
+- `404`: session or approval request not found.
+- `409`: approval creation on a non-running session, or an already resolved
+  approval request.
 - `405`: method not allowed.

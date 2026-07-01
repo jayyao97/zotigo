@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -18,6 +19,7 @@ const (
 
 type displayItemSource interface {
 	LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error)
+	AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error)
 }
 
 type storedDisplayItemSource struct {
@@ -36,12 +38,47 @@ func (s storedDisplayItemSource) LoadItems(ctx context.Context, sessionID string
 	return s.store.ListDisplayItems(ctx, sessionID)
 }
 
+func (s storedDisplayItemSource) AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return zotigosession.DisplayItem{}, err
+	}
+	return s.store.AppendDisplayItem(ctx, sessionID, item)
+}
+
+func (s storedDisplayItemSource) ensureSession(ctx context.Context, sessionID string) error {
+	sess, err := s.store.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("check session: %w", err)
+	}
+	if sess != nil {
+		return nil
+	}
+
+	now := time.Now().UTC()
+	return s.store.Put(ctx, &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:        sessionID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+		AgentSnapshot: agent.Snapshot{
+			State:     agent.StateIdle,
+			CreatedAt: now,
+		},
+		Turns: make([]zotigosession.Turn, 0),
+	})
+}
+
 type failingDisplayItemSource struct {
 	err error
 }
 
 func (s failingDisplayItemSource) LoadItems(context.Context, string) ([]zotigosession.DisplayItem, bool, error) {
 	return nil, false, s.err
+}
+
+func (s failingDisplayItemSource) AppendItem(context.Context, string, zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	return zotigosession.DisplayItem{}, s.err
 }
 
 type itemResponse struct {
@@ -51,6 +88,7 @@ type itemResponse struct {
 	Role      string                `json:"role,omitempty"`
 	Content   []itemContentResponse `json:"content,omitempty"`
 	Turn      *itemTurnResponse     `json:"turn,omitempty"`
+	Approval  *itemApprovalResponse `json:"approval,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	CreatedAt time.Time             `json:"created_at"`
 }
@@ -99,6 +137,31 @@ type itemTurnResponse struct {
 	ProviderFinishReason string `json:"provider_finish_reason,omitempty"`
 	LastAgentMessage     string `json:"last_agent_message,omitempty"`
 	DurationMS           int64  `json:"duration_ms,omitempty"`
+}
+
+type itemApprovalResponse struct {
+	ID        string                         `json:"id,omitempty"`
+	TurnID    string                         `json:"turn_id,omitempty"`
+	Pending   []itemPendingApprovalResponse  `json:"pending,omitempty"`
+	Decisions []itemApprovalDecisionResponse `json:"decisions,omitempty"`
+}
+
+type itemPendingApprovalResponse struct {
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
+	Description      string `json:"description,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	RiskLevel        string `json:"risk_level,omitempty"`
+	Source           string `json:"source,omitempty"`
+	RequiresSnapshot bool   `json:"requires_snapshot,omitempty"`
+}
+
+type itemApprovalDecisionResponse struct {
+	ToolCallID   string `json:"tool_call_id,omitempty"`
+	Approved     bool   `json:"approved"`
+	Reason       string `json:"reason,omitempty"`
+	ModifiedArgs string `json:"modified_args,omitempty"`
 }
 
 type itemsResponse struct {
@@ -174,6 +237,7 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Role:      item.Role,
 		Content:   publicDisplayContent(item.Content),
 		Turn:      publicDisplayTurn(item.Turn),
+		Approval:  publicDisplayApproval(item.Approval),
 		Error:     item.Error,
 		CreatedAt: item.CreatedAt,
 	}
@@ -258,4 +322,52 @@ func publicDisplayTurn(turn *zotigosession.DisplayTurn) *itemTurnResponse {
 		LastAgentMessage:     turn.LastAgentMessage,
 		DurationMS:           turn.DurationMS,
 	}
+}
+
+func publicDisplayApproval(approval *zotigosession.DisplayApproval) *itemApprovalResponse {
+	if approval == nil {
+		return nil
+	}
+	return &itemApprovalResponse{
+		ID:        approval.ID,
+		TurnID:    approval.TurnID,
+		Pending:   publicDisplayPendingApprovals(approval.Pending),
+		Decisions: publicDisplayApprovalDecisions(approval.Decisions),
+	}
+}
+
+func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []itemPendingApprovalResponse {
+	if len(pending) == 0 {
+		return nil
+	}
+	resp := make([]itemPendingApprovalResponse, 0, len(pending))
+	for _, item := range pending {
+		resp = append(resp, itemPendingApprovalResponse{
+			ToolCallID:       item.ToolCallID,
+			ToolName:         item.ToolName,
+			Arguments:        item.Arguments,
+			Description:      item.Description,
+			Reason:           item.Reason,
+			RiskLevel:        item.RiskLevel,
+			Source:           item.Source,
+			RequiresSnapshot: item.RequiresSnapshot,
+		})
+	}
+	return resp
+}
+
+func publicDisplayApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []itemApprovalDecisionResponse {
+	if len(decisions) == 0 {
+		return nil
+	}
+	resp := make([]itemApprovalDecisionResponse, 0, len(decisions))
+	for _, item := range decisions {
+		resp = append(resp, itemApprovalDecisionResponse{
+			ToolCallID:   item.ToolCallID,
+			Approved:     item.Approved,
+			Reason:       item.Reason,
+			ModifiedArgs: item.ModifiedArgs,
+		})
+	}
+	return resp
 }

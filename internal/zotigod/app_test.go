@@ -21,8 +21,10 @@ type sessionListResponse struct {
 }
 
 type fakeDisplayItemSource struct {
-	items map[string][]zotigosession.DisplayItem
-	err   error
+	items      map[string][]zotigosession.DisplayItem
+	err        error
+	appendErr  func(sessionID string, item zotigosession.DisplayItem) error
+	appendHook func(sessionID string, item zotigosession.DisplayItem)
 }
 
 func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
@@ -31,6 +33,33 @@ func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) (
 	}
 	items, ok := s.items[sessionID]
 	return items, ok, nil
+}
+
+func (s *fakeDisplayItemSource) AppendItem(_ context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	if s.err != nil {
+		return zotigosession.DisplayItem{}, s.err
+	}
+	if s.items == nil {
+		s.items = make(map[string][]zotigosession.DisplayItem)
+	}
+	if s.appendErr != nil {
+		if err := s.appendErr(sessionID, item); err != nil {
+			return zotigosession.DisplayItem{}, err
+		}
+	}
+	next := uint64(len(s.items[sessionID]) + 1)
+	item.Sequence = next
+	if item.ID == "" {
+		item.ID = fmt.Sprintf("item_%s_%d", sessionID, next)
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	s.items[sessionID] = append(s.items[sessionID], item)
+	if s.appendHook != nil {
+		s.appendHook(sessionID, item)
+	}
+	return item, nil
 }
 
 func createSession(t *testing.T, handler http.Handler) Session {
@@ -425,6 +454,331 @@ func TestWorkerAttachTransitionsToRunning(t *testing.T) {
 	}
 	if running.State != SessionStateRunning {
 		t.Fatalf("expected state %q, got %q", SessionStateRunning, running.State)
+	}
+}
+
+func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+	if approval.Status != approvalStatusPending {
+		t.Fatalf("expected status %q, got %q", approvalStatusPending, approval.Status)
+	}
+	if approval.TurnID != "turn-1" || len(approval.Pending) != 1 {
+		t.Fatalf("unexpected approval response: %#v", approval)
+	}
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
+		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
+	}
+
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 2 {
+		t.Fatalf("expected approval request and turn paused items, got %d", len(items.Items))
+	}
+	if items.Items[0].Type != string(zotigosession.DisplayItemApprovalRequest) {
+		t.Fatalf("expected approval_request item, got %s", items.Items[0].Type)
+	}
+	if items.Items[0].Approval == nil || items.Items[0].Approval.ID != approval.ID {
+		t.Fatalf("unexpected approval item: %#v", items.Items[0].Approval)
+	}
+	if got := items.Items[0].Approval.Pending[0]; got.ToolCallID != "call-1" || got.ToolName != "shell" || got.Reason != "writes files" {
+		t.Fatalf("unexpected pending approval: %#v", got)
+	}
+	if items.Items[1].Type != string(zotigosession.DisplayItemTurnPaused) {
+		t.Fatalf("expected turn_paused item, got %s", items.Items[1].Type)
+	}
+	if items.Items[1].Turn == nil || items.Items[1].Turn.ID != "turn-1" || items.Items[1].Turn.Reason != "need_approval" {
+		t.Fatalf("unexpected turn paused item: %#v", items.Items[1].Turn)
+	}
+
+	approved := true
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":true}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var resolved approvalRequestResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+		t.Fatalf("decode approval response: %v", err)
+	}
+	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved != approved {
+		t.Fatalf("unexpected resolved approval: %#v", resolved)
+	}
+	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
+		t.Fatalf("expected state %q, got %q", SessionStateRunning, got.State)
+	}
+
+	workerView := getApprovalRequest(t, handler, created.ID, approval.ID)
+	if workerView.Status != approvalStatusResolved || len(workerView.Decisions) != 1 {
+		t.Fatalf("worker did not observe resolved approval: %#v", workerView)
+	}
+
+	items = getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 3 {
+		t.Fatalf("expected approval request, turn paused, and decision items, got %d", len(items.Items))
+	}
+	if items.Items[2].Type != string(zotigosession.DisplayItemApprovalDecision) {
+		t.Fatalf("expected approval_decision item, got %s", items.Items[2].Type)
+	}
+	if items.Items[2].Approval == nil || len(items.Items[2].Approval.Decisions) != 1 || !items.Items[2].Approval.Decisions[0].Approved {
+		t.Fatalf("unexpected approval decision item: %#v", items.Items[2].Approval)
+	}
+}
+
+func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", nil))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
+	}
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
+		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
+	}
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":true}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+}
+
+func TestApprovalCreateStillPausesWhenTurnPausedItemAppendFails(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source.appendErr = func(_ string, item zotigosession.DisplayItem) error {
+		if item.Type == zotigosession.DisplayItemTurnPaused {
+			return errors.New("write failed")
+		}
+		return nil
+	}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
+		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":true}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+}
+
+func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
+	registry := newSessionRegistry()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(registry, source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+
+	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalDecision {
+			_, _ = registry.End(created.ID)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":true}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if items.Items[len(items.Items)-1].Type != string(zotigosession.DisplayItemApprovalDecision) {
+		t.Fatalf("expected durable approval_decision, got %#v", items.Items[len(items.Items)-1])
+	}
+}
+
+func TestApprovalDecisionSucceedsWhenSessionEndsBeforePause(t *testing.T) {
+	registry := newSessionRegistry()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(registry, source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+
+	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalRequest {
+			_, _ = registry.End(created.ID)
+		}
+	}
+
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+	if got := getSession(t, handler, created.ID); got.State != SessionStateEnded {
+		t.Fatalf("expected state %q, got %q", SessionStateEnded, got.State)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":false,"reason":"session ended"}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	resolved := getApprovalRequest(t, handler, created.ID, approval.ID)
+	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 {
+		t.Fatalf("expected resolved approval, got %#v", resolved)
+	}
+}
+
+func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+
+	items, ok, err := store.ListDisplayItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("list display items: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected daemon session to be materialized in store")
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected approval request and turn paused items, got %d", len(items))
+	}
+	if items[0].Type != zotigosession.DisplayItemApprovalRequest || items[0].Approval == nil || items[0].Approval.ID != approval.ID {
+		t.Fatalf("unexpected stored approval request item: %#v", items[0])
+	}
+	if items[1].Type != zotigosession.DisplayItemTurnPaused {
+		t.Fatalf("expected turn_paused item, got %s", items[1].Type)
+	}
+}
+
+func TestApprovalDecisionRecoversPendingRequestFromDisplayLog(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+
+	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	newSession := createSession(t, restarted)
+	if newSession.ID == created.ID {
+		t.Fatalf("expected restart-created session id not to reuse %q", created.ID)
+	}
+
+	workerView := getApprovalRequest(t, restarted, created.ID, approval.ID)
+	if workerView.Status != approvalStatusPending || len(workerView.Pending) != 1 {
+		t.Fatalf("expected pending approval after restart, got %#v", workerView)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":false,"reason":"not now"}]
+	}`))
+	restarted.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var resolved approvalRequestResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+		t.Fatalf("decode approval response: %v", err)
+	}
+	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved {
+		t.Fatalf("unexpected resolved approval: %#v", resolved)
+	}
+	if resolved.Decisions[0].Reason != "not now" {
+		t.Fatalf("expected denial reason to persist, got %#v", resolved.Decisions[0])
+	}
+
+	workerView = getApprovalRequest(t, restarted, created.ID, approval.ID)
+	if workerView.Status != approvalStatusResolved || len(workerView.Decisions) != 1 {
+		t.Fatalf("expected resolved approval from display log, got %#v", workerView)
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":true}]
+	}`))
+	restarted.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
+	}
+}
+
+func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+
+	tests := []struct {
+		name string
+		body string
+	}{
+		{name: "missing decision", body: `{"decisions":[]}`},
+		{name: "unknown tool call", body: `{"decisions":[{"tool_call_id":"call-missing","approved":true}]}`},
+		{name: "missing approved", body: `{"decisions":[{"tool_call_id":"call-1"}]}`},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(tt.body))
+			handler.ServeHTTP(rec, req)
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestApprovalCreateRejectsNonRunningSession(t *testing.T) {
+	handler := NewHandler()
+	created := createSession(t, handler)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/approvals", strings.NewReader(`{
+		"turn_id":"turn-1",
+		"pending":[{"tool_call_id":"call-1","tool_name":"shell"}]
+	}`))
+	handler.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
 	}
 }
 
@@ -841,6 +1195,64 @@ func attachWorker(t *testing.T, handler http.Handler, id string) Session {
 		t.Fatalf("decode attach response: %v", err)
 	}
 	return session
+}
+
+func getSession(t *testing.T, handler http.Handler, id string) Session {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+id, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var session Session
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode session response: %v", err)
+	}
+	return session
+}
+
+func createApprovalRequestForTest(t *testing.T, handler http.Handler, id string) approvalRequestResponse {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+id+"/approvals", strings.NewReader(`{
+		"turn_id": "turn-1",
+		"pending": [{
+			"tool_call_id": "call-1",
+			"tool_name": "shell",
+			"arguments": "{\"command\":\"touch file\"}",
+			"description": "Run shell command",
+			"reason": "writes files",
+			"risk_level": "medium",
+			"source": "classifier",
+			"requires_snapshot": true
+		}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	var approval approvalRequestResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &approval); err != nil {
+		t.Fatalf("decode approval response: %v", err)
+	}
+	return approval
+}
+
+func getApprovalRequest(t *testing.T, handler http.Handler, sessionID string, approvalID string) approvalRequestResponse {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/internal/sessions/"+sessionID+"/approvals/"+approvalID, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var approval approvalRequestResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &approval); err != nil {
+		t.Fatalf("decode approval response: %v", err)
+	}
+	return approval
 }
 
 func getItems(t *testing.T, handler http.Handler, path string) itemsResponse {

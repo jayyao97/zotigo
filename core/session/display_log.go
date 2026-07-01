@@ -16,6 +16,8 @@ const (
 	DisplayItemTurnCompleted    DisplayItemType = "turn_completed"
 	DisplayItemTurnFailed       DisplayItemType = "turn_failed"
 	DisplayItemTurnInterrupted  DisplayItemType = "turn_interrupted"
+	DisplayItemApprovalRequest  DisplayItemType = "approval_request"
+	DisplayItemApprovalDecision DisplayItemType = "approval_decision"
 	DisplayItemContextCompacted DisplayItemType = "context_compacted"
 )
 
@@ -65,6 +67,31 @@ type DisplayTurn struct {
 	DurationMS           int64  `json:"duration_ms,omitempty"`
 }
 
+type DisplayApproval struct {
+	ID        string                    `json:"id,omitempty"`
+	TurnID    string                    `json:"turn_id,omitempty"`
+	Pending   []DisplayPendingApproval  `json:"pending,omitempty"`
+	Decisions []DisplayApprovalDecision `json:"decisions,omitempty"`
+}
+
+type DisplayPendingApproval struct {
+	ToolCallID       string `json:"tool_call_id,omitempty"`
+	ToolName         string `json:"tool_name,omitempty"`
+	Arguments        string `json:"arguments,omitempty"`
+	Description      string `json:"description,omitempty"`
+	Reason           string `json:"reason,omitempty"`
+	RiskLevel        string `json:"risk_level,omitempty"`
+	Source           string `json:"source,omitempty"`
+	RequiresSnapshot bool   `json:"requires_snapshot,omitempty"`
+}
+
+type DisplayApprovalDecision struct {
+	ToolCallID   string `json:"tool_call_id,omitempty"`
+	Approved     bool   `json:"approved"`
+	Reason       string `json:"reason,omitempty"`
+	ModifiedArgs string `json:"modified_args,omitempty"`
+}
+
 type DisplayItem struct {
 	ID        string               `json:"id"`
 	Sequence  uint64               `json:"sequence"`
@@ -72,6 +99,7 @@ type DisplayItem struct {
 	Role      string               `json:"role,omitempty"`
 	Content   []DisplayContentPart `json:"content,omitempty"`
 	Turn      *DisplayTurn         `json:"turn,omitempty"`
+	Approval  *DisplayApproval     `json:"approval,omitempty"`
 	Error     string               `json:"error,omitempty"`
 	CreatedAt time.Time            `json:"created_at"`
 }
