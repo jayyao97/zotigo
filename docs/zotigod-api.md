@@ -52,7 +52,7 @@ Response:
 {
   "items": [
     {
-      "id": "item_sess-1_1",
+      "id": "item_sess_8f0e12ab34cd56ef_1",
       "sequence": 1,
       "type": "user_message",
       "role": "user",
@@ -60,7 +60,7 @@ Response:
       "created_at": "2026-01-02T03:04:05Z"
     },
     {
-      "id": "item_sess-1_2",
+      "id": "item_sess_8f0e12ab34cd56ef_2",
       "sequence": 2,
       "type": "assistant_message",
       "role": "assistant",
@@ -87,7 +87,7 @@ Response:
       "created_at": "2026-01-02T03:04:06Z"
     },
     {
-      "id": "item_sess-1_3",
+      "id": "item_sess_8f0e12ab34cd56ef_3",
       "sequence": 3,
       "type": "turn_completed",
       "turn": {
@@ -190,7 +190,7 @@ Response:
 ```json
 {
   "id": "apr_8f0e12ab34cd56ef",
-  "session_id": "sess-1",
+  "session_id": "sess_8f0e12ab34cd56ef",
   "turn_id": "turn_123",
   "status": "pending",
   "pending": [
