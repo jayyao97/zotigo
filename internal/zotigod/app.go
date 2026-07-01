@@ -63,7 +63,7 @@ func (r *sessionRegistry) Create() Session {
 
 	r.nextID++
 	session := Session{
-		ID:        fmt.Sprintf("sess-%d", r.nextID),
+		ID:        newZotigodID("sess"),
 		State:     SessionStateCreated,
 		CreatedAt: time.Now().UTC(),
 		seq:       r.nextID,
@@ -103,7 +103,13 @@ func (r *sessionRegistry) Start(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateStarting, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
+		session.State = SessionStateRunning
+	})
+}
+
+func (r *sessionRegistry) ResumeAfterApproval(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateRunning
 	})
 }

@@ -1,8 +1,6 @@
 package zotigod
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"strings"
@@ -44,7 +42,7 @@ func (r *approvalRegistry) Create(sessionID string, turnID string, pending []zot
 	}
 
 	return approvalRequest{
-		ID:        newApprovalID(),
+		ID:        newZotigodID("apr"),
 		SessionID: sessionID,
 		TurnID:    strings.TrimSpace(turnID),
 		Status:    approvalStatusPending,
@@ -164,12 +162,4 @@ func copyApprovalDecisions(items []zotigosession.DisplayApprovalDecision) []zoti
 		copied[idx].ToolCallID = strings.TrimSpace(copied[idx].ToolCallID)
 	}
 	return copied
-}
-
-func newApprovalID() string {
-	var buf [8]byte
-	if _, err := rand.Read(buf[:]); err == nil {
-		return "apr_" + hex.EncodeToString(buf[:])
-	}
-	return fmt.Sprintf("apr_%d", time.Now().UnixNano())
 }

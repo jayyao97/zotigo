@@ -93,19 +93,16 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 	}
 	approval.CreatedAt = item.CreatedAt
 
-	if _, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
+	_, _ = h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnPaused,
 		Turn: &zotigosession.DisplayTurn{
 			ID:     approval.TurnID,
 			Reason: "need_approval",
 		},
-	}); err != nil {
-		http.Error(w, fmt.Sprintf("append turn paused item: %v", err), http.StatusInternalServerError)
-		return
-	}
+	})
 
 	if session, err = h.registry.Pause(id); err != nil {
-		h.writeTransition(w, session, err)
+		writeJSON(w, http.StatusCreated, publicApprovalRequest(approval))
 		return
 	}
 	writeJSON(w, http.StatusCreated, publicApprovalRequest(approval))
@@ -190,11 +187,7 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 	approval = resolvedApprovalFromDecision(approval, decisions, item.CreatedAt)
 
 	if inRegistry {
-		session, err = h.registry.MarkRunning(id)
-	}
-	if err != nil {
-		h.writeTransition(w, session, err)
-		return
+		_, _ = h.registry.ResumeAfterApproval(id)
 	}
 	writeJSON(w, http.StatusOK, publicApprovalRequest(approval))
 }
