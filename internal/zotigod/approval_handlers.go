@@ -93,6 +93,8 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 	}
 	approval.CreatedAt = item.CreatedAt
 
+	// The approval_request item is the durable commit record. turn_paused is a
+	// replay hint for clients, so a write failure should not strand the worker.
 	_, _ = h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnPaused,
 		Turn: &zotigosession.DisplayTurn{
@@ -101,10 +103,7 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 		},
 	})
 
-	if session, err = h.registry.Pause(id); err != nil {
-		writeJSON(w, http.StatusCreated, publicApprovalRequest(approval))
-		return
-	}
+	_, _ = h.registry.Pause(id)
 	writeJSON(w, http.StatusCreated, publicApprovalRequest(approval))
 }
 
@@ -148,12 +147,6 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 	h.approvals.mu.Lock()
 	defer h.approvals.mu.Unlock()
 
-	session, inRegistry := h.registry.Get(id)
-	if inRegistry && session.State != SessionStatePaused {
-		http.Error(w, "approval decision requires a paused session", http.StatusConflict)
-		return
-	}
-
 	approval, ok, err := h.loadApproval(r, id, approvalID)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("load approval: %v", err), http.StatusInternalServerError)
@@ -186,7 +179,7 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 	}
 	approval = resolvedApprovalFromDecision(approval, decisions, item.CreatedAt)
 
-	if inRegistry {
+	if session, inRegistry := h.registry.Get(id); inRegistry && session.State == SessionStatePaused {
 		_, _ = h.registry.ResumeAfterApproval(id)
 	}
 	writeJSON(w, http.StatusOK, publicApprovalRequest(approval))

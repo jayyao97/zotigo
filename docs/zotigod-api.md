@@ -150,9 +150,10 @@ Status codes:
 ## Human approval flow
 
 When a worker needs human approval, it creates an approval request through the
-internal worker API. zotigod appends an `approval_request` display item followed
-by `turn_paused` with `reason: "need_approval"`, and transitions the daemon
-session state to `paused`.
+internal worker API. zotigod appends an `approval_request` display item as the
+durable approval record, best-effort appends `turn_paused` with
+`reason: "need_approval"` for display replay, and transitions the daemon session
+state to `paused` when it is still running.
 
 The persisted approval source of truth is the display log. zotigod reconstructs
 pending and resolved approval requests from `approval_request` and
@@ -239,11 +240,10 @@ Denied decisions can include a reason:
 
 The decision request must include exactly one decision for each pending tool
 call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected.
-After a valid decision, zotigod appends an `approval_decision` item and moves
-the daemon session back to `running` when the session is still present in the
-current daemon registry. If zotigod restarted and the session is only known from
-the display log, the durable decision is still accepted and returned; there is no
-in-memory daemon session state to transition.
+After a valid decision, zotigod appends an `approval_decision` item. If the
+current daemon registry still has the session in `paused`, zotigod moves it back
+to `running`; if the session is absent or already terminal, the durable decision
+is still accepted and returned without an in-memory state transition.
 
 Workers can poll the internal read endpoint until the request is resolved:
 
@@ -255,5 +255,6 @@ Status codes:
 - `200`: approval request returned or decision accepted.
 - `400`: invalid request body or decision set.
 - `404`: session or approval request not found.
-- `409`: invalid lifecycle state or already resolved approval request.
+- `409`: approval creation on a non-running session, or an already resolved
+  approval request.
 - `405`: method not allowed.

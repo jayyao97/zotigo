@@ -391,6 +391,10 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
 		return
 	}
+
+	h.approvals.mu.Lock()
+	defer h.approvals.mu.Unlock()
+
 	if req.Error != "" {
 		session, err := h.registry.Fail(id, req.Error)
 		h.writeTransition(w, session, err)

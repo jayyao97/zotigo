@@ -617,6 +617,40 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	}
 }
 
+func TestApprovalDecisionSucceedsWhenSessionEndsBeforePause(t *testing.T) {
+	registry := newSessionRegistry()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(registry, source)
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	attachWorker(t, handler, created.ID)
+
+	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalRequest {
+			_, _ = registry.End(created.ID)
+		}
+	}
+
+	approval := createApprovalRequestForTest(t, handler, created.ID)
+	if got := getSession(t, handler, created.ID); got.State != SessionStateEnded {
+		t.Fatalf("expected state %q, got %q", SessionStateEnded, got.State)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+		"decisions": [{"tool_call_id":"call-1","approved":false,"reason":"session ended"}]
+	}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+
+	resolved := getApprovalRequest(t, handler, created.ID, approval.ID)
+	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 {
+		t.Fatalf("expected resolved approval, got %#v", resolved)
+	}
+}
+
 func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
