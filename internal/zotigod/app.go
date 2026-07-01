@@ -27,6 +27,7 @@ const (
 	SessionStateCreated  SessionState = "created"
 	SessionStateStarting SessionState = "starting"
 	SessionStateRunning  SessionState = "running"
+	SessionStatePaused   SessionState = "paused"
 	SessionStateEnded    SessionState = "ended"
 	SessionStateFailed   SessionState = "failed"
 )
@@ -102,14 +103,20 @@ func (r *sessionRegistry) Start(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateRunning
+	})
+}
+
+func (r *sessionRegistry) Pause(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+		session.State = SessionStatePaused
 	})
 }
 
 func (r *sessionRegistry) End(id string) (Session, error) {
 	now := time.Now().UTC()
-	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateEnded
 		session.EndedAt = &now
 	})
@@ -117,7 +124,7 @@ func (r *sessionRegistry) End(id string) (Session, error) {
 
 func (r *sessionRegistry) Fail(id string, message string) (Session, error) {
 	now := time.Now().UTC()
-	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateFailed
 		session.EndedAt = &now
 		session.Error = message
@@ -150,8 +157,9 @@ func canTransition(state SessionState, from []SessionState) bool {
 }
 
 type handler struct {
-	registry *sessionRegistry
-	items    displayItemSource
+	registry  *sessionRegistry
+	approvals *approvalRegistry
+	items     displayItemSource
 }
 
 type finishSessionRequest struct {
@@ -223,8 +231,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource) http.Handler
 		items = failingDisplayItemSource{err: errors.New("display item source is not configured")}
 	}
 	handler := &handler{
-		registry: registry,
-		items:    items,
+		registry:  registry,
+		approvals: newApprovalRegistry(),
+		items:     items,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
@@ -271,6 +280,10 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	case "start":
 		h.handleSessionStart(w, r, id)
 	default:
+		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
+			h.handleApprovalDecision(w, r, id, approvalID)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
@@ -287,7 +300,13 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 		h.handleWorkerAttach(w, r, id)
 	case "worker/finish":
 		h.handleWorkerFinish(w, r, id)
+	case "approvals":
+		h.handleApprovalCreate(w, r, id)
 	default:
+		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
+			h.handleApprovalGet(w, r, id, approvalID)
+			return
+		}
 		http.NotFound(w, r)
 	}
 }
@@ -420,6 +439,20 @@ func readOptionalJSON(r *http.Request, value any) error {
 	}
 	if len(strings.TrimSpace(string(data))) == 0 {
 		return nil
+	}
+	return sonic.Unmarshal(data, value)
+}
+
+func readRequiredJSON(r *http.Request, value any) error {
+	if r.Body == nil {
+		return errors.New("request body is required")
+	}
+	data, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(string(data))) == 0 {
+		return errors.New("request body is required")
 	}
 	return sonic.Unmarshal(data, value)
 }
