@@ -61,6 +61,7 @@ type Agent struct {
 	mu              sync.RWMutex
 	state           State
 	history         []protocol.Message
+	pendingTurnUser []string
 	pendingActions  []*PendingAction
 	deferredActions []*PendingAction
 	turns           []TurnAudit
@@ -358,6 +359,7 @@ func (a *Agent) Restore(s Snapshot) {
 	defer a.mu.Unlock()
 	a.state = s.State
 	a.history = s.History
+	a.pendingTurnUser = nil
 	a.pendingActions = s.PendingActions
 	a.deferredActions = s.DeferredActions
 	a.turnSafety = s.TurnSafety
@@ -366,6 +368,31 @@ func (a *Agent) Restore(s Snapshot) {
 	} else {
 		a.turns = s.Turns
 	}
+}
+
+// QueueTurnUserInput queues additional user input for the active turn.
+// Pending inputs are merged and appended to runtime history as a normal user
+// message before the next provider request.
+func (a *Agent) QueueTurnUserInput(text string) error {
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return errors.New("input is required")
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.state != StateRunning && a.state != StatePaused {
+		return fmt.Errorf("agent is not running")
+	}
+	a.pendingTurnUser = append(a.pendingTurnUser, text)
+	return nil
+}
+
+// ClearPendingTurnUserInput discards active-turn input that was not drained
+// before a turn was interrupted or otherwise abandoned.
+func (a *Agent) ClearPendingTurnUserInput() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pendingTurnUser = nil
 }
 
 // Run continues the execution loop.
@@ -472,9 +499,10 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 
-			a.mu.RLock()
+			a.mu.Lock()
+			a.drainPendingTurnUserInputLocked()
 			msgs := a.buildContext()
-			a.mu.RUnlock()
+			a.mu.Unlock()
 
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
@@ -796,6 +824,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				continue
 			}
 
+			a.mu.Lock()
+			if a.drainPendingTurnUserInputLocked() {
+				a.mu.Unlock()
+				continue
+			}
+			a.mu.Unlock()
+
 			// Recover from empty responses: the model emitted no text and no
 			// tool calls (all output_tokens went into reasoning). Without this
 			// guard the turn would end silently mid-task. Nudge the model once
@@ -823,6 +858,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			// No tool calls -> turn finished
 			a.mu.Lock()
+			if a.drainPendingTurnUserInputLocked() {
+				a.mu.Unlock()
+				continue
+			}
+			a.pendingTurnUser = nil
 			a.state = StateIdle
 			a.mu.Unlock()
 
@@ -1823,9 +1863,18 @@ func (a *Agent) buildContext() []protocol.Message {
 	if a.userContext != nil {
 		history = a.withUserContextMessage(history, pctx)
 	}
-
 	msgs = append(msgs, history...)
 	return msgs
+}
+
+func (a *Agent) drainPendingTurnUserInputLocked() bool {
+	if len(a.pendingTurnUser) == 0 {
+		return false
+	}
+	text := strings.Join(a.pendingTurnUser, "\n\n")
+	a.pendingTurnUser = nil
+	a.history = append(a.history, protocol.NewUserMessage(text))
+	return true
 }
 
 func (a *Agent) withUserContextMessage(history []protocol.Message, pctx prompt.PromptContext) []protocol.Message {

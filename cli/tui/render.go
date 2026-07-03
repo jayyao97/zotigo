@@ -24,7 +24,7 @@ const (
 
 func renderDisplayItem(item session.DisplayItem) (string, bool) {
 	switch item.Type {
-	case session.DisplayItemUserMessage:
+	case session.DisplayItemUserMessage, session.DisplayItemSteeringMessage:
 		text := displayText(item.Content)
 		if text == "" {
 			return "", false

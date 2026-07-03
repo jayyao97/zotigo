@@ -2524,6 +2524,44 @@ func (p *ContextCaptureProvider) StreamChat(ctx context.Context, messages []prot
 	return ch, nil
 }
 
+type BlockingCaptureProvider struct {
+	mu      sync.Mutex
+	Calls   [][]protocol.Message
+	Started chan struct{}
+	Release chan struct{}
+	started sync.Once
+}
+
+func (p *BlockingCaptureProvider) Name() string { return "blocking-capture" }
+
+func (p *BlockingCaptureProvider) StreamChat(ctx context.Context, messages []protocol.Message, _ []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.mu.Lock()
+	p.Calls = append(p.Calls, append([]protocol.Message(nil), messages...))
+	call := len(p.Calls)
+	p.mu.Unlock()
+
+	if call == 1 {
+		p.started.Do(func() { close(p.Started) })
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-p.Release:
+		}
+	}
+
+	ch := make(chan protocol.Event, 4)
+	go func() {
+		defer close(ch)
+		ch <- protocol.NewTextDeltaEvent("ok")
+		ch <- protocol.Event{
+			Type:        protocol.EventTypeContentEnd,
+			ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "ok"},
+		}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return ch, nil
+}
+
 func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
 	prov := &ContextCaptureProvider{}
 	providers.Register("context-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
@@ -2580,6 +2618,104 @@ func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
 	}
 	if strings.Contains(history[0].String(), "<user_context>") {
 		t.Fatalf("context message should not be persisted in history: %q", history[0].String())
+	}
+}
+
+func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
+	prov := &BlockingCaptureProvider{
+		Started: make(chan struct{}),
+		Release: make(chan struct{}),
+	}
+	providers.Register("blocking-capture-steering", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	cfg := config.ProfileConfig{Provider: "blocking-capture-steering"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "real request")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	select {
+	case <-prov.Started:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not start")
+	}
+	if err := ag.QueueTurnUserInput("first correction"); err != nil {
+		t.Fatalf("queue first input: %v", err)
+	}
+	if err := ag.QueueTurnUserInput("second correction"); err != nil {
+		t.Fatalf("queue second input: %v", err)
+	}
+	close(prov.Release)
+	for range events {
+	}
+
+	prov.mu.Lock()
+	calls := append([][]protocol.Message(nil), prov.Calls...)
+	prov.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected queued input to trigger a follow-up provider request, got %d calls", len(calls))
+	}
+	first := calls[0]
+	if len(first) == 0 || first[len(first)-1].String() != "real request" {
+		t.Fatalf("expected first request to contain only the real request, got %#v", first)
+	}
+	second := calls[1]
+	if len(second) < 3 {
+		t.Fatalf("expected follow-up request to include user, assistant, and queued user input, got %#v", second)
+	}
+	got := second[len(second)-1]
+	if got.Role != protocol.RoleUser || got.String() != "first correction\n\nsecond correction" {
+		t.Fatalf("expected merged queued input as normal user message, got %#v", got)
+	}
+
+	history := ag.Snapshot().History
+	if len(history) < 3 {
+		t.Fatalf("expected queued input to persist in history, got %#v", history)
+	}
+	got = history[len(history)-2]
+	if got.Role != protocol.RoleUser || got.String() != "first correction\n\nsecond correction" {
+		t.Fatalf("expected merged queued input in history, got %#v", got)
+	}
+
+	if err := ag.QueueTurnUserInput("late"); err == nil {
+		t.Fatal("expected queueing input without an active turn to fail")
+	}
+}
+
+func TestAgentQueuesTurnUserInputWhilePaused(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("paused-queue", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "paused-queue"}, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	ag.Restore(agent.Snapshot{State: agent.StatePaused})
+
+	if err := ag.QueueTurnUserInput("apply after approval"); err != nil {
+		t.Fatalf("queue input while paused: %v", err)
+	}
+	ag.Restore(agent.Snapshot{State: agent.StateIdle})
+	if err := ag.QueueTurnUserInput("late"); err == nil {
+		t.Fatal("expected queueing input while idle to fail")
 	}
 }
 

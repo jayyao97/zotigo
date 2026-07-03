@@ -149,9 +149,18 @@ func (r *Runner) RunOnce(ctx context.Context, msg protocol.Message) error {
 // This is suitable for long-lived transports (ACP, WebSocket) where the
 // transport can respond to approval requests synchronously.
 func (r *Runner) RunFullTurn(ctx context.Context, msg protocol.Message) error {
+	return r.RunFullTurnStarted(ctx, msg, nil)
+}
+
+// RunFullTurnStarted is like RunFullTurn, but invokes onStarted after the
+// agent accepts the input and before streamed events are drained.
+func (r *Runner) RunFullTurnStarted(ctx context.Context, msg protocol.Message, onStarted func()) error {
 	eventCh, err := r.agent.RunMessage(ctx, msg)
 	if err != nil {
 		return err
+	}
+	if onStarted != nil {
+		onStarted()
 	}
 
 	return r.drainWithApprovalLoop(ctx, eventCh)
