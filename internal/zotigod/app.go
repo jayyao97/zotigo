@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -17,6 +18,8 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/core/agent"
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 const defaultAddr = "127.0.0.1:8765"
@@ -35,13 +38,14 @@ const (
 )
 
 type Session struct {
-	ID        string       `json:"id"`
-	State     SessionState `json:"state"`
-	CreatedAt time.Time    `json:"created_at"`
-	StartedAt *time.Time   `json:"started_at,omitempty"`
-	EndedAt   *time.Time   `json:"ended_at,omitempty"`
-	Error     string       `json:"error,omitempty"`
-	seq       uint64
+	ID               string       `json:"id"`
+	State            SessionState `json:"state"`
+	WorkingDirectory string       `json:"working_directory,omitempty"`
+	CreatedAt        time.Time    `json:"created_at"`
+	StartedAt        *time.Time   `json:"started_at,omitempty"`
+	EndedAt          *time.Time   `json:"ended_at,omitempty"`
+	Error            string       `json:"error,omitempty"`
+	seq              uint64
 }
 
 var (
@@ -59,19 +63,32 @@ func newSessionRegistry() *sessionRegistry {
 	return &sessionRegistry{sessions: make(map[string]Session)}
 }
 
-func (r *sessionRegistry) Create() Session {
+func (r *sessionRegistry) Add(session Session) Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	r.nextID++
-	session := Session{
-		ID:        newZotigodID("sess"),
-		State:     SessionStateCreated,
-		CreatedAt: time.Now().UTC(),
-		seq:       r.nextID,
+	if session.ID == "" {
+		session.ID = newZotigodID("sess")
 	}
+	if session.State == "" {
+		session.State = SessionStateCreated
+	}
+	if session.CreatedAt.IsZero() {
+		session.CreatedAt = time.Now().UTC()
+	}
+	session.seq = r.nextID
 	r.sessions[session.ID] = session
 	return session
+}
+
+func newSession(workingDirectory string) Session {
+	return Session{
+		ID:               newZotigodID("sess"),
+		State:            SessionStateCreated,
+		WorkingDirectory: workingDirectory,
+		CreatedAt:        time.Now().UTC(),
+	}
 }
 
 func (r *sessionRegistry) Get(id string) (Session, bool) {
@@ -168,9 +185,14 @@ type handler struct {
 	registry             *sessionRegistry
 	approvals            *approvalRegistry
 	items                displayItemSource
+	store                zotigosession.Store
 	workers              *workerRegistry
 	launcher             workerLauncher
 	workerConnectTimeout time.Duration
+}
+
+type createSessionRequest struct {
+	WorkingDirectory string `json:"working_directory,omitempty"`
 }
 
 type finishSessionRequest struct {
@@ -258,14 +280,62 @@ type handlerOptions struct {
 	launcher             workerLauncher
 	workers              *workerRegistry
 	workerConnectTimeout time.Duration
+	store                zotigosession.Store
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
-	items, err := newStoredDisplayItemSource()
+	store, err := zotigosession.NewFileStore("")
 	if err != nil {
-		items = failingDisplayItemSource{err: err}
+		opts.store = unavailableSessionStore{err: err}
+		return newHandler(newSessionRegistry(), failingDisplayItemSource{err: err}, opts)
 	}
+	opts.store = store
+	items := storedDisplayItemSource{store: store}
 	return newHandler(newSessionRegistry(), items, opts)
+}
+
+type unavailableSessionStore struct {
+	err error
+}
+
+func (s unavailableSessionStore) Get(context.Context, string) (*zotigosession.Session, error) {
+	return nil, s.err
+}
+
+func (s unavailableSessionStore) Put(context.Context, *zotigosession.Session) error {
+	return s.err
+}
+
+func (s unavailableSessionStore) AppendDisplayItem(context.Context, string, zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	return zotigosession.DisplayItem{}, s.err
+}
+
+func (s unavailableSessionStore) ListDisplayItems(context.Context, string) ([]zotigosession.DisplayItem, bool, error) {
+	return nil, false, s.err
+}
+
+func (s unavailableSessionStore) Delete(context.Context, string) error {
+	return s.err
+}
+
+func (s unavailableSessionStore) List(context.Context, zotigosession.ListFilter) ([]zotigosession.Metadata, error) {
+	return nil, s.err
+}
+
+func (s unavailableSessionStore) Lock(context.Context, string) error {
+	return s.err
+}
+
+func (s unavailableSessionStore) Unlock(context.Context, string) error {
+	return s.err
+}
+
+func (s unavailableSessionStore) IsLocked(context.Context, string) (bool, error) {
+	return false, s.err
+}
+
+func (s unavailableSessionStore) Close() error {
+	return nil
 }
 
 func newHandler(registry *sessionRegistry, items displayItemSource, opts ...handlerOptions) http.Handler {
@@ -279,6 +349,11 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.workers == nil {
 		options.workers = newWorkerRegistry()
 	}
+	if options.store == nil {
+		if source, ok := items.(storedDisplayItemSource); ok {
+			options.store = source.store
+		}
+	}
 	if options.workerConnectTimeout == 0 && options.launcher != nil {
 		options.workerConnectTimeout = defaultWorkerConnectTimeout
 	}
@@ -286,6 +361,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		registry:             registry,
 		approvals:            newApprovalRegistry(),
 		items:                items,
+		store:                options.store,
 		workers:              options.workers,
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
@@ -314,11 +390,69 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	case http.MethodGet:
 		writeJSON(w, http.StatusOK, map[string][]Session{"sessions": h.registry.List()})
 	case http.MethodPost:
-		writeJSON(w, http.StatusCreated, h.registry.Create())
+		var req createSessionRequest
+		if err := readOptionalJSON(r, &req); err != nil {
+			http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+			return
+		}
+		workingDirectory, err := resolveWorkingDirectory(req.WorkingDirectory)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		session := newSession(workingDirectory)
+		if err := h.persistSession(r.Context(), session); err != nil {
+			http.Error(w, fmt.Sprintf("persist session: %v", err), http.StatusInternalServerError)
+			return
+		}
+		session = h.registry.Add(session)
+		writeJSON(w, http.StatusCreated, session)
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func resolveWorkingDirectory(raw string) (string, error) {
+	workDir := strings.TrimSpace(raw)
+	if workDir == "" {
+		cwd, err := os.Getwd()
+		if err != nil {
+			return "", fmt.Errorf("resolve working_directory: %w", err)
+		}
+		workDir = cwd
+	}
+	if !filepath.IsAbs(workDir) {
+		return "", fmt.Errorf("working_directory must be an absolute path")
+	}
+	workDir = filepath.Clean(workDir)
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return "", fmt.Errorf("working_directory must exist: %w", err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("working_directory must be a directory")
+	}
+	return workDir, nil
+}
+
+func (h *handler) persistSession(ctx context.Context, session Session) error {
+	if h.store == nil {
+		return nil
+	}
+	return h.store.Put(ctx, &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:               session.ID,
+			WorkingDirectory: session.WorkingDirectory,
+			CreatedAt:        session.CreatedAt,
+			UpdatedAt:        session.CreatedAt,
+		},
+		AgentSnapshot: agent.Snapshot{
+			State:     agent.StateIdle,
+			CreatedAt: session.CreatedAt,
+		},
+		Turns: make([]zotigosession.Turn, 0),
+	})
 }
 
 func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -424,7 +558,20 @@ func (h *handler) launchWorker(ctx context.Context, id string) error {
 	if h.launcher == nil {
 		return nil
 	}
-	return h.launcher.Start(ctx, id)
+	return h.launcher.Start(ctx, id, h.sessionWorkingDirectory(ctx, id))
+}
+
+func (h *handler) sessionWorkingDirectory(ctx context.Context, id string) string {
+	if session, ok := h.registry.Get(id); ok && session.WorkingDirectory != "" {
+		return session.WorkingDirectory
+	}
+	if h.store != nil {
+		if session, err := h.store.Get(ctx, id); err == nil && session != nil && session.WorkingDirectory != "" {
+			return session.WorkingDirectory
+		}
+	}
+	cwd, _ := os.Getwd()
+	return cwd
 }
 
 func (h *handler) waitForWorker(ctx context.Context, id string) bool {

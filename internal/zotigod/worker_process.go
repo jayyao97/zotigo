@@ -10,13 +10,13 @@ import (
 )
 
 type workerLauncher interface {
-	Start(ctx context.Context, sessionID string) error
+	Start(ctx context.Context, sessionID string, workingDirectory string) error
 }
 
-type workerLauncherFunc func(ctx context.Context, sessionID string) error
+type workerLauncherFunc func(ctx context.Context, sessionID string, workingDirectory string) error
 
-func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string) error {
-	return fn(ctx, sessionID)
+func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string, workingDirectory string) error {
+	return fn(ctx, sessionID, workingDirectory)
 }
 
 type processWorkerLauncher struct {
@@ -47,7 +47,7 @@ func newProcessWorkerLauncher(daemonURL string, logger *log.Logger) (*processWor
 	}, nil
 }
 
-func (l *processWorkerLauncher) Start(_ context.Context, sessionID string) error {
+func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, workingDirectory string) error {
 	if l == nil {
 		return nil
 	}
@@ -57,6 +57,9 @@ func (l *processWorkerLauncher) Start(_ context.Context, sessionID string) error
 		"--session-id", sessionID,
 	)
 	cmd.Dir = l.workDir
+	if workingDirectory != "" {
+		cmd.Dir = workingDirectory
+	}
 	cmd.Env = l.env
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output

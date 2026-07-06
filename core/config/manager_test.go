@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/config"
@@ -83,6 +84,33 @@ ui:
 
 	if cfg.Tools.Web.TimeoutSec == 0 {
 		t.Error("Expected tools defaults to be preserved")
+	}
+}
+
+func TestLoadForDirUsesExplicitProjectDirectory(t *testing.T) {
+	projectDir := t.TempDir()
+	projectConfigContent := []byte(`
+default_profile: project-profile
+profiles:
+  project-profile:
+    provider: openai
+    model: gpt-4.1
+`)
+	if err := os.WriteFile(filepath.Join(projectDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
+		t.Fatalf("Failed to write project config: %v", err)
+	}
+
+	mgr := config.NewManager()
+	cfg, err := mgr.LoadForDir(projectDir)
+	if err != nil {
+		t.Fatalf("Failed to load config: %v", err)
+	}
+
+	if cfg.DefaultProfile != "project-profile" {
+		t.Fatalf("Expected project default profile, got %q", cfg.DefaultProfile)
+	}
+	if cfg.Profiles["project-profile"].Model != "gpt-4.1" {
+		t.Fatalf("Expected project profile model, got %#v", cfg.Profiles["project-profile"])
 	}
 }
 
