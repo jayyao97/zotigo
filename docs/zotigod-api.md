@@ -30,6 +30,27 @@ Current internal worker endpoints include:
 - `POST /internal/sessions/{id}/approvals`
 - `GET /internal/sessions/{id}/approvals/{approval_id}`
 
+## Create sessions
+
+`POST /sessions` creates a zotigod session for a project directory. Desktop
+clients should pass the project root selected by the user:
+
+```json
+{
+  "working_directory": "/Users/me/workspace/project"
+}
+```
+
+`working_directory` must be an absolute path that resolves to an existing
+directory. If it is omitted, zotigod uses its current working directory for
+CLI/backward compatibility. The directory is persisted in the core session
+store and returned in session responses as `working_directory`.
+
+Workers launched for the session use this directory as their process working
+directory and as the source for project config, skills, project instructions,
+tools, shell execution, and LSP state. Legacy sessions without a stored working
+directory fall back to the worker process current directory.
+
 ## Read session display items
 
 `GET /sessions/{id}/items` returns a paginated, read-only display log for a

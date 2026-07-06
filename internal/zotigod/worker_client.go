@@ -210,9 +210,12 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(sess.WorkingDirectory) != "" {
+		cwd = sess.WorkingDirectory
+	}
 
 	cm := config.NewManager()
-	appConfig, err := cm.Load()
+	appConfig, err := cm.LoadForDir(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}

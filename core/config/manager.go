@@ -25,6 +25,11 @@ func NewManager() *Manager {
 }
 
 func (m *Manager) Load() (*Config, error) {
+	cwd, _ := os.Getwd()
+	return m.LoadForDir(cwd)
+}
+
+func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 	defaults := DefaultConfig()
 	m.v.SetDefault("default_profile", defaults.DefaultProfile)
 	m.v.SetDefault("profiles", defaults.Profiles)
@@ -47,16 +52,15 @@ func (m *Manager) Load() (*Config, error) {
 	}
 
 	// Load Project
-	cwd, err := os.Getwd()
-	if err == nil {
-		projectConfigPath := filepath.Join(cwd, ProjectConfig)
+	if workDir != "" {
+		projectConfigPath := filepath.Join(workDir, ProjectConfig)
 		if _, err := os.Stat(projectConfigPath); err == nil {
 			m.v.SetConfigFile(projectConfigPath)
 			if err := m.v.MergeInConfig(); err != nil {
 				return nil, fmt.Errorf("failed to merge project config: %w", err)
 			}
 		} else {
-			nestedProjectConfig := filepath.Join(cwd, ConfigDirName, ConfigFileName)
+			nestedProjectConfig := filepath.Join(workDir, ConfigDirName, ConfigFileName)
 			if _, err := os.Stat(nestedProjectConfig); err == nil {
 				m.v.SetConfigFile(nestedProjectConfig)
 				if err := m.v.MergeInConfig(); err != nil {

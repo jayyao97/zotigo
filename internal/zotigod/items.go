@@ -31,14 +31,6 @@ type storedDisplayItemSource struct {
 	store zotigosession.Store
 }
 
-func newStoredDisplayItemSource() (displayItemSource, error) {
-	store, err := zotigosession.NewFileStore("")
-	if err != nil {
-		return nil, err
-	}
-	return storedDisplayItemSource{store: store}, nil
-}
-
 func (s storedDisplayItemSource) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
 	return s.store.ListDisplayItems(ctx, sessionID)
 }

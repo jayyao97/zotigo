@@ -171,6 +171,22 @@ func createSession(t *testing.T, handler http.Handler) Session {
 	return session
 }
 
+func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workDir string) Session {
+	t.Helper()
+
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	var session Session
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	return session
+}
+
 func TestHealth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -247,6 +263,99 @@ func TestSessionsCreateAndList(t *testing.T) {
 	}
 	if len(list.Sessions) != 1 || list.Sessions[0].ID != created.ID {
 		t.Fatalf("unexpected sessions: %#v", list.Sessions)
+	}
+}
+
+func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	workDir := t.TempDir()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"working_directory":%q}`, workDir)))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	var created Session
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.WorkingDirectory != workDir {
+		t.Fatalf("expected working directory %q, got %q", workDir, created.WorkingDirectory)
+	}
+
+	stored, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	if stored == nil || stored.WorkingDirectory != workDir {
+		t.Fatalf("expected stored working directory %q, got %#v", workDir, stored)
+	}
+}
+
+func TestSessionsCreateRejectsInvalidWorkingDirectory(t *testing.T) {
+	handler := NewHandler()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"working_directory":"/path/that/does/not/exist"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"working_directory":"relative/project"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionsCreateDoesNotRegisterWhenPersistenceFails(t *testing.T) {
+	registry := newSessionRegistry()
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		store: unavailableSessionStore{err: errors.New("store unavailable")},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	if got := registry.List(); len(got) != 0 {
+		t.Fatalf("expected no registered sessions after persistence failure, got %#v", got)
+	}
+}
+
+func TestDefaultHandlerRejectsCreateWhenStoreInitializationFails(t *testing.T) {
+	homeFile := filepath.Join(t.TempDir(), "home-file")
+	if err := os.WriteFile(homeFile, []byte("not a directory"), 0644); err != nil {
+		t.Fatalf("write home file: %v", err)
+	}
+	t.Setenv("HOME", homeFile)
+	handler := NewHandler()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var list sessionListResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	if len(list.Sessions) != 0 {
+		t.Fatalf("expected no sessions after failed create, got %#v", list.Sessions)
 	}
 }
 
@@ -536,7 +645,7 @@ func TestSessionStartLaunchesWorkerAndWaitsForConnection(t *testing.T) {
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
-	launcher := workerLauncherFunc(func(_ context.Context, sessionID string) error {
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
 		go func() {
 			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
 			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
@@ -569,10 +678,54 @@ func TestSessionStartLaunchesWorkerAndWaitsForConnection(t *testing.T) {
 	defer worker.Close()
 }
 
+func TestSessionStartPassesWorkingDirectoryToWorkerLauncher(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	workDir := t.TempDir()
+	var launchedWorkDir string
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, workingDirectory string) error {
+		launchedWorkDir = workingDirectory
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSessionWithWorkingDirectory(t, handler, workDir)
+	started := startSession(t, handler, created.ID)
+	if started.State != SessionStateRunning {
+		t.Fatalf("expected state %q, got %q", SessionStateRunning, started.State)
+	}
+	if launchedWorkDir != workDir {
+		t.Fatalf("expected launcher workdir %q, got %q", workDir, launchedWorkDir)
+	}
+
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+}
+
 func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source, handlerOptions{
-		launcher:             workerLauncherFunc(func(context.Context, string) error { return nil }),
+		launcher:             workerLauncherFunc(func(context.Context, string, string) error { return nil }),
 		workerConnectTimeout: 10 * time.Millisecond,
 	})
 
@@ -1626,7 +1779,7 @@ func TestSessionPauseLaunchesMissingWorker(t *testing.T) {
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
-	launcher := workerLauncherFunc(func(_ context.Context, sessionID string) error {
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
 		go func() {
 			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
 			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
@@ -2600,7 +2753,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 func TestSessionRegistryLifecycleTransitions(t *testing.T) {
 	registry := newSessionRegistry()
 
-	created := registry.Create()
+	created := registry.Add(newSession(""))
 	if created.State != SessionStateCreated {
 		t.Fatalf("expected state %q, got %q", SessionStateCreated, created.State)
 	}
@@ -2703,7 +2856,7 @@ func TestSessionRegistryRejectsInvalidLifecycleTransitions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := newSessionRegistry()
-			session := registry.Create()
+			session := registry.Add(newSession(""))
 			if err := tt.run(registry, session.ID); !errors.Is(err, errInvalidSessionTransition) {
 				t.Fatalf("expected invalid transition error, got %v", err)
 			}
