@@ -12,6 +12,9 @@ state and display history.
 - `GET /sessions/{id}`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
+- `POST /sessions/{id}/messages`
+- `POST /sessions/{id}/pause`
+- `POST /sessions/{id}/steering`
 - `POST /sessions/{id}/approvals/{approval_id}`
 
 Internal worker endpoints under `/internal/sessions/...` are not public desktop
@@ -19,8 +22,11 @@ API and may change without compatibility guarantees.
 
 Current internal worker endpoints include:
 
+- `GET /internal/workers/connect?session_id={id}`
 - `POST /internal/sessions/{id}/worker/attach`
 - `POST /internal/sessions/{id}/worker/finish`
+- `GET /internal/sessions/{id}/commands`
+- `POST /internal/sessions/{id}/turn/interrupted`
 - `POST /internal/sessions/{id}/approvals`
 - `GET /internal/sessions/{id}/approvals/{approval_id}`
 
@@ -109,6 +115,8 @@ Response:
 Current item types include:
 
 - `user_message`
+- `steering_message`
+- `session_command`
 - `assistant_message`
 - `error`
 - `turn_started`
@@ -127,6 +135,15 @@ from runtime state.
 `approval_request` and `approval_decision` are display-log items, not command
 messages. Desktop clients render approval UI from these items, but submit the
 user's decision through the public approval endpoint below.
+
+`steering_message` is a user-visible correction sent while a turn is already
+running. It is separate from `user_message` so workers can consume steering
+commands without replaying ordinary history messages as new input.
+
+`session_command` records durable control requests such as pause. It is a
+command request, not proof that the worker already applied the command.
+Lifecycle confirmation still comes from explicit turn items such as
+`turn_interrupted`.
 
 Message content parts are zotigod display DTOs, not runtime protocol structs.
 Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
@@ -147,6 +164,313 @@ Status codes:
 - `404`: session not found.
 - `405`: method not allowed.
 
+## Submit, pause, and steering
+
+Desktop can submit a new user message, request a running session to pause the
+current turn, or add steering text for the worker to apply at the next provider
+interruption point. zotigod tries to make sure a worker is online before
+accepting these requests, records accepted requests as durable display-log
+items, and then sends a best-effort command frame over the internal worker
+WebSocket.
+
+The display-log append and WebSocket write are not a single transaction. zotigod
+tries to start a missing worker before appending; after a command has been
+appended, the durable command log is the recovery source of truth. Public
+message, pause, and steering requests are conditionally appended against the
+current display-log state. If the target turn ends before the command is durably
+recorded, zotigod rejects the command instead of accepting a stale no-op. A
+successful public response means the command was accepted into the durable log,
+not that the worker has already applied it.
+
+Starting a session launches an internal worker process from the current
+`zotigod` executable. The worker connects back over WebSocket; connecting a
+`starting` session transitions it to `running`. If the worker is still
+connecting when the start response is written, desktop can poll `GET
+/sessions/{id}` until the state is `running`. If zotigod launched a worker but
+it does not connect before the startup timeout, the session is marked `failed`
+and the start request returns `503`.
+
+Worker startup also acquires the same per-session file lock used by the CLI
+session manager. If another CLI, daemon worker, or local process already owns
+that session lock, the worker exits instead of reusing the session concurrently.
+The worker stores a per-session command cursor under `.zotigo/sessions` and uses
+it to avoid replaying old accepted commands after restart. Cursor writes are
+atomic rename operations. If the cursor file is corrupt, the bundled worker only
+recovers past commands whose application is visible in the display log; pending
+accepted commands are replayed rather than skipped.
+
+Workers attach a live control channel by dialing:
+
+`GET /internal/workers/connect?session_id={id}`
+
+This is a WebSocket endpoint. zotigod keeps one active worker connection per
+session ID, so multiple sessions can run concurrently on independent worker
+processes. Reconnecting the same session replaces the old connection.
+Connecting a `starting` session transitions it to `running`; `running` and
+`paused` sessions may reconnect. `created`, `ended`, and `failed` sessions are
+rejected. A worker WebSocket disconnect only removes that live connection; it
+does not by itself end the session.
+
+zotigod sends WebSocket ping frames to workers and expects pong responses. A
+worker connection that stops responding is closed and unregistered, so later
+public commands can relaunch or reconnect a worker instead of writing to a stale
+socket. When a worker reports session finish, zotigod closes and unregisters the
+live worker connection immediately.
+
+Workers also send WebSocket ping frames to zotigod and require pong responses.
+If the worker cannot write a ping or does not receive a pong before its read
+deadline, it closes the WebSocket, cancels any active turn, and exits. Workers do
+not continue tool or model execution after the control channel is lost. If a
+display-log turn is active, the worker appends `turn_interrupted` with reason
+`control_channel_closed` before closing. This prevents a desktop user from
+seeing a disconnected session while tools keep running in the background.
+
+Worker command delivery is split into a WebSocket reader and an ordered command
+consumer. The reader only reads frames, handles ping/pong control traffic,
+decodes commands, and enqueues them into an in-process command buffer. The
+consumer processes commands sequentially and saves the command cursor after each
+applied command. The command buffer is intentionally bounded at 32 items; if it
+fills, the worker treats itself as unhealthy and exits instead of staying
+connected but not applying pause or steering commands.
+
+Current limitation: zotigod's live session registry is still in-memory. If the
+daemon process restarts, existing worker processes do not have a recovered
+registry entry to attach to yet. Full daemon restart recovery needs registry
+rehydration before workers can safely reconnect and resume live sessions.
+Worker crash recovery is also intentionally limited in this version: once a
+worker accepts a message command and starts a turn, the command cursor may be
+advanced before that turn completes. If the worker process crashes mid-turn,
+zotigod does not currently reconstruct and resume that in-flight turn. When a
+new bundled worker starts and finds an old open display-log turn, it appends
+`turn_interrupted` with reason `worker_restarted` before accepting new control
+commands.
+
+Server-to-worker command frame:
+
+```json
+{
+  "type": "command",
+  "command": {
+    "id": "item_sess_8f0e12ab34cd56ef_4",
+    "sequence": 4,
+    "type": "pause",
+    "turn_id": "turn_123",
+    "reason": "user_pause",
+    "created_at": "2026-01-02T03:04:07Z"
+  }
+}
+```
+
+Submit a user message:
+
+`POST /sessions/{id}/messages`
+
+```json
+{
+  "text": "Build the desktop runtime."
+}
+```
+
+Accepted messages append one durable `user_message` display item with a
+`command` payload of `type: "message"`. Workers consume that same item as the
+command source of truth; UI clients render it as the visible user message. This
+keeps the visible transcript and executable command atomic.
+
+`POST /sessions/{id}/messages` requires a running session with no currently open
+turn and no pending message command that has not yet started a turn. If a turn
+is active, desktop should use `POST /sessions/{id}/steering` instead of
+submitting a new message.
+
+Response:
+
+```json
+{
+  "id": "item_sess_8f0e12ab34cd56ef_4",
+  "sequence": 4,
+  "type": "message",
+  "text": "Build the desktop runtime.",
+  "created_at": "2026-01-02T03:04:07Z"
+}
+```
+
+Pause current turn:
+
+`POST /sessions/{id}/pause`
+
+Optional request body:
+
+```json
+{
+  "turn_id": "turn_123"
+}
+```
+
+If `turn_id` is omitted, zotigod uses the last open display-log turn. A pause
+request without an open turn is rejected. When `turn_id` is present, it must
+match the open turn. An accepted pause request appends `session_command` with
+`type: "pause"` and `reason: "user_pause"`. It does not mark the session
+`ended`; the bundled worker applies the command and confirms the lifecycle by
+appending `turn_interrupted`.
+
+Response:
+
+```json
+{
+  "id": "item_sess_8f0e12ab34cd56ef_4",
+  "sequence": 4,
+  "type": "pause",
+  "turn_id": "turn_123",
+  "reason": "user_pause",
+  "created_at": "2026-01-02T03:04:07Z"
+}
+```
+
+Submit steering text:
+
+`POST /sessions/{id}/steering`
+
+```json
+{
+  "text": "Use the smaller fix and avoid changing the parser.",
+  "turn_id": "turn_123"
+}
+```
+
+`turn_id` is optional. When present, it must match the currently open display-log
+turn. When omitted, zotigod uses the currently open turn. Steering without an
+open turn is rejected; desktop should use `POST /sessions/{id}/messages` for a
+new normal turn. Steering also requires the session registry state to be
+`running`; paused approval sessions reject steering until the approval is
+resolved and the live worker resumes.
+
+Response:
+
+```json
+{
+  "id": "item_sess_8f0e12ab34cd56ef_5",
+  "sequence": 5,
+  "type": "steering",
+  "turn_id": "turn_123",
+  "text": "Use the smaller fix and avoid changing the parser.",
+  "created_at": "2026-01-02T03:04:08Z"
+}
+```
+
+Workers poll commands with a display-log cursor. `after` is a sequence cursor
+kept for compatibility; workers should prefer the byte `offset` cursor because
+it avoids re-reading the full display log on long sessions.
+
+`GET /internal/sessions/{id}/commands?after=0&limit=200`
+
+or:
+
+`GET /internal/sessions/{id}/commands?offset=0&limit=200`
+
+Response:
+
+```json
+{
+  "commands": [
+    {
+      "id": "item_sess_8f0e12ab34cd56ef_4",
+      "sequence": 4,
+      "type": "message",
+      "text": "Build the desktop runtime.",
+      "created_at": "2026-01-02T03:04:07Z"
+    },
+    {
+      "id": "item_sess_8f0e12ab34cd56ef_5",
+      "sequence": 5,
+      "type": "pause",
+      "turn_id": "turn_123",
+      "reason": "user_pause",
+      "created_at": "2026-01-02T03:04:08Z"
+    },
+    {
+      "id": "item_sess_8f0e12ab34cd56ef_6",
+      "sequence": 6,
+      "type": "steering",
+      "turn_id": "turn_123",
+      "text": "First correction",
+      "created_at": "2026-01-02T03:04:09Z"
+    },
+    {
+      "id": "item_sess_8f0e12ab34cd56ef_7",
+      "sequence": 7,
+      "type": "steering",
+      "turn_id": "turn_123",
+      "text": "Second correction",
+      "created_at": "2026-01-02T03:04:10Z"
+    }
+  ],
+  "next_cursor": "7",
+  "next_offset": 8123
+}
+```
+
+`next_offset` is the next display-log byte offset after the complete lines that
+were scanned. Workers persist both `next_offset` and the highest command
+sequence they have applied, so replay can skip already-applied commands while
+still advancing through the append-only log. If the log ends with a partial
+line, the offset cursor stops at the last complete line and the partial line is
+ignored until it is completed or truncated by a later append.
+
+zotigod returns each accepted `steering_message` as its own command. The worker
+runtime owns semantic coalescing before injecting steering into the model
+context. Multiple steering commands received before the next provider request
+are merged into one normal `role=user` message, appended to runtime history, and
+then sent in the next provider request for that same active turn. Stale steering
+commands for a completed, paused, or different turn are ignored by the worker
+and are not carried into a later turn.
+
+After applying a pause command, the bundled worker writes `turn_interrupted`
+directly to the display log. The internal endpoint below exists for worker
+implementations that report lifecycle confirmation over HTTP. `turn_id` is
+required and must match the current open display-log turn.
+
+`POST /internal/sessions/{id}/turn/interrupted`
+
+```json
+{
+  "turn_id": "turn_123",
+  "reason": "user_pause",
+  "duration_ms": 1200
+}
+```
+
+Response:
+
+```json
+{
+  "id": "item_sess_8f0e12ab34cd56ef_7",
+  "sequence": 7,
+  "type": "turn_interrupted",
+  "turn": {
+    "id": "turn_123",
+    "status": "interrupted",
+    "reason": "user_pause",
+    "duration_ms": 1200
+  },
+  "created_at": "2026-01-02T03:04:10Z"
+}
+```
+
+Status codes:
+
+- `202`: pause command accepted.
+- `201`: message or steering command created, or worker lifecycle confirmation
+  appended.
+- `200`: internal command list returned.
+- `400`: invalid request body, missing `turn_id`, empty steering text, or
+  invalid command query.
+- `404`: session not found in the current daemon registry.
+- `409`: command submitted to a non-running session, message submitted during an
+  active turn, pause/steering submitted without an active turn, or a lifecycle,
+  pause, or steering `turn_id` does not match the active turn.
+- `503`: zotigod could not start or reconnect a worker before accepting the
+  command.
+- `405`: method not allowed.
+
 ## Human approval flow
 
 When a worker needs human approval, it creates an approval request through the
@@ -158,7 +482,10 @@ state to `paused` when it is still running.
 The persisted approval source of truth is the display log. zotigod reconstructs
 pending and resolved approval requests from `approval_request` and
 `approval_decision` items, so public approval submission can continue after a
-zotigod restart as long as the session display log is still present.
+zotigod restart as long as the session display log is still present. This only
+recovers the approval read model and records the user's decision; v1 does not
+resume execution of the original pending tool call after zotigod or the worker
+has restarted and lost the live paused runtime.
 
 Desktop clients using this flow must support the `paused` session state and the
 `approval_request` / `approval_decision` item payloads before enabling HITL UI.

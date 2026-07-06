@@ -1,22 +1,29 @@
 package session
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/bytedance/sonic"
 )
 
-const displayLogTailScanBlockSize = 4096
+const (
+	displayLogTailScanBlockSize = 4096
+	lockFileWriteGrace          = time.Second
+)
+
+var displayLogAppendMu sync.Mutex
 
 // FileStore implements Store using the local filesystem.
 // Sessions are stored as JSON files in a configurable directory.
@@ -93,11 +100,39 @@ func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item Displ
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	return s.appendDisplayItemLocked(ctx, id, item, nil)
+}
+
+func (s *FileStore) AppendDisplayItemIf(ctx context.Context, id string, item DisplayItem, condition func([]DisplayItem) error) (DisplayItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.appendDisplayItemLocked(ctx, id, item, condition)
+}
+
+func (s *FileStore) appendDisplayItemLocked(ctx context.Context, id string, item DisplayItem, condition func([]DisplayItem) error) (DisplayItem, error) {
 	if _, err := os.Stat(s.sessionPath(id)); err != nil {
 		if os.IsNotExist(err) {
 			return DisplayItem{}, fmt.Errorf("session not found: %s", id)
 		}
 		return DisplayItem{}, fmt.Errorf("stat session file: %w", err)
+	}
+	displayLogAppendMu.Lock()
+	defer displayLogAppendMu.Unlock()
+	unlock, err := s.lockDisplayLogAppendLocked(ctx, id)
+	if err != nil {
+		return DisplayItem{}, err
+	}
+	defer unlock()
+
+	if condition != nil {
+		items, err := s.readDisplayItemsLocked(id)
+		if err != nil {
+			return DisplayItem{}, err
+		}
+		if err := condition(items); err != nil {
+			return DisplayItem{}, err
+		}
 	}
 
 	lastSequence, completeEndOffset, err := s.lastDisplaySequenceLocked(id)
@@ -150,6 +185,26 @@ func (s *FileStore) ListDisplayItems(ctx context.Context, id string) ([]DisplayI
 	return items, true, nil
 }
 
+func (s *FileStore) ListDisplayItemsFromOffset(ctx context.Context, id string, offset int64, maxLines int) ([]DisplayItem, bool, int64, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	if offset < 0 {
+		return nil, false, offset, fmt.Errorf("offset must be non-negative")
+	}
+	if _, err := os.Stat(s.sessionPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, offset, nil
+		}
+		return nil, false, offset, fmt.Errorf("stat session file: %w", err)
+	}
+	items, nextOffset, err := s.readDisplayItemsFromOffsetLocked(id, offset, maxLines)
+	if err != nil {
+		return nil, true, offset, err
+	}
+	return items, true, nextOffset, nil
+}
+
 // Delete removes a session by ID.
 func (s *FileStore) Delete(ctx context.Context, id string) error {
 	s.mu.Lock()
@@ -165,6 +220,7 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	lockPath := s.lockPath(id)
 	_ = os.Remove(lockPath)
 	_ = os.Remove(s.displayLogPath(id))
+	_ = os.Remove(s.displayLogAppendLockPath(id))
 
 	// Update registry
 	return s.removeFromRegistry(id)
@@ -218,17 +274,34 @@ func (s *FileStore) List(ctx context.Context, filter ListFilter) ([]Metadata, er
 
 // Lock acquires an exclusive lock on a session.
 func (s *FileStore) Lock(ctx context.Context, id string) error {
-	locked, err := s.IsLocked(ctx, id)
-	if err != nil {
-		return err
-	}
-	if locked {
-		return fmt.Errorf("session %s is already locked", id)
-	}
-
 	lockPath := s.lockPath(id)
 	pid := fmt.Sprintf("%d", os.Getpid())
-	return os.WriteFile(lockPath, []byte(pid), 0644)
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+		}
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err == nil {
+			if _, err := file.WriteString(pid); err != nil {
+				_ = file.Close()
+				_ = os.Remove(lockPath)
+				return err
+			}
+			return file.Close()
+		}
+		if !os.IsExist(err) {
+			return err
+		}
+		locked, err := s.IsLocked(ctx, id)
+		if err != nil {
+			return err
+		}
+		if locked {
+			return fmt.Errorf("session %s is already locked", id)
+		}
+	}
 }
 
 // Unlock releases the lock on a session.
@@ -243,7 +316,10 @@ func (s *FileStore) Unlock(ctx context.Context, id string) error {
 
 // IsLocked checks if a session is currently locked.
 func (s *FileStore) IsLocked(ctx context.Context, id string) (bool, error) {
-	lockPath := s.lockPath(id)
+	return isPIDLockActive(s.lockPath(id))
+}
+
+func isPIDLockActive(lockPath string) (bool, error) {
 	data, err := os.ReadFile(lockPath)
 	if os.IsNotExist(err) {
 		return false, nil
@@ -253,27 +329,41 @@ func (s *FileStore) IsLocked(ctx context.Context, id string) (bool, error) {
 	}
 
 	pidStr := string(data)
+	if pidStr == "" {
+		info, statErr := os.Stat(lockPath)
+		if statErr != nil {
+			return true, nil
+		}
+		if time.Since(info.ModTime()) < lockFileWriteGrace {
+			return true, nil
+		}
+		if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return true, fmt.Errorf("remove empty lock file: %w", removeErr)
+		}
+		return false, nil
+	}
+
 	pid, err := strconv.Atoi(pidStr)
 	if err != nil {
 		// Corrupt lock file, clean it up
-		_ = os.Remove(lockPath)
+		if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			return true, fmt.Errorf("remove corrupt lock file: %w", removeErr)
+		}
 		return false, nil
 	}
 
-	// Check if process exists
-	process, err := os.FindProcess(pid)
+	running, err := pidRunning(pid)
 	if err != nil {
-		return false, nil
+		return true, err
 	}
-
-	// Sending Signal 0 checks for existence without killing
-	err = process.Signal(syscall.Signal(0))
-	if err == nil {
+	if running {
 		return true, nil // Process is running
 	}
 
 	// Process is dead, clean up stale lock
-	_ = os.Remove(lockPath)
+	if removeErr := os.Remove(lockPath); removeErr != nil && !os.IsNotExist(removeErr) {
+		return true, fmt.Errorf("remove stale lock file: %w", removeErr)
+	}
 	return false, nil
 }
 
@@ -292,8 +382,59 @@ func (s *FileStore) displayLogPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".display.jsonl")
 }
 
+func (s *FileStore) displayLogAppendLockPath(id string) string {
+	return filepath.Join(s.rootDir, "sessions", id+".display.lock")
+}
+
 func (s *FileStore) lockPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".lock")
+}
+
+func (s *FileStore) lockDisplayLogAppendLocked(ctx context.Context, id string) (func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	lockPath := s.displayLogAppendLockPath(id)
+	pid := fmt.Sprintf("%d", os.Getpid())
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		file, err := os.OpenFile(lockPath, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0644)
+		if err == nil {
+			if _, err := file.WriteString(pid); err != nil {
+				_ = file.Close()
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("write display log append lock: %w", err)
+			}
+			if err := file.Close(); err != nil {
+				_ = os.Remove(lockPath)
+				return nil, fmt.Errorf("close display log append lock: %w", err)
+			}
+			return func() {
+				_ = os.Remove(lockPath)
+			}, nil
+		}
+		if !os.IsExist(err) {
+			return nil, fmt.Errorf("create display log append lock: %w", err)
+		}
+		locked, err := isPIDLockActive(lockPath)
+		if err != nil {
+			return nil, err
+		}
+		if !locked {
+			continue
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
 }
 
 func (s *FileStore) readDisplayItemsLocked(id string) ([]DisplayItem, error) {
@@ -309,20 +450,78 @@ func (s *FileStore) readDisplayItemsLocked(id string) ([]DisplayItem, error) {
 	lines := bytes.Split(data, []byte{'\n'})
 	endedWithNewline := len(data) == 0 || data[len(data)-1] == '\n'
 	for idx, line := range lines {
+		if idx == len(lines)-1 && !endedWithNewline {
+			break
+		}
 		if len(line) == 0 {
 			continue
 		}
 		line = bytes.TrimSuffix(line, []byte{'\r'})
 		var item DisplayItem
 		if err := sonic.Unmarshal(line, &item); err != nil {
-			if idx == len(lines)-1 && !endedWithNewline {
-				break
-			}
 			return nil, fmt.Errorf("unmarshal display log item: %w", err)
 		}
 		items = append(items, item)
 	}
 	return items, nil
+}
+
+func (s *FileStore) readDisplayItemsFromOffsetLocked(id string, offset int64, maxLines int) ([]DisplayItem, int64, error) {
+	path := s.displayLogPath(id)
+	file, err := os.Open(path)
+	if os.IsNotExist(err) {
+		return []DisplayItem{}, offset, nil
+	}
+	if err != nil {
+		return nil, offset, fmt.Errorf("open display log: %w", err)
+	}
+	defer func() { _ = file.Close() }()
+
+	info, err := file.Stat()
+	if err != nil {
+		return nil, offset, fmt.Errorf("stat display log: %w", err)
+	}
+	if offset > info.Size() {
+		return nil, offset, fmt.Errorf("offset exceeds display log size")
+	}
+	if _, err := file.Seek(offset, io.SeekStart); err != nil {
+		return nil, offset, fmt.Errorf("seek display log: %w", err)
+	}
+
+	reader := bufio.NewReader(file)
+	nextOffset := offset
+	items := make([]DisplayItem, 0)
+	for maxLines <= 0 || len(items) < maxLines {
+		line, err := reader.ReadBytes('\n')
+		if len(line) == 0 && errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return nil, nextOffset, fmt.Errorf("read display log line: %w", err)
+		}
+		if errors.Is(err, io.EOF) && (len(line) == 0 || line[len(line)-1] != '\n') {
+			break
+		}
+		nextOffset += int64(len(line))
+		line = bytes.TrimSuffix(line, []byte{'\n'})
+		line = bytes.TrimSuffix(line, []byte{'\r'})
+		if len(line) == 0 {
+			if errors.Is(err, io.EOF) {
+				break
+			}
+			continue
+		}
+		var item DisplayItem
+		if err := sonic.Unmarshal(line, &item); err != nil {
+			return nil, nextOffset, fmt.Errorf("unmarshal display log item: %w", err)
+		}
+		item.LogOffset = nextOffset
+		items = append(items, item)
+		if errors.Is(err, io.EOF) {
+			break
+		}
+	}
+	return items, nextOffset, nil
 }
 
 func (s *FileStore) lastDisplaySequenceLocked(id string) (uint64, int64, error) {

@@ -3,6 +3,9 @@ package session
 import (
 	"context"
 	"os"
+	"strconv"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -257,6 +260,61 @@ func TestFileStore_Lock(t *testing.T) {
 	}
 	if locked {
 		t.Error("Expected session to be unlocked")
+	}
+}
+
+func TestFileStore_LockCleansStalePID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	if err := os.WriteFile(store.lockPath("stale_lock"), []byte("99999999"), 0644); err != nil {
+		t.Fatalf("write stale lock: %v", err)
+	}
+
+	if err := store.Lock(ctx, "stale_lock"); err != nil {
+		t.Fatalf("expected stale lock to be cleaned up: %v", err)
+	}
+	defer func() { _ = store.Unlock(ctx, "stale_lock") }()
+
+	data, err := os.ReadFile(store.lockPath("stale_lock"))
+	if err != nil {
+		t.Fatalf("read refreshed lock: %v", err)
+	}
+	if string(data) != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("expected refreshed lock pid %d, got %q", os.Getpid(), string(data))
+	}
+}
+
+func TestFileStore_LockIsExclusive(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	var success atomic.Int32
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := store.Lock(ctx, "exclusive_lock"); err == nil {
+				success.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	defer func() { _ = store.Unlock(ctx, "exclusive_lock") }()
+
+	if got := success.Load(); got != 1 {
+		t.Fatalf("expected exactly one lock acquisition, got %d", got)
 	}
 }
 

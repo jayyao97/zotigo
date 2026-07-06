@@ -21,6 +21,8 @@ import (
 
 const defaultAddr = "127.0.0.1:8765"
 
+const defaultWorkerConnectTimeout = 3 * time.Second
+
 type SessionState string
 
 const (
@@ -163,9 +165,12 @@ func canTransition(state SessionState, from []SessionState) bool {
 }
 
 type handler struct {
-	registry  *sessionRegistry
-	approvals *approvalRegistry
-	items     displayItemSource
+	registry             *sessionRegistry
+	approvals            *approvalRegistry
+	items                displayItemSource
+	workers              *workerRegistry
+	launcher             workerLauncher
+	workerConnectTimeout time.Duration
 }
 
 type finishSessionRequest struct {
@@ -178,14 +183,35 @@ func Run(args []string) int {
 	fs.SetOutput(os.Stderr)
 
 	addr := fs.String("addr", defaultAddr, "Address to listen on")
+	workerMode := fs.Bool("worker", false, "Run an internal zotigod worker")
+	workerDaemonURL := fs.String("daemon-url", "", "zotigod daemon URL for internal worker mode")
+	workerSessionID := fs.String("session-id", "", "zotigod session id for internal worker mode")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
+	if *workerMode {
+		daemonURL := *workerDaemonURL
+		if daemonURL == "" {
+			daemonURL = "http://" + defaultAddr
+		}
+		if err := runWorkerClient(context.Background(), workerClientConfig{
+			DaemonURL: daemonURL,
+			SessionID: *workerSessionID,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "zotigod worker failed: %v\n", err)
+			return 1
+		}
+		return 0
+	}
 
 	logger := log.New(os.Stderr, "[zotigod] ", log.LstdFlags)
+	launcher, err := newProcessWorkerLauncher("http://"+*addr, logger)
+	if err != nil {
+		logger.Printf("Worker launcher disabled: %v", err)
+	}
 	server := &http.Server{
 		Addr:              *addr,
-		Handler:           NewHandler(),
+		Handler:           newDefaultHandler(handlerOptions{launcher: launcher}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -225,27 +251,51 @@ func Run(args []string) int {
 }
 
 func NewHandler() http.Handler {
+	return newDefaultHandler(handlerOptions{})
+}
+
+type handlerOptions struct {
+	launcher             workerLauncher
+	workers              *workerRegistry
+	workerConnectTimeout time.Duration
+}
+
+func newDefaultHandler(opts handlerOptions) http.Handler {
 	items, err := newStoredDisplayItemSource()
 	if err != nil {
 		items = failingDisplayItemSource{err: err}
 	}
-	return newHandler(newSessionRegistry(), items)
+	return newHandler(newSessionRegistry(), items, opts)
 }
 
-func newHandler(registry *sessionRegistry, items displayItemSource) http.Handler {
+func newHandler(registry *sessionRegistry, items displayItemSource, opts ...handlerOptions) http.Handler {
 	if items == nil {
 		items = failingDisplayItemSource{err: errors.New("display item source is not configured")}
 	}
+	options := handlerOptions{workerConnectTimeout: 0}
+	if len(opts) > 0 {
+		options = opts[0]
+	}
+	if options.workers == nil {
+		options.workers = newWorkerRegistry()
+	}
+	if options.workerConnectTimeout == 0 && options.launcher != nil {
+		options.workerConnectTimeout = defaultWorkerConnectTimeout
+	}
 	handler := &handler{
-		registry:  registry,
-		approvals: newApprovalRegistry(),
-		items:     items,
+		registry:             registry,
+		approvals:            newApprovalRegistry(),
+		items:                items,
+		workers:              options.workers,
+		launcher:             options.launcher,
+		workerConnectTimeout: options.workerConnectTimeout,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/sessions", handler.handleSessions)
 	mux.HandleFunc("/sessions/", handler.handleSession)
 	mux.HandleFunc("/internal/sessions/", handler.handleInternalSession)
+	mux.HandleFunc("/internal/workers/connect", handler.handleWorkerConnect)
 	return mux
 }
 
@@ -283,8 +333,14 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionGet(w, r, id)
 	case "items":
 		h.handleSessionItems(w, r, id)
+	case "messages":
+		h.handleSessionMessage(w, r, id)
+	case "pause":
+		h.handleSessionPause(w, r, id)
 	case "start":
 		h.handleSessionStart(w, r, id)
+	case "steering":
+		h.handleSessionSteering(w, r, id)
 	default:
 		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
 			h.handleApprovalDecision(w, r, id, approvalID)
@@ -302,6 +358,10 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 	}
 
 	switch action {
+	case "commands":
+		h.handleWorkerCommands(w, r, id)
+	case "turn/interrupted":
+		h.handleWorkerTurnInterrupted(w, r, id)
 	case "worker/attach":
 		h.handleWorkerAttach(w, r, id)
 	case "worker/finish":
@@ -339,7 +399,41 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	session, err := h.registry.Start(id)
-	h.writeTransition(w, session, err)
+	if err != nil {
+		h.writeTransition(w, session, err)
+		return
+	}
+	if err := h.launchWorker(r.Context(), id); err != nil {
+		_, _ = h.registry.Fail(id, err.Error())
+		http.Error(w, fmt.Sprintf("start worker: %v", err), http.StatusInternalServerError)
+		return
+	}
+	if h.launcher != nil && !h.waitForWorker(r.Context(), id) {
+		msg := "worker did not connect before timeout"
+		_, _ = h.registry.Fail(id, msg)
+		http.Error(w, msg, http.StatusServiceUnavailable)
+		return
+	}
+	if running, ok := h.registry.Get(id); ok {
+		session = running
+	}
+	writeJSON(w, http.StatusOK, session)
+}
+
+func (h *handler) launchWorker(ctx context.Context, id string) error {
+	if h.launcher == nil {
+		return nil
+	}
+	return h.launcher.Start(ctx, id)
+}
+
+func (h *handler) waitForWorker(ctx context.Context, id string) bool {
+	if h.workerConnectTimeout <= 0 {
+		return h.workers.Has(id)
+	}
+	waitCtx, cancel := context.WithTimeout(ctx, h.workerConnectTimeout)
+	defer cancel()
+	return h.workers.Wait(waitCtx.Done(), id)
 }
 
 func (h *handler) handleSessionItems(w http.ResponseWriter, r *http.Request, id string) {
@@ -397,10 +491,16 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 
 	if req.Error != "" {
 		session, err := h.registry.Fail(id, req.Error)
+		if err == nil {
+			h.workers.Close(id)
+		}
 		h.writeTransition(w, session, err)
 		return
 	}
 	session, err := h.registry.End(id)
+	if err == nil {
+		h.workers.Close(id)
+	}
 	h.writeTransition(w, session, err)
 }
 

@@ -20,6 +20,11 @@ const (
 type displayItemSource interface {
 	LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error)
 	AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error)
+	AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error)
+}
+
+type offsetDisplayItemSource interface {
+	LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
 }
 
 type storedDisplayItemSource struct {
@@ -38,9 +43,43 @@ func (s storedDisplayItemSource) LoadItems(ctx context.Context, sessionID string
 	return s.store.ListDisplayItems(ctx, sessionID)
 }
 
+func (s storedDisplayItemSource) LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error) {
+	type offsetStore interface {
+		ListDisplayItemsFromOffset(ctx context.Context, id string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
+	}
+	store, ok := s.store.(offsetStore)
+	if !ok {
+		items, exists, err := s.store.ListDisplayItems(ctx, sessionID)
+		return items, exists, 0, err
+	}
+	return store.ListDisplayItemsFromOffset(ctx, sessionID, offset, maxLines)
+}
+
 func (s storedDisplayItemSource) AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
 	if err := s.ensureSession(ctx, sessionID); err != nil {
 		return zotigosession.DisplayItem{}, err
+	}
+	return s.store.AppendDisplayItem(ctx, sessionID, item)
+}
+
+func (s storedDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return zotigosession.DisplayItem{}, err
+	}
+	type conditionalStore interface {
+		AppendDisplayItemIf(ctx context.Context, id string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error)
+	}
+	if store, ok := s.store.(conditionalStore); ok {
+		return store.AppendDisplayItemIf(ctx, sessionID, item, condition)
+	}
+	items, _, err := s.store.ListDisplayItems(ctx, sessionID)
+	if err != nil {
+		return zotigosession.DisplayItem{}, err
+	}
+	if condition != nil {
+		if err := condition(items); err != nil {
+			return zotigosession.DisplayItem{}, err
+		}
 	}
 	return s.store.AppendDisplayItem(ctx, sessionID, item)
 }
@@ -81,6 +120,10 @@ func (s failingDisplayItemSource) AppendItem(context.Context, string, zotigosess
 	return zotigosession.DisplayItem{}, s.err
 }
 
+func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigosession.DisplayItem, func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
+	return zotigosession.DisplayItem{}, s.err
+}
+
 type itemResponse struct {
 	ID        string                `json:"id"`
 	Sequence  uint64                `json:"sequence"`
@@ -89,6 +132,7 @@ type itemResponse struct {
 	Content   []itemContentResponse `json:"content,omitempty"`
 	Turn      *itemTurnResponse     `json:"turn,omitempty"`
 	Approval  *itemApprovalResponse `json:"approval,omitempty"`
+	Command   *itemCommandResponse  `json:"command,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	CreatedAt time.Time             `json:"created_at"`
 }
@@ -162,6 +206,13 @@ type itemApprovalDecisionResponse struct {
 	Approved     bool   `json:"approved"`
 	Reason       string `json:"reason,omitempty"`
 	ModifiedArgs string `json:"modified_args,omitempty"`
+}
+
+type itemCommandResponse struct {
+	Type   string `json:"type,omitempty"`
+	Text   string `json:"text,omitempty"`
+	TurnID string `json:"turn_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type itemsResponse struct {
@@ -238,6 +289,7 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Content:   publicDisplayContent(item.Content),
 		Turn:      publicDisplayTurn(item.Turn),
 		Approval:  publicDisplayApproval(item.Approval),
+		Command:   publicDisplayCommand(item.Command),
 		Error:     item.Error,
 		CreatedAt: item.CreatedAt,
 	}
@@ -333,6 +385,18 @@ func publicDisplayApproval(approval *zotigosession.DisplayApproval) *itemApprova
 		TurnID:    approval.TurnID,
 		Pending:   publicDisplayPendingApprovals(approval.Pending),
 		Decisions: publicDisplayApprovalDecisions(approval.Decisions),
+	}
+}
+
+func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandResponse {
+	if command == nil {
+		return nil
+	}
+	return &itemCommandResponse{
+		Type:   command.Type,
+		Text:   command.Text,
+		TurnID: command.TurnID,
+		Reason: command.Reason,
 	}
 }
 

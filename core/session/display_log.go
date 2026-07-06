@@ -9,6 +9,8 @@ type DisplayItemType string
 
 const (
 	DisplayItemUserMessage      DisplayItemType = "user_message"
+	DisplayItemSteeringMessage  DisplayItemType = "steering_message"
+	DisplayItemSessionCommand   DisplayItemType = "session_command"
 	DisplayItemAssistantMessage DisplayItemType = "assistant_message"
 	DisplayItemError            DisplayItemType = "error"
 	DisplayItemTurnStarted      DisplayItemType = "turn_started"
@@ -92,6 +94,13 @@ type DisplayApprovalDecision struct {
 	ModifiedArgs string `json:"modified_args,omitempty"`
 }
 
+type DisplayCommand struct {
+	Type   string `json:"type,omitempty"`
+	Text   string `json:"text,omitempty"`
+	TurnID string `json:"turn_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
+}
+
 type DisplayItem struct {
 	ID        string               `json:"id"`
 	Sequence  uint64               `json:"sequence"`
@@ -100,8 +109,10 @@ type DisplayItem struct {
 	Content   []DisplayContentPart `json:"content,omitempty"`
 	Turn      *DisplayTurn         `json:"turn,omitempty"`
 	Approval  *DisplayApproval     `json:"approval,omitempty"`
+	Command   *DisplayCommand      `json:"command,omitempty"`
 	Error     string               `json:"error,omitempty"`
 	CreatedAt time.Time            `json:"created_at"`
+	LogOffset int64                `json:"-"`
 }
 
 type DisplayPageQuery struct {
