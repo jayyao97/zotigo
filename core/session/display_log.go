@@ -26,6 +26,7 @@ const (
 type DisplayContentPart struct {
 	Type       string             `json:"type"`
 	Text       string             `json:"text,omitempty"`
+	Image      *DisplayMediaPart  `json:"image,omitempty"`
 	ToolCall   *DisplayToolCall   `json:"tool_call,omitempty"`
 	ToolResult *DisplayToolResult `json:"tool_result,omitempty"`
 }
@@ -58,6 +59,9 @@ type DisplayMediaPart struct {
 	URL       string `json:"url,omitempty"`
 	FileID    string `json:"file_id,omitempty"`
 	MediaType string `json:"media_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 type DisplayTurn struct {
@@ -95,10 +99,20 @@ type DisplayApprovalDecision struct {
 }
 
 type DisplayCommand struct {
-	Type   string `json:"type,omitempty"`
-	Text   string `json:"text,omitempty"`
-	TurnID string `json:"turn_id,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Type   string                `json:"type,omitempty"`
+	Text   string                `json:"text,omitempty"`
+	Images []DisplayCommandImage `json:"images,omitempty"`
+	TurnID string                `json:"turn_id,omitempty"`
+	Reason string                `json:"reason,omitempty"`
+}
+
+type DisplayCommandImage struct {
+	MimeType  string `json:"mime_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
+	BlobPath  string `json:"blob_path,omitempty"`
+	Data      []byte `json:"-"`
 }
 
 type DisplayItem struct {

@@ -3,6 +3,7 @@ package zotigod
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -331,7 +332,7 @@ func (r *workerRuntime) Close() {
 func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
 	switch command.Type {
 	case sessionCommandMessage:
-		return r.startMessageTurn(ctx, command.Text)
+		return r.startMessageTurn(ctx, command)
 	case sessionCommandPause:
 		return r.pauseTurn(ctx, command)
 	case sessionCommandSteering:
@@ -396,7 +397,12 @@ func isStaleTurnUserInputError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "agent is not running")
 }
 
-func (r *workerRuntime) startMessageTurn(ctx context.Context, text string) error {
+func (r *workerRuntime) startMessageTurn(ctx context.Context, command commandResponse) error {
+	msg, err := messageFromCommand(command)
+	if err != nil {
+		return err
+	}
+
 	r.mu.Lock()
 	if r.turnActive {
 		r.mu.Unlock()
@@ -416,7 +422,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, text string) error
 		return err
 	}
 	go func() {
-		err := r.runner.RunFullTurnStarted(turnCtx, protocol.NewUserMessage(text), r.markTurnReady)
+		err := r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, zotigotransport.ErrTransportClosed) {
 			_ = r.display.Fail(context.Background(), err)
 		}
@@ -424,6 +430,27 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, text string) error
 		r.finishTurn()
 	}()
 	return nil
+}
+
+func messageFromCommand(command commandResponse) (protocol.Message, error) {
+	msg := protocol.NewUserMessage(command.Text)
+	for idx, img := range command.Images {
+		if img.DataBase64 == "" {
+			return protocol.Message{}, fmt.Errorf("message image payload unavailable for command %q image %d", command.ID, idx)
+		}
+		data, err := base64.StdEncoding.Strict().DecodeString(img.DataBase64)
+		if err != nil {
+			return protocol.Message{}, fmt.Errorf("decode command image %d: %w", idx, err)
+		}
+		msg.Content = append(msg.Content, protocol.ContentPart{
+			Type: protocol.ContentTypeImage,
+			Image: &protocol.MediaPart{
+				Data:      data,
+				MediaType: img.MimeType,
+			},
+		})
+	}
+	return msg, nil
 }
 
 func (r *workerRuntime) cancelCurrentTurn() {

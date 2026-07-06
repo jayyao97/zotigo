@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
@@ -1360,6 +1361,357 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandMessage {
 		t.Fatalf("expected one message command, got %#v", commands)
+	}
+}
+
+func TestSessionMessageAcceptsImageInput(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	imageBase64 := tinyPNGBase64()
+	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	var publicCommand publicCommandResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &publicCommand); err != nil {
+		t.Fatalf("decode message response: %v", err)
+	}
+	if len(publicCommand.Images) != 1 {
+		t.Fatalf("expected one public image metadata, got %#v", publicCommand.Images)
+	}
+	if strings.Contains(rec.Body.String(), "data_base64") || strings.Contains(rec.Body.String(), imageBase64) {
+		t.Fatalf("public message response leaked image payload: %s", rec.Body.String())
+	}
+
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || len(msg.Command.Images) != 1 {
+		t.Fatalf("expected worker image command, got %#v", msg)
+	}
+	if msg.Command.Images[0].DataBase64 == "" {
+		t.Fatalf("worker command did not include image data")
+	}
+
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 1 {
+		t.Fatalf("expected one display item, got %#v", items.Items)
+	}
+	item := items.Items[0]
+	if len(item.Content) != 2 || item.Content[1].Image == nil {
+		t.Fatalf("expected text and image display parts, got %#v", item.Content)
+	}
+	if item.Content[1].Image.MediaType != "image/png" || item.Content[1].Image.SizeBytes == 0 ||
+		item.Content[1].Image.Width != 1 || item.Content[1].Image.Height != 1 {
+		t.Fatalf("unexpected image metadata: %#v", item.Content[1].Image)
+	}
+	encodedItems, err := sonic.MarshalString(items)
+	if err != nil {
+		t.Fatalf("encode items: %v", err)
+	}
+	if strings.Contains(encodedItems, imageBase64) {
+		t.Fatalf("items response leaked image base64")
+	}
+}
+
+func TestSessionMessageRejectsImageInputWithoutBlobPersistence(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "image persistence is not configured") {
+		t.Fatalf("expected image persistence error, got %q", rec.Body.String())
+	}
+}
+
+func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	imageBase64 := tinyPNGBase64()
+	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	_ = readWorkerMessage(t, worker)
+
+	rawLog, err := os.ReadFile(filepath.Join(root, "sessions", created.ID+".display.jsonl"))
+	if err != nil {
+		t.Fatalf("read display log: %v", err)
+	}
+	if strings.Contains(string(rawLog), imageBase64) {
+		t.Fatalf("display log leaked image base64")
+	}
+	if strings.Contains(string(rawLog), root) {
+		t.Fatalf("display log leaked absolute store root: %s", string(rawLog))
+	}
+
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 1 || len(commands.Commands[0].Images) != 1 {
+		t.Fatalf("expected replayable image command, got %#v", commands)
+	}
+	if commands.Commands[0].Images[0].DataBase64 == "" {
+		t.Fatalf("replayed command did not hydrate image payload")
+	}
+}
+
+func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	_ = readWorkerMessage(t, worker)
+
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
+	}
+
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 1 || len(commands.Commands[0].Images) != 1 ||
+		commands.Commands[0].Images[0].DataBase64 == "" {
+		t.Fatalf("expected accepted image command to remain replayable, got %#v", commands)
+	}
+}
+
+func TestWorkerCommandsFailsWhenImageBlobMissing(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	_ = readWorkerMessage(t, worker)
+
+	if err := os.RemoveAll(filepath.Join(root, "sessions", created.ID+".images")); err != nil {
+		t.Fatalf("remove image dir: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	req = httptest.NewRequest(http.MethodGet, "/internal/sessions/"+created.ID+"/commands?after=0", nil)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "read command image") {
+		t.Fatalf("expected read command image error, got %q", rec.Body.String())
+	}
+}
+
+func TestMessageFromCommandIncludesImages(t *testing.T) {
+	msg, err := messageFromCommand(commandResponse{
+		ID:   "item_1",
+		Type: sessionCommandMessage,
+		Text: "describe this",
+		Images: []commandImageResponse{{
+			MimeType:   "image/png",
+			DataBase64: tinyPNGBase64(),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("messageFromCommand: %v", err)
+	}
+	if msg.Role != protocol.RoleUser || len(msg.Content) != 2 {
+		t.Fatalf("unexpected message: %#v", msg)
+	}
+	if msg.Content[1].Type != protocol.ContentTypeImage || msg.Content[1].Image == nil ||
+		msg.Content[1].Image.MediaType != "image/png" || len(msg.Content[1].Image.Data) == 0 {
+		t.Fatalf("expected image content part, got %#v", msg.Content[1])
+	}
+}
+
+func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
+	_, err := messageFromCommand(commandResponse{
+		ID:   "item_1",
+		Type: sessionCommandMessage,
+		Text: "describe this",
+		Images: []commandImageResponse{{
+			MimeType: "image/png",
+		}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "image payload unavailable") {
+		t.Fatalf("expected missing image payload error, got %v", err)
+	}
+}
+
+func TestSessionMessageRejectsInvalidImages(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		code int
+	}{
+		{
+			name: "invalid base64",
+			body: `{"text":"hello","images":[{"mime_type":"image/png","data_base64":"not-base64"}]}`,
+			code: http.StatusBadRequest,
+		},
+		{
+			name: "unsupported mime type",
+			body: fmt.Sprintf(`{"text":"hello","images":[{"mime_type":"image/gif","data_base64":%q}]}`, tinyPNGBase64()),
+			code: http.StatusBadRequest,
+		},
+		{
+			name: "too many images",
+			body: tooManyImagesBody(),
+			code: http.StatusBadRequest,
+		},
+		{
+			name: "image too large",
+			body: fmt.Sprintf(`{"text":"hello","images":[{"mime_type":"image/png","data_base64":%q}]}`,
+				base64.StdEncoding.EncodeToString(make([]byte, maxMessageImageBytes+1))),
+			code: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			handler := newHandler(newSessionRegistry(), source)
+			server := httptest.NewServer(handler)
+			defer server.Close()
+
+			created := createSession(t, handler)
+			startSession(t, handler, created.ID)
+			worker := dialWorker(t, server, created.ID)
+			defer worker.Close()
+
+			rec := httptest.NewRecorder()
+			req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(tt.body))
+			handler.ServeHTTP(rec, req)
+			if rec.Code != tt.code {
+				t.Fatalf("expected status %d, got %d: %s", tt.code, rec.Code, rec.Body.String())
+			}
+		})
+	}
+}
+
+func TestSessionMessageRejectsOversizedRequestBody(t *testing.T) {
+	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	rec := httptest.NewRecorder()
+	body := `{"text":"` + strings.Repeat("x", maxMessageRequestBytes) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionSteeringRejectsImages(t *testing.T) {
+	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	rec := httptest.NewRecorder()
+	body := fmt.Sprintf(`{"text":"adjust","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionSteeringRejectsOversizedRequestBody(t *testing.T) {
+	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	rec := httptest.NewRecorder()
+	body := `{"text":"` + strings.Repeat("x", maxMessageRequestBytes) + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusRequestEntityTooLarge, rec.Code, rec.Body.String())
 	}
 }
 
@@ -3055,6 +3407,18 @@ func postSteering(t *testing.T, handler http.Handler, sessionID string, text str
 		t.Fatalf("decode steering response: %v", err)
 	}
 	return command
+}
+
+func tinyPNGBase64() string {
+	return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+}
+
+func tooManyImagesBody() string {
+	parts := make([]string, 0, maxMessageImages+1)
+	for range maxMessageImages + 1 {
+		parts = append(parts, fmt.Sprintf(`{"mime_type":"image/png","data_base64":%q}`, tinyPNGBase64()))
+	}
+	return `{"text":"hello","images":[` + strings.Join(parts, ",") + `]}`
 }
 
 func appendTurnStarted(t *testing.T, source *fakeDisplayItemSource, sessionID string, turnID string) {

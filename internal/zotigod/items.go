@@ -132,6 +132,7 @@ type itemResponse struct {
 type itemContentResponse struct {
 	Type       string                  `json:"type"`
 	Text       string                  `json:"text,omitempty"`
+	Image      *itemMediaPartResponse  `json:"image,omitempty"`
 	ToolCall   *itemToolCallResponse   `json:"tool_call,omitempty"`
 	ToolResult *itemToolResultResponse `json:"tool_result,omitempty"`
 }
@@ -160,10 +161,12 @@ type itemToolResultContentResponse struct {
 }
 
 type itemMediaPartResponse struct {
-	Data      []byte `json:"data,omitempty"`
 	URL       string `json:"url,omitempty"`
 	FileID    string `json:"file_id,omitempty"`
 	MediaType string `json:"media_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 type itemTurnResponse struct {
@@ -201,10 +204,18 @@ type itemApprovalDecisionResponse struct {
 }
 
 type itemCommandResponse struct {
-	Type   string `json:"type,omitempty"`
-	Text   string `json:"text,omitempty"`
-	TurnID string `json:"turn_id,omitempty"`
-	Reason string `json:"reason,omitempty"`
+	Type   string                     `json:"type,omitempty"`
+	Text   string                     `json:"text,omitempty"`
+	Images []itemCommandImageResponse `json:"images,omitempty"`
+	TurnID string                     `json:"turn_id,omitempty"`
+	Reason string                     `json:"reason,omitempty"`
+}
+
+type itemCommandImageResponse struct {
+	MimeType  string `json:"mime_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 type itemsResponse struct {
@@ -293,6 +304,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart) []itemCont
 		parts = append(parts, itemContentResponse{
 			Type:       part.Type,
 			Text:       part.Text,
+			Image:      publicDisplayMediaPart(part.Image),
 			ToolCall:   publicDisplayToolCall(part.ToolCall),
 			ToolResult: publicDisplayToolResult(part.ToolResult),
 		})
@@ -347,10 +359,12 @@ func publicDisplayMediaPart(media *zotigosession.DisplayMediaPart) *itemMediaPar
 		return nil
 	}
 	return &itemMediaPartResponse{
-		Data:      media.Data,
 		URL:       media.URL,
 		FileID:    media.FileID,
 		MediaType: media.MediaType,
+		SizeBytes: media.SizeBytes,
+		Width:     media.Width,
+		Height:    media.Height,
 	}
 }
 
@@ -387,9 +401,26 @@ func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandRes
 	return &itemCommandResponse{
 		Type:   command.Type,
 		Text:   command.Text,
+		Images: publicDisplayCommandImages(command.Images),
 		TurnID: command.TurnID,
 		Reason: command.Reason,
 	}
+}
+
+func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []itemCommandImageResponse {
+	if len(images) == 0 {
+		return nil
+	}
+	resp := make([]itemCommandImageResponse, 0, len(images))
+	for _, img := range images {
+		resp = append(resp, itemCommandImageResponse{
+			MimeType:  img.MimeType,
+			SizeBytes: img.SizeBytes,
+			Width:     img.Width,
+			Height:    img.Height,
+		})
+	}
+	return resp
 }
 
 func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []itemPendingApprovalResponse {
