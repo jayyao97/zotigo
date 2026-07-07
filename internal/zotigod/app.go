@@ -717,7 +717,7 @@ func readRequiredJSON(r *http.Request, value any) error {
 type apiResponse[T any] struct {
 	Code    string `json:"code"`
 	Message string `json:"message"`
-	Data    T      `json:"data,omitempty"`
+	Data    T      `json:"data"`
 }
 
 type apiErrorResponse struct {

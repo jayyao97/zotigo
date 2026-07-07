@@ -313,8 +313,10 @@ Server-to-worker command frame:
     "id": "item_sess_8f0e12ab34cd56ef_4",
     "sequence": 4,
     "type": "pause",
-    "turn_id": "turn_123",
-    "reason": "user_pause",
+    "pause": {
+      "turn_id": "turn_123",
+      "reason": "user_pause"
+    },
     "created_at": "2026-01-02T03:04:07Z"
   }
 }
