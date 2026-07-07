@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -29,6 +30,58 @@ import (
 
 type sessionListResponse struct {
 	Sessions []Session `json:"sessions"`
+}
+
+func decodeAPIData(t *testing.T, data []byte, value any) error {
+	t.Helper()
+	var resp struct {
+		Code    string          `json:"code"`
+		Message string          `json:"message"`
+		Data    json.RawMessage `json:"data"`
+	}
+	if err := sonic.Unmarshal(data, &resp); err != nil {
+		t.Fatalf("decode api response: %v", err)
+	}
+	if resp.Code != "ok" {
+		t.Fatalf("expected api code ok, got %q: %s", resp.Code, resp.Message)
+	}
+	if value == nil {
+		return nil
+	}
+	if len(resp.Data) == 0 {
+		t.Fatal("expected api response data")
+	}
+	if err := sonic.Unmarshal(resp.Data, value); err != nil {
+		t.Fatalf("decode api response data: %v", err)
+	}
+	return nil
+}
+
+func assertAPIError(t *testing.T, rec *httptest.ResponseRecorder, status int, code string, messageContains string) {
+	t.Helper()
+	if rec.Code != status {
+		t.Fatalf("expected status %d, got %d: %s", status, rec.Code, rec.Body.String())
+	}
+	if got := rec.Header().Get("Content-Type"); got != "application/json" {
+		t.Fatalf("expected JSON content type, got %q", got)
+	}
+	var resp struct {
+		Code    string `json:"code"`
+		Message string `json:"message"`
+		Data    any    `json:"data,omitempty"`
+	}
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode api error response: %v", err)
+	}
+	if resp.Code != code {
+		t.Fatalf("expected error code %q, got %q: %s", code, resp.Code, rec.Body.String())
+	}
+	if !strings.Contains(resp.Message, messageContains) {
+		t.Fatalf("expected error message containing %q, got %q", messageContains, resp.Message)
+	}
+	if resp.Data != nil {
+		t.Fatalf("expected no data in error response, got %#v", resp.Data)
+	}
 }
 
 type noopProvider struct{}
@@ -166,7 +219,7 @@ func createSession(t *testing.T, handler http.Handler) Session {
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
 	}
 	var session Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	return session
@@ -182,7 +235,7 @@ func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workD
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
 	var session Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	return session
@@ -202,7 +255,7 @@ func TestHealth(t *testing.T) {
 	}
 
 	var body map[string]string
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
 	if body["status"] != "ok" {
@@ -220,7 +273,7 @@ func TestSessionsCreateAndList(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var list sessionListResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode initial list response: %v", err)
 	}
 	if len(list.Sessions) != 0 {
@@ -234,7 +287,7 @@ func TestSessionsCreateAndList(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
 	}
 	var created Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	if created.ID == "" {
@@ -259,11 +312,80 @@ func TestSessionsCreateAndList(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list response: %v", err)
 	}
 	if len(list.Sessions) != 1 || list.Sessions[0].ID != created.ID {
 		t.Fatalf("unexpected sessions: %#v", list.Sessions)
+	}
+}
+
+func TestAPIErrorEnvelopeContract(t *testing.T) {
+	handler := NewHandler()
+
+	tests := []struct {
+		name            string
+		method          string
+		path            string
+		body            string
+		status          int
+		code            string
+		messageContains string
+	}{
+		{
+			name:            "public bad request",
+			method:          http.MethodPost,
+			path:            "/sessions",
+			body:            `{"working_directory":"relative"}`,
+			status:          http.StatusBadRequest,
+			code:            "invalid_request",
+			messageContains: "working_directory must be an absolute path",
+		},
+		{
+			name:            "public not found",
+			method:          http.MethodGet,
+			path:            "/sessions/missing",
+			status:          http.StatusNotFound,
+			code:            "not_found",
+			messageContains: "session not found",
+		},
+		{
+			name:            "method not allowed",
+			method:          http.MethodPost,
+			path:            "/health",
+			status:          http.StatusMethodNotAllowed,
+			code:            "method_not_allowed",
+			messageContains: "method not allowed",
+		},
+		{
+			name:            "internal non commands bad request",
+			method:          http.MethodPost,
+			path:            "/internal/sessions/missing/worker/finish",
+			body:            `{`,
+			status:          http.StatusBadRequest,
+			code:            "invalid_request",
+			messageContains: "decode request",
+		},
+		{
+			name:            "internal commands bad request",
+			method:          http.MethodGet,
+			path:            "/internal/sessions/{session}/commands?after=abc",
+			status:          http.StatusBadRequest,
+			code:            "invalid_request",
+			messageContains: "invalid after cursor",
+		},
+	}
+
+	session := createSession(t, handler)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec := httptest.NewRecorder()
+			path := strings.ReplaceAll(tt.path, "{session}", session.ID)
+			req := httptest.NewRequest(tt.method, path, strings.NewReader(tt.body))
+			handler.ServeHTTP(rec, req)
+			assertAPIError(t, rec, tt.status, tt.code, tt.messageContains)
+		})
 	}
 }
 
@@ -282,7 +404,7 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
 	var created Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decode create response: %v", err)
 	}
 	if created.WorkingDirectory != workDir {
@@ -352,7 +474,7 @@ func TestDefaultHandlerRejectsCreateWhenStoreInitializationFails(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var list sessionListResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list response: %v", err)
 	}
 	if len(list.Sessions) != 0 {
@@ -371,7 +493,7 @@ func TestSessionsGetByID(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, getRec.Code)
 	}
 	var got Session
-	if err := sonic.Unmarshal(getRec.Body.Bytes(), &got); err != nil {
+	if err := decodeAPIData(t, getRec.Body.Bytes(), &got); err != nil {
 		t.Fatalf("decode get response: %v", err)
 	}
 	if got.ID != created.ID || got.State != SessionStateCreated {
@@ -630,7 +752,7 @@ func TestSessionStartTransitionsToStarting(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var started Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &started); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &started); err != nil {
 		t.Fatalf("decode start response: %v", err)
 	}
 	if started.State != SessionStateStarting {
@@ -753,7 +875,7 @@ func TestWorkerAttachTransitionsToRunning(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var running Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &running); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &running); err != nil {
 		t.Fatalf("decode attach response: %v", err)
 	}
 	if running.State != SessionStateRunning {
@@ -783,7 +905,7 @@ func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
 	if msg.Type != workerMessageCommand || msg.Command == nil {
 		t.Fatalf("expected command message, got %#v", msg)
 	}
-	if msg.Command.Type != sessionCommandSteering || msg.Command.Text != "use the smaller fix" {
+	if msg.Command.Type != sessionCommandSteering || msg.Command.Steering == nil || msg.Command.Steering.Text != "use the smaller fix" {
 		t.Fatalf("unexpected steering command: %#v", msg.Command)
 	}
 
@@ -965,6 +1087,58 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 	}
 	if saved != cursor {
 		t.Fatalf("expected saved cursor %#v, got %#v", cursor, saved)
+	}
+}
+
+func TestWorkerRuntimeRejectsMalformedTypedCommand(t *testing.T) {
+	runtime := &workerRuntime{}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:       "cmd-1",
+		Sequence: 1,
+		Type:     sessionCommandMessage,
+	}); err == nil || !strings.Contains(err.Error(), "invalid message command payload") {
+		t.Fatalf("expected invalid message payload error, got %v", err)
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:       "cmd-2",
+		Sequence: 2,
+		Type:     sessionCommandPause,
+		Message:  &messageCommandPayload{Text: "wrong"},
+		Pause:    &pauseCommandPayload{Reason: userPauseReason},
+	}); err == nil || !strings.Contains(err.Error(), "invalid pause command payload") {
+		t.Fatalf("expected invalid pause payload error, got %v", err)
+	}
+}
+
+func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, http.StatusOK, commandsResponse{
+			Commands: []commandResponse{{
+				ID:       "cmd-1",
+				Sequence: 1,
+				Type:     sessionCommandMessage,
+			}},
+			NextCursor: "1",
+			NextOffset: 1,
+		})
+	}))
+	defer server.Close()
+
+	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-malformed", &workerRuntime{}, workerCommandCursor{})
+	if err == nil || !strings.Contains(err.Error(), "invalid message command payload") {
+		t.Fatalf("expected malformed command error, got %v", err)
+	}
+	if cursor.Sequence != 0 || cursor.Offset != 0 {
+		t.Fatalf("expected cursor not to advance, got %#v", cursor)
+	}
+	saved, err := loadWorkerCommandCursor(context.Background(), nil, "sess-malformed")
+	if err != nil {
+		t.Fatalf("load saved cursor: %v", err)
+	}
+	if saved.Sequence != 0 || saved.Offset != 0 {
+		t.Fatalf("expected saved cursor not to advance, got %#v", saved)
 	}
 }
 
@@ -1339,8 +1513,8 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	var command commandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &command); err != nil {
+	var command publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode message response: %v", err)
 	}
 	if command.Type != sessionCommandMessage || command.Text != "build the runtime" {
@@ -1348,7 +1522,7 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	}
 
 	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Type != sessionCommandMessage || msg.Command.Text != "build the runtime" {
+	if msg.Command == nil || msg.Command.Type != sessionCommandMessage || msg.Command.Message == nil || msg.Command.Message.Text != "build the runtime" {
 		t.Fatalf("unexpected worker message command: %#v", msg)
 	}
 
@@ -1388,7 +1562,7 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	}
 
 	var publicCommand publicCommandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &publicCommand); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &publicCommand); err != nil {
 		t.Fatalf("decode message response: %v", err)
 	}
 	if len(publicCommand.Images) != 1 {
@@ -1399,10 +1573,10 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	}
 
 	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || len(msg.Command.Images) != 1 {
+	if msg.Command == nil || msg.Command.Message == nil || len(msg.Command.Message.Images) != 1 {
 		t.Fatalf("expected worker image command, got %#v", msg)
 	}
-	if msg.Command.Images[0].DataBase64 == "" {
+	if msg.Command.Message.Images[0].DataBase64 == "" {
 		t.Fatalf("worker command did not include image data")
 	}
 
@@ -1487,10 +1661,10 @@ func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || len(commands.Commands[0].Images) != 1 {
+	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || len(commands.Commands[0].Message.Images) != 1 {
 		t.Fatalf("expected replayable image command, got %#v", commands)
 	}
-	if commands.Commands[0].Images[0].DataBase64 == "" {
+	if commands.Commands[0].Message.Images[0].DataBase64 == "" {
 		t.Fatalf("replayed command did not hydrate image payload")
 	}
 }
@@ -1527,8 +1701,8 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || len(commands.Commands[0].Images) != 1 ||
-		commands.Commands[0].Images[0].DataBase64 == "" {
+	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || len(commands.Commands[0].Message.Images) != 1 ||
+		commands.Commands[0].Message.Images[0].DataBase64 == "" {
 		t.Fatalf("expected accepted image command to remain replayable, got %#v", commands)
 	}
 }
@@ -1586,9 +1760,7 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 }
 
 func TestMessageFromCommandIncludesImages(t *testing.T) {
-	msg, err := messageFromCommand(commandResponse{
-		ID:   "item_1",
-		Type: sessionCommandMessage,
+	msg, err := messageFromCommand("item_1", &messageCommandPayload{
 		Text: "describe this",
 		Images: []commandImageResponse{{
 			MimeType:   "image/png",
@@ -1608,9 +1780,7 @@ func TestMessageFromCommandIncludesImages(t *testing.T) {
 }
 
 func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
-	_, err := messageFromCommand(commandResponse{
-		ID:   "item_1",
-		Type: sessionCommandMessage,
+	_, err := messageFromCommand("item_1", &messageCommandPayload{
 		Text: "describe this",
 		Images: []commandImageResponse{{
 			MimeType: "image/png",
@@ -1759,7 +1929,7 @@ func TestSessionMessageReturnsAcceptedWhenWorkerDisconnectsAfterAppend(t *testin
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Text != "persist this" {
+	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "persist this" {
 		t.Fatalf("expected durable message command, got %#v", commands)
 	}
 }
@@ -1945,8 +2115,7 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- runtime.queueTurnUserInput(context.Background(), commandResponse{
-			Type:   sessionCommandSteering,
+		result <- runtime.queueTurnUserInput(context.Background(), &steeringCommandPayload{
 			TurnID: turnID,
 			Text:   "use the smaller fix",
 		})
@@ -1999,8 +2168,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		readyDone:  true,
 	}
 
-	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
-		Type:   sessionCommandSteering,
+	err = runtime.queueTurnUserInput(context.Background(), &steeringCommandPayload{
 		TurnID: turnID,
 		Text:   "too late",
 	})
@@ -2056,8 +2224,8 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
 	}
-	var command commandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &command); err != nil {
+	var command publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode pause response: %v", err)
 	}
 	if command.Type != sessionCommandPause || command.TurnID != "turn-1" || command.Reason != userPauseReason {
@@ -2218,8 +2386,8 @@ func TestWorkerTurnInterruptedConfirmsPauseLifecycle(t *testing.T) {
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
 	}
-	var pauseCommand commandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &pauseCommand); err != nil {
+	var pauseCommand publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &pauseCommand); err != nil {
 		t.Fatalf("decode pause response: %v", err)
 	}
 
@@ -2300,8 +2468,8 @@ func TestSessionSteeringCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	var command commandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &command); err != nil {
+	var command publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode steering response: %v", err)
 	}
 	if command.Type != sessionCommandSteering || command.Text != "use the smaller fix" || command.TurnID != "turn-1" {
@@ -2314,7 +2482,8 @@ func TestSessionSteeringCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Text != "use the smaller fix" || commands.Commands[0].TurnID != "turn-1" {
+	if len(commands.Commands) != 1 || commands.Commands[0].Steering == nil ||
+		commands.Commands[0].Steering.Text != "use the smaller fix" || commands.Commands[0].Steering.TurnID != "turn-1" {
 		t.Fatalf("expected one steering command, got %#v", commands)
 	}
 }
@@ -2415,18 +2584,19 @@ func TestWorkerCommandsReturnSteeringItemsUnmerged(t *testing.T) {
 	if len(commands.Commands) != 3 {
 		t.Fatalf("expected three commands, got %#v", commands)
 	}
-	if commands.Commands[0].Text != "first correction" {
+	if commands.Commands[0].Steering == nil || commands.Commands[0].Steering.Text != "first correction" {
 		t.Fatalf("unexpected first steering command: %#v", commands.Commands[0])
 	}
-	if commands.Commands[1].Text != "second correction" {
+	if commands.Commands[1].Steering == nil || commands.Commands[1].Steering.Text != "second correction" {
 		t.Fatalf("unexpected second steering command: %#v", commands.Commands[1])
 	}
-	if commands.Commands[2].Text != "third correction" {
+	if commands.Commands[2].Steering == nil || commands.Commands[2].Steering.Text != "third correction" {
 		t.Fatalf("unexpected third steering command: %#v", commands.Commands[2])
 	}
 
 	afterFirst := getCommands(t, handler, fmt.Sprintf("/internal/sessions/%s/commands?after=%d", created.ID, commands.Commands[0].Sequence))
-	if len(afterFirst.Commands) != 2 || afterFirst.Commands[0].Text != "second correction" || afterFirst.Commands[1].Text != "third correction" {
+	if len(afterFirst.Commands) != 2 || afterFirst.Commands[0].Steering == nil || afterFirst.Commands[0].Steering.Text != "second correction" ||
+		afterFirst.Commands[1].Steering == nil || afterFirst.Commands[1].Steering.Text != "third correction" {
 		t.Fatalf("expected later steering after cursor, got %#v", afterFirst)
 	}
 }
@@ -2502,7 +2672,7 @@ func TestWorkerCommandsOffsetScansInBatches(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?offset=0&limit=1")
-	if len(commands.Commands) != 1 || commands.Commands[0].Text != "batched" {
+	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "batched" {
 		t.Fatalf("expected command after batched scan, got %#v", commands)
 	}
 	if got := source.offsetCalls.Load(); got != 1 {
@@ -2607,7 +2777,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var resolved approvalRequestResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
 	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved != approved {
@@ -2814,7 +2984,7 @@ func TestApprovalDecisionRecoversPendingRequestFromDisplayLog(t *testing.T) {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var resolved approvalRequestResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &resolved); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
 	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved {
@@ -2897,7 +3067,7 @@ func TestWorkerFinishTransitionsToEnded(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var ended Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &ended); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &ended); err != nil {
 		t.Fatalf("decode finish response: %v", err)
 	}
 	if ended.State != SessionStateEnded {
@@ -2946,7 +3116,7 @@ func TestWorkerFinishWithErrorTransitionsToFailed(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var failed Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &failed); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &failed); err != nil {
 		t.Fatalf("decode finish response: %v", err)
 	}
 	if failed.State != SessionStateFailed {
@@ -3090,7 +3260,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 			t.Fatalf("create %d: expected status %d, got %d", i, http.StatusCreated, rec.Code)
 		}
 		var created Session
-		if err := sonic.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		if err := decodeAPIData(t, rec.Body.Bytes(), &created); err != nil {
 			t.Fatalf("create %d: decode response: %v", i, err)
 		}
 		createdIDs = append(createdIDs, created.ID)
@@ -3103,7 +3273,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var list sessionListResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
 		t.Fatalf("decode list response: %v", err)
 	}
 	if len(list.Sessions) != len(createdIDs) {
@@ -3303,7 +3473,7 @@ func startSession(t *testing.T, handler http.Handler, id string) Session {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var session Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode start response: %v", err)
 	}
 	return session
@@ -3318,7 +3488,7 @@ func attachWorker(t *testing.T, handler http.Handler, id string) Session {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
 	}
 	var session Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode attach response: %v", err)
 	}
 	return session
@@ -3333,7 +3503,7 @@ func getSession(t *testing.T, handler http.Handler, id string) Session {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var session Session
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &session); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
 		t.Fatalf("decode session response: %v", err)
 	}
 	return session
@@ -3361,7 +3531,7 @@ func createApprovalRequestForTest(t *testing.T, handler http.Handler, id string)
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
 	var approval approvalRequestResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &approval); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &approval); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
 	return approval
@@ -3376,7 +3546,7 @@ func getApprovalRequest(t *testing.T, handler http.Handler, sessionID string, ap
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var approval approvalRequestResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &approval); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &approval); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
 	return approval
@@ -3406,7 +3576,7 @@ func readWorkerMessage(t *testing.T, conn *websocket.Conn) workerMessage {
 	return msg
 }
 
-func postSteering(t *testing.T, handler http.Handler, sessionID string, text string) commandResponse {
+func postSteering(t *testing.T, handler http.Handler, sessionID string, text string) {
 	t.Helper()
 
 	rec := httptest.NewRecorder()
@@ -3416,11 +3586,10 @@ func postSteering(t *testing.T, handler http.Handler, sessionID string, text str
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	var command commandResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &command); err != nil {
+	var command publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode steering response: %v", err)
 	}
-	return command
 }
 
 func tinyPNGBase64() string {
@@ -3495,7 +3664,7 @@ func getItems(t *testing.T, handler http.Handler, path string) itemsResponse {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
 	var resp itemsResponse
-	if err := sonic.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+	if err := decodeAPIData(t, rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode items response: %v", err)
 	}
 	return resp

@@ -378,38 +378,38 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeAPIJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeJSON(w, http.StatusOK, map[string][]Session{"sessions": h.registry.List()})
+		writeAPIJSON(w, http.StatusOK, map[string][]Session{"sessions": h.registry.List()})
 	case http.MethodPost:
 		var req createSessionRequest
 		if err := readOptionalJSON(r, &req); err != nil {
-			http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+			writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 			return
 		}
 		workingDirectory, err := resolveWorkingDirectory(req.WorkingDirectory)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		session := newSession(workingDirectory)
 		if err := h.persistSession(r.Context(), session); err != nil {
-			http.Error(w, fmt.Sprintf("persist session: %v", err), http.StatusInternalServerError)
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
 		}
 		session = h.registry.Add(session)
-		writeJSON(w, http.StatusCreated, session)
+		writeAPIJSON(w, http.StatusCreated, session)
 	default:
 		w.Header().Set("Allow", "GET, POST")
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 	}
 }
 
@@ -458,7 +458,7 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	id, action, ok := parseSessionPath(r.URL.Path, "/sessions/")
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "not found")
 		return
 	}
 
@@ -480,14 +480,14 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 			h.handleApprovalDecision(w, r, id, approvalID)
 			return
 		}
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "not found")
 	}
 }
 
 func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) {
 	id, action, ok := parseSessionPath(r.URL.Path, "/internal/sessions/")
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "not found")
 		return
 	}
 
@@ -507,29 +507,29 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 			h.handleApprovalGet(w, r, id, approvalID)
 			return
 		}
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "not found")
 	}
 }
 
 func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, session)
+	writeAPIJSON(w, http.StatusOK, session)
 }
 
 func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	session, err := h.registry.Start(id)
@@ -539,19 +539,19 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 	}
 	if err := h.launchWorker(r.Context(), id); err != nil {
 		_, _ = h.registry.Fail(id, err.Error())
-		http.Error(w, fmt.Sprintf("start worker: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start worker: %v", err))
 		return
 	}
 	if h.launcher != nil && !h.waitForWorker(r.Context(), id) {
 		msg := "worker did not connect before timeout"
 		_, _ = h.registry.Fail(id, msg)
-		http.Error(w, msg, http.StatusServiceUnavailable)
+		writeAPIError(w, http.StatusServiceUnavailable, msg)
 		return
 	}
 	if running, ok := h.registry.Get(id); ok {
 		session = running
 	}
-	writeJSON(w, http.StatusOK, session)
+	writeAPIJSON(w, http.StatusOK, session)
 }
 
 func (h *handler) launchWorker(ctx context.Context, id string) error {
@@ -586,34 +586,34 @@ func (h *handler) waitForWorker(ctx context.Context, id string) bool {
 func (h *handler) handleSessionItems(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	query, err := parseDisplayItemQuery(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	_, inRegistry := h.registry.Get(id)
 	items, inStore, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	if !inRegistry && !inStore {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildItemsResponse(items, query))
+	writeAPIJSON(w, http.StatusOK, buildItemsResponse(items, query))
 }
 
 func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	session, err := h.registry.MarkRunning(id)
@@ -623,13 +623,13 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	var req finishSessionRequest
 	if err := readOptionalJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 
@@ -653,16 +653,16 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 
 func (h *handler) writeTransition(w http.ResponseWriter, session Session, err error) {
 	if err == nil {
-		writeJSON(w, http.StatusOK, session)
+		writeAPIJSON(w, http.StatusOK, session)
 		return
 	}
 	switch {
 	case errors.Is(err, errSessionNotFound):
-		http.Error(w, "session not found", http.StatusNotFound)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, errInvalidSessionTransition):
-		http.Error(w, "invalid session state transition", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "invalid session state transition")
 	default:
-		http.Error(w, fmt.Sprintf("update session: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("update session: %v", err))
 	}
 }
 
@@ -714,10 +714,60 @@ func readRequiredJSON(r *http.Request, value any) error {
 	return sonic.Unmarshal(data, value)
 }
 
+type apiResponse[T any] struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+	Data    T      `json:"data,omitempty"`
+}
+
+type apiErrorResponse struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+func writeAPIJSON[T any](w http.ResponseWriter, status int, value T) {
+	writeJSON(w, status, apiResponse[T]{
+		Code:    "ok",
+		Message: "",
+		Data:    value,
+	})
+}
+
+func writeAPIError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, apiErrorResponse{
+		Code:    apiErrorCode(status),
+		Message: message,
+	})
+}
+
+func apiErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "invalid_request"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusMethodNotAllowed:
+		return "method_not_allowed"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusRequestEntityTooLarge:
+		return "request_too_large"
+	case http.StatusServiceUnavailable:
+		return "service_unavailable"
+	default:
+		if status >= 500 {
+			return "internal_error"
+		}
+		return "error"
+	}
+}
+
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	data, err := sonic.Marshal(value)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("encode response: %v", err), http.StatusInternalServerError)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`{"code":"internal_error","message":"encode response failed"}`))
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
