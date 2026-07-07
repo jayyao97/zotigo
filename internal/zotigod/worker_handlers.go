@@ -11,25 +11,25 @@ var workerUpgrader = websocket.Upgrader{}
 func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	sessionID := r.URL.Query().Get("session_id")
 	if err := validateWorkerSessionID(sessionID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
 	session, ok := h.registry.Get(sessionID)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	switch session.State {
 	case SessionStateStarting, SessionStateRunning, SessionStatePaused:
 	default:
-		http.Error(w, "worker connect requires a live session", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "worker connect requires a live session")
 		return
 	}
 

@@ -330,19 +330,52 @@ func (r *workerRuntime) Close() {
 }
 
 func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
+	if err := validateWorkerCommand(command); err != nil {
+		return err
+	}
 	switch command.Type {
 	case sessionCommandMessage:
-		return r.startMessageTurn(ctx, command)
+		return r.startMessageTurn(ctx, command.ID, command.Message)
 	case sessionCommandPause:
-		return r.pauseTurn(ctx, command)
+		return r.pauseTurn(ctx, command.Pause)
 	case sessionCommandSteering:
-		return r.queueTurnUserInput(ctx, command)
+		return r.queueTurnUserInput(ctx, command.Steering)
 	default:
 		return nil
 	}
 }
 
-func (r *workerRuntime) pauseTurn(ctx context.Context, command commandResponse) error {
+func validateWorkerCommand(command commandResponse) error {
+	payloads := 0
+	if command.Message != nil {
+		payloads++
+	}
+	if command.Pause != nil {
+		payloads++
+	}
+	if command.Steering != nil {
+		payloads++
+	}
+	switch command.Type {
+	case sessionCommandMessage:
+		if command.Message == nil || payloads != 1 {
+			return fmt.Errorf("invalid message command payload")
+		}
+	case sessionCommandPause:
+		if command.Pause == nil || payloads != 1 {
+			return fmt.Errorf("invalid pause command payload")
+		}
+	case sessionCommandSteering:
+		if command.Steering == nil || payloads != 1 {
+			return fmt.Errorf("invalid steering command payload")
+		}
+	default:
+		return nil
+	}
+	return nil
+}
+
+func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayload) error {
 	currentTurnID := r.display.CurrentTurnID()
 	if currentTurnID == "" {
 		return nil
@@ -354,7 +387,7 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command commandResponse) 
 	return r.display.Interrupt(ctx, command.Reason)
 }
 
-func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandResponse) error {
+func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steeringCommandPayload) error {
 	text := strings.TrimSpace(command.Text)
 	if text == "" {
 		return nil
@@ -397,8 +430,8 @@ func isStaleTurnUserInputError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "agent is not running")
 }
 
-func (r *workerRuntime) startMessageTurn(ctx context.Context, command commandResponse) error {
-	msg, err := messageFromCommand(command)
+func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, command *messageCommandPayload) error {
+	msg, err := messageFromCommand(commandID, command)
 	if err != nil {
 		return err
 	}
@@ -432,11 +465,11 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, command commandRes
 	return nil
 }
 
-func messageFromCommand(command commandResponse) (protocol.Message, error) {
+func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
 	msg := protocol.NewUserMessage(command.Text)
 	for idx, img := range command.Images {
 		if img.DataBase64 == "" {
-			return protocol.Message{}, fmt.Errorf("message image payload unavailable for command %q image %d", command.ID, idx)
+			return protocol.Message{}, fmt.Errorf("message image payload unavailable for command %q image %d", commandID, idx)
 		}
 		data, err := base64.StdEncoding.Strict().DecodeString(img.DataBase64)
 		if err != nil {

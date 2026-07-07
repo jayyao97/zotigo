@@ -30,6 +30,44 @@ Current internal worker endpoints include:
 - `POST /internal/sessions/{id}/approvals`
 - `GET /internal/sessions/{id}/approvals/{approval_id}`
 
+## Response envelope
+
+Public HTTP endpoints return a JSON envelope in addition to the HTTP status
+code. Successful responses use `code: "ok"` and put the endpoint-specific DTO in
+`data`:
+
+```json
+{
+  "code": "ok",
+  "message": "",
+  "data": {
+    "id": "sess_8f0e12ab34cd56ef"
+  }
+}
+```
+
+Errors keep the non-2xx HTTP status and return a stable error body:
+
+```json
+{
+  "code": "invalid_request",
+  "message": "text is required"
+}
+```
+
+Current error codes include `invalid_request`, `not_found`,
+`method_not_allowed`, `conflict`, `request_too_large`,
+`service_unavailable`, and `internal_error`.
+
+Internal HTTP endpoints also use this envelope, except
+`GET /internal/sessions/{id}/commands` successful responses. The commands
+endpoint intentionally returns the raw command page so replayed HTTP commands
+and live WebSocket command frames can share the same command DTO. Command
+endpoint errors still use the structured `{ "code", "message" }` shape.
+
+Unless a section explicitly says "raw response", response examples below show
+the endpoint-specific `data` payload.
+
 ## Create sessions
 
 `POST /sessions` creates a zotigod session for a project directory. Desktop
@@ -73,7 +111,7 @@ Query parameters:
 `after` and `before` are mutually exclusive. Responses are always ordered by
 `sequence` ascending, including the default recent page.
 
-Response:
+Response data:
 
 ```json
 {
@@ -275,8 +313,10 @@ Server-to-worker command frame:
     "id": "item_sess_8f0e12ab34cd56ef_4",
     "sequence": 4,
     "type": "pause",
-    "turn_id": "turn_123",
-    "reason": "user_pause",
+    "pause": {
+      "turn_id": "turn_123",
+      "reason": "user_pause"
+    },
     "created_at": "2026-01-02T03:04:07Z"
   }
 }
@@ -334,7 +374,7 @@ turn and no pending message command that has not yet started a turn. If a turn
 is active, desktop should use `POST /sessions/{id}/steering` instead of
 submitting a new message.
 
-Response:
+Response data:
 
 ```json
 {
@@ -373,7 +413,7 @@ match the open turn. An accepted pause request appends `session_command` with
 `ended`; the bundled worker applies the command and confirms the lifecycle by
 appending `turn_interrupted`.
 
-Response:
+Response data:
 
 ```json
 {
@@ -405,7 +445,7 @@ new normal turn. Steering also requires the session registry state to be
 resolved and the live worker resumes. Steering v1 only supports text; requests
 with `images` are rejected with `400`.
 
-Response:
+Response data:
 
 ```json
 {
@@ -428,7 +468,7 @@ or:
 
 `GET /internal/sessions/{id}/commands?offset=0&limit=200`
 
-Response:
+Raw response:
 
 ```json
 {
@@ -437,31 +477,39 @@ Response:
       "id": "item_sess_8f0e12ab34cd56ef_4",
       "sequence": 4,
       "type": "message",
-      "text": "Build the desktop runtime.",
+      "message": {
+        "text": "Build the desktop runtime."
+      },
       "created_at": "2026-01-02T03:04:07Z"
     },
     {
       "id": "item_sess_8f0e12ab34cd56ef_5",
       "sequence": 5,
       "type": "pause",
-      "turn_id": "turn_123",
-      "reason": "user_pause",
+      "pause": {
+        "turn_id": "turn_123",
+        "reason": "user_pause"
+      },
       "created_at": "2026-01-02T03:04:08Z"
     },
     {
       "id": "item_sess_8f0e12ab34cd56ef_6",
       "sequence": 6,
       "type": "steering",
-      "turn_id": "turn_123",
-      "text": "First correction",
+      "steering": {
+        "turn_id": "turn_123",
+        "text": "First correction"
+      },
       "created_at": "2026-01-02T03:04:09Z"
     },
     {
       "id": "item_sess_8f0e12ab34cd56ef_7",
       "sequence": 7,
       "type": "steering",
-      "turn_id": "turn_123",
-      "text": "Second correction",
+      "steering": {
+        "turn_id": "turn_123",
+        "text": "Second correction"
+      },
       "created_at": "2026-01-02T03:04:10Z"
     }
   ],
@@ -500,7 +548,7 @@ required and must match the current open display-log turn.
 }
 ```
 
-Response:
+Response data:
 
 ```json
 {
@@ -575,7 +623,7 @@ Worker create request:
 }
 ```
 
-Response:
+Response data:
 
 ```json
 {

@@ -65,14 +65,28 @@ type commandsResponse struct {
 }
 
 type commandResponse struct {
-	ID        string                 `json:"id"`
-	Sequence  uint64                 `json:"sequence"`
-	Type      string                 `json:"type"`
-	Text      string                 `json:"text,omitempty"`
-	Images    []commandImageResponse `json:"images,omitempty"`
-	TurnID    string                 `json:"turn_id,omitempty"`
-	Reason    string                 `json:"reason,omitempty"`
-	CreatedAt time.Time              `json:"created_at"`
+	ID        string                  `json:"id"`
+	Sequence  uint64                  `json:"sequence"`
+	Type      string                  `json:"type"`
+	CreatedAt time.Time               `json:"created_at"`
+	Message   *messageCommandPayload  `json:"message,omitempty"`
+	Steering  *steeringCommandPayload `json:"steering,omitempty"`
+	Pause     *pauseCommandPayload    `json:"pause,omitempty"`
+}
+
+type messageCommandPayload struct {
+	Text   string                 `json:"text"`
+	Images []commandImageResponse `json:"images,omitempty"`
+}
+
+type steeringCommandPayload struct {
+	Text   string `json:"text"`
+	TurnID string `json:"turn_id,omitempty"`
+}
+
+type pauseCommandPayload struct {
+	TurnID string `json:"turn_id,omitempty"`
+	Reason string `json:"reason,omitempty"`
 }
 
 type commandImageResponse struct {
@@ -104,69 +118,69 @@ type publicCommandImageResponse struct {
 func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	if session.State != SessionStateRunning {
-		http.Error(w, "message requires a running session", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "message requires a running session")
 		return
 	}
 
 	var req submitMessageRequest
 	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
-			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			writeAPIError(w, http.StatusRequestEntityTooLarge, err.Error())
 			return
 		}
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
-		http.Error(w, "text is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "text is required")
 		return
 	}
 	images, err := validateMessageImages(req.Images)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
-		http.Error(w, "message requires an idle session; use steering for an active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
 		return
 	}
 	if !h.ensureWorkerOnline(r.Context(), id) {
-		http.Error(w, "message requires an online worker", http.StatusServiceUnavailable)
+		writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
 		return
 	}
 	item, err := h.appendMessageCommand(r.Context(), id, text, images)
 	if err != nil {
 		if errors.Is(err, errSessionBusy) {
-			http.Error(w, "message requires an idle session; use steering for an active turn", http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
 			return
 		}
-		http.Error(w, fmt.Sprintf("append message command: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append message command: %v", err))
 		return
 	}
 
 	command, err := messageCommandFromItem(item, h.sessionStoreRoot())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("build message command: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("build message command: %v", err))
 		return
 	}
 	h.sendCommand(r.Context(), id, command)
-	writeJSON(w, http.StatusCreated, publicCommandFromCommand(command))
+	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
 var (
@@ -215,81 +229,81 @@ func requireIdleSession(items []zotigosession.DisplayItem) error {
 func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	if session.State != SessionStateRunning {
-		http.Error(w, "pause requires a running session", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause requires a running session")
 		return
 	}
 	var req pauseSessionRequest
 	if err := readOptionalJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 
 	turnID := strings.TrimSpace(req.TurnID)
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	openTurnID := lastOpenTurnID(items)
 	if openTurnID == "" {
-		http.Error(w, "pause requires an active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause requires an active turn")
 		return
 	}
 	if turnID == "" {
 		turnID = openTurnID
 	} else if turnID != openTurnID {
-		http.Error(w, "pause turn_id does not match active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause turn_id does not match active turn")
 		return
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		http.Error(w, "pause rejected while approval is pending", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
 		return
 	}
 	if !h.ensureWorkerOnline(r.Context(), id) {
-		http.Error(w, "pause requires an online worker", http.StatusServiceUnavailable)
+		writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
 		return
 	}
 	items, _, err = h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	if lastOpenTurnID(items) != turnID {
-		http.Error(w, "pause requires an active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause requires an active turn")
 		return
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		http.Error(w, "pause rejected while approval is pending", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
 		return
 	}
 
 	item, err := h.appendPauseCommand(r.Context(), id, turnID)
 	if err != nil {
 		if errors.Is(err, errSessionBusy) {
-			http.Error(w, "pause requires an active turn", http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, "pause requires an active turn")
 			return
 		}
 		if errors.Is(err, errApprovalPending) {
-			http.Error(w, "pause rejected while approval is pending", http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
 			return
 		}
-		http.Error(w, fmt.Sprintf("append pause command: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append pause command: %v", err))
 		return
 	}
 
 	command := pauseCommandFromItem(item)
 	h.sendCommand(r.Context(), id, command)
-	writeJSON(w, http.StatusAccepted, command)
+	writeAPIJSON(w, http.StatusAccepted, publicCommandFromCommand(command))
 }
 
 func (h *handler) appendPauseCommand(ctx context.Context, id string, turnID string) (zotigosession.DisplayItem, error) {
@@ -306,91 +320,91 @@ func (h *handler) appendPauseCommand(ctx context.Context, id string, turnID stri
 func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	if session.State != SessionStateRunning {
-		http.Error(w, "steering requires a running session", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering requires a running session")
 		return
 	}
 
 	var req steeringRequest
 	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
-			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			writeAPIError(w, http.StatusRequestEntityTooLarge, err.Error())
 			return
 		}
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 	if len(req.Images) > 0 {
-		http.Error(w, "steering does not support images", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "steering does not support images")
 		return
 	}
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
-		http.Error(w, "text is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "text is required")
 		return
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	turnID := lastOpenTurnID(items)
 	if turnID == "" {
-		http.Error(w, "steering requires an active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering requires an active turn")
 		return
 	}
 	if expected := strings.TrimSpace(req.TurnID); expected != "" && expected != turnID {
-		http.Error(w, "steering turn_id does not match active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering turn_id does not match active turn")
 		return
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		http.Error(w, "steering rejected while approval is pending", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
 		return
 	}
 	if !h.ensureWorkerOnline(r.Context(), id) {
-		http.Error(w, "steering requires an online worker", http.StatusServiceUnavailable)
+		writeAPIError(w, http.StatusServiceUnavailable, "steering requires an online worker")
 		return
 	}
 	items, _, err = h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	if lastOpenTurnID(items) != turnID {
-		http.Error(w, "steering requires an active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering requires an active turn")
 		return
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		http.Error(w, "steering rejected while approval is pending", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
 		return
 	}
 
 	item, err := h.appendSteeringCommand(r.Context(), id, turnID, text)
 	if err != nil {
 		if errors.Is(err, errSessionBusy) {
-			http.Error(w, "steering requires an active turn", http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, "steering requires an active turn")
 			return
 		}
 		if errors.Is(err, errApprovalPending) {
-			http.Error(w, "steering rejected while approval is pending", http.StatusConflict)
+			writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
 			return
 		}
-		http.Error(w, fmt.Sprintf("append steering command: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append steering command: %v", err))
 		return
 	}
 
 	command := steeringCommandFromItem(item)
 	h.sendCommand(r.Context(), id, command)
-	writeJSON(w, http.StatusCreated, command)
+	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
 func (h *handler) appendSteeringCommand(ctx context.Context, id string, turnID string, text string) (zotigosession.DisplayItem, error) {
@@ -420,31 +434,31 @@ func requireOpenTurnWithoutPendingApproval(turnID string) func([]zotigosession.D
 func (h *handler) handleWorkerTurnInterrupted(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if _, ok := h.registry.Get(id); !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
 	var req interruptTurnRequest
 	if err := readRequiredJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 	turnID := strings.TrimSpace(req.TurnID)
 	if turnID == "" {
-		http.Error(w, "turn_id is required", http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, "turn_id is required")
 		return
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 	if openTurnID := lastOpenTurnID(items); openTurnID == "" || openTurnID != turnID {
-		http.Error(w, "turn_id does not match active turn", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "turn_id does not match active turn")
 		return
 	}
 	reason := strings.TrimSpace(req.Reason)
@@ -462,33 +476,33 @@ func (h *handler) handleWorkerTurnInterrupted(w http.ResponseWriter, r *http.Req
 		},
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("append turn interrupted item: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append turn interrupted item: %v", err))
 		return
 	}
 
-	writeJSON(w, http.StatusCreated, publicDisplayItem(item))
+	writeAPIJSON(w, http.StatusCreated, publicDisplayItem(item))
 }
 
 func (h *handler) handleWorkerCommands(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 	if _, ok := h.registry.Get(id); !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 
 	query, err := parseCommandQuery(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if query.HasOffset {
 		resp, err := buildCommandsResponseFromOffset(r.Context(), h.items, id, query, h.sessionStoreRoot())
 		if err != nil {
-			http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 			return
 		}
 		writeJSON(w, http.StatusOK, resp)
@@ -496,13 +510,13 @@ func (h *handler) handleWorkerCommands(w http.ResponseWriter, r *http.Request, i
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
 
 	resp, err := buildCommandsResponse(items, query, h.sessionStoreRoot())
 	if err != nil {
-		http.Error(w, fmt.Sprintf("build commands: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("build commands: %v", err))
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
@@ -743,14 +757,15 @@ func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (com
 		Sequence:  item.Sequence,
 		Type:      sessionCommandMessage,
 		CreatedAt: item.CreatedAt,
+		Message:   &messageCommandPayload{},
 	}
 	if item.Command != nil {
-		command.Text = item.Command.Text
+		command.Message.Text = item.Command.Text
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
 		if err != nil {
 			return commandResponse{}, err
 		}
-		command.Images = images
+		command.Message.Images = images
 	}
 	return command, nil
 }
@@ -792,17 +807,35 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 		ID:        command.ID,
 		Sequence:  command.Sequence,
 		Type:      command.Type,
-		Text:      command.Text,
-		TurnID:    command.TurnID,
-		Reason:    command.Reason,
 		CreatedAt: command.CreatedAt,
 	}
-	if len(command.Images) == 0 {
-		return resp
+	switch command.Type {
+	case sessionCommandMessage:
+		if command.Message != nil {
+			resp.Text = command.Message.Text
+			resp.Images = publicCommandImages(command.Message.Images)
+		}
+	case sessionCommandSteering:
+		if command.Steering != nil {
+			resp.Text = command.Steering.Text
+			resp.TurnID = command.Steering.TurnID
+		}
+	case sessionCommandPause:
+		if command.Pause != nil {
+			resp.TurnID = command.Pause.TurnID
+			resp.Reason = command.Pause.Reason
+		}
 	}
-	resp.Images = make([]publicCommandImageResponse, len(command.Images))
-	for i, img := range command.Images {
-		resp.Images[i] = publicCommandImageResponse{
+	return resp
+}
+
+func publicCommandImages(images []commandImageResponse) []publicCommandImageResponse {
+	if len(images) == 0 {
+		return nil
+	}
+	resp := make([]publicCommandImageResponse, len(images))
+	for i, img := range images {
+		resp[i] = publicCommandImageResponse{
 			MimeType:  img.MimeType,
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
@@ -817,11 +850,13 @@ func steeringCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 		ID:        item.ID,
 		Sequence:  item.Sequence,
 		Type:      sessionCommandSteering,
-		Text:      commandText(item.Content),
 		CreatedAt: item.CreatedAt,
+		Steering: &steeringCommandPayload{
+			Text: commandText(item.Content),
+		},
 	}
 	if item.Turn != nil {
-		command.TurnID = item.Turn.ID
+		command.Steering.TurnID = item.Turn.ID
 	}
 	return command
 }
@@ -832,10 +867,11 @@ func pauseCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 		Sequence:  item.Sequence,
 		Type:      sessionCommandPause,
 		CreatedAt: item.CreatedAt,
+		Pause:     &pauseCommandPayload{},
 	}
 	if item.Command != nil {
-		command.TurnID = item.Command.TurnID
-		command.Reason = item.Command.Reason
+		command.Pause.TurnID = item.Command.TurnID
+		command.Pause.Reason = item.Command.Reason
 	}
 	return command
 }

@@ -50,7 +50,7 @@ type approvalRequestResponse struct {
 func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
@@ -59,23 +59,23 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "approval request not found")
 		return
 	}
 	if session.State != SessionStateRunning {
-		http.Error(w, "approval request requires a running session", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "approval request requires a running session")
 		return
 	}
 
 	var req createApprovalRequest
 	if err := readRequiredJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 
 	approval, err := h.approvals.Create(id, req.TurnID, pendingApprovalRequests(req.Pending))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -88,7 +88,7 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 		},
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("append approval request item: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval request item: %v", err))
 		return
 	}
 	approval.CreatedAt = item.CreatedAt
@@ -104,43 +104,43 @@ func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, i
 	})
 
 	_, _ = h.registry.Pause(id)
-	writeJSON(w, http.StatusCreated, publicApprovalRequest(approval))
+	writeAPIJSON(w, http.StatusCreated, publicApprovalRequest(approval))
 }
 
 func (h *handler) handleApprovalGet(w http.ResponseWriter, r *http.Request, id string, approvalID string) {
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	approval, ok, err := h.loadApproval(r, id, approvalID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load approval: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load approval: %v", err))
 		return
 	}
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "approval request not found")
 		return
 	}
-	writeJSON(w, http.StatusOK, publicApprovalRequest(approval))
+	writeAPIJSON(w, http.StatusOK, publicApprovalRequest(approval))
 }
 
 func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request, id string, approvalID string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
 
 	var req submitApprovalDecisionRequest
 	if err := readRequiredJSON(r, &req); err != nil {
-		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
 	decisions, err := approvalDecisionRequests(req.Decisions)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -149,19 +149,19 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 
 	approval, ok, err := h.loadApproval(r, id, approvalID)
 	if err != nil {
-		http.Error(w, fmt.Sprintf("load approval: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load approval: %v", err))
 		return
 	}
 	if !ok {
-		http.NotFound(w, r)
+		writeAPIError(w, http.StatusNotFound, "approval request not found")
 		return
 	}
 	if approval.Status != approvalStatusPending {
-		http.Error(w, "approval request already resolved", http.StatusConflict)
+		writeAPIError(w, http.StatusConflict, "approval request already resolved")
 		return
 	}
 	if err := validateApprovalDecisions(approval.Pending, decisions); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 
@@ -174,7 +174,7 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		},
 	})
 	if err != nil {
-		http.Error(w, fmt.Sprintf("append approval decision item: %v", err), http.StatusInternalServerError)
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval decision item: %v", err))
 		return
 	}
 	approval = resolvedApprovalFromDecision(approval, decisions, item.CreatedAt)
@@ -182,7 +182,7 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 	if session, inRegistry := h.registry.Get(id); inRegistry && session.State == SessionStatePaused {
 		_, _ = h.registry.ResumeAfterApproval(id)
 	}
-	writeJSON(w, http.StatusOK, publicApprovalRequest(approval))
+	writeAPIJSON(w, http.StatusOK, publicApprovalRequest(approval))
 }
 
 func pendingApprovalRequests(items []pendingApprovalRequestDTO) []zotigosession.DisplayPendingApproval {
