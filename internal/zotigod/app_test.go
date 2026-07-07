@@ -1533,7 +1533,7 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	}
 }
 
-func TestWorkerCommandsFailsWhenImageBlobMissing(t *testing.T) {
+func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	root := t.TempDir()
 	store, err := zotigosession.NewFileStore(root)
 	if err != nil {
@@ -1560,14 +1560,28 @@ func TestWorkerCommandsFailsWhenImageBlobMissing(t *testing.T) {
 	if err := os.RemoveAll(filepath.Join(root, "sessions", created.ID+".images")); err != nil {
 		t.Fatalf("remove image dir: %v", err)
 	}
+	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemSessionCommand,
+		Command: &zotigosession.DisplayCommand{
+			Type:   sessionCommandPause,
+			Reason: userPauseReason,
+		},
+	}); err != nil {
+		t.Fatalf("append pause command: %v", err)
+	}
+
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodGet, "/internal/sessions/"+created.ID+"/commands?after=0", nil)
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), "read command image") {
-		t.Fatalf("expected read command image error, got %q", rec.Body.String())
+	var commands commandsResponse
+	if err := sonic.Unmarshal(rec.Body.Bytes(), &commands); err != nil {
+		t.Fatalf("decode commands: %v", err)
+	}
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandPause {
+		t.Fatalf("expected missing image command to be skipped, got %#v", commands)
 	}
 }
 

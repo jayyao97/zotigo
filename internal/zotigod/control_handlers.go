@@ -28,6 +28,8 @@ const (
 	commandOffsetScanLines     = maxCommandsLimit
 )
 
+var errCommandImageUnavailable = errors.New("command image payload unavailable")
+
 type pauseSessionRequest struct {
 	TurnID string `json:"turn_id,omitempty"`
 }
@@ -588,6 +590,9 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 			case sessionCommandMessage:
 				command, err := messageCommandFromItem(item, rootDir)
 				if err != nil {
+					if errors.Is(err, errCommandImageUnavailable) {
+						continue
+					}
 					return commandsResponse{}, err
 				}
 				resp.Commands = append(resp.Commands, command)
@@ -638,6 +643,9 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 		for _, item := range items {
 			command, ok, err := commandFromDisplayItem(item, rootDir)
 			if err != nil {
+				if errors.Is(err, errCommandImageUnavailable) {
+					continue
+				}
 				return commandsResponse{}, err
 			}
 			if ok {
@@ -763,16 +771,16 @@ func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDi
 			part.DataBase64 = base64.StdEncoding.EncodeToString(img.Data)
 		} else if img.BlobPath != "" {
 			if rootDir == "" {
-				return nil, errors.New("image persistence is not configured")
+				return nil, fmt.Errorf("%w: image persistence is not configured", errCommandImageUnavailable)
 			}
 			data, err := os.ReadFile(filepath.Join(rootDir, img.BlobPath))
 			if err != nil {
-				return nil, fmt.Errorf("read command image %d: %w", idx, err)
+				return nil, fmt.Errorf("%w: read command image %d: %v", errCommandImageUnavailable, idx, err)
 			}
 			part.DataBase64 = base64.StdEncoding.EncodeToString(data)
 		}
 		if part.DataBase64 == "" {
-			return nil, fmt.Errorf("command image %d payload is unavailable", idx)
+			return nil, fmt.Errorf("%w: command image %d payload is unavailable", errCommandImageUnavailable, idx)
 		}
 		resp = append(resp, part)
 	}
