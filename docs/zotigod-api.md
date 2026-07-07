@@ -286,16 +286,48 @@ Submit a user message:
 
 `POST /sessions/{id}/messages`
 
+Text-only payloads remain supported:
+
 ```json
 {
   "text": "Build the desktop runtime."
 }
 ```
 
+Messages may also include image input:
+
+```json
+{
+  "text": "What is shown in this image?",
+  "images": [
+    {
+      "mime_type": "image/png",
+      "data_base64": "..."
+    }
+  ]
+}
+```
+
+`images` is optional. The first image-input version only accepts `image/png`,
+`image/jpeg`, and `image/webp`. A request may include at most 5 images; each
+decoded image is capped at 5 MiB, total decoded image bytes are capped at 20
+MiB, and the JSON request body is capped at 28 MiB. Invalid base64, unsupported
+MIME types, and images whose decoded bytes do not match their declared MIME type
+return `400`. PNG and JPEG validation decodes image config; WebP validation is
+limited to basic RIFF/WebP header sniffing in this first version. Oversized
+request bodies return `413`.
+
 Accepted messages append one durable `user_message` display item with a
 `command` payload of `type: "message"`. Workers consume that same item as the
 command source of truth; UI clients render it as the visible user message. This
 keeps the visible transcript and executable command atomic.
+
+For image messages, the live worker command includes the image payload so the
+runtime receives real `image` content parts. The display log and public
+`/sessions/{id}/items` response do not persist or return full image base64.
+Image bytes are stored separately as per-session blobs for command replay, and
+public responses only include metadata such as `mime_type`, `size_bytes`,
+`width`, and `height` when available.
 
 `POST /sessions/{id}/messages` requires a running session with no currently open
 turn and no pending message command that has not yet started a turn. If a turn
@@ -310,6 +342,14 @@ Response:
   "sequence": 4,
   "type": "message",
   "text": "Build the desktop runtime.",
+  "images": [
+    {
+      "mime_type": "image/png",
+      "size_bytes": 1024,
+      "width": 640,
+      "height": 480
+    }
+  ],
   "created_at": "2026-01-02T03:04:07Z"
 }
 ```
@@ -362,7 +402,8 @@ turn. When omitted, zotigod uses the currently open turn. Steering without an
 open turn is rejected; desktop should use `POST /sessions/{id}/messages` for a
 new normal turn. Steering also requires the session registry state to be
 `running`; paused approval sessions reject steering until the approval is
-resolved and the live worker resumes.
+resolved and the live worker resumes. Steering v1 only supports text; requests
+with `images` are rejected with `400`.
 
 Response:
 
@@ -482,8 +523,9 @@ Status codes:
 - `201`: message or steering command created, or worker lifecycle confirmation
   appended.
 - `200`: internal command list returned.
-- `400`: invalid request body, missing `turn_id`, empty steering text, or
-  invalid command query.
+- `400`: invalid request body, invalid image input, missing `turn_id`, empty
+  steering text, or invalid command query.
+- `413`: message or steering request body exceeds the public API size limit.
 - `404`: session not found in the current daemon registry.
 - `409`: command submitted to a non-running session, message submitted during an
   active turn, pause/steering submitted without an active turn, or a lifecycle,

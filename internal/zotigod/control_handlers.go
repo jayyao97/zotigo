@@ -2,9 +2,12 @@ package zotigod
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -25,17 +28,21 @@ const (
 	commandOffsetScanLines     = maxCommandsLimit
 )
 
+var errCommandImageUnavailable = errors.New("command image payload unavailable")
+
 type pauseSessionRequest struct {
 	TurnID string `json:"turn_id,omitempty"`
 }
 
 type submitMessageRequest struct {
-	Text string `json:"text"`
+	Text   string                      `json:"text"`
+	Images []submitMessageImageRequest `json:"images,omitempty"`
 }
 
 type steeringRequest struct {
-	Text   string `json:"text"`
-	TurnID string `json:"turn_id,omitempty"`
+	Text   string                      `json:"text"`
+	Images []submitMessageImageRequest `json:"images,omitempty"`
+	TurnID string                      `json:"turn_id,omitempty"`
 }
 
 type interruptTurnRequest struct {
@@ -58,13 +65,40 @@ type commandsResponse struct {
 }
 
 type commandResponse struct {
-	ID        string    `json:"id"`
-	Sequence  uint64    `json:"sequence"`
-	Type      string    `json:"type"`
-	Text      string    `json:"text,omitempty"`
-	TurnID    string    `json:"turn_id,omitempty"`
-	Reason    string    `json:"reason,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
+	ID        string                 `json:"id"`
+	Sequence  uint64                 `json:"sequence"`
+	Type      string                 `json:"type"`
+	Text      string                 `json:"text,omitempty"`
+	Images    []commandImageResponse `json:"images,omitempty"`
+	TurnID    string                 `json:"turn_id,omitempty"`
+	Reason    string                 `json:"reason,omitempty"`
+	CreatedAt time.Time              `json:"created_at"`
+}
+
+type commandImageResponse struct {
+	MimeType   string `json:"mime_type,omitempty"`
+	SizeBytes  int    `json:"size_bytes,omitempty"`
+	Width      int    `json:"width,omitempty"`
+	Height     int    `json:"height,omitempty"`
+	DataBase64 string `json:"data_base64,omitempty"`
+}
+
+type publicCommandResponse struct {
+	ID        string                       `json:"id"`
+	Sequence  uint64                       `json:"sequence"`
+	Type      string                       `json:"type"`
+	Text      string                       `json:"text,omitempty"`
+	Images    []publicCommandImageResponse `json:"images,omitempty"`
+	TurnID    string                       `json:"turn_id,omitempty"`
+	Reason    string                       `json:"reason,omitempty"`
+	CreatedAt time.Time                    `json:"created_at"`
+}
+
+type publicCommandImageResponse struct {
+	MimeType  string `json:"mime_type,omitempty"`
+	SizeBytes int    `json:"size_bytes,omitempty"`
+	Width     int    `json:"width,omitempty"`
+	Height    int    `json:"height,omitempty"`
 }
 
 func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -85,13 +119,22 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	}
 
 	var req submitMessageRequest
-	if err := readRequiredJSON(r, &req); err != nil {
+	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
 		return
 	}
 	text := strings.TrimSpace(req.Text)
 	if text == "" {
 		http.Error(w, "text is required", http.StatusBadRequest)
+		return
+	}
+	images, err := validateMessageImages(req.Images)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
@@ -107,7 +150,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		http.Error(w, "message requires an online worker", http.StatusServiceUnavailable)
 		return
 	}
-	item, err := h.appendMessageCommand(r.Context(), id, text)
+	item, err := h.appendMessageCommand(r.Context(), id, text, images)
 	if err != nil {
 		if errors.Is(err, errSessionBusy) {
 			http.Error(w, "message requires an idle session; use steering for an active turn", http.StatusConflict)
@@ -117,9 +160,13 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	command := messageCommandFromItem(item)
+	command, err := messageCommandFromItem(item, h.sessionStoreRoot())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build message command: %v", err), http.StatusInternalServerError)
+		return
+	}
 	h.sendCommand(r.Context(), id, command)
-	writeJSON(w, http.StatusCreated, command)
+	writeJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
 var (
@@ -127,13 +174,35 @@ var (
 	errApprovalPending = errors.New("approval is pending")
 )
 
-func (h *handler) appendMessageCommand(ctx context.Context, id string, text string) (zotigosession.DisplayItem, error) {
-	item := displayTextMessageItem(zotigosession.DisplayItemUserMessage, text)
-	item.Command = &zotigosession.DisplayCommand{
-		Type: sessionCommandMessage,
-		Text: text,
+func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage) (zotigosession.DisplayItem, error) {
+	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
+	if err != nil {
+		return zotigosession.DisplayItem{}, err
 	}
-	return h.items.AppendItemIf(ctx, id, item, requireIdleSession)
+	item := displayMessageItem(zotigosession.DisplayItemUserMessage, text, images)
+	item.Command = &zotigosession.DisplayCommand{
+		Type:   sessionCommandMessage,
+		Text:   text,
+		Images: displayCommandImages(images),
+	}
+	item, err = h.items.AppendItemIf(ctx, id, item, requireIdleSession)
+	if err != nil {
+		cleanupMessageImageBlobs(images)
+		return zotigosession.DisplayItem{}, err
+	}
+	return item, nil
+}
+
+type rootDirStore interface {
+	RootDir() string
+}
+
+func (h *handler) sessionStoreRoot() string {
+	store, ok := h.store.(rootDirStore)
+	if !ok || store == nil {
+		return ""
+	}
+	return store.RootDir()
 }
 
 func requireIdleSession(items []zotigosession.DisplayItem) error {
@@ -252,8 +321,16 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 	}
 
 	var req steeringRequest
-	if err := readRequiredJSON(r, &req); err != nil {
+	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
+		if errors.Is(err, errRequestBodyTooLarge) {
+			http.Error(w, err.Error(), http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, fmt.Sprintf("decode request: %v", err), http.StatusBadRequest)
+		return
+	}
+	if len(req.Images) > 0 {
+		http.Error(w, "steering does not support images", http.StatusBadRequest)
 		return
 	}
 	text := strings.TrimSpace(req.Text)
@@ -409,7 +486,7 @@ func (h *handler) handleWorkerCommands(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	if query.HasOffset {
-		resp, err := buildCommandsResponseFromOffset(r.Context(), h.items, id, query)
+		resp, err := buildCommandsResponseFromOffset(r.Context(), h.items, id, query, h.sessionStoreRoot())
 		if err != nil {
 			http.Error(w, fmt.Sprintf("load display items: %v", err), http.StatusInternalServerError)
 			return
@@ -423,7 +500,12 @@ func (h *handler) handleWorkerCommands(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	writeJSON(w, http.StatusOK, buildCommandsResponse(items, query))
+	resp, err := buildCommandsResponse(items, query, h.sessionStoreRoot())
+	if err != nil {
+		http.Error(w, fmt.Sprintf("build commands: %v", err), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func parseCommandQuery(r *http.Request) (commandQuery, error) {
@@ -482,7 +564,7 @@ func (h *handler) sendCommand(ctx context.Context, id string, command commandRes
 	return h.workers.Send(id, command)
 }
 
-func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery) commandsResponse {
+func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery, rootDir string) (commandsResponse, error) {
 	resp := commandsResponse{Commands: make([]commandResponse, 0)}
 	lastScanned := query.After
 
@@ -506,7 +588,14 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 			appended := false
 			switch item.Command.Type {
 			case sessionCommandMessage:
-				resp.Commands = append(resp.Commands, messageCommandFromItem(item))
+				command, err := messageCommandFromItem(item, rootDir)
+				if err != nil {
+					if errors.Is(err, errCommandImageUnavailable) {
+						continue
+					}
+					return commandsResponse{}, err
+				}
+				resp.Commands = append(resp.Commands, command)
 				appended = true
 			case sessionCommandPause:
 				resp.Commands = append(resp.Commands, pauseCommandFromItem(item))
@@ -526,17 +615,20 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 	default:
 		resp.NextCursor = strconv.FormatUint(query.After, 10)
 	}
-	return resp
+	return resp, nil
 }
 
-func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSource, sessionID string, query commandQuery) (commandsResponse, error) {
+func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSource, sessionID string, query commandQuery, rootDir string) (commandsResponse, error) {
 	offsetSource, ok := source.(offsetDisplayItemSource)
 	if !ok {
 		items, _, err := source.LoadItems(ctx, sessionID)
 		if err != nil {
 			return commandsResponse{}, err
 		}
-		resp := buildCommandsResponse(items, commandQuery{Limit: query.Limit})
+		resp, err := buildCommandsResponse(items, commandQuery{Limit: query.Limit}, rootDir)
+		if err != nil {
+			return commandsResponse{}, err
+		}
 		return resp, nil
 	}
 
@@ -549,7 +641,14 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 			return commandsResponse{}, err
 		}
 		for _, item := range items {
-			if command, ok := commandFromDisplayItem(item); ok {
+			command, ok, err := commandFromDisplayItem(item, rootDir)
+			if err != nil {
+				if errors.Is(err, errCommandImageUnavailable) {
+					continue
+				}
+				return commandsResponse{}, err
+			}
+			if ok {
 				resp.Commands = append(resp.Commands, command)
 				if len(resp.Commands) >= query.Limit {
 					if item.LogOffset > 0 {
@@ -576,38 +675,69 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 	return resp, nil
 }
 
-func commandFromDisplayItem(item zotigosession.DisplayItem) (commandResponse, bool) {
+func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, bool, error) {
 	if item.Type == zotigosession.DisplayItemSteeringMessage {
 		if commandText(item.Content) == "" {
-			return commandResponse{}, false
+			return commandResponse{}, false, nil
 		}
-		return steeringCommandFromItem(item), true
+		return steeringCommandFromItem(item), true, nil
 	}
 	if item.Command == nil {
-		return commandResponse{}, false
+		return commandResponse{}, false, nil
 	}
 	switch item.Command.Type {
 	case sessionCommandMessage:
-		return messageCommandFromItem(item), true
+		command, err := messageCommandFromItem(item, rootDir)
+		return command, err == nil, err
 	case sessionCommandPause:
-		return pauseCommandFromItem(item), true
+		return pauseCommandFromItem(item), true, nil
 	default:
-		return commandResponse{}, false
+		return commandResponse{}, false, nil
 	}
 }
 
-func displayTextMessageItem(itemType zotigosession.DisplayItemType, text string) zotigosession.DisplayItem {
+func displayMessageItem(itemType zotigosession.DisplayItemType, text string, images []messageImage) zotigosession.DisplayItem {
+	content := []zotigosession.DisplayContentPart{{
+		Type: string(protocol.ContentTypeText),
+		Text: text,
+	}}
+	for _, img := range images {
+		content = append(content, zotigosession.DisplayContentPart{
+			Type: string(protocol.ContentTypeImage),
+			Image: &zotigosession.DisplayMediaPart{
+				MediaType: img.MimeType,
+				SizeBytes: img.SizeBytes,
+				Width:     img.Width,
+				Height:    img.Height,
+			},
+		})
+	}
 	return zotigosession.DisplayItem{
-		Type: itemType,
-		Role: string(protocol.RoleUser),
-		Content: []zotigosession.DisplayContentPart{{
-			Type: string(protocol.ContentTypeText),
-			Text: text,
-		}},
+		Type:    itemType,
+		Role:    string(protocol.RoleUser),
+		Content: content,
 	}
 }
 
-func messageCommandFromItem(item zotigosession.DisplayItem) commandResponse {
+func displayCommandImages(images []messageImage) []zotigosession.DisplayCommandImage {
+	if len(images) == 0 {
+		return nil
+	}
+	resp := make([]zotigosession.DisplayCommandImage, 0, len(images))
+	for _, img := range images {
+		resp = append(resp, zotigosession.DisplayCommandImage{
+			MimeType:  img.MimeType,
+			SizeBytes: img.SizeBytes,
+			Width:     img.Width,
+			Height:    img.Height,
+			BlobPath:  img.BlobPath,
+			Data:      img.Data,
+		})
+	}
+	return resp
+}
+
+func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
 	command := commandResponse{
 		ID:        item.ID,
 		Sequence:  item.Sequence,
@@ -616,8 +746,70 @@ func messageCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	}
 	if item.Command != nil {
 		command.Text = item.Command.Text
+		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		command.Images = images
 	}
-	return command
+	return command, nil
+}
+
+func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDir string) ([]commandImageResponse, error) {
+	if len(images) == 0 {
+		return nil, nil
+	}
+	resp := make([]commandImageResponse, 0, len(images))
+	for idx, img := range images {
+		part := commandImageResponse{
+			MimeType:  img.MimeType,
+			SizeBytes: img.SizeBytes,
+			Width:     img.Width,
+			Height:    img.Height,
+		}
+		if len(img.Data) > 0 {
+			part.DataBase64 = base64.StdEncoding.EncodeToString(img.Data)
+		} else if img.BlobPath != "" {
+			if rootDir == "" {
+				return nil, fmt.Errorf("%w: image persistence is not configured", errCommandImageUnavailable)
+			}
+			data, err := os.ReadFile(filepath.Join(rootDir, img.BlobPath))
+			if err != nil {
+				return nil, fmt.Errorf("%w: read command image %d: %v", errCommandImageUnavailable, idx, err)
+			}
+			part.DataBase64 = base64.StdEncoding.EncodeToString(data)
+		}
+		if part.DataBase64 == "" {
+			return nil, fmt.Errorf("%w: command image %d payload is unavailable", errCommandImageUnavailable, idx)
+		}
+		resp = append(resp, part)
+	}
+	return resp, nil
+}
+
+func publicCommandFromCommand(command commandResponse) publicCommandResponse {
+	resp := publicCommandResponse{
+		ID:        command.ID,
+		Sequence:  command.Sequence,
+		Type:      command.Type,
+		Text:      command.Text,
+		TurnID:    command.TurnID,
+		Reason:    command.Reason,
+		CreatedAt: command.CreatedAt,
+	}
+	if len(command.Images) == 0 {
+		return resp
+	}
+	resp.Images = make([]publicCommandImageResponse, len(command.Images))
+	for i, img := range command.Images {
+		resp.Images[i] = publicCommandImageResponse{
+			MimeType:  img.MimeType,
+			SizeBytes: img.SizeBytes,
+			Width:     img.Width,
+			Height:    img.Height,
+		}
+	}
+	return resp
 }
 
 func steeringCommandFromItem(item zotigosession.DisplayItem) commandResponse {

@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -127,6 +128,13 @@ func TestFileStore_Delete(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Put failed: %v", err)
 	}
+	imageDir := filepath.Join(tmpDir, "sessions", "test_delete.images")
+	if err := os.MkdirAll(imageDir, 0700); err != nil {
+		t.Fatalf("Create image dir failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(imageDir, "image.png"), []byte("image"), 0600); err != nil {
+		t.Fatalf("Write image blob failed: %v", err)
+	}
 
 	// Delete
 	err = store.Delete(ctx, "test_delete")
@@ -141,6 +149,9 @@ func TestFileStore_Delete(t *testing.T) {
 	}
 	if loaded != nil {
 		t.Error("Session should be deleted")
+	}
+	if _, err := os.Stat(imageDir); !os.IsNotExist(err) {
+		t.Fatalf("Image blob directory should be deleted, got err=%v", err)
 	}
 }
 

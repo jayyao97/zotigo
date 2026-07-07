@@ -55,6 +55,10 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 	}, nil
 }
 
+func (s *FileStore) RootDir() string {
+	return s.rootDir
+}
+
 // Get retrieves a session by ID.
 func (s *FileStore) Get(ctx context.Context, id string) (*Session, error) {
 	s.mu.RLock()
@@ -221,6 +225,9 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	_ = os.Remove(lockPath)
 	_ = os.Remove(s.displayLogPath(id))
 	_ = os.Remove(s.displayLogAppendLockPath(id))
+	if err := os.RemoveAll(s.imageBlobDir(id)); err != nil {
+		return fmt.Errorf("failed to delete session image blobs: %w", err)
+	}
 
 	// Update registry
 	return s.removeFromRegistry(id)
@@ -384,6 +391,10 @@ func (s *FileStore) displayLogPath(id string) string {
 
 func (s *FileStore) displayLogAppendLockPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".display.lock")
+}
+
+func (s *FileStore) imageBlobDir(id string) string {
+	return filepath.Join(s.rootDir, "sessions", id+".images")
 }
 
 func (s *FileStore) lockPath(id string) string {
