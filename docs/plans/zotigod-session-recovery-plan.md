@@ -237,6 +237,9 @@ make check
 
 - Do not start workers from read APIs.
 - Do not load every stored session into the live registry at daemon startup.
+- Do not persist final runtime state in this phase. After daemon restart, a stored
+  session that previously ended or failed is returned as `offline` and may be
+  continued by starting a new worker.
 - Do not resume an in-flight turn after process restart.
 - Do not recover pending tool execution after approval restart.
 - Do not add full worker crash restart/backoff policy in this phase.

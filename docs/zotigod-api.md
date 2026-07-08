@@ -336,12 +336,15 @@ connected but not applying pause or steering commands.
 If the daemon process restarts, old workers are not treated as still live.
 Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or
 `POST /sessions/{id}/messages` starts a new worker. Worker crash recovery is
-intentionally limited in this version: once a worker accepts a message command
-and starts a turn, the command cursor may be advanced before that turn
-completes. If the worker process crashes mid-turn, zotigod does not currently
-reconstruct and resume that in-flight turn. When a new bundled worker starts and
-finds an old open display-log turn, it appends `turn_interrupted` with reason
-`worker_restarted` before accepting new control commands.
+intentionally limited in this version. Final runtime states such as `ended` or
+`failed` are not persisted across daemon restarts; after restart, stored-only
+sessions are reported as `offline` and can be continued by starting a new
+worker. Once a worker accepts a message command and starts a turn, the command
+cursor may be advanced before that turn completes. If the worker process crashes
+mid-turn, zotigod does not currently reconstruct and resume that in-flight turn.
+When a new bundled worker starts and finds an old open display-log turn, it
+appends `turn_interrupted` with reason `worker_restarted` before accepting new
+control commands.
 
 Server-to-worker command frame:
 
