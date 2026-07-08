@@ -241,6 +241,26 @@ func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workD
 	return session
 }
 
+func putStoredSession(t *testing.T, store zotigosession.Store, id string, workDir string) {
+	t.Helper()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:               id,
+			WorkingDirectory: workDir,
+			CreatedAt:        now,
+			UpdatedAt:        now,
+		},
+		AgentSnapshot: agent.Snapshot{
+			State:     agent.StateIdle,
+			CreatedAt: now,
+		},
+		Turns: make([]zotigosession.Turn, 0),
+	}); err != nil {
+		t.Fatalf("put stored session: %v", err)
+	}
+}
+
 func TestHealth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
@@ -264,7 +284,11 @@ func TestHealth(t *testing.T) {
 }
 
 func TestSessionsCreateAndList(t *testing.T) {
-	handler := NewHandler()
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
@@ -470,15 +494,8 @@ func TestDefaultHandlerRejectsCreateWhenStoreInitializationFails(t *testing.T) {
 
 	rec = httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
-	var list sessionListResponse
-	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
-		t.Fatalf("decode list response: %v", err)
-	}
-	if len(list.Sessions) != 0 {
-		t.Fatalf("expected no sessions after failed create, got %#v", list.Sessions)
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
 	}
 }
 
@@ -498,6 +515,94 @@ func TestSessionsGetByID(t *testing.T) {
 	}
 	if got.ID != created.ID || got.State != SessionStateCreated {
 		t.Fatalf("unexpected session: %#v", got)
+	}
+}
+
+func TestSessionsGetReturnsStoredSessionOffline(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	workDir := t.TempDir()
+	putStoredSession(t, store, "sess-stored", workDir)
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/sess-stored", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var got Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode get response: %v", err)
+	}
+	if got.ID != "sess-stored" || got.State != SessionStateOffline || got.Live {
+		t.Fatalf("expected stored offline session, got %#v", got)
+	}
+	if got.WorkingDirectory != workDir {
+		t.Fatalf("expected working directory %q, got %q", workDir, got.WorkingDirectory)
+	}
+}
+
+func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	workDir := t.TempDir()
+	putStoredSession(t, store, "sess-stored", workDir)
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	created := createSession(t, handler)
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var list sessionListResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	seen := map[string]Session{}
+	for _, session := range list.Sessions {
+		seen[session.ID] = session
+	}
+	if len(seen) != 2 {
+		t.Fatalf("expected two unique sessions, got %#v", list.Sessions)
+	}
+	if !seen[created.ID].Live || seen[created.ID].State != SessionStateCreated {
+		t.Fatalf("expected registry session to remain live, got %#v", seen[created.ID])
+	}
+	if seen["sess-stored"].Live || seen["sess-stored"].State != SessionStateOffline {
+		t.Fatalf("expected stored session to be offline, got %#v", seen["sess-stored"])
+	}
+}
+
+func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	var launches atomic.Int32
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store: store,
+		launcher: workerLauncherFunc(func(context.Context, string, string) error {
+			launches.Add(1)
+			return nil
+		}),
+		workerConnectTimeout: time.Millisecond,
+	})
+
+	for _, path := range []string{"/sessions", "/sessions/sess-stored", "/sessions/sess-stored/items"} {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("%s: expected status %d, got %d: %s", path, http.StatusOK, rec.Code, rec.Body.String())
+		}
+	}
+	if got := launches.Load(); got != 0 {
+		t.Fatalf("expected read APIs not to launch workers, got %d launches", got)
 	}
 }
 
@@ -767,7 +872,7 @@ func TestSessionStartLaunchesWorkerAndWaitsForConnection(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workers := newWorkerRegistry()
-	workerReady := make(chan *websocket.Conn, 1)
+	workerReady := make(chan *websocket.Conn, 2)
 	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
 		go func() {
 			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
@@ -805,7 +910,7 @@ func TestSessionStartPassesWorkingDirectoryToWorkerLauncher(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workers := newWorkerRegistry()
-	workerReady := make(chan *websocket.Conn, 1)
+	workerReady := make(chan *websocket.Conn, 2)
 	workDir := t.TempDir()
 	var launchedWorkDir string
 	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, workingDirectory string) error {
@@ -843,6 +948,186 @@ func TestSessionStartPassesWorkingDirectoryToWorkerLauncher(t *testing.T) {
 		t.Fatal("expected worker websocket connection")
 	}
 	defer worker.Close()
+}
+
+func TestSessionStartResumesStoredSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	workDir := t.TempDir()
+	putStoredSession(t, store, "sess-stored", workDir)
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	var launchedWorkDir string
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, workingDirectory string) error {
+		launchedWorkDir = workingDirectory
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	started := startSession(t, handler, "sess-stored")
+	if started.State != SessionStateRunning || !started.Live {
+		t.Fatalf("expected running live session, got %#v", started)
+	}
+	if launchedWorkDir != workDir {
+		t.Fatalf("expected launcher workdir %q, got %q", workDir, launchedWorkDir)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+}
+
+func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 2)
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	var launchOnce sync.Once
+	var launches atomic.Int32
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		launches.Add(1)
+		launchOnce.Do(func() { close(launchStarted) })
+		<-releaseLaunch
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	var wg sync.WaitGroup
+	codes := make(chan int, 2)
+	for idx := 0; idx < 2; idx++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rec := httptest.NewRecorder()
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/start", nil))
+			codes <- rec.Code
+		}()
+	}
+	<-launchStarted
+	close(releaseLaunch)
+	wg.Wait()
+	close(codes)
+	for code := range codes {
+		if code != http.StatusOK {
+			t.Fatalf("expected concurrent start status %d, got %d", http.StatusOK, code)
+		}
+	}
+	if got := launches.Load(); got != 1 {
+		t.Fatalf("expected one worker launch, got %d", got)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+}
+
+func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	var launchOnce sync.Once
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		launchOnce.Do(func() { close(launchStarted) })
+		<-releaseLaunch
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	firstDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/start", nil))
+		firstDone <- rec.Code
+	}()
+	<-launchStarted
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/start", nil).WithContext(waitCtx)
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected observer status %d, got %d: %s", http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	}
+
+	close(releaseLaunch)
+	if code := <-firstDone; code != http.StatusOK {
+		t.Fatalf("expected owner start status %d, got %d", http.StatusOK, code)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+	if got := getSession(t, handler, "sess-stored"); got.State != SessionStateRunning {
+		t.Fatalf("expected active launch to remain running, got %#v", got)
+	}
 }
 
 func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
@@ -1535,6 +1820,140 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandMessage {
 		t.Fatalf("expected one message command, got %#v", commands)
+	}
+}
+
+func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	workDir := t.TempDir()
+	putStoredSession(t, store, "sess-stored", workDir)
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	var launchedWorkDir string
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, workingDirectory string) error {
+		launchedWorkDir = workingDirectory
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/messages", strings.NewReader(`{"text":"continue this session"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	if launchedWorkDir != workDir {
+		t.Fatalf("expected launcher workdir %q, got %q", workDir, launchedWorkDir)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Message == nil || msg.Command.Message.Text != "continue this session" {
+		t.Fatalf("unexpected worker command: %#v", msg)
+	}
+
+	got := getSession(t, handler, "sess-stored")
+	if got.State != SessionStateRunning || !got.Live {
+		t.Fatalf("expected resumed running session, got %#v", got)
+	}
+}
+
+func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	if _, err := store.AppendDisplayItem(context.Background(), "sess-stored", zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-stale"},
+	}); err != nil {
+		t.Fatalf("append stale turn: %v", err)
+	}
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemTurnInterrupted,
+			Turn: &zotigosession.DisplayTurn{
+				ID:     "turn-stale",
+				Status: "interrupted",
+				Reason: workerRestartedReason,
+			},
+		}); err != nil {
+			return err
+		}
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/messages", strings.NewReader(`{"text":"continue after restart"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Message == nil || msg.Command.Message.Text != "continue after restart" {
+		t.Fatalf("unexpected worker command: %#v", msg)
+	}
+
+	items := getItems(t, handler, "/sessions/sess-stored/items?limit=10")
+	if len(items.Items) != 3 {
+		t.Fatalf("expected stale start, interruption, and message, got %#v", items.Items)
+	}
+	if items.Items[1].Type != string(zotigosession.DisplayItemTurnInterrupted) ||
+		items.Items[1].Turn == nil || items.Items[1].Turn.Reason != workerRestartedReason {
+		t.Fatalf("expected worker restart interruption, got %#v", items.Items[1])
+	}
+	if items.Items[2].Type != string(zotigosession.DisplayItemUserMessage) ||
+		items.Items[2].Command == nil || items.Items[2].Command.Type != sessionCommandMessage {
+		t.Fatalf("expected accepted message after interruption, got %#v", items.Items[2])
 	}
 }
 
@@ -2729,6 +3148,24 @@ func TestSessionControlsRejectInvalidRequests(t *testing.T) {
 	}
 }
 
+func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/pause", nil))
+	assertAPIError(t, rec, http.StatusConflict, "session_not_live", "pause requires a live session")
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/steering", strings.NewReader(`{"text":"adjust"}`))
+	handler.ServeHTTP(rec, req)
+	assertAPIError(t, rec, http.StatusConflict, "session_not_live", "steering requires a live session")
+}
+
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
@@ -2953,7 +3390,7 @@ func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T
 	}
 }
 
-func TestApprovalDecisionRecoversPendingRequestFromDisplayLog(t *testing.T) {
+func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
@@ -2980,33 +3417,7 @@ func TestApprovalDecisionRecoversPendingRequestFromDisplayLog(t *testing.T) {
 		"decisions": [{"tool_call_id":"call-1","approved":false,"reason":"not now"}]
 	}`))
 	restarted.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
-	var resolved approvalRequestResponse
-	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
-		t.Fatalf("decode approval response: %v", err)
-	}
-	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved {
-		t.Fatalf("unexpected resolved approval: %#v", resolved)
-	}
-	if resolved.Decisions[0].Reason != "not now" {
-		t.Fatalf("expected denial reason to persist, got %#v", resolved.Decisions[0])
-	}
-
-	workerView = getApprovalRequest(t, restarted, created.ID, approval.ID)
-	if workerView.Status != approvalStatusResolved || len(workerView.Decisions) != 1 {
-		t.Fatalf("expected resolved approval from display log, got %#v", workerView)
-	}
-
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
-		"decisions": [{"tool_call_id":"call-1","approved":true}]
-	}`))
-	restarted.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
-	}
+	assertAPIError(t, rec, http.StatusConflict, "session_not_live", "approval decision requires a live session")
 }
 
 func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
@@ -3250,7 +3661,11 @@ func TestSessionsGetByIDNotFound(t *testing.T) {
 }
 
 func TestSessionsListUsesCreationOrder(t *testing.T) {
-	handler := NewHandler()
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 	createdIDs := make([]string, 0, 11)
 
 	for i := 0; i < 11; i++ {
