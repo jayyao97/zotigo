@@ -57,7 +57,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 
 Current error codes include `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
-`service_unavailable`, and `internal_error`.
+`session_not_live`, `service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -88,6 +88,49 @@ Workers launched for the session use this directory as their process working
 directory and as the source for project config, skills, project instructions,
 tools, shell execution, and LSP state. Legacy sessions without a stored working
 directory fall back to the worker process current directory.
+
+## Session liveness and recovery
+
+Session history and session runtime are separate. The session store on disk can
+contain old sessions and display logs even when the current `zotigod` process
+has no worker running for them.
+
+Read APIs do not start workers:
+
+- `GET /sessions`
+- `GET /sessions/{id}`
+- `GET /sessions/{id}/items`
+
+If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}`
+return it as offline:
+
+```json
+{
+  "id": "sess_8f0e12ab34cd56ef",
+  "state": "offline",
+  "live": false,
+  "working_directory": "/Users/me/workspace/project",
+  "created_at": "2026-01-02T03:04:05Z"
+}
+```
+
+`live: false` means desktop may render history but should not show turn-scoped
+controls as usable. Sending a new message or explicitly starting the session can
+make it live again. Stored-only sessions are never reported as `running`;
+`running` means the current daemon has accepted a worker connection for that
+session.
+
+`POST /sessions/{id}/start` is an explicit runtime resume/pre-warm operation. It
+loads a stored session into the daemon registry when needed, launches a worker,
+and waits for that worker to connect. It does not append a user message.
+
+`POST /sessions/{id}/messages` also resumes an offline session before accepting
+the message. Desktop's normal chat flow can call `messages` directly instead of
+calling `start` first.
+
+Pause, steering, and approval decisions do not auto-resume offline sessions
+because they refer to a currently running turn or a live pending approval. For a
+stored-only session they return `409` with `code: "session_not_live"`.
 
 ## Read session display items
 
@@ -243,11 +286,9 @@ not that the worker has already applied it.
 
 Starting a session launches an internal worker process from the current
 `zotigod` executable. The worker connects back over WebSocket; connecting a
-`starting` session transitions it to `running`. If the worker is still
-connecting when the start response is written, desktop can poll `GET
-/sessions/{id}` until the state is `running`. If zotigod launched a worker but
+`starting` session transitions it to `running`. If zotigod launched a worker but
 it does not connect before the startup timeout, the session is marked `failed`
-and the start request returns `503`.
+and the start or message request returns `503`.
 
 Worker startup also acquires the same per-session file lock used by the CLI
 session manager. If another CLI, daemon worker, or local process already owns
@@ -292,17 +333,18 @@ applied command. The command buffer is intentionally bounded at 32 items; if it
 fills, the worker treats itself as unhealthy and exits instead of staying
 connected but not applying pause or steering commands.
 
-Current limitation: zotigod's live session registry is still in-memory. If the
-daemon process restarts, existing worker processes do not have a recovered
-registry entry to attach to yet. Full daemon restart recovery needs registry
-rehydration before workers can safely reconnect and resume live sessions.
-Worker crash recovery is also intentionally limited in this version: once a
-worker accepts a message command and starts a turn, the command cursor may be
-advanced before that turn completes. If the worker process crashes mid-turn,
-zotigod does not currently reconstruct and resume that in-flight turn. When a
-new bundled worker starts and finds an old open display-log turn, it appends
-`turn_interrupted` with reason `worker_restarted` before accepting new control
-commands.
+If the daemon process restarts, old workers are not treated as still live.
+Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or
+`POST /sessions/{id}/messages` starts a new worker. Worker crash recovery is
+intentionally limited in this version. Final runtime states such as `ended` or
+`failed` are not persisted across daemon restarts; after restart, stored-only
+sessions are reported as `offline` and can be continued by starting a new
+worker. Once a worker accepts a message command and starts a turn, the command
+cursor may be advanced before that turn completes. If the worker process crashes
+mid-turn, zotigod does not currently reconstruct and resume that in-flight turn.
+When a new bundled worker starts and finds an old open display-log turn, it
+appends `turn_interrupted` with reason `worker_restarted` before accepting new
+control commands.
 
 Server-to-worker command frame:
 
@@ -369,10 +411,10 @@ Image bytes are stored separately as per-session blobs for command replay, and
 public responses only include metadata such as `mime_type`, `size_bytes`,
 `width`, and `height` when available.
 
-`POST /sessions/{id}/messages` requires a running session with no currently open
-turn and no pending message command that has not yet started a turn. If a turn
-is active, desktop should use `POST /sessions/{id}/steering` instead of
-submitting a new message.
+`POST /sessions/{id}/messages` starts or resumes the session when needed, then
+requires no currently open turn and no pending message command that has not yet
+started a turn. If a turn is active, desktop should use
+`POST /sessions/{id}/steering` instead of submitting a new message.
 
 Response data:
 
@@ -574,10 +616,12 @@ Status codes:
 - `400`: invalid request body, invalid image input, missing `turn_id`, empty
   steering text, or invalid command query.
 - `413`: message or steering request body exceeds the public API size limit.
-- `404`: session not found in the current daemon registry.
+- `404`: session not found.
 - `409`: command submitted to a non-running session, message submitted during an
-  active turn, pause/steering submitted without an active turn, or a lifecycle,
-  pause, or steering `turn_id` does not match the active turn.
+  active turn, turn-scoped command submitted to an offline session, pause/steering
+  submitted without an active turn, or a lifecycle, pause, or steering `turn_id`
+  does not match the active turn. Offline turn-scoped commands use
+  `code: "session_not_live"`.
 - `503`: zotigod could not start or reconnect a worker before accepting the
   command.
 - `405`: method not allowed.
@@ -590,13 +634,14 @@ durable approval record, best-effort appends `turn_paused` with
 `reason: "need_approval"` for display replay, and transitions the daemon session
 state to `paused` when it is still running.
 
-The persisted approval source of truth is the display log. zotigod reconstructs
+The persisted approval read model is the display log. zotigod reconstructs
 pending and resolved approval requests from `approval_request` and
-`approval_decision` items, so public approval submission can continue after a
-zotigod restart as long as the session display log is still present. This only
-recovers the approval read model and records the user's decision; v1 does not
-resume execution of the original pending tool call after zotigod or the worker
-has restarted and lost the live paused runtime.
+`approval_decision` items for display and worker reads. Public approval
+submission still requires the session to be live in the current daemon. If the
+daemon has restarted and the session is only present on disk, desktop can still
+display the pending approval from `/items`, but
+`POST /sessions/{id}/approvals/{approval_id}` returns `409` with
+`code: "session_not_live"`.
 
 Desktop clients using this flow must support the `paused` session state and the
 `approval_request` / `approval_decision` item payloads before enabling HITL UI.
@@ -680,8 +725,7 @@ The decision request must include exactly one decision for each pending tool
 call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected.
 After a valid decision, zotigod appends an `approval_decision` item. If the
 current daemon registry still has the session in `paused`, zotigod moves it back
-to `running`; if the session is absent or already terminal, the durable decision
-is still accepted and returned without an in-memory state transition.
+to `running`.
 
 Workers can poll the internal read endpoint until the request is resolved:
 
@@ -694,5 +738,6 @@ Status codes:
 - `400`: invalid request body or decision set.
 - `404`: session or approval request not found.
 - `409`: approval creation on a non-running session, or an already resolved
-  approval request.
+  approval request. Public decisions for offline sessions use
+  `code: "session_not_live"`.
 - `405`: method not allowed.

@@ -33,6 +33,7 @@ const (
 	SessionStateStarting SessionState = "starting"
 	SessionStateRunning  SessionState = "running"
 	SessionStatePaused   SessionState = "paused"
+	SessionStateOffline  SessionState = "offline"
 	SessionStateEnded    SessionState = "ended"
 	SessionStateFailed   SessionState = "failed"
 )
@@ -40,6 +41,7 @@ const (
 type Session struct {
 	ID               string       `json:"id"`
 	State            SessionState `json:"state"`
+	Live             bool         `json:"live"`
 	WorkingDirectory string       `json:"working_directory,omitempty"`
 	CreatedAt        time.Time    `json:"created_at"`
 	StartedAt        *time.Time   `json:"started_at,omitempty"`
@@ -67,6 +69,22 @@ func (r *sessionRegistry) Add(session Session) Session {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	return r.addLocked(session)
+}
+
+func (r *sessionRegistry) GetOrAdd(session Session) Session {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if session.ID != "" {
+		if existing, ok := r.sessions[session.ID]; ok {
+			return existing
+		}
+	}
+	return r.addLocked(session)
+}
+
+func (r *sessionRegistry) addLocked(session Session) Session {
 	r.nextID++
 	if session.ID == "" {
 		session.ID = newZotigodID("sess")
@@ -74,6 +92,7 @@ func (r *sessionRegistry) Add(session Session) Session {
 	if session.State == "" {
 		session.State = SessionStateCreated
 	}
+	session.Live = true
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = time.Now().UTC()
 	}
@@ -86,6 +105,7 @@ func newSession(workingDirectory string) Session {
 	return Session{
 		ID:               newZotigodID("sess"),
 		State:            SessionStateCreated,
+		Live:             true,
 		WorkingDirectory: workingDirectory,
 		CreatedAt:        time.Now().UTC(),
 	}
@@ -388,7 +408,12 @@ func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		writeAPIJSON(w, http.StatusOK, map[string][]Session{"sessions": h.registry.List()})
+		sessions, err := h.listSessions(r.Context())
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, map[string][]Session{"sessions": sessions})
 	case http.MethodPost:
 		var req createSessionRequest
 		if err := readOptionalJSON(r, &req); err != nil {
@@ -453,6 +478,68 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 		},
 		Turns: make([]zotigosession.Turn, 0),
 	})
+}
+
+func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
+	registrySessions := h.registry.List()
+	seen := make(map[string]struct{}, len(registrySessions))
+	for idx := range registrySessions {
+		registrySessions[idx].Live = true
+		seen[registrySessions[idx].ID] = struct{}{}
+	}
+	if h.store == nil {
+		return registrySessions, nil
+	}
+	metadata, err := h.store.List(ctx, zotigosession.ListFilter{OrderBy: zotigosession.OrderByUpdatedDesc})
+	if err != nil {
+		return nil, err
+	}
+	sessions := append([]Session(nil), registrySessions...)
+	for _, meta := range metadata {
+		if _, ok := seen[meta.ID]; ok {
+			continue
+		}
+		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
+	}
+	return sessions, nil
+}
+
+func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live bool) Session {
+	return Session{
+		ID:               meta.ID,
+		State:            state,
+		Live:             live,
+		WorkingDirectory: meta.WorkingDirectory,
+		CreatedAt:        meta.CreatedAt,
+	}
+}
+
+func (h *handler) storedSession(ctx context.Context, id string) (Session, bool, error) {
+	if h.store == nil {
+		return Session{}, false, nil
+	}
+	session, err := h.store.Get(ctx, id)
+	if err != nil {
+		return Session{}, false, err
+	}
+	if session == nil {
+		return Session{}, false, nil
+	}
+	return sessionFromMetadata(session.Metadata, SessionStateOffline, false), true, nil
+}
+
+func (h *handler) loadSessionIntoRegistry(ctx context.Context, id string) (Session, bool, error) {
+	if session, ok := h.registry.Get(id); ok {
+		session.Live = true
+		return session, true, nil
+	}
+	stored, ok, err := h.storedSession(ctx, id)
+	if err != nil || !ok {
+		return Session{}, ok, err
+	}
+	stored.State = SessionStateCreated
+	stored.Live = true
+	return h.registry.GetOrAdd(stored), true, nil
 }
 
 func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -520,9 +607,19 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, "session not found")
+		stored, inStore, err := h.storedSession(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
+			return
+		}
+		if !inStore {
+			writeAPIError(w, http.StatusNotFound, "session not found")
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, stored)
 		return
 	}
+	session.Live = true
 	writeAPIJSON(w, http.StatusOK, session)
 }
 
@@ -532,26 +629,106 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	session, err := h.registry.Start(id)
+	session, err := h.ensureSessionRunning(r.Context(), id)
 	if err != nil {
-		h.writeTransition(w, session, err)
+		h.writeEnsureRunningError(w, err)
 		return
-	}
-	if err := h.launchWorker(r.Context(), id); err != nil {
-		_, _ = h.registry.Fail(id, err.Error())
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start worker: %v", err))
-		return
-	}
-	if h.launcher != nil && !h.waitForWorker(r.Context(), id) {
-		msg := "worker did not connect before timeout"
-		_, _ = h.registry.Fail(id, msg)
-		writeAPIError(w, http.StatusServiceUnavailable, msg)
-		return
-	}
-	if running, ok := h.registry.Get(id); ok {
-		session = running
 	}
 	writeAPIJSON(w, http.StatusOK, session)
+}
+
+var errWorkerConnectTimeout = errors.New("worker did not connect before timeout")
+
+func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session, error) {
+	for {
+		session, ok, err := h.loadSessionIntoRegistry(ctx, id)
+		if err != nil {
+			return Session{}, fmt.Errorf("load session: %w", err)
+		}
+		if !ok {
+			return Session{}, errSessionNotFound
+		}
+
+		switch session.State {
+		case SessionStateRunning:
+			session.Live = true
+			return session, nil
+		case SessionStateStarting:
+			if h.launcher == nil {
+				return Session{}, errInvalidSessionTransition
+			}
+			if !h.waitForRunningWorker(ctx, id) {
+				return Session{}, errWorkerConnectTimeout
+			}
+			if running, ok := h.registry.Get(id); ok && running.State == SessionStateRunning {
+				running.Live = true
+				return running, nil
+			}
+			return Session{}, errWorkerConnectTimeout
+		case SessionStateCreated:
+			session, err = h.registry.Start(id)
+			if errors.Is(err, errInvalidSessionTransition) {
+				continue
+			}
+			if err != nil {
+				return Session{}, err
+			}
+			if err := h.launchWorker(ctx, id); err != nil {
+				_, _ = h.registry.Fail(id, err.Error())
+				return Session{}, fmt.Errorf("start worker: %w", err)
+			}
+			if h.launcher != nil && !h.waitForRunningWorker(ctx, id) {
+				_, _ = h.registry.Fail(id, errWorkerConnectTimeout.Error())
+				return Session{}, errWorkerConnectTimeout
+			}
+			if running, ok := h.registry.Get(id); ok {
+				running.Live = true
+				return running, nil
+			}
+			session.Live = true
+			return session, nil
+		default:
+			return Session{}, errInvalidSessionTransition
+		}
+	}
+}
+
+func (h *handler) waitForRunningWorker(ctx context.Context, id string) bool {
+	waitCtx := ctx
+	cancel := func() {}
+	if h.workerConnectTimeout > 0 {
+		waitCtx, cancel = context.WithTimeout(ctx, h.workerConnectTimeout)
+	}
+	defer cancel()
+
+	if !h.workers.Wait(waitCtx.Done(), id) {
+		return false
+	}
+	ticker := time.NewTicker(time.Millisecond)
+	defer ticker.Stop()
+	for {
+		if session, ok := h.registry.Get(id); ok && session.State == SessionStateRunning {
+			return true
+		}
+		select {
+		case <-waitCtx.Done():
+			return false
+		case <-ticker.C:
+		}
+	}
+}
+
+func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errSessionNotFound):
+		writeAPIError(w, http.StatusNotFound, "session not found")
+	case errors.Is(err, errInvalidSessionTransition):
+		writeAPIError(w, http.StatusConflict, "invalid session state transition")
+	case errors.Is(err, errWorkerConnectTimeout):
+		writeAPIError(w, http.StatusServiceUnavailable, errWorkerConnectTimeout.Error())
+	default:
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start session: %v", err))
+	}
 }
 
 func (h *handler) launchWorker(ctx context.Context, id string) error {
@@ -734,8 +911,12 @@ func writeAPIJSON[T any](w http.ResponseWriter, status int, value T) {
 }
 
 func writeAPIError(w http.ResponseWriter, status int, message string) {
+	writeAPIErrorCode(w, status, apiErrorCode(status), message)
+}
+
+func writeAPIErrorCode(w http.ResponseWriter, status int, code string, message string) {
 	writeJSON(w, status, apiErrorResponse{
-		Code:    apiErrorCode(status),
+		Code:    code,
 		Message: message,
 	})
 }

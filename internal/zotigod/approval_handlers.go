@@ -156,6 +156,10 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		writeAPIError(w, http.StatusNotFound, "approval request not found")
 		return
 	}
+	if _, inRegistry := h.registry.Get(id); !inRegistry {
+		h.writeSessionNotLiveOrMissing(w, r.Context(), id, "approval decision requires a live session")
+		return
+	}
 	if approval.Status != approvalStatusPending {
 		writeAPIError(w, http.StatusConflict, "approval request already resolved")
 		return

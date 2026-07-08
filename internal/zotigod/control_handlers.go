@@ -122,16 +122,6 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 
-	session, ok := h.registry.Get(id)
-	if !ok {
-		writeAPIError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if session.State != SessionStateRunning {
-		writeAPIError(w, http.StatusConflict, "message requires a running session")
-		return
-	}
-
 	var req submitMessageRequest
 	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
@@ -149,6 +139,10 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	images, err := validateMessageImages(req.Images)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
+		h.writeEnsureRunningError(w, err)
 		return
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
@@ -235,7 +229,7 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, "session not found")
+		h.writeSessionNotLiveOrMissing(w, r.Context(), id, "pause requires a live session")
 		return
 	}
 	if session.State != SessionStateRunning {
@@ -326,7 +320,7 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 
 	session, ok := h.registry.Get(id)
 	if !ok {
-		writeAPIError(w, http.StatusNotFound, "session not found")
+		h.writeSessionNotLiveOrMissing(w, r.Context(), id, "steering requires a live session")
 		return
 	}
 	if session.State != SessionStateRunning {
@@ -417,6 +411,19 @@ func (h *handler) appendSteeringCommand(ctx context.Context, id string, turnID s
 		}},
 		Turn: &zotigosession.DisplayTurn{ID: turnID},
 	}, requireOpenTurnWithoutPendingApproval(turnID))
+}
+
+func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx context.Context, id string, message string) {
+	_, inStore, err := h.storedSession(ctx, id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
+		return
+	}
+	if inStore {
+		writeAPIErrorCode(w, http.StatusConflict, "session_not_live", message)
+		return
+	}
+	writeAPIError(w, http.StatusNotFound, "session not found")
 }
 
 func requireOpenTurnWithoutPendingApproval(turnID string) func([]zotigosession.DisplayItem) error {
