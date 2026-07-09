@@ -1959,7 +1959,8 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 }
 
 func TestSessionMessageAcceptsImageInput(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -2024,6 +2025,9 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	}
 	if strings.Contains(encodedItems, imageBase64) {
 		t.Fatalf("items response leaked image base64")
+	}
+	if err := os.Remove(filepath.Join(root, "sessions", created.ID+".display.jsonl")); err != nil {
+		t.Fatalf("remove display log: %v", err)
 	}
 
 	imageRec := httptest.NewRecorder()
@@ -2138,6 +2142,65 @@ func TestSessionImageReadRejectsNestedImageName(t *testing.T) {
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/images/nested/secret.png", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionImageReadBackfillsLegacyDisplayLogReference(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	created := createSession(t, handler)
+	imageData, err := base64.StdEncoding.DecodeString(tinyPNGBase64())
+	if err != nil {
+		t.Fatalf("decode image fixture: %v", err)
+	}
+	blobPath := filepath.Join("sessions", created.ID+".images", "legacy.png")
+	if err := os.MkdirAll(filepath.Join(root, "sessions", created.ID+".images"), 0700); err != nil {
+		t.Fatalf("create image dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, blobPath), imageData, 0600); err != nil {
+		t.Fatalf("write legacy image: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemUserMessage,
+		Command: &zotigosession.DisplayCommand{
+			Type: sessionCommandMessage,
+			Images: []zotigosession.DisplayCommandImage{{
+				MimeType:  "image/png",
+				SizeBytes: len(imageData),
+				Width:     1,
+				Height:    1,
+				BlobPath:  blobPath,
+			}},
+		},
+	}); err != nil {
+		t.Fatalf("append legacy image display item: %v", err)
+	}
+
+	imageURL := "/sessions/" + created.ID + "/images/legacy.png"
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, imageURL, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), imageData) {
+		t.Fatalf("unexpected image bytes")
+	}
+
+	if err := os.Remove(filepath.Join(root, "sessions", created.ID+".display.jsonl")); err != nil {
+		t.Fatalf("remove display log: %v", err)
+	}
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, imageURL, nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected indexed image status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if !bytes.Equal(rec.Body.Bytes(), imageData) {
+		t.Fatalf("unexpected indexed image bytes")
 	}
 }
 

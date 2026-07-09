@@ -264,6 +264,30 @@ func (s *FileStore) List(ctx context.Context, filter ListFilter) ([]Metadata, er
 	return s.index.list(ctx, filter)
 }
 
+// PutImageRefs indexes image blobs accepted by a session message.
+func (s *FileStore) PutImageRefs(ctx context.Context, refs []ImageRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.index.upsertImageRefs(ctx, refs)
+}
+
+// DeleteImageRefs removes image blob index rows for a session.
+func (s *FileStore) DeleteImageRefs(ctx context.Context, sessionID string, names []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.index.deleteImageRefs(ctx, sessionID, names)
+}
+
+// GetImageRef retrieves one indexed image blob reference.
+func (s *FileStore) GetImageRef(ctx context.Context, sessionID string, name string) (ImageRef, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.index.getImageRef(ctx, sessionID, name)
+}
+
 // Lock acquires an exclusive lock on a session.
 func (s *FileStore) Lock(ctx context.Context, id string) error {
 	lockPath := s.lockPath(id)

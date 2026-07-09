@@ -190,20 +190,24 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
 	}
-
-	_, inRegistry := h.registry.Get(id)
-	items, inStore, err := h.items.LoadItems(r.Context(), id)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
-		return
-	}
-	if !inRegistry && !inStore {
-		writeAPIError(w, http.StatusNotFound, "session not found")
-		return
-	}
-
-	image, ok := referencedMessageImage(items, blobPath)
+	store, ok := h.imageStore()
 	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "image index is not configured")
+		return
+	}
+	image, ok, err := store.GetImageRef(r.Context(), id, name)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load image reference: %v", err))
+		return
+	}
+	if !ok {
+		image, ok, err = h.indexLegacyMessageImageRef(r.Context(), store, id, name, blobPath)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load image reference: %v", err))
+			return
+		}
+	}
+	if !ok || filepath.Clean(image.BlobPath) != filepath.Clean(blobPath) {
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
 	}
@@ -211,7 +215,7 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
 	}
-	rootDir := h.sessionStoreRoot()
+	rootDir := store.RootDir()
 	if rootDir == "" {
 		writeAPIError(w, http.StatusInternalServerError, "image persistence is not configured")
 		return
@@ -242,6 +246,15 @@ func (h *handler) appendMessageCommand(ctx context.Context, id string, text stri
 	if err != nil {
 		return zotigosession.DisplayItem{}, err
 	}
+	refs, err := messageImageRefs(id, images)
+	if err != nil {
+		cleanupMessageImageBlobs(images)
+		return zotigosession.DisplayItem{}, err
+	}
+	if err := h.putMessageImageRefs(ctx, refs); err != nil {
+		cleanupMessageImageBlobs(images)
+		return zotigosession.DisplayItem{}, err
+	}
 	item := displayMessageItem(zotigosession.DisplayItemUserMessage, text, images)
 	item.Command = &zotigosession.DisplayCommand{
 		Type:   sessionCommandMessage,
@@ -250,10 +263,39 @@ func (h *handler) appendMessageCommand(ctx context.Context, id string, text stri
 	}
 	item, err = h.items.AppendItemIf(ctx, id, item, requireIdleSession)
 	if err != nil {
+		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
 		cleanupMessageImageBlobs(images)
 		return zotigosession.DisplayItem{}, err
 	}
 	return item, nil
+}
+
+func (h *handler) indexLegacyMessageImageRef(ctx context.Context, store imageRefStore, sessionID string, name string, blobPath string) (zotigosession.ImageRef, bool, error) {
+	items, inStore, err := h.items.LoadItems(ctx, sessionID)
+	if err != nil {
+		return zotigosession.ImageRef{}, false, err
+	}
+	if !inStore {
+		return zotigosession.ImageRef{}, false, nil
+	}
+	image, ok := referencedMessageImage(items, blobPath)
+	if !ok || !isAllowedMessageImageMimeType(image.MimeType) {
+		return zotigosession.ImageRef{}, false, nil
+	}
+	ref := zotigosession.ImageRef{
+		SessionID: sessionID,
+		Name:      name,
+		BlobPath:  image.BlobPath,
+		MimeType:  image.MimeType,
+		SizeBytes: image.SizeBytes,
+		Width:     image.Width,
+		Height:    image.Height,
+		CreatedAt: time.Now().UTC(),
+	}
+	if err := store.PutImageRefs(ctx, []zotigosession.ImageRef{ref}); err != nil {
+		return zotigosession.ImageRef{}, false, err
+	}
+	return ref, true, nil
 }
 
 func referencedMessageImage(items []zotigosession.DisplayItem, blobPath string) (zotigosession.DisplayCommandImage, bool) {
@@ -274,12 +316,46 @@ type rootDirStore interface {
 	RootDir() string
 }
 
+type imageRefStore interface {
+	rootDirStore
+	PutImageRefs(context.Context, []zotigosession.ImageRef) error
+	DeleteImageRefs(context.Context, string, []string) error
+	GetImageRef(context.Context, string, string) (zotigosession.ImageRef, bool, error)
+}
+
 func (h *handler) sessionStoreRoot() string {
 	store, ok := h.store.(rootDirStore)
 	if !ok || store == nil {
 		return ""
 	}
 	return store.RootDir()
+}
+
+func (h *handler) imageStore() (imageRefStore, bool) {
+	store, ok := h.store.(imageRefStore)
+	return store, ok && store != nil
+}
+
+func (h *handler) putMessageImageRefs(ctx context.Context, refs []zotigosession.ImageRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	store, ok := h.imageStore()
+	if !ok {
+		return errors.New("image index is not configured")
+	}
+	return store.PutImageRefs(ctx, refs)
+}
+
+func (h *handler) deleteMessageImageRefs(ctx context.Context, sessionID string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	store, ok := h.imageStore()
+	if !ok {
+		return nil
+	}
+	return store.DeleteImageRefs(ctx, sessionID, names)
 }
 
 func requireIdleSession(items []zotigosession.DisplayItem) error {

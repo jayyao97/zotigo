@@ -10,7 +10,7 @@ Codex uses a similar split: durable rollout files keep replay history, while SQL
 
 ## Goal
 
-Add a SQLite-backed session metadata index for `core/session.FileStore` so `GET /sessions` and store `List` can query metadata without relying on a full file-registry scan.
+Add a SQLite-backed session metadata index for `core/session.FileStore` so `GET /sessions` and store `List` can query metadata without relying on a full file-registry scan. The same database may also hold narrow blob-reference indexes, such as accepted message images, when a public read API needs fast lookup without moving the blob bytes into SQLite.
 
 The SQLite index is not the source of truth for conversation history. It is an index over durable session files and display logs.
 
@@ -18,7 +18,7 @@ The SQLite index is not the source of truth for conversation history. It is an i
 
 - Do not move display logs into SQLite.
 - Do not change `/sessions/{id}/items` pagination or display-log storage.
-- Do not migrate image blobs into SQLite.
+- Do not migrate image blob bytes into SQLite.
 - Do not change worker command replay.
 - Do not add archive, pinning, project, or selection state to zotigod. Those are desktop UI concepts.
 - Do not add desktop-side SQLite changes in this PR.
@@ -30,7 +30,7 @@ Keep these responsibilities separate:
 - **Session JSON**: durable agent snapshot and core session metadata.
 - **Display log JSONL**: durable transcript, lifecycle events, and command log.
 - **Image blob directory**: raw image bytes referenced by display-log commands.
-- **zotigod SQLite session index**: queryable metadata owned by zotigo, such as session id, working directory, existing last prompt preview, and timestamps.
+- **zotigod SQLite session index**: queryable metadata owned by zotigo, such as session id, working directory, existing last prompt preview, timestamps, and narrow blob references.
 - **zotigo-desktop SQLite**: desktop UI state, such as projects, conversations, pinned order, selected conversation, and the binding to a daemon session.
 
 If SQLite is missing or damaged, zotigod should be able to rebuild the index from existing session JSON files. SQLite should improve query behavior, not become the only copy of session metadata.
@@ -55,6 +55,23 @@ CREATE INDEX IF NOT EXISTS idx_sessions_working_directory_updated_at
   ON sessions(working_directory, updated_at);
 ```
 
+Message images use a separate reference table. It indexes only accepted image
+blob metadata, not image bytes:
+
+```sql
+CREATE TABLE IF NOT EXISTS session_images (
+  session_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  blob_path TEXT NOT NULL,
+  mime_type TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  width INTEGER NOT NULL,
+  height INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  PRIMARY KEY (session_id, name)
+);
+```
+
 `last_prompt` preserves the existing `session.Metadata.LastPrompt` behavior used by CLI session lists. It is not a desktop conversation title.
 
 `created_at` and `updated_at` are stored as Unix nanoseconds so SQLite ordering is chronological and does not depend on RFC3339 string formatting details.
@@ -73,12 +90,12 @@ The exact filename can change during implementation, but it should be clearly sc
 
 ## Write Path
 
-Update the SQLite index whenever `FileStore` changes durable session metadata:
+Update the SQLite session metadata index whenever `FileStore` changes durable session metadata:
 
 - `Put`: upsert `session.Metadata`
 - `Delete`: delete the row
 
-`AppendDisplayItem` should not update SQLite in this version. Display-log append frequency is higher, and we are not indexing last-message preview or last sequence yet.
+`AppendDisplayItem` should not update session metadata rows in this version. Display-log append frequency is higher, and we are not indexing last-message preview or last sequence yet. Message image refs are written explicitly by zotigod when image blobs are accepted, so image reads do not need to scan the display log.
 
 The write order should preserve correctness:
 
@@ -99,6 +116,10 @@ Supported filters should match the current `ListFilter` behavior:
 - `OrderByCreatedAsc`
 
 `FileStore.Get` should continue reading the session JSON by id. `GET /sessions/{id}` needs the full stored session metadata and later may need the agent snapshot, so SQLite should not replace `Get`.
+
+`GET /sessions/{id}/images/{name}` should query the image reference table by
+`(session_id, name)`, then read the referenced blob file. It should not scan the
+full display log per image request.
 
 ## Index Initialization
 

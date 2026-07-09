@@ -136,6 +136,14 @@ func TestFileStore_Delete(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(imageDir, "image.png"), []byte("image"), 0600); err != nil {
 		t.Fatalf("Write image blob failed: %v", err)
 	}
+	if err := store.PutImageRefs(ctx, []ImageRef{{
+		SessionID: sess.ID,
+		Name:      "image.png",
+		BlobPath:  filepath.Join("sessions", sess.ID+".images", "image.png"),
+		MimeType:  "image/png",
+	}}); err != nil {
+		t.Fatalf("Put image ref failed: %v", err)
+	}
 
 	// Delete
 	err = store.Delete(ctx, "test_delete")
@@ -160,6 +168,11 @@ func TestFileStore_Delete(t *testing.T) {
 	}
 	if _, err := os.Stat(imageDir); !os.IsNotExist(err) {
 		t.Fatalf("Image blob directory should be deleted, got err=%v", err)
+	}
+	if _, ok, err := store.GetImageRef(ctx, sess.ID, "image.png"); err != nil {
+		t.Fatalf("Get image ref failed: %v", err)
+	} else if ok {
+		t.Fatalf("Image ref should be deleted with session")
 	}
 }
 
@@ -345,6 +358,85 @@ func TestFileStore_SQLiteIndexOrdersZeroAndNonZeroNanosecondTimes(t *testing.T) 
 	}
 	if asc[0].ID != "earlier_zero_nano" || asc[1].ID != "later_one_nano" {
 		t.Fatalf("Unexpected asc order: %s, %s", asc[0].ID, asc[1].ID)
+	}
+}
+
+func TestFileStore_SQLiteIndexOrdersEqualTimestampsByID(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	ts := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, id := range []string{"sess_a", "sess_c", "sess_b"} {
+		if err := store.Put(ctx, &Session{Metadata: Metadata{
+			ID:               id,
+			WorkingDirectory: "/project/tie",
+			CreatedAt:        ts,
+			UpdatedAt:        ts,
+		}}); err != nil {
+			t.Fatalf("Put %s failed: %v", id, err)
+		}
+	}
+
+	desc, err := store.List(ctx, ListFilter{WorkingDirectory: "/project/tie", OrderBy: OrderByUpdatedDesc})
+	if err != nil {
+		t.Fatalf("List desc failed: %v", err)
+	}
+	if desc[0].ID != "sess_c" || desc[1].ID != "sess_b" || desc[2].ID != "sess_a" {
+		t.Fatalf("Unexpected desc tiebreak order: %#v", desc)
+	}
+	asc, err := store.List(ctx, ListFilter{WorkingDirectory: "/project/tie", OrderBy: OrderByCreatedAsc})
+	if err != nil {
+		t.Fatalf("List asc failed: %v", err)
+	}
+	if asc[0].ID != "sess_a" || asc[1].ID != "sess_b" || asc[2].ID != "sess_c" {
+		t.Fatalf("Unexpected asc tiebreak order: %#v", asc)
+	}
+}
+
+func TestFileStore_SQLiteImageRefs(t *testing.T) {
+	tmpDir := t.TempDir()
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create store: %v", err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	ref := ImageRef{
+		SessionID: "sess_images",
+		Name:      "image.png",
+		BlobPath:  filepath.Join("sessions", "sess_images.images", "image.png"),
+		MimeType:  "image/png",
+		SizeBytes: 10,
+		Width:     1,
+		Height:    2,
+		CreatedAt: time.Now(),
+	}
+	if err := store.PutImageRefs(ctx, []ImageRef{ref}); err != nil {
+		t.Fatalf("PutImageRefs failed: %v", err)
+	}
+	got, ok, err := store.GetImageRef(ctx, "sess_images", "image.png")
+	if err != nil {
+		t.Fatalf("GetImageRef failed: %v", err)
+	}
+	if !ok {
+		t.Fatalf("Expected image ref")
+	}
+	if got.BlobPath != ref.BlobPath || got.MimeType != ref.MimeType || got.SizeBytes != ref.SizeBytes || got.Width != ref.Width || got.Height != ref.Height {
+		t.Fatalf("Unexpected image ref: %#v", got)
+	}
+	if err := store.DeleteImageRefs(ctx, "sess_images", []string{"image.png"}); err != nil {
+		t.Fatalf("DeleteImageRefs failed: %v", err)
+	}
+	if _, ok, err := store.GetImageRef(ctx, "sess_images", "image.png"); err != nil {
+		t.Fatalf("GetImageRef after delete failed: %v", err)
+	} else if ok {
+		t.Fatalf("Expected image ref to be deleted")
 	}
 }
 

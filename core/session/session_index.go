@@ -44,6 +44,18 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 		)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)`,
 		`CREATE INDEX IF NOT EXISTS idx_sessions_working_directory_updated_at ON sessions(working_directory, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS session_images (
+			session_id TEXT NOT NULL,
+			name TEXT NOT NULL,
+			blob_path TEXT NOT NULL,
+			mime_type TEXT NOT NULL,
+			size_bytes INTEGER NOT NULL,
+			width INTEGER NOT NULL,
+			height INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			PRIMARY KEY (session_id, name)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_session_images_session_id ON session_images(session_id)`,
 		`CREATE TABLE IF NOT EXISTS metadata (
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
@@ -74,8 +86,19 @@ func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 }
 
 func (i *sessionIndex) delete(ctx context.Context, id string) error {
-	if _, err := i.db.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
 		return fmt.Errorf("delete session index: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_images WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session image index: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, id); err != nil {
+		return fmt.Errorf("delete session index: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session index delete: %w", err)
 	}
 	return nil
 }
@@ -119,15 +142,15 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 	query.WriteString(` ORDER BY `)
 	switch filter.OrderBy {
 	case OrderByUpdatedAsc:
-		query.WriteString(`updated_at ASC`)
+		query.WriteString(`updated_at ASC, id ASC`)
 	case OrderByCreatedDesc:
-		query.WriteString(`created_at DESC`)
+		query.WriteString(`created_at DESC, id DESC`)
 	case OrderByCreatedAsc:
-		query.WriteString(`created_at ASC`)
+		query.WriteString(`created_at ASC, id ASC`)
 	case OrderByUpdatedDesc:
 		fallthrough
 	default:
-		query.WriteString(`updated_at DESC`)
+		query.WriteString(`updated_at DESC, id DESC`)
 	}
 	if filter.Limit > 0 {
 		query.WriteString(` LIMIT ?`)
@@ -156,6 +179,97 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 		return nil, fmt.Errorf("iterate session index: %w", err)
 	}
 	return result, nil
+}
+
+// ImageRef indexes an accepted per-session image blob without storing its bytes.
+type ImageRef struct {
+	SessionID string
+	Name      string
+	BlobPath  string
+	MimeType  string
+
+	SizeBytes int
+	Width     int
+	Height    int
+	CreatedAt time.Time
+}
+
+func (i *sessionIndex) upsertImageRefs(ctx context.Context, refs []ImageRef) error {
+	if len(refs) == 0 {
+		return nil
+	}
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("upsert session image index: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `
+		INSERT INTO session_images (session_id, name, blob_path, mime_type, size_bytes, width, height, created_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(session_id, name) DO UPDATE SET
+			blob_path = excluded.blob_path,
+			mime_type = excluded.mime_type,
+			size_bytes = excluded.size_bytes,
+			width = excluded.width,
+			height = excluded.height,
+			created_at = excluded.created_at
+	`)
+	if err != nil {
+		return fmt.Errorf("prepare session image index upsert: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for _, ref := range refs {
+		if _, err := stmt.ExecContext(ctx, ref.SessionID, ref.Name, ref.BlobPath, ref.MimeType, ref.SizeBytes, ref.Width, ref.Height, formatIndexTime(ref.CreatedAt)); err != nil {
+			return fmt.Errorf("upsert session image index: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session image index upsert: %w", err)
+	}
+	return nil
+}
+
+func (i *sessionIndex) deleteImageRefs(ctx context.Context, sessionID string, names []string) error {
+	if len(names) == 0 {
+		return nil
+	}
+	tx, err := i.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("delete session image index: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	stmt, err := tx.PrepareContext(ctx, `DELETE FROM session_images WHERE session_id = ? AND name = ?`)
+	if err != nil {
+		return fmt.Errorf("prepare session image index delete: %w", err)
+	}
+	defer func() { _ = stmt.Close() }()
+	for _, name := range names {
+		if _, err := stmt.ExecContext(ctx, sessionID, name); err != nil {
+			return fmt.Errorf("delete session image index: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit session image index delete: %w", err)
+	}
+	return nil
+}
+
+func (i *sessionIndex) getImageRef(ctx context.Context, sessionID string, name string) (ImageRef, bool, error) {
+	var ref ImageRef
+	var createdAt int64
+	err := i.db.QueryRowContext(ctx, `
+		SELECT session_id, name, blob_path, mime_type, size_bytes, width, height, created_at
+		FROM session_images
+		WHERE session_id = ? AND name = ?
+	`, sessionID, name).Scan(&ref.SessionID, &ref.Name, &ref.BlobPath, &ref.MimeType, &ref.SizeBytes, &ref.Width, &ref.Height, &createdAt)
+	if err == nil {
+		ref.CreatedAt = parseIndexTime(createdAt)
+		return ref, true, nil
+	}
+	if err == sql.ErrNoRows {
+		return ImageRef{}, false, nil
+	}
+	return ImageRef{}, false, fmt.Errorf("get session image index: %w", err)
 }
 
 func (i *sessionIndex) bootstrapped(ctx context.Context) (bool, error) {

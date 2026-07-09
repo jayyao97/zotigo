@@ -432,10 +432,10 @@ Historical image bytes are read through a separate public endpoint:
 The `{name}` value is the random image name returned in `/items` image URLs.
 This endpoint does not wrap the response in JSON; it returns the original image
 bytes with `Content-Type` set to `image/png`, `image/jpeg`, or `image/webp`.
-The image must be referenced by the session display log. Missing sessions,
-unknown image names, unreferenced blob files, and deleted blobs return `404`.
-This keeps `/items` small and prevents base64 image payloads from becoming part
-of the transcript API.
+The image must be recorded in zotigod's session image index when the message is
+accepted. Missing sessions, unknown image names, unreferenced blob files, and
+deleted blobs return `404`. This keeps `/items` small and prevents base64 image
+payloads from becoming part of the transcript API.
 
 `POST /sessions/{id}/messages` starts or resumes the session when needed, then
 requires no currently open turn and no pending message command that has not yet
