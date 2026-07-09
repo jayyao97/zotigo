@@ -95,6 +95,7 @@ type commandImageResponse struct {
 	Width      int    `json:"width,omitempty"`
 	Height     int    `json:"height,omitempty"`
 	DataBase64 string `json:"data_base64,omitempty"`
+	BlobPath   string `json:"-"`
 }
 
 type publicCommandResponse struct {
@@ -113,6 +114,7 @@ type publicCommandImageResponse struct {
 	SizeBytes int    `json:"size_bytes,omitempty"`
 	Width     int    `json:"width,omitempty"`
 	Height    int    `json:"height,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, id string) {
@@ -132,13 +134,13 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	text := strings.TrimSpace(req.Text)
-	if text == "" {
-		writeAPIError(w, http.StatusBadRequest, "text is required")
-		return
-	}
 	images, err := validateMessageImages(req.Images)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if text == "" && len(images) == 0 {
+		writeAPIError(w, http.StatusBadRequest, "message requires text or images")
 		return
 	}
 	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
@@ -177,6 +179,59 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
+func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id string, name string) {
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	blobPath, ok := messageImageBlobPath(id, name)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "image not found")
+		return
+	}
+
+	_, inRegistry := h.registry.Get(id)
+	items, inStore, err := h.items.LoadItems(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
+		return
+	}
+	if !inRegistry && !inStore {
+		writeAPIError(w, http.StatusNotFound, "session not found")
+		return
+	}
+
+	image, ok := referencedMessageImage(items, blobPath)
+	if !ok {
+		writeAPIError(w, http.StatusNotFound, "image not found")
+		return
+	}
+	if !isAllowedMessageImageMimeType(image.MimeType) {
+		writeAPIError(w, http.StatusNotFound, "image not found")
+		return
+	}
+	rootDir := h.sessionStoreRoot()
+	if rootDir == "" {
+		writeAPIError(w, http.StatusInternalServerError, "image persistence is not configured")
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(rootDir, blobPath))
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeAPIError(w, http.StatusNotFound, "image not found")
+			return
+		}
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("read image: %v", err))
+		return
+	}
+	w.Header().Set("Content-Type", image.MimeType)
+	w.Header().Set("Cache-Control", "private, max-age=86400")
+	w.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
 var (
 	errSessionBusy     = errors.New("session is busy")
 	errApprovalPending = errors.New("approval is pending")
@@ -199,6 +254,20 @@ func (h *handler) appendMessageCommand(ctx context.Context, id string, text stri
 		return zotigosession.DisplayItem{}, err
 	}
 	return item, nil
+}
+
+func referencedMessageImage(items []zotigosession.DisplayItem, blobPath string) (zotigosession.DisplayCommandImage, bool) {
+	for _, item := range items {
+		if item.Command == nil || item.Command.Type != sessionCommandMessage {
+			continue
+		}
+		for _, img := range item.Command.Images {
+			if filepath.Clean(img.BlobPath) == filepath.Clean(blobPath) {
+				return img, true
+			}
+		}
+	}
+	return zotigosession.DisplayCommandImage{}, false
 }
 
 type rootDirStore interface {
@@ -718,10 +787,13 @@ func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (com
 }
 
 func displayMessageItem(itemType zotigosession.DisplayItemType, text string, images []messageImage) zotigosession.DisplayItem {
-	content := []zotigosession.DisplayContentPart{{
-		Type: string(protocol.ContentTypeText),
-		Text: text,
-	}}
+	content := make([]zotigosession.DisplayContentPart, 0, 1+len(images))
+	if text != "" {
+		content = append(content, zotigosession.DisplayContentPart{
+			Type: string(protocol.ContentTypeText),
+			Text: text,
+		})
+	}
 	for _, img := range images {
 		content = append(content, zotigosession.DisplayContentPart{
 			Type: string(protocol.ContentTypeImage),
@@ -788,6 +860,7 @@ func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDi
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
+			BlobPath:  img.BlobPath,
 		}
 		if len(img.Data) > 0 {
 			part.DataBase64 = base64.StdEncoding.EncodeToString(img.Data)
@@ -847,6 +920,7 @@ func publicCommandImages(images []commandImageResponse) []publicCommandImageResp
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
+			URL:       publicImageURLFromBlobPath(img.BlobPath),
 		}
 	}
 	return resp

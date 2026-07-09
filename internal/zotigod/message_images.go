@@ -12,6 +12,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -199,4 +200,35 @@ func messageImageExtension(mimeType string) string {
 	default:
 		return ".png"
 	}
+}
+
+func publicImageURLFromBlobPath(blobPath string) string {
+	sessionID, name, ok := parseMessageImageBlobPath(blobPath)
+	if !ok {
+		return ""
+	}
+	return "/sessions/" + url.PathEscape(sessionID) + "/images/" + url.PathEscape(name)
+}
+
+func parseMessageImageBlobPath(blobPath string) (sessionID string, name string, ok bool) {
+	parts := strings.Split(filepath.ToSlash(blobPath), "/")
+	if len(parts) != 3 || parts[0] != "sessions" || parts[2] == "" {
+		return "", "", false
+	}
+	dir := parts[1]
+	if !strings.HasSuffix(dir, ".images") {
+		return "", "", false
+	}
+	sessionID = strings.TrimSuffix(dir, ".images")
+	if sessionID == "" || strings.ContainsAny(parts[2], `/\`) || parts[2] == "." || parts[2] == ".." {
+		return "", "", false
+	}
+	return sessionID, parts[2], true
+}
+
+func messageImageBlobPath(sessionID string, name string) (string, bool) {
+	if sessionID == "" || name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return "", false
+	}
+	return filepath.Join("sessions", sessionID+".images", name), true
 }

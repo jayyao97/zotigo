@@ -1,6 +1,7 @@
 package zotigod
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -1987,6 +1988,9 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	if len(publicCommand.Images) != 1 {
 		t.Fatalf("expected one public image metadata, got %#v", publicCommand.Images)
 	}
+	if publicCommand.Images[0].URL == "" {
+		t.Fatalf("expected public image URL, got %#v", publicCommand.Images[0])
+	}
 	if strings.Contains(rec.Body.String(), "data_base64") || strings.Contains(rec.Body.String(), imageBase64) {
 		t.Fatalf("public message response leaked image payload: %s", rec.Body.String())
 	}
@@ -2011,12 +2015,150 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 		item.Content[1].Image.Width != 1 || item.Content[1].Image.Height != 1 {
 		t.Fatalf("unexpected image metadata: %#v", item.Content[1].Image)
 	}
+	if item.Content[1].Image.URL == "" || item.Command == nil || len(item.Command.Images) != 1 || item.Command.Images[0].URL == "" {
+		t.Fatalf("expected item image URLs, got content=%#v command=%#v", item.Content[1].Image, item.Command)
+	}
 	encodedItems, err := sonic.MarshalString(items)
 	if err != nil {
 		t.Fatalf("encode items: %v", err)
 	}
 	if strings.Contains(encodedItems, imageBase64) {
 		t.Fatalf("items response leaked image base64")
+	}
+
+	imageRec := httptest.NewRecorder()
+	handler.ServeHTTP(imageRec, httptest.NewRequest(http.MethodGet, item.Content[1].Image.URL, nil))
+	if imageRec.Code != http.StatusOK {
+		t.Fatalf("expected image status %d, got %d: %s", http.StatusOK, imageRec.Code, imageRec.Body.String())
+	}
+	expectedImage, err := base64.StdEncoding.DecodeString(imageBase64)
+	if err != nil {
+		t.Fatalf("decode image fixture: %v", err)
+	}
+	if imageRec.Header().Get("Content-Type") != "image/png" {
+		t.Fatalf("expected image/png, got %q", imageRec.Header().Get("Content-Type"))
+	}
+	if !bytes.Equal(imageRec.Body.Bytes(), expectedImage) {
+		t.Fatalf("unexpected image bytes")
+	}
+}
+
+func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	imageBase64 := tinyPNGBase64()
+	body := fmt.Sprintf(`{"images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	var publicCommand publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &publicCommand); err != nil {
+		t.Fatalf("decode message response: %v", err)
+	}
+	if publicCommand.Text != "" {
+		t.Fatalf("expected empty public text, got %q", publicCommand.Text)
+	}
+	if len(publicCommand.Images) != 1 {
+		t.Fatalf("expected one public image metadata, got %#v", publicCommand.Images)
+	}
+
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Message == nil {
+		t.Fatalf("expected worker message command, got %#v", msg)
+	}
+	if msg.Command.Message.Text != "" {
+		t.Fatalf("expected empty worker text, got %q", msg.Command.Message.Text)
+	}
+	if len(msg.Command.Message.Images) != 1 || msg.Command.Message.Images[0].DataBase64 == "" {
+		t.Fatalf("expected worker image payload, got %#v", msg.Command.Message.Images)
+	}
+
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 1 {
+		t.Fatalf("expected one display item, got %#v", items.Items)
+	}
+	item := items.Items[0]
+	if len(item.Content) != 1 || item.Content[0].Text != "" || item.Content[0].Image == nil {
+		t.Fatalf("expected image-only display item, got %#v", item.Content)
+	}
+	if strings.Contains(rec.Body.String(), "data_base64") || strings.Contains(rec.Body.String(), imageBase64) {
+		t.Fatalf("public message response leaked image payload: %s", rec.Body.String())
+	}
+}
+
+func TestSessionImageReadRejectsUnreferencedBlob(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	created := createSession(t, handler)
+	dir := filepath.Join(root, "sessions", created.ID+".images")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		t.Fatalf("create image dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "orphan.png"), []byte("orphan"), 0600); err != nil {
+		t.Fatalf("write orphan image: %v", err)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/images/orphan.png", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionImageReadRejectsNestedImageName(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	created := createSession(t, handler)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/images/nested/secret.png", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusNotFound, rec.Code, rec.Body.String())
+	}
+}
+
+func TestSessionMessageRejectsEmptyTextWithoutImages(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"   "}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "message requires text or images") {
+		t.Fatalf("unexpected response: %s", rec.Body.String())
 	}
 }
 
