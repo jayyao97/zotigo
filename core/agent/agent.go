@@ -61,7 +61,7 @@ type Agent struct {
 	mu              sync.RWMutex
 	state           State
 	history         []protocol.Message
-	pendingTurnUser []string
+	pendingTurnUser []protocol.Message
 	pendingActions  []*PendingAction
 	deferredActions []*PendingAction
 	turns           []TurnAudit
@@ -378,13 +378,51 @@ func (a *Agent) QueueTurnUserInput(text string) error {
 	if text == "" {
 		return errors.New("input is required")
 	}
+	return a.QueueTurnUserMessage(protocol.NewUserMessage(text))
+}
+
+// QueueTurnUserMessage queues structured user input for the active turn.
+func (a *Agent) QueueTurnUserMessage(msg protocol.Message) error {
+	msg, err := normalizeQueuedTurnUserMessage(msg)
+	if err != nil {
+		return err
+	}
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if a.state != StateRunning && a.state != StatePaused {
 		return fmt.Errorf("agent is not running")
 	}
-	a.pendingTurnUser = append(a.pendingTurnUser, text)
+	a.pendingTurnUser = append(a.pendingTurnUser, msg)
 	return nil
+}
+
+func normalizeQueuedTurnUserMessage(msg protocol.Message) (protocol.Message, error) {
+	if msg.Role != protocol.RoleUser {
+		return protocol.Message{}, errors.New("input must be a user message")
+	}
+	content := make([]protocol.ContentPart, 0, len(msg.Content))
+	for _, part := range msg.Content {
+		switch part.Type {
+		case protocol.ContentTypeText:
+			text := strings.TrimSpace(part.Text)
+			if text != "" {
+				part.Text = text
+				content = append(content, part)
+			}
+		case protocol.ContentTypeImage:
+			if part.Image != nil {
+				content = append(content, part)
+			}
+		}
+	}
+	if len(content) == 0 {
+		return protocol.Message{}, errors.New("input is required")
+	}
+	msg.Content = content
+	if msg.CreatedAt.IsZero() {
+		msg.CreatedAt = time.Now()
+	}
+	return msg, nil
 }
 
 // ClearPendingTurnUserInput discards active-turn input that was not drained
@@ -1871,9 +1909,38 @@ func (a *Agent) drainPendingTurnUserInputLocked() bool {
 	if len(a.pendingTurnUser) == 0 {
 		return false
 	}
-	text := strings.Join(a.pendingTurnUser, "\n\n")
+	content := make([]protocol.ContentPart, 0, len(a.pendingTurnUser))
+	texts := make([]string, 0, len(a.pendingTurnUser))
+	flushText := func() {
+		if len(texts) == 0 {
+			return
+		}
+		content = append(content, protocol.ContentPart{
+			Type: protocol.ContentTypeText,
+			Text: strings.Join(texts, "\n\n"),
+		})
+		texts = texts[:0]
+	}
+	for _, msg := range a.pendingTurnUser {
+		for _, part := range msg.Content {
+			if part.Type == protocol.ContentTypeText {
+				text := strings.TrimSpace(part.Text)
+				if text != "" {
+					texts = append(texts, text)
+				}
+				continue
+			}
+			flushText()
+			content = append(content, part)
+		}
+	}
+	flushText()
 	a.pendingTurnUser = nil
-	a.history = append(a.history, protocol.NewUserMessage(text))
+	a.history = append(a.history, protocol.Message{
+		Role:      protocol.RoleUser,
+		Content:   content,
+		CreatedAt: time.Now(),
+	})
 	return true
 }
 

@@ -322,7 +322,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart, commandIma
 }
 
 func displayCommandImagesForContent(command *zotigosession.DisplayCommand) []zotigosession.DisplayCommandImage {
-	if command == nil || command.Type != sessionCommandMessage {
+	if command == nil || (command.Type != sessionCommandMessage && command.Type != sessionCommandSteering) {
 		return nil
 	}
 	return command.Images
