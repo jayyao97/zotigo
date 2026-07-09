@@ -563,6 +563,10 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 	case "steering":
 		h.handleSessionSteering(w, r, id)
 	default:
+		if imageName, ok := strings.CutPrefix(action, "images/"); ok {
+			h.handleSessionImage(w, r, id, imageName)
+			return
+		}
 		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
 			h.handleApprovalDecision(w, r, id, approvalID)
 			return

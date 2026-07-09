@@ -51,7 +51,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 ```json
 {
   "code": "invalid_request",
-  "message": "text is required"
+  "message": "message requires text or images"
 }
 ```
 
@@ -164,7 +164,19 @@ Response data:
       "sequence": 1,
       "type": "user_message",
       "role": "user",
-      "content": [{ "type": "text", "text": "hello" }],
+      "content": [
+        { "type": "text", "text": "hello" },
+        {
+          "type": "image",
+          "image": {
+            "media_type": "image/png",
+            "size_bytes": 1024,
+            "width": 640,
+            "height": 480,
+            "url": "/sessions/sess_8f0e12ab34cd56ef/images/0123456789abcdef0123456789abcdef.png"
+          }
+        }
+      ],
       "created_at": "2026-01-02T03:04:05Z"
     },
     {
@@ -390,7 +402,9 @@ Messages may also include image input:
 }
 ```
 
-`images` is optional. The first image-input version only accepts `image/png`,
+`text` is optional when `images` is non-empty. Requests must include at least one
+non-empty text value or one image. `images` is optional. The first image-input
+version only accepts `image/png`,
 `image/jpeg`, and `image/webp`. A request may include at most 5 images; each
 decoded image is capped at 5 MiB, total decoded image bytes are capped at 20
 MiB, and the JSON request body is capped at 28 MiB. Invalid base64, unsupported
@@ -409,7 +423,19 @@ runtime receives real `image` content parts. The display log and public
 `/sessions/{id}/items` response do not persist or return full image base64.
 Image bytes are stored separately as per-session blobs for command replay, and
 public responses only include metadata such as `mime_type`, `size_bytes`,
-`width`, and `height` when available.
+`width`, `height`, and an image read `url` when available.
+
+Historical image bytes are read through a separate public endpoint:
+
+`GET /sessions/{id}/images/{name}`
+
+The `{name}` value is the random image name returned in `/items` image URLs.
+This endpoint does not wrap the response in JSON; it returns the original image
+bytes with `Content-Type` set to `image/png`, `image/jpeg`, or `image/webp`.
+The image must be recorded in zotigod's session image index when the message is
+accepted. Missing sessions, unknown image names, unreferenced blob files, and
+deleted blobs return `404`. This keeps `/items` small and prevents base64 image
+payloads from becoming part of the transcript API.
 
 `POST /sessions/{id}/messages` starts or resumes the session when needed, then
 requires no currently open turn and no pending message command that has not yet
@@ -429,7 +455,8 @@ Response data:
       "mime_type": "image/png",
       "size_bytes": 1024,
       "width": 640,
-      "height": 480
+      "height": 480,
+      "url": "/sessions/sess_8f0e12ab34cd56ef/images/0123456789abcdef0123456789abcdef.png"
     }
   ],
   "created_at": "2026-01-02T03:04:07Z"

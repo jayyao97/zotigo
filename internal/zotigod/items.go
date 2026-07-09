@@ -216,6 +216,7 @@ type itemCommandImageResponse struct {
 	SizeBytes int    `json:"size_bytes,omitempty"`
 	Width     int    `json:"width,omitempty"`
 	Height    int    `json:"height,omitempty"`
+	URL       string `json:"url,omitempty"`
 }
 
 type itemsResponse struct {
@@ -289,7 +290,7 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Sequence:  item.Sequence,
 		Type:      string(item.Type),
 		Role:      item.Role,
-		Content:   publicDisplayContent(item.Content),
+		Content:   publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
 		Turn:      publicDisplayTurn(item.Turn),
 		Approval:  publicDisplayApproval(item.Approval),
 		Command:   publicDisplayCommand(item.Command),
@@ -298,18 +299,33 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 	}
 }
 
-func publicDisplayContent(content []zotigosession.DisplayContentPart) []itemContentResponse {
+func publicDisplayContent(content []zotigosession.DisplayContentPart, commandImages []zotigosession.DisplayCommandImage) []itemContentResponse {
 	parts := make([]itemContentResponse, 0, len(content))
+	imageIdx := 0
 	for _, part := range content {
+		image := publicDisplayMediaPart(part.Image)
+		if image != nil && image.URL == "" && imageIdx < len(commandImages) {
+			image.URL = publicImageURLFromBlobPath(commandImages[imageIdx].BlobPath)
+		}
+		if part.Image != nil {
+			imageIdx++
+		}
 		parts = append(parts, itemContentResponse{
 			Type:       part.Type,
 			Text:       part.Text,
-			Image:      publicDisplayMediaPart(part.Image),
+			Image:      image,
 			ToolCall:   publicDisplayToolCall(part.ToolCall),
 			ToolResult: publicDisplayToolResult(part.ToolResult),
 		})
 	}
 	return parts
+}
+
+func displayCommandImagesForContent(command *zotigosession.DisplayCommand) []zotigosession.DisplayCommandImage {
+	if command == nil || command.Type != sessionCommandMessage {
+		return nil
+	}
+	return command.Images
 }
 
 func publicDisplayToolCall(call *zotigosession.DisplayToolCall) *itemToolCallResponse {
@@ -418,6 +434,7 @@ func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []it
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
+			URL:       publicImageURLFromBlobPath(img.BlobPath),
 		})
 	}
 	return resp

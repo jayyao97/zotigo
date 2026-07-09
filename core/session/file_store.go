@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -30,6 +29,7 @@ var displayLogAppendMu sync.Mutex
 type FileStore struct {
 	rootDir      string
 	registryPath string
+	index        *sessionIndex
 	mu           sync.RWMutex
 }
 
@@ -49,10 +49,21 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create sessions directory: %w", err)
 	}
 
-	return &FileStore{
+	index, err := openSessionIndex(filepath.Join(rootDir, "session_index.sqlite"))
+	if err != nil {
+		return nil, err
+	}
+
+	store := &FileStore{
 		rootDir:      rootDir,
 		registryPath: filepath.Join(rootDir, "registry.json"),
-	}, nil
+		index:        index,
+	}
+	if err := store.bootstrapSessionIndex(); err != nil {
+		_ = index.close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *FileStore) RootDir() string {
@@ -95,9 +106,15 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 	if err := os.WriteFile(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write session file: %w", err)
 	}
+	if err := s.index.upsert(ctx, sess.Metadata); err != nil {
+		return err
+	}
 
-	// Update registry
-	return s.updateRegistry(sess.Metadata)
+	// Keep the legacy registry file updated for compatibility. List uses SQLite.
+	if err := s.updateRegistry(sess.Metadata); err != nil {
+		return err
+	}
+	return s.recordLegacyRegistryMTime(ctx)
 }
 
 func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item DisplayItem) (DisplayItem, error) {
@@ -228,9 +245,15 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	if err := os.RemoveAll(s.imageBlobDir(id)); err != nil {
 		return fmt.Errorf("failed to delete session image blobs: %w", err)
 	}
+	if err := s.index.delete(ctx, id); err != nil {
+		return err
+	}
 
-	// Update registry
-	return s.removeFromRegistry(id)
+	// Keep the legacy registry file updated for compatibility. List uses SQLite.
+	if err := s.removeFromRegistry(id); err != nil {
+		return err
+	}
+	return s.recordLegacyRegistryMTime(ctx)
 }
 
 // List returns all sessions matching the filter.
@@ -238,45 +261,31 @@ func (s *FileStore) List(ctx context.Context, filter ListFilter) ([]Metadata, er
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	reg, err := s.loadRegistry()
-	if err != nil {
-		return nil, err
-	}
+	return s.index.list(ctx, filter)
+}
 
-	var result []Metadata
-	for _, meta := range reg.Sessions {
-		if filter.WorkingDirectory != "" && meta.WorkingDirectory != filter.WorkingDirectory {
-			continue
-		}
-		result = append(result, meta)
-	}
+// PutImageRefs indexes image blobs accepted by a session message.
+func (s *FileStore) PutImageRefs(ctx context.Context, refs []ImageRef) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Sort
-	switch filter.OrderBy {
-	case OrderByUpdatedDesc:
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].UpdatedAt.After(result[j].UpdatedAt)
-		})
-	case OrderByUpdatedAsc:
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].UpdatedAt.Before(result[j].UpdatedAt)
-		})
-	case OrderByCreatedDesc:
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].CreatedAt.After(result[j].CreatedAt)
-		})
-	case OrderByCreatedAsc:
-		sort.Slice(result, func(i, j int) bool {
-			return result[i].CreatedAt.Before(result[j].CreatedAt)
-		})
-	}
+	return s.index.upsertImageRefs(ctx, refs)
+}
 
-	// Limit
-	if filter.Limit > 0 && len(result) > filter.Limit {
-		result = result[:filter.Limit]
-	}
+// DeleteImageRefs removes image blob index rows for a session.
+func (s *FileStore) DeleteImageRefs(ctx context.Context, sessionID string, names []string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	return result, nil
+	return s.index.deleteImageRefs(ctx, sessionID, names)
+}
+
+// GetImageRef retrieves one indexed image blob reference.
+func (s *FileStore) GetImageRef(ctx context.Context, sessionID string, name string) (ImageRef, bool, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.index.getImageRef(ctx, sessionID, name)
 }
 
 // Lock acquires an exclusive lock on a session.
@@ -376,6 +385,9 @@ func isPIDLockActive(lockPath string) (bool, error) {
 
 // Close releases any resources.
 func (s *FileStore) Close() error {
+	if s.index != nil {
+		return s.index.close()
+	}
 	return nil
 }
 
@@ -670,6 +682,21 @@ func (s *FileStore) loadRegistry() (*registry, error) {
 	if err := json.Unmarshal(data, &reg); err != nil {
 		// If corrupt, return empty
 		return &registry{Sessions: []Metadata{}}, nil
+	}
+	return &reg, nil
+}
+
+func (s *FileStore) loadRegistryStrict() (*registry, error) {
+	data, err := os.ReadFile(s.registryPath)
+	if os.IsNotExist(err) {
+		return &registry{Sessions: []Metadata{}}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to read registry: %w", err)
+	}
+	var reg registry
+	if err := json.Unmarshal(data, &reg); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal registry: %w", err)
 	}
 	return &reg, nil
 }
