@@ -1523,6 +1523,135 @@ func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 	}
 }
 
+func TestLoadWorkerCommandCursorDoesNotSkipPendingSteering(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	defer store.Close()
+	sessionID := "sess-pending-steering-cursor"
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:        sessionID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+	}); err != nil {
+		t.Fatalf("append turn started: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemSteeringMessage,
+		Role: string(protocol.RoleUser),
+		Content: []zotigosession.DisplayContentPart{{
+			Type: string(protocol.ContentTypeText),
+			Text: "still pending",
+		}},
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+		Command: &zotigosession.DisplayCommand{
+			Type:   sessionCommandSteering,
+			Text:   "still pending",
+			TurnID: "turn-1",
+		},
+	}); err != nil {
+		t.Fatalf("append steering command: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+		t.Fatalf("create cursor dir: %v", err)
+	}
+	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+		t.Fatalf("write corrupt cursor: %v", err)
+	}
+
+	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	if err != nil {
+		t.Fatalf("load worker command cursor: %v", err)
+	}
+	if cursor.Sequence != 0 || cursor.Offset != 0 {
+		t.Fatalf("expected pending steering to remain replayable, got %#v", cursor)
+	}
+}
+
+func TestLoadWorkerCommandCursorRecoversAppliedImageOnlySteering(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	defer store.Close()
+	sessionID := "sess-applied-image-steering-cursor"
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID:        sessionID,
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+	}); err != nil {
+		t.Fatalf("append turn started: %v", err)
+	}
+	item, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemSteeringMessage,
+		Role: string(protocol.RoleUser),
+		Content: []zotigosession.DisplayContentPart{{
+			Type: string(protocol.ContentTypeImage),
+			Image: &zotigosession.DisplayMediaPart{
+				MediaType: "image/png",
+				SizeBytes: 1,
+				Width:     1,
+				Height:    1,
+			},
+		}},
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+		Command: &zotigosession.DisplayCommand{
+			Type: sessionCommandSteering,
+			Images: []zotigosession.DisplayCommandImage{{
+				MimeType:  "image/png",
+				SizeBytes: 1,
+				Width:     1,
+				Height:    1,
+			}},
+			TurnID: "turn-1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("append steering command: %v", err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnCompleted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+	}); err != nil {
+		t.Fatalf("append turn completed: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+		t.Fatalf("create cursor dir: %v", err)
+	}
+	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+		t.Fatalf("write corrupt cursor: %v", err)
+	}
+
+	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	if err != nil {
+		t.Fatalf("load worker command cursor: %v", err)
+	}
+	if cursor.Sequence != item.Sequence || cursor.Offset != 0 {
+		t.Fatalf("expected applied image steering sequence %d, got %#v", item.Sequence, cursor)
+	}
+}
+
 func TestLoadWorkerCommandCursorDowngradesUnsafeSequence(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store, err := zotigosession.NewFileStore(t.TempDir())
@@ -2386,7 +2515,7 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 func TestMessageFromCommandIncludesImages(t *testing.T) {
 	msg, err := messageFromCommand("item_1", &messageCommandPayload{
 		Text: "describe this",
-		Images: []commandImageResponse{{
+		Images: []commandImageData{{
 			MimeType:   "image/png",
 			DataBase64: tinyPNGBase64(),
 		}},
@@ -2406,7 +2535,7 @@ func TestMessageFromCommandIncludesImages(t *testing.T) {
 func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
 	_, err := messageFromCommand("item_1", &messageCommandPayload{
 		Text: "describe this",
-		Images: []commandImageResponse{{
+		Images: []commandImageData{{
 			MimeType: "image/png",
 		}},
 	})
@@ -2485,8 +2614,13 @@ func TestSessionMessageRejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
-func TestSessionSteeringRejectsImages(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -2494,13 +2628,75 @@ func TestSessionSteeringRejectsImages(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+	}); err != nil {
+		t.Fatalf("append turn started: %v", err)
+	}
 
+	imageBase64 := tinyPNGBase64()
 	rec := httptest.NewRecorder()
-	body := fmt.Sprintf(`{"text":"adjust","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
+	body := fmt.Sprintf(`{"images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+
+	var publicCommand publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &publicCommand); err != nil {
+		t.Fatalf("decode steering response: %v", err)
+	}
+	if publicCommand.Text != "" || publicCommand.TurnID != "turn-1" || len(publicCommand.Images) != 1 {
+		t.Fatalf("unexpected public steering response: %#v", publicCommand)
+	}
+	if publicCommand.Images[0].URL == "" {
+		t.Fatalf("expected public steering image URL, got %#v", publicCommand.Images[0])
+	}
+	if strings.Contains(rec.Body.String(), "data_base64") || strings.Contains(rec.Body.String(), imageBase64) {
+		t.Fatalf("public steering response leaked image payload: %s", rec.Body.String())
+	}
+
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Steering == nil || len(msg.Command.Steering.Images) != 1 {
+		t.Fatalf("expected worker steering image command, got %#v", msg)
+	}
+	if msg.Command.Steering.Images[0].DataBase64 == "" {
+		t.Fatalf("worker steering command did not include image data")
+	}
+
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 2 {
+		t.Fatalf("expected turn and steering display items, got %#v", items.Items)
+	}
+	item := items.Items[1]
+	if len(item.Content) != 1 || item.Content[0].Image == nil || item.Content[0].Image.URL == "" {
+		t.Fatalf("expected image-only steering display item, got %#v", item.Content)
+	}
+	if item.Command == nil || len(item.Command.Images) != 1 || item.Command.Images[0].URL == "" {
+		t.Fatalf("expected steering command image URL, got %#v", item.Command)
+	}
+
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 1 || commands.Commands[0].Steering == nil || len(commands.Commands[0].Steering.Images) != 1 {
+		t.Fatalf("expected replayable steering image command, got %#v", commands)
+	}
+	if commands.Commands[0].Steering.Images[0].DataBase64 == "" {
+		t.Fatalf("replayed steering command did not hydrate image payload")
+	}
+
+	imageRec := httptest.NewRecorder()
+	handler.ServeHTTP(imageRec, httptest.NewRequest(http.MethodGet, item.Content[0].Image.URL, nil))
+	if imageRec.Code != http.StatusOK {
+		t.Fatalf("expected image status %d, got %d: %s", http.StatusOK, imageRec.Code, imageRec.Body.String())
+	}
+	expectedImage, err := base64.StdEncoding.DecodeString(imageBase64)
+	if err != nil {
+		t.Fatalf("decode image fixture: %v", err)
+	}
+	if !bytes.Equal(imageRec.Body.Bytes(), expectedImage) {
+		t.Fatalf("unexpected image bytes")
 	}
 }
 

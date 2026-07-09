@@ -2693,6 +2693,71 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 	}
 }
 
+func TestAgentDrainsStructuredQueuedTurnUserInputIntoHistory(t *testing.T) {
+	prov := &BlockingCaptureProvider{
+		Started: make(chan struct{}),
+		Release: make(chan struct{}),
+	}
+	providers.Register("blocking-capture-structured-steering", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "blocking-capture-structured-steering"}, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "real request")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	select {
+	case <-prov.Started:
+	case <-time.After(time.Second):
+		t.Fatal("provider did not start")
+	}
+	if err := ag.QueueTurnUserMessage(protocol.Message{
+		Role: protocol.RoleUser,
+		Content: []protocol.ContentPart{
+			{Type: protocol.ContentTypeText, Text: "look at this"},
+			{Type: protocol.ContentTypeImage, Image: &protocol.MediaPart{Data: []byte{1, 2, 3}, MediaType: "image/png"}},
+		},
+	}); err != nil {
+		t.Fatalf("queue structured input: %v", err)
+	}
+	if err := ag.QueueTurnUserInput("then use the simpler fix"); err != nil {
+		t.Fatalf("queue text input: %v", err)
+	}
+	close(prov.Release)
+	for range events {
+	}
+
+	prov.mu.Lock()
+	calls := append([][]protocol.Message(nil), prov.Calls...)
+	prov.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected queued input to trigger a follow-up provider request, got %d calls", len(calls))
+	}
+	got := calls[1][len(calls[1])-1]
+	if got.Role != protocol.RoleUser || len(got.Content) != 3 {
+		t.Fatalf("expected merged structured user message, got %#v", got)
+	}
+	if got.Content[0].Type != protocol.ContentTypeText || got.Content[0].Text != "look at this" {
+		t.Fatalf("unexpected first content part: %#v", got.Content[0])
+	}
+	if got.Content[1].Type != protocol.ContentTypeImage || got.Content[1].Image == nil {
+		t.Fatalf("expected image content part, got %#v", got.Content[1])
+	}
+	if got.Content[2].Type != protocol.ContentTypeText || got.Content[2].Text != "then use the simpler fix" {
+		t.Fatalf("unexpected final content part: %#v", got.Content[2])
+	}
+}
+
 func TestAgentQueuesTurnUserInputWhilePaused(t *testing.T) {
 	prov := &ContextCaptureProvider{}
 	providers.Register("paused-queue", func(cfg config.ProfileConfig) (providers.Provider, error) {

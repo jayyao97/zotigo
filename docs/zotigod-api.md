@@ -495,24 +495,35 @@ Response data:
 }
 ```
 
-Submit steering text:
+Submit steering input:
 
 `POST /sessions/{id}/steering`
 
 ```json
 {
   "text": "Use the smaller fix and avoid changing the parser.",
+  "images": [
+    {
+      "mime_type": "image/png",
+      "data_base64": "..."
+    }
+  ],
   "turn_id": "turn_123"
 }
 ```
+
+`text` and `images` follow the same input rules as `POST /messages`: either
+field may be omitted, but at least one must be present. Steering images use the
+same limits and accepted MIME types as normal message images. Public responses
+and display items only include image metadata and image read URLs; worker
+commands hydrate the original image bytes.
 
 `turn_id` is optional. When present, it must match the currently open display-log
 turn. When omitted, zotigod uses the currently open turn. Steering without an
 open turn is rejected; desktop should use `POST /sessions/{id}/messages` for a
 new normal turn. Steering also requires the session registry state to be
 `running`; paused approval sessions reject steering until the approval is
-resolved and the live worker resumes. Steering v1 only supports text; requests
-with `images` are rejected with `400`.
+resolved and the live worker resumes.
 
 Response data:
 
@@ -523,6 +534,15 @@ Response data:
   "type": "steering",
   "turn_id": "turn_123",
   "text": "Use the smaller fix and avoid changing the parser.",
+  "images": [
+    {
+      "mime_type": "image/png",
+      "size_bytes": 1024,
+      "width": 640,
+      "height": 480,
+      "url": "/sessions/sess_8f0e12ab34cd56ef/images/abcdef0123456789abcdef0123456789.png"
+    }
+  ],
   "created_at": "2026-01-02T03:04:08Z"
 }
 ```
@@ -577,7 +597,16 @@ Raw response:
       "type": "steering",
       "steering": {
         "turn_id": "turn_123",
-        "text": "Second correction"
+        "text": "Second correction",
+        "images": [
+          {
+            "mime_type": "image/png",
+            "size_bytes": 1024,
+            "width": 640,
+            "height": 480,
+            "data_base64": "..."
+          }
+        ]
       },
       "created_at": "2026-01-02T03:04:10Z"
     }

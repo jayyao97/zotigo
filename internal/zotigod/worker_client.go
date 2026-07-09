@@ -388,8 +388,11 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayl
 }
 
 func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steeringCommandPayload) error {
-	text := strings.TrimSpace(command.Text)
-	if text == "" {
+	msg, err := userMessageFromCommand(command.Text, command.Images, "steering")
+	if err != nil {
+		return err
+	}
+	if len(msg.Content) == 0 {
 		return nil
 	}
 
@@ -417,7 +420,7 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steerin
 	if currentTurnID == "" || (command.TurnID != "" && command.TurnID != currentTurnID) {
 		return nil
 	}
-	if err := r.agent.QueueTurnUserInput(text); err != nil {
+	if err := r.agent.QueueTurnUserMessage(msg); err != nil {
 		if isStaleTurnUserInputError(err) {
 			return nil
 		}
@@ -466,14 +469,28 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 }
 
 func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
-	msg := protocol.NewUserMessage(command.Text)
-	for idx, img := range command.Images {
+	return userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+}
+
+func userMessageFromCommand(text string, images []commandImageData, label string) (protocol.Message, error) {
+	msg := protocol.Message{
+		Role:      protocol.RoleUser,
+		Content:   make([]protocol.ContentPart, 0, 1+len(images)),
+		CreatedAt: time.Now(),
+	}
+	if text = strings.TrimSpace(text); text != "" {
+		msg.Content = append(msg.Content, protocol.ContentPart{
+			Type: protocol.ContentTypeText,
+			Text: text,
+		})
+	}
+	for idx, img := range images {
 		if img.DataBase64 == "" {
-			return protocol.Message{}, fmt.Errorf("message image payload unavailable for command %q image %d", commandID, idx)
+			return protocol.Message{}, fmt.Errorf("%s image payload unavailable for image %d", label, idx)
 		}
 		data, err := base64.StdEncoding.Strict().DecodeString(img.DataBase64)
 		if err != nil {
-			return protocol.Message{}, fmt.Errorf("decode command image %d: %w", idx, err)
+			return protocol.Message{}, fmt.Errorf("decode %s image %d: %w", label, idx, err)
 		}
 		msg.Content = append(msg.Content, protocol.ContentPart{
 			Type: protocol.ContentTypeImage,
@@ -760,12 +777,14 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	pendingByTurn := make(map[string][]uint64)
 
 	for _, item := range items {
+		recordedCommand := false
 		if item.Command != nil && item.Command.Type != "" {
 			commandSeqs = append(commandSeqs, item.Sequence)
+			recordedCommand = true
 			switch item.Command.Type {
 			case sessionCommandMessage:
 				pendingMessages = append(pendingMessages, item.Sequence)
-			case sessionCommandPause:
+			case sessionCommandPause, sessionCommandSteering:
 				if item.Command.TurnID != "" {
 					pendingByTurn[item.Command.TurnID] = append(pendingByTurn[item.Command.TurnID], item.Sequence)
 				}
@@ -773,7 +792,7 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				safe[item.Sequence] = true
 			}
 		}
-		if item.Type == zotigosession.DisplayItemSteeringMessage && commandText(item.Content) != "" {
+		if !recordedCommand && item.Type == zotigosession.DisplayItemSteeringMessage && commandText(item.Content) != "" {
 			commandSeqs = append(commandSeqs, item.Sequence)
 			if item.Turn != nil && item.Turn.ID != "" {
 				pendingByTurn[item.Turn.ID] = append(pendingByTurn[item.Turn.ID], item.Sequence)
