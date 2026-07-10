@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -281,6 +282,116 @@ func TestHealth(t *testing.T) {
 	}
 	if body["status"] != "ok" {
 		t.Fatalf("unexpected health response: %#v", body)
+	}
+}
+
+func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	configDir := filepath.Join(homeDir, config.ConfigDirName)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("create global config directory: %v", err)
+	}
+	globalConfig := `
+profiles:
+  global-fast:
+    provider: anthropic
+    model: claude-fast
+    api_key: global-secret
+`
+	if err := os.WriteFile(filepath.Join(configDir, config.ConfigFileName), []byte(globalConfig), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	projectDir := t.TempDir()
+	projectConfig := `
+default_profile: project-high
+profiles:
+  project-high:
+    provider: openai
+    model: gpt-5.5
+    thinking_level: high
+    api_key: should-not-leak
+    base_url: https://private.example.com
+    params:
+      private_option: should-not-leak
+`
+	if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var response profilesResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profiles response: %v", err)
+	}
+	if response.DefaultProfile != "project-high" {
+		t.Fatalf("expected default profile project-high, got %q", response.DefaultProfile)
+	}
+	for i := 1; i < len(response.Profiles); i++ {
+		if response.Profiles[i-1].Name >= response.Profiles[i].Name {
+			t.Fatalf("expected profiles sorted by name, got %#v", response.Profiles)
+		}
+	}
+	var projectProfile *publicProfile
+	var globalProfile *publicProfile
+	for i := range response.Profiles {
+		if response.Profiles[i].Name == "project-high" {
+			projectProfile = &response.Profiles[i]
+		}
+		if response.Profiles[i].Name == "global-fast" {
+			globalProfile = &response.Profiles[i]
+		}
+	}
+	if projectProfile == nil {
+		t.Fatal("expected project profile")
+	}
+	if projectProfile.Provider != "openai" || projectProfile.Model != "gpt-5.5" || projectProfile.ThinkingLevel != "high" {
+		t.Fatalf("unexpected project profile: %#v", projectProfile)
+	}
+	if globalProfile == nil || globalProfile.Provider != "anthropic" || globalProfile.Model != "claude-fast" {
+		t.Fatalf("expected merged global profile, got %#v", globalProfile)
+	}
+	for _, forbidden := range []string{"should-not-leak", "global-secret", "private.example.com", "private_option", "api_key", "base_url"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("response leaked %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
+func TestProfilesRejectsRelativeWorkingDirectory(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles?working_directory=relative", nil))
+
+	assertAPIError(t, rec, http.StatusBadRequest, "invalid_request", "working_directory must be an absolute path")
+}
+
+func TestProfilesRejectsMissingDefaultProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte("default_profile: missing\n"), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", `default profile "missing" not found`)
+}
+
+func TestProfilesRejectsUnsupportedMethod(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/config/profiles", nil))
+
+	assertAPIError(t, rec, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("expected Allow %q, got %q", http.MethodGet, got)
 	}
 }
 

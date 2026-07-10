@@ -388,6 +388,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
+	mux.HandleFunc("/config/profiles", handler.handleProfiles)
 	mux.HandleFunc("/sessions", handler.handleSessions)
 	mux.HandleFunc("/sessions/", handler.handleSession)
 	mux.HandleFunc("/internal/sessions/", handler.handleInternalSession)

@@ -7,6 +7,7 @@ state and display history.
 ## Public endpoints
 
 - `GET /health`
+- `GET /config/profiles`
 - `POST /sessions`
 - `GET /sessions`
 - `GET /sessions/{id}`
@@ -67,6 +68,34 @@ endpoint errors still use the structured `{ "code", "message" }` shape.
 
 Unless a section explicitly says "raw response", response examples below show
 the endpoint-specific `data` payload.
+
+## Read profiles
+
+`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the
+effective profiles for a project after merging the global and project Zotigo
+configuration. `working_directory` follows the same rules as session creation:
+it must be an absolute path to an existing directory. If omitted, zotigod uses
+its current working directory.
+
+The response is safe for desktop clients and does not expose API keys, base
+URLs, provider parameters, or safety configuration:
+
+```json
+{
+  "default_profile": "gpt-5.5-high",
+  "profiles": [
+    {
+      "name": "gpt-5.5-high",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "thinking_level": "high"
+    }
+  ]
+}
+```
+
+Profiles are ordered by `name`. This endpoint only reads configuration and does
+not start a worker or create a session.
 
 ## Create sessions
 
