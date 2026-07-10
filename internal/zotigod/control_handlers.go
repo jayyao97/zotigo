@@ -20,6 +20,7 @@ const (
 	sessionCommandMessage      = "message"
 	sessionCommandPause        = "pause"
 	sessionCommandSteering     = "steering"
+	sessionCommandProfile      = "profile"
 	userPauseReason            = "user_pause"
 	controlChannelClosedReason = "control_channel_closed"
 	workerRestartedReason      = "worker_restarted"
@@ -72,6 +73,7 @@ type commandResponse struct {
 	Message   *messageCommandPayload  `json:"message,omitempty"`
 	Steering  *steeringCommandPayload `json:"steering,omitempty"`
 	Pause     *pauseCommandPayload    `json:"pause,omitempty"`
+	Profile   *profileCommandPayload  `json:"profile,omitempty"`
 }
 
 type messageCommandPayload struct {
@@ -88,6 +90,10 @@ type steeringCommandPayload struct {
 type pauseCommandPayload struct {
 	TurnID string `json:"turn_id,omitempty"`
 	Reason string `json:"reason,omitempty"`
+}
+
+type profileCommandPayload struct {
+	Name string `json:"name"`
 }
 
 type commandImageData struct {
@@ -107,6 +113,7 @@ type publicCommandResponse struct {
 	Images    []publicCommandImageResponse `json:"images,omitempty"`
 	TurnID    string                       `json:"turn_id,omitempty"`
 	Reason    string                       `json:"reason,omitempty"`
+	Profile   string                       `json:"profile,omitempty"`
 	CreatedAt time.Time                    `json:"created_at"`
 }
 
@@ -798,6 +805,9 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 			case sessionCommandPause:
 				resp.Commands = append(resp.Commands, pauseCommandFromItem(item))
 				appended = true
+			case sessionCommandProfile:
+				resp.Commands = append(resp.Commands, profileCommandFromItem(item))
+				appended = true
 			}
 			if appended && len(resp.Commands) >= query.Limit {
 				break
@@ -893,6 +903,8 @@ func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (com
 		return command, err == nil, err
 	case sessionCommandPause:
 		return pauseCommandFromItem(item), true, nil
+	case sessionCommandProfile:
+		return profileCommandFromItem(item), true, nil
 	default:
 		return commandResponse{}, false, nil
 	}
@@ -1018,6 +1030,10 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 			resp.TurnID = command.Pause.TurnID
 			resp.Reason = command.Pause.Reason
 		}
+	case sessionCommandProfile:
+		if command.Profile != nil {
+			resp.Profile = command.Profile.Name
+		}
 	}
 	return resp
 }
@@ -1079,6 +1095,20 @@ func pauseCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	if item.Command != nil {
 		command.Pause.TurnID = item.Command.TurnID
 		command.Pause.Reason = item.Command.Reason
+	}
+	return command
+}
+
+func profileCommandFromItem(item zotigosession.DisplayItem) commandResponse {
+	command := commandResponse{
+		ID:        item.ID,
+		Sequence:  item.Sequence,
+		Type:      sessionCommandProfile,
+		CreatedAt: item.CreatedAt,
+		Profile:   &profileCommandPayload{},
+	}
+	if item.Command != nil {
+		command.Profile.Name = item.Command.Profile
 	}
 	return command
 }

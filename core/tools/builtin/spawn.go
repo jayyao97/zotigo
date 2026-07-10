@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
@@ -27,8 +28,16 @@ const (
 
 // SpawnTool runs a short-lived child agent for focused research or implementation work.
 type SpawnTool struct {
+	mu         sync.RWMutex
 	cfg        config.ProfileConfig
 	childTools []tools.Tool
+}
+
+// SetProfile changes the profile used by subsequently created subagents.
+func (t *SpawnTool) SetProfile(cfg config.ProfileConfig) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cfg = cfg
 }
 
 // NewSpawnTool constructs a spawn tool. childTools is the tool pool the child
@@ -182,7 +191,10 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		childExec = &spawnWorkDirExecutor{base: exec, workDir: childWorkDir}
 	}
 
-	child, err := agent.New(t.cfg, childExec,
+	t.mu.RLock()
+	profile := t.cfg
+	t.mu.RUnlock()
+	child, err := agent.New(profile, childExec,
 		agent.WithSystemPromptBuilder(spawnPromptBuilder(args.AgentType)),
 		agent.WithTools(childTools...),
 		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),

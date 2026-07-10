@@ -49,9 +49,9 @@ func Run(args []string) int {
 		return 1
 	}
 
-	profile, ok := cfg.Profiles[cfg.DefaultProfile]
-	if !ok {
-		logger.Printf("Profile %q not found", cfg.DefaultProfile)
+	_, profile, err := cfg.ResolveProfile("")
+	if err != nil {
+		logger.Printf("Failed to resolve profile: %v", err)
 		return 1
 	}
 

@@ -97,13 +97,12 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Write session file
 	path := s.sessionPath(sess.ID)
 	data, err := json.MarshalIndent(sess, "", "  ")
 	if err != nil {
 		return fmt.Errorf("failed to marshal session: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
+	if err := writeFileAtomic(path, data, 0644); err != nil {
 		return fmt.Errorf("failed to write session file: %w", err)
 	}
 	if err := s.index.upsert(ctx, sess.Metadata); err != nil {
@@ -115,6 +114,122 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 		return err
 	}
 	return s.recordLegacyRegistryMTime(ctx)
+}
+
+// UpdateProfile updates only profile metadata and restores every persisted view
+// if a derived index or legacy registry write fails.
+func (s *FileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.sessionPath(id)
+	previousData, previousExists, err := readOptionalFile(path)
+	if err != nil {
+		return fmt.Errorf("read previous session file: %w", err)
+	}
+	if !previousExists {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	previousSession := &Session{}
+	if err := json.Unmarshal(previousData, previousSession); err != nil {
+		return fmt.Errorf("unmarshal previous session: %w", err)
+	}
+	previousRegistry, previousRegistryExists, err := readOptionalFile(s.registryPath)
+	if err != nil {
+		return fmt.Errorf("read previous registry: %w", err)
+	}
+	updatedSession := *previousSession
+	updatedSession.ProfileName = profileName
+	updatedSession.UpdatedAt = updatedAt
+	data, err := json.MarshalIndent(&updatedSession, "", "  ")
+	if err != nil {
+		return fmt.Errorf("marshal updated session: %w", err)
+	}
+	if err := writeFileAtomic(path, data, 0644); err != nil {
+		return fmt.Errorf("write updated session: %w", err)
+	}
+	if err := s.index.upsert(ctx, updatedSession.Metadata); err != nil {
+		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+	}
+	if err := s.updateRegistry(updatedSession.Metadata); err != nil {
+		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+	}
+	if err := s.recordLegacyRegistryMTime(ctx); err != nil {
+		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+	}
+	return nil
+}
+
+func (s *FileStore) rollbackProfileUpdateLocked(ctx context.Context, cause error, path string, previousData []byte, previousSession *Session, previousRegistry []byte, previousRegistryExists bool) error {
+	rollbackCtx := context.WithoutCancel(ctx)
+	cancel := func() {}
+	if deadline, ok := ctx.Deadline(); ok {
+		rollbackCtx, cancel = context.WithDeadline(rollbackCtx, deadline)
+	}
+	defer cancel()
+	ctx = rollbackCtx
+	rollbackErrors := []error{cause}
+	if err := restoreFile(path, previousData, true); err != nil {
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore session file: %w", err))
+	}
+	if err := s.index.upsert(ctx, previousSession.Metadata); err != nil {
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore session index: %w", err))
+	}
+	if err := restoreFile(s.registryPath, previousRegistry, previousRegistryExists); err != nil {
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore registry: %w", err))
+	} else if previousRegistryExists {
+		if err := s.recordLegacyRegistryMTime(ctx); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore registry mtime: %w", err))
+		}
+	}
+	joined := errors.Join(rollbackErrors...)
+	if len(rollbackErrors) > 1 {
+		return errors.Join(ErrProfileStateUncertain, joined)
+	}
+	return joined
+}
+
+func readOptionalFile(path string) ([]byte, bool, error) {
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return nil, false, nil
+	}
+	return data, err == nil, err
+}
+
+func restoreFile(path string, data []byte, exists bool) error {
+	if !exists {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		return nil
+	}
+	return writeFileAtomic(path, data, 0644)
+}
+
+func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".tmp-*")
+	if err != nil {
+		return err
+	}
+	tempPath := file.Name()
+	defer func() { _ = os.Remove(tempPath) }()
+	if err := file.Chmod(mode); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if _, err := file.Write(data); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tempPath, path)
 }
 
 func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item DisplayItem) (DisplayItem, error) {
@@ -315,7 +430,7 @@ func (s *FileStore) Lock(ctx context.Context, id string) error {
 			return err
 		}
 		if locked {
-			return fmt.Errorf("session %s is already locked", id)
+			return fmt.Errorf("%w: session %s is already locked", ErrSessionLocked, id)
 		}
 	}
 }
@@ -744,7 +859,7 @@ func (s *FileStore) saveRegistry(reg *registry) error {
 	if err != nil {
 		return fmt.Errorf("failed to marshal registry: %w", err)
 	}
-	return os.WriteFile(s.registryPath, data, 0644)
+	return writeFileAtomic(s.registryPath, data, 0644)
 }
 
 // Ensure FileStore implements Store

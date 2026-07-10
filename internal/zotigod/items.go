@@ -125,6 +125,7 @@ type itemResponse struct {
 	Turn      *itemTurnResponse     `json:"turn,omitempty"`
 	Approval  *itemApprovalResponse `json:"approval,omitempty"`
 	Command   *itemCommandResponse  `json:"command,omitempty"`
+	Profile   *itemProfileResponse  `json:"profile,omitempty"`
 	Error     string                `json:"error,omitempty"`
 	CreatedAt time.Time             `json:"created_at"`
 }
@@ -204,11 +205,18 @@ type itemApprovalDecisionResponse struct {
 }
 
 type itemCommandResponse struct {
-	Type   string                     `json:"type,omitempty"`
-	Text   string                     `json:"text,omitempty"`
-	Images []itemCommandImageResponse `json:"images,omitempty"`
-	TurnID string                     `json:"turn_id,omitempty"`
-	Reason string                     `json:"reason,omitempty"`
+	Type    string                     `json:"type,omitempty"`
+	Text    string                     `json:"text,omitempty"`
+	Images  []itemCommandImageResponse `json:"images,omitempty"`
+	TurnID  string                     `json:"turn_id,omitempty"`
+	Reason  string                     `json:"reason,omitempty"`
+	Profile string                     `json:"profile,omitempty"`
+}
+
+type itemProfileResponse struct {
+	CommandID string `json:"command_id,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
 }
 
 type itemCommandImageResponse struct {
@@ -294,9 +302,17 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Turn:      publicDisplayTurn(item.Turn),
 		Approval:  publicDisplayApproval(item.Approval),
 		Command:   publicDisplayCommand(item.Command),
+		Profile:   publicDisplayProfile(item.Profile),
 		Error:     item.Error,
 		CreatedAt: item.CreatedAt,
 	}
+}
+
+func publicDisplayProfile(profile *zotigosession.DisplayProfileChange) *itemProfileResponse {
+	if profile == nil {
+		return nil
+	}
+	return &itemProfileResponse{CommandID: profile.CommandID, From: profile.From, To: profile.To}
 }
 
 func publicDisplayContent(content []zotigosession.DisplayContentPart, commandImages []zotigosession.DisplayCommandImage) []itemContentResponse {
@@ -415,11 +431,12 @@ func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandRes
 		return nil
 	}
 	return &itemCommandResponse{
-		Type:   command.Type,
-		Text:   command.Text,
-		Images: publicDisplayCommandImages(command.Images),
-		TurnID: command.TurnID,
-		Reason: command.Reason,
+		Type:    command.Type,
+		Text:    command.Text,
+		Images:  publicDisplayCommandImages(command.Images),
+		TurnID:  command.TurnID,
+		Reason:  command.Reason,
+		Profile: command.Profile,
 	}
 }
 

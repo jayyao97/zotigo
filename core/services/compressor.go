@@ -127,6 +127,16 @@ func (c *Compressor) SetTranscriptDir(dir string) {
 	c.config.TranscriptDir = dir
 }
 
+// SetContextWindow updates the compression budget for subsequent model calls.
+func (c *Compressor) SetContextWindow(size int) {
+	if size <= 0 {
+		size = config.DefaultContextWindow
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.config.ContextWindowSize = size
+}
+
 // CompressionResult contains the result of a compression operation
 type CompressionResult struct {
 	OriginalTokens   int

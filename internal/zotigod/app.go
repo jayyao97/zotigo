@@ -19,6 +19,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -43,6 +44,7 @@ type Session struct {
 	State            SessionState `json:"state"`
 	Live             bool         `json:"live"`
 	WorkingDirectory string       `json:"working_directory,omitempty"`
+	ProfileName      string       `json:"profile,omitempty"`
 	CreatedAt        time.Time    `json:"created_at"`
 	StartedAt        *time.Time   `json:"started_at,omitempty"`
 	EndedAt          *time.Time   `json:"ended_at,omitempty"`
@@ -53,16 +55,21 @@ type Session struct {
 var (
 	errSessionNotFound          = errors.New("session not found")
 	errInvalidSessionTransition = errors.New("invalid session state transition")
+	errSessionProfileNotFound   = errors.New("session profile not found")
 )
 
 type sessionRegistry struct {
 	mu       sync.Mutex
 	nextID   uint64
 	sessions map[string]Session
+	changed  chan struct{}
 }
 
 func newSessionRegistry() *sessionRegistry {
-	return &sessionRegistry{sessions: make(map[string]Session)}
+	return &sessionRegistry{
+		sessions: make(map[string]Session),
+		changed:  make(chan struct{}),
+	}
 }
 
 func (r *sessionRegistry) Add(session Session) Session {
@@ -98,15 +105,17 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 	}
 	session.seq = r.nextID
 	r.sessions[session.ID] = session
+	r.notifyChangedLocked()
 	return session
 }
 
-func newSession(workingDirectory string) Session {
+func newSession(workingDirectory string, profileName string) Session {
 	return Session{
 		ID:               newZotigodID("sess"),
 		State:            SessionStateCreated,
 		Live:             true,
 		WorkingDirectory: workingDirectory,
+		ProfileName:      profileName,
 		CreatedAt:        time.Now().UTC(),
 	}
 }
@@ -117,6 +126,14 @@ func (r *sessionRegistry) Get(id string) (Session, bool) {
 
 	session, ok := r.sessions[id]
 	return session, ok
+}
+
+func (r *sessionRegistry) Watch(id string) (Session, bool, <-chan struct{}) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[id]
+	return session, ok, r.changed
 }
 
 func (r *sessionRegistry) List() []Session {
@@ -147,6 +164,12 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 	})
 }
 
+func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+		session.State = SessionStateStarting
+	})
+}
+
 func (r *sessionRegistry) ResumeAfterApproval(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateRunning
@@ -156,6 +179,12 @@ func (r *sessionRegistry) ResumeAfterApproval(id string) (Session, error) {
 func (r *sessionRegistry) Pause(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
 		session.State = SessionStatePaused
+	})
+}
+
+func (r *sessionRegistry) UpdateProfile(id string, profileName string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+		session.ProfileName = profileName
 	})
 }
 
@@ -176,6 +205,15 @@ func (r *sessionRegistry) Fail(id string, message string) (Session, error) {
 	})
 }
 
+func (r *sessionRegistry) FailStarting(id string, message string) (Session, error) {
+	now := time.Now().UTC()
+	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
+		session.State = SessionStateFailed
+		session.EndedAt = &now
+		session.Error = message
+	})
+}
+
 func (r *sessionRegistry) transition(id string, from []SessionState, apply func(*Session)) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -189,7 +227,13 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 	}
 	apply(&session)
 	r.sessions[id] = session
+	r.notifyChangedLocked()
 	return session, nil
+}
+
+func (r *sessionRegistry) notifyChangedLocked() {
+	close(r.changed)
+	r.changed = make(chan struct{})
 }
 
 func canTransition(state SessionState, from []SessionState) bool {
@@ -209,10 +253,12 @@ type handler struct {
 	workers              *workerRegistry
 	launcher             workerLauncher
 	workerConnectTimeout time.Duration
+	sessionOps           *sessionOperationLocks
 }
 
 type createSessionRequest struct {
 	WorkingDirectory string `json:"working_directory,omitempty"`
+	Profile          string `json:"profile,omitempty"`
 }
 
 type finishSessionRequest struct {
@@ -385,6 +431,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workers:              options.workers,
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
+		sessionOps:           newSessionOperationLocks(),
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
@@ -426,7 +473,21 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		session := newSession(workingDirectory)
+		appConfig, err := config.NewManager().LoadForDir(workingDirectory)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
+			return
+		}
+		profileName, _, err := appConfig.ResolveProfile(req.Profile)
+		if err != nil {
+			if strings.TrimSpace(req.Profile) != "" {
+				writeAPIError(w, http.StatusBadRequest, err.Error())
+			} else {
+				writeAPIError(w, http.StatusInternalServerError, "default "+err.Error())
+			}
+			return
+		}
+		session := newSession(workingDirectory, profileName)
 		if err := h.persistSession(r.Context(), session); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
@@ -470,6 +531,7 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 		Metadata: zotigosession.Metadata{
 			ID:               session.ID,
 			WorkingDirectory: session.WorkingDirectory,
+			ProfileName:      session.ProfileName,
 			CreatedAt:        session.CreatedAt,
 			UpdatedAt:        session.CreatedAt,
 		},
@@ -484,9 +546,11 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	registrySessions := h.registry.List()
 	seen := make(map[string]struct{}, len(registrySessions))
+	registryIndex := make(map[string]int, len(registrySessions))
 	for idx := range registrySessions {
 		registrySessions[idx].Live = true
 		seen[registrySessions[idx].ID] = struct{}{}
+		registryIndex[registrySessions[idx].ID] = idx
 	}
 	if h.store == nil {
 		return registrySessions, nil
@@ -498,6 +562,7 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	sessions := append([]Session(nil), registrySessions...)
 	for _, meta := range metadata {
 		if _, ok := seen[meta.ID]; ok {
+			sessions[registryIndex[meta.ID]].ProfileName = meta.ProfileName
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -511,6 +576,7 @@ func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live b
 		State:            state,
 		Live:             live,
 		WorkingDirectory: meta.WorkingDirectory,
+		ProfileName:      meta.ProfileName,
 		CreatedAt:        meta.CreatedAt,
 	}
 }
@@ -559,6 +625,8 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionMessage(w, r, id)
 	case "pause":
 		h.handleSessionPause(w, r, id)
+	case "profile":
+		h.handleSessionProfile(w, r, id)
 	case "start":
 		h.handleSessionStart(w, r, id)
 	case "steering":
@@ -624,6 +692,12 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 		writeAPIJSON(w, http.StatusOK, stored)
 		return
 	}
+	if h.store != nil {
+		stored, err := h.store.Get(r.Context(), id)
+		if err == nil && stored != nil {
+			session.ProfileName = stored.ProfileName
+		}
+	}
 	session.Live = true
 	writeAPIJSON(w, http.StatusOK, session)
 }
@@ -645,60 +719,51 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 var errWorkerConnectTimeout = errors.New("worker did not connect before timeout")
 
 func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session, error) {
-	for {
-		session, ok, err := h.loadSessionIntoRegistry(ctx, id)
-		if err != nil {
-			return Session{}, fmt.Errorf("load session: %w", err)
-		}
-		if !ok {
-			return Session{}, errSessionNotFound
-		}
-
-		switch session.State {
-		case SessionStateRunning:
-			session.Live = true
-			return session, nil
-		case SessionStateStarting:
-			if h.launcher == nil {
-				return Session{}, errInvalidSessionTransition
-			}
-			if !h.waitForRunningWorker(ctx, id) {
-				return Session{}, errWorkerConnectTimeout
-			}
-			if running, ok := h.registry.Get(id); ok && running.State == SessionStateRunning {
-				running.Live = true
-				return running, nil
-			}
-			return Session{}, errWorkerConnectTimeout
-		case SessionStateCreated:
-			session, err = h.registry.Start(id)
-			if errors.Is(err, errInvalidSessionTransition) {
-				continue
-			}
-			if err != nil {
-				return Session{}, err
-			}
-			if err := h.launchWorker(ctx, id); err != nil {
-				_, _ = h.registry.Fail(id, err.Error())
-				return Session{}, fmt.Errorf("start worker: %w", err)
-			}
-			if h.launcher != nil && !h.waitForRunningWorker(ctx, id) {
-				_, _ = h.registry.Fail(id, errWorkerConnectTimeout.Error())
-				return Session{}, errWorkerConnectTimeout
-			}
-			if running, ok := h.registry.Get(id); ok {
-				running.Live = true
-				return running, nil
-			}
-			session.Live = true
-			return session, nil
-		default:
-			return Session{}, errInvalidSessionTransition
-		}
+	unlock := h.sessionOps.lock(id)
+	session, launched, err := h.ensureSessionStartedLocked(ctx, id)
+	unlock()
+	if err != nil {
+		return Session{}, err
 	}
+	if launched {
+		h.launchWorkerInBackground(id)
+	}
+	if h.launcher == nil || (!launched && session.State != SessionStateStarting) {
+		session.Live = true
+		return h.sessionWithStoredProfile(ctx, session)
+	}
+	if err := h.waitForRunningWorker(ctx, id); err != nil {
+		return Session{}, err
+	}
+	if running, ok := h.registry.Get(id); ok && running.State == SessionStateRunning {
+		running.Live = true
+		return h.sessionWithStoredProfile(ctx, running)
+	}
+	return Session{}, errWorkerConnectTimeout
 }
 
-func (h *handler) waitForRunningWorker(ctx context.Context, id string) bool {
+func (h *handler) launchWorkerInBackground(id string) {
+	var timeout *time.Timer
+	if h.workerConnectTimeout > 0 {
+		timeout = time.AfterFunc(h.workerConnectTimeout, func() {
+			_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+		})
+	}
+	go func() {
+		if err := h.launchWorker(context.Background(), id); err != nil {
+			if timeout != nil {
+				timeout.Stop()
+			}
+			_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
+			return
+		}
+		if err := h.waitForRunningWorker(context.Background(), id); err == nil && timeout != nil {
+			timeout.Stop()
+		}
+	}()
+}
+
+func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 	waitCtx := ctx
 	cancel := func() {}
 	if h.workerConnectTimeout > 0 {
@@ -706,21 +771,113 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) bool {
 	}
 	defer cancel()
 
-	if !h.workers.Wait(waitCtx.Done(), id) {
-		return false
-	}
-	ticker := time.NewTicker(time.Millisecond)
-	defer ticker.Stop()
 	for {
-		if session, ok := h.registry.Get(id); ok && session.State == SessionStateRunning {
-			return true
+		session, ok, changed := h.registry.Watch(id)
+		if !ok {
+			return errSessionNotFound
 		}
+		switch session.State {
+		case SessionStateRunning:
+			if h.workers.Has(id) {
+				return nil
+			}
+		case SessionStateFailed:
+			if session.Error == errWorkerConnectTimeout.Error() {
+				return errWorkerConnectTimeout
+			}
+			if session.Error != "" {
+				return errors.New(session.Error)
+			}
+			return errors.New("worker failed to start")
+		}
+
 		select {
 		case <-waitCtx.Done():
-			return false
-		case <-ticker.C:
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return errWorkerConnectTimeout
+		case <-changed:
 		}
 	}
+}
+
+func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Session, bool, error) {
+	for {
+		session, ok, err := h.loadSessionIntoRegistry(ctx, id)
+		if err != nil {
+			return Session{}, false, fmt.Errorf("load session: %w", err)
+		}
+		if !ok {
+			return Session{}, false, errSessionNotFound
+		}
+
+		switch session.State {
+		case SessionStateRunning:
+			if h.workers.Has(id) || h.launcher == nil {
+				return session, false, nil
+			}
+			if err := h.validateSessionProfile(ctx, session); err != nil {
+				return Session{}, false, err
+			}
+			session, err = h.registry.RestartWorker(id)
+			if errors.Is(err, errInvalidSessionTransition) {
+				continue
+			}
+			if err != nil {
+				return Session{}, false, err
+			}
+			return session, true, nil
+		case SessionStateStarting:
+			if h.launcher == nil {
+				return Session{}, false, errInvalidSessionTransition
+			}
+			return session, false, nil
+		case SessionStateCreated:
+			if err := h.validateSessionProfile(ctx, session); err != nil {
+				return Session{}, false, err
+			}
+			session, err = h.registry.Start(id)
+			if errors.Is(err, errInvalidSessionTransition) {
+				continue
+			}
+			if err != nil {
+				return Session{}, false, err
+			}
+			return session, true, nil
+		default:
+			return Session{}, false, errInvalidSessionTransition
+		}
+	}
+}
+
+func (h *handler) validateSessionProfile(ctx context.Context, session Session) error {
+	workingDirectory := session.WorkingDirectory
+	if workingDirectory == "" {
+		workingDirectory = h.sessionWorkingDirectory(ctx, session.ID)
+	}
+	appConfig, err := config.NewManager().LoadForDir(workingDirectory)
+	if err != nil {
+		return fmt.Errorf("load session profile configuration: %w", err)
+	}
+	if _, _, err := appConfig.ResolveProfile(session.ProfileName); err != nil {
+		return fmt.Errorf("%w: %v", errSessionProfileNotFound, err)
+	}
+	return nil
+}
+
+func (h *handler) sessionWithStoredProfile(ctx context.Context, session Session) (Session, error) {
+	if h.store == nil {
+		return session, nil
+	}
+	stored, err := h.store.Get(ctx, session.ID)
+	if err != nil {
+		return Session{}, fmt.Errorf("load session profile: %w", err)
+	}
+	if stored != nil {
+		session.ProfileName = stored.ProfileName
+	}
+	return session, nil
 }
 
 func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
@@ -731,6 +888,10 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "invalid session state transition")
 	case errors.Is(err, errWorkerConnectTimeout):
 		writeAPIError(w, http.StatusServiceUnavailable, errWorkerConnectTimeout.Error())
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
+	case errors.Is(err, errSessionProfileNotFound):
+		writeAPIErrorCode(w, http.StatusConflict, "profile_not_found", err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start session: %v", err))
 	}

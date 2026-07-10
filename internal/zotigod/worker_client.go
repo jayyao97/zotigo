@@ -49,7 +49,7 @@ type workerClientConfig struct {
 	SessionID string
 }
 
-func runWorkerClient(ctx context.Context, cfg workerClientConfig) error {
+func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr error) {
 	if strings.TrimSpace(cfg.SessionID) == "" {
 		return fmt.Errorf("session_id is required")
 	}
@@ -67,11 +67,35 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) error {
 		_ = store.Close()
 		return err
 	}
-	defer unlock()
-	defer func() { _ = store.Close() }()
-
+	var runtime *workerRuntime
+	var conn *websocket.Conn
+	stopKeepalive := func() {}
+	var runErr error
 	httpClient := &http.Client{Timeout: workerHTTPTimeout}
-	runtime, err := newWorkerRuntime(ctx, workerRuntimeConfig{
+	defer func() {
+		stopKeepalive()
+		if runtime != nil {
+			runtime.Close()
+		}
+		if unlockErr := unlock(); unlockErr != nil {
+			wrapped := fmt.Errorf("unlock session %s: %w", cfg.SessionID, unlockErr)
+			returnErr = errors.Join(returnErr, wrapped)
+			if runErr == nil {
+				runErr = wrapped
+			}
+		}
+		if conn != nil {
+			_ = conn.Close()
+		}
+		if runErr != nil && !isExpectedWorkerClose(runErr) {
+			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
+			defer cancel()
+			_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, runErr)
+		}
+		_ = store.Close()
+	}()
+
+	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:  cfg.SessionID,
 		DaemonURL:  daemonURL,
 		Store:      store,
@@ -80,7 +104,6 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) error {
 	if err != nil {
 		return err
 	}
-	defer runtime.Close()
 
 	cursor, err := loadWorkerCommandCursor(ctx, store, cfg.SessionID)
 	if err != nil {
@@ -95,27 +118,18 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) error {
 	if err != nil {
 		return err
 	}
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	conn, _, err = websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect worker websocket: %w", err)
 	}
-	defer func() { _ = conn.Close() }()
-	stopKeepalive := startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
-	defer stopKeepalive()
-
-	var runErr error
-	defer func() {
-		if runErr == nil || isExpectedWorkerClose(runErr) {
-			return
-		}
-		finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-		defer cancel()
-		_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, runErr)
-	}()
+	stopKeepalive = startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 
 	commandCh, readErrCh := readWorkerCommands(conn)
 	for {
 		select {
+		case err := <-runtime.fatalCh:
+			runErr = err
+			return err
 		case err := <-readErrCh:
 			runErr = err
 			return runErr
@@ -127,13 +141,8 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) error {
 			if command.Sequence <= cursor.Sequence {
 				continue
 			}
-			if err := runtime.HandleCommand(ctx, command); err != nil {
-				runErr = err
-				return err
-			}
-			cursor.Sequence = command.Sequence
-			cursor.Offset = advanceWorkerCommandOffset(ctx, store, cfg.SessionID, cursor.Offset, cursor.Sequence)
-			if err := saveWorkerCommandCursor(cfg.SessionID, cursor); err != nil {
+			cursor, err = replayWorkerCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
+			if err != nil {
 				runErr = err
 				return err
 			}
@@ -185,13 +194,21 @@ func readWorkerCommands(conn *websocket.Conn) (<-chan commandResponse, <-chan er
 }
 
 type workerRuntime struct {
-	sessionID string
-	store     zotigosession.Store
-	agent     *agent.Agent
-	runner    *runner.Runner
-	transport *workerRuntimeTransport
-	display   *workerDisplayLog
-	cleanup   func()
+	sessionID    string
+	workDir      string
+	store        zotigosession.Store
+	agent        *agent.Agent
+	runner       *runner.Runner
+	transport    *workerRuntimeTransport
+	display      *workerDisplayLog
+	observer     observability.Observer
+	cleanup      func()
+	storeMu      sync.Mutex
+	profileMu    sync.Mutex
+	profileEpoch uint64
+	fatalCh      chan error
+	fatalMu      sync.Mutex
+	fatalErr     error
 
 	mu         sync.Mutex
 	turnCancel context.CancelFunc
@@ -220,10 +237,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, fmt.Errorf("load config: %w", err)
 	}
-	profileName := appConfig.DefaultProfile
-	profile, ok := appConfig.Profiles[profileName]
-	if !ok {
-		return nil, fmt.Errorf("profile %q not found in config", profileName)
+	profileName, profile, err := resolveWorkerProfile(sess, appConfig)
+	if err != nil {
+		return nil, err
 	}
 
 	localExec, err := executor.NewLocalExecutor(cwd)
@@ -239,6 +255,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
+	observer := wiring.NewObserver(appConfig.Observability, cfg.SessionID, map[string]any{
+		"zotigo_session": cfg.SessionID,
+		"process_start":  time.Now().UTC().Format(time.RFC3339),
+		"worker":         true,
+	})
 
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
 		Config:      appConfig,
@@ -255,13 +276,14 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		}),
 		ApprovalPolicy:      agent.ApprovalPolicyAuto,
 		TranscriptDir:       transcriptDir,
-		Observer:            observability.Noop{},
+		Observer:            observer,
 		ConfigureClassifier: true,
 		Middleware: []agent.Middleware{
 			middleware.ReadTracker(readTracker),
 		},
 	})
 	if err != nil {
+		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
 	}
@@ -276,6 +298,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		LSPManager:  lspManager,
 		Spawn:       true,
 	}); err != nil {
+		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
 		return nil, fmt.Errorf("register tools: %w", err)
@@ -283,6 +306,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 
 	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
+		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
 		return nil, fmt.Errorf("repair open display turn: %w", err)
@@ -290,10 +314,13 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	transport := newWorkerRuntimeTransport(cfg.SessionID, cfg.DaemonURL, cfg.HTTPClient, display)
 	runtime := &workerRuntime{
 		sessionID: cfg.SessionID,
+		workDir:   cwd,
 		store:     cfg.Store,
 		agent:     ag,
 		transport: transport,
 		display:   display,
+		observer:  observer,
+		fatalCh:   make(chan error, 1),
 	}
 	runtime.runner = runner.New(ag, transport, runner.WithListeners(runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
@@ -305,15 +332,23 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}))
 
 	runtime.cleanup = func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+		_ = observer.Close(closeCtx)
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
 	}
 	return runtime, nil
 }
 
+func resolveWorkerProfile(sess *zotigosession.Session, appConfig *config.Config) (string, config.ProfileConfig, error) {
+	return appConfig.ResolveProfile(sess.ProfileName)
+}
+
 func (r *workerRuntime) Close() {
 	r.mu.Lock()
 	active := r.turnActive
+	done := r.turnDone
 	if r.turnCancel != nil {
 		r.turnCancel()
 	}
@@ -324,24 +359,40 @@ func (r *workerRuntime) Close() {
 	if r.transport != nil {
 		_ = r.transport.Close()
 	}
+	if active && done != nil {
+		<-done
+	}
+	if r.agent != nil {
+		_ = r.agent.WaitForRuntimeIdle(context.Background())
+	}
 	if r.cleanup != nil {
 		r.cleanup()
 	}
 }
 
 func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
+	_, err := r.handleCommand(ctx, command)
+	return err
+}
+
+func (r *workerRuntime) handleCommand(ctx context.Context, command commandResponse) (<-chan error, error) {
+	if err := r.currentFatalError(); err != nil {
+		return nil, err
+	}
 	if err := validateWorkerCommand(command); err != nil {
-		return err
+		return nil, err
 	}
 	switch command.Type {
 	case sessionCommandMessage:
-		return r.startMessageTurn(ctx, command.ID, command.Message)
+		return nil, r.startMessageTurn(ctx, command.ID, command.Message)
 	case sessionCommandPause:
-		return r.pauseTurn(ctx, command.Pause)
+		return nil, r.pauseTurn(ctx, command.Pause)
 	case sessionCommandSteering:
-		return r.queueTurnUserInput(ctx, command.Steering)
+		return nil, r.queueTurnUserInput(ctx, command.Steering)
+	case sessionCommandProfile:
+		return r.switchProfile(ctx, command.ID, command.Profile)
 	default:
-		return nil
+		return nil, nil
 	}
 }
 
@@ -354,6 +405,9 @@ func validateWorkerCommand(command commandResponse) error {
 		payloads++
 	}
 	if command.Steering != nil {
+		payloads++
+	}
+	if command.Profile != nil {
 		payloads++
 	}
 	switch command.Type {
@@ -369,8 +423,188 @@ func validateWorkerCommand(command commandResponse) error {
 		if command.Steering == nil || payloads != 1 {
 			return fmt.Errorf("invalid steering command payload")
 		}
+	case sessionCommandProfile:
+		if command.Profile == nil || strings.TrimSpace(command.Profile.Name) == "" || payloads != 1 {
+			return fmt.Errorf("invalid profile command payload")
+		}
 	default:
 		return nil
+	}
+	return nil
+}
+
+func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *profileCommandPayload) (<-chan error, error) {
+	completion := make(chan error, 1)
+	target := strings.TrimSpace(command.Name)
+	epoch, err := r.nextProfileEpoch()
+	if err != nil {
+		close(completion)
+		return completion, err
+	}
+	r.agent.SupersedePendingRuntimeProfile()
+	appConfig, err := config.NewManager().LoadForDir(r.workDir)
+	if err != nil {
+		r.completeProfileFailure(ctx, completion, commandID, target, fmt.Errorf("load profiles: %w", err))
+		return completion, nil
+	}
+	_, profile, err := appConfig.ResolveProfile(target)
+	if err != nil {
+		r.completeProfileFailure(ctx, completion, commandID, target, err)
+		return completion, nil
+	}
+	runtimeProfile, err := wiring.NewRuntimeProfile(wiring.AgentConfig{
+		Config:              appConfig,
+		ProfileName:         target,
+		Profile:             profile,
+		Observer:            r.observer,
+		ConfigureClassifier: true,
+	})
+	if err != nil {
+		r.completeProfileFailure(ctx, completion, commandID, target, err)
+		return completion, nil
+	}
+	from := r.agent.ActiveProfileName()
+	runtimeProfile.BeforeApply = func() error {
+		commitCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
+		defer cancel()
+		return r.commitLatestProfileSwitch(commitCtx, epoch, commandID, from, target)
+	}
+	result := r.agent.QueueRuntimeProfile(runtimeProfile)
+	go r.finishProfileSwitch(commandID, target, result, completion)
+	return completion, nil
+}
+
+func (r *workerRuntime) nextProfileEpoch() (uint64, error) {
+	r.profileMu.Lock()
+	defer r.profileMu.Unlock()
+	if err := r.currentFatalError(); err != nil {
+		return 0, err
+	}
+	r.profileEpoch++
+	return r.profileEpoch, nil
+}
+
+func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uint64, commandID string, from string, target string) error {
+	r.profileMu.Lock()
+	defer r.profileMu.Unlock()
+	if r.profileEpoch != epoch {
+		return agent.ErrRuntimeProfileSuperseded
+	}
+	err := r.commitProfileSwitch(ctx, commandID, from, target)
+	var uncertain *profileStateUncertainError
+	if errors.As(err, &uncertain) {
+		r.fail(uncertain)
+	}
+	return err
+}
+
+func (r *workerRuntime) finishProfileSwitch(commandID string, target string, result <-chan error, completion chan<- error) {
+	defer close(completion)
+	err := <-result
+	var uncertain *profileStateUncertainError
+	if errors.As(err, &uncertain) {
+		r.fail(uncertain)
+		completion <- uncertain
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if errors.Is(err, agent.ErrRuntimeProfileSuperseded) {
+		err = r.recordProfileFailure(ctx, commandID, target, agent.ErrRuntimeProfileSuperseded)
+		if err != nil {
+			r.fail(err)
+		}
+		completion <- err
+		return
+	}
+	if err != nil {
+		err = r.recordProfileFailure(ctx, commandID, target, err)
+		if err != nil {
+			r.fail(err)
+		}
+		completion <- err
+		return
+	}
+	completion <- nil
+}
+
+func (r *workerRuntime) completeProfileFailure(ctx context.Context, completion chan<- error, commandID string, target string, cause error) {
+	err := r.recordProfileFailure(ctx, commandID, target, cause)
+	if err != nil {
+		r.fail(err)
+	}
+	completion <- err
+	close(completion)
+}
+
+type profileStateUncertainError struct {
+	cause error
+}
+
+func (e *profileStateUncertainError) Error() string {
+	return "profile state is uncertain: " + e.cause.Error()
+}
+func (e *profileStateUncertainError) Unwrap() error { return e.cause }
+
+func (r *workerRuntime) fail(err error) {
+	if err == nil {
+		return
+	}
+	r.fatalMu.Lock()
+	if r.fatalErr == nil {
+		r.fatalErr = err
+	}
+	fatalErr := r.fatalErr
+	r.fatalMu.Unlock()
+	if r.fatalCh == nil {
+		return
+	}
+	select {
+	case r.fatalCh <- fatalErr:
+	default:
+	}
+}
+
+func (r *workerRuntime) currentFatalError() error {
+	r.fatalMu.Lock()
+	defer r.fatalMu.Unlock()
+	return r.fatalErr
+}
+
+func (r *workerRuntime) commitProfileSwitch(ctx context.Context, commandID string, from string, target string) error {
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, r.workDir)
+	if err != nil {
+		return err
+	}
+	previousProfile := sess.ProfileName
+	previousUpdatedAt := sess.UpdatedAt
+	sess.ProfileName = target
+	sess.UpdatedAt = time.Now().UTC()
+	if err := persistSessionProfile(ctx, r.store, sess); err != nil {
+		if errors.Is(err, zotigosession.ErrProfileStateUncertain) {
+			return &profileStateUncertainError{cause: err}
+		}
+		return err
+	}
+	if err := r.display.ProfileChanged(ctx, commandID, from, target); err != nil {
+		sess.ProfileName = previousProfile
+		sess.UpdatedAt = previousUpdatedAt
+		if rollbackErr := persistSessionProfile(ctx, r.store, sess); rollbackErr != nil {
+			return &profileStateUncertainError{cause: errors.Join(
+				fmt.Errorf("append profile changed: %w", err),
+				fmt.Errorf("rollback session profile: %w", rollbackErr),
+			)}
+		}
+		return fmt.Errorf("append profile changed: %w", err)
+	}
+	return nil
+}
+
+func (r *workerRuntime) recordProfileFailure(ctx context.Context, commandID string, target string, err error) error {
+	if appendErr := r.display.ProfileFailed(ctx, commandID, r.agent.ActiveProfileName(), target, err); appendErr != nil {
+		return appendErr
 	}
 	return nil
 }
@@ -462,6 +696,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, zotigotransport.ErrTransportClosed) {
 			_ = r.display.Fail(context.Background(), err)
 		}
+		_ = r.agent.WaitForRuntimeIdle(context.Background())
 		_ = r.saveSnapshot(context.Background(), r.agent.Snapshot())
 		r.finishTurn()
 	}()
@@ -546,6 +781,8 @@ func (r *workerRuntime) closeTurnDoneLocked() {
 }
 
 func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot) error {
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
 	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, "")
 	if err != nil {
 		return err
@@ -615,6 +852,27 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 }
 
 func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, runtime *workerRuntime, cursor workerCommandCursor) (workerCommandCursor, error) {
+	type pendingProfile struct {
+		sequence   uint64
+		completion <-chan error
+	}
+	pendingProfiles := make([]pendingProfile, 0)
+	flushProfiles := func() error {
+		for _, pending := range pendingProfiles {
+			select {
+			case err := <-pending.completion:
+				if err != nil {
+					return err
+				}
+				cursor.Sequence = pending.sequence
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		}
+		pendingProfiles = pendingProfiles[:0]
+		return nil
+	}
+
 	for {
 		previousOffset := cursor.Offset
 		commands, err := fetchWorkerCommands(ctx, client, daemonURL, sessionID, cursor)
@@ -625,10 +883,23 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 			if command.Sequence <= cursor.Sequence {
 				continue
 			}
-			if err := runtime.HandleCommand(ctx, command); err != nil {
+			if command.Type != sessionCommandProfile {
+				if err := flushProfiles(); err != nil {
+					return cursor, err
+				}
+			}
+			completion, err := runtime.handleCommand(ctx, command)
+			if err != nil {
 				return cursor, err
 			}
+			if completion != nil {
+				pendingProfiles = append(pendingProfiles, pendingProfile{sequence: command.Sequence, completion: completion})
+				continue
+			}
 			cursor.Sequence = command.Sequence
+		}
+		if err := flushProfiles(); err != nil {
+			return cursor, err
 		}
 		cursor.Offset = commands.NextOffset
 		if err := saveWorkerCommandCursor(sessionID, cursor); err != nil {
@@ -659,41 +930,6 @@ func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL str
 		return commandsResponse{}, err
 	}
 	return body, nil
-}
-
-func advanceWorkerCommandOffset(ctx context.Context, store zotigosession.Store, sessionID string, offset int64, sequence uint64) int64 {
-	if offset < 0 {
-		offset = 0
-	}
-	originalOffset := offset
-	type offsetStore interface {
-		ListDisplayItemsFromOffset(ctx context.Context, id string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
-	}
-	offsetReader, ok := store.(offsetStore)
-	if !ok {
-		return offset
-	}
-	for {
-		items, _, nextOffset, err := offsetReader.ListDisplayItemsFromOffset(ctx, sessionID, offset, commandOffsetScanLines)
-		if err != nil || nextOffset == offset {
-			return offset
-		}
-		for _, item := range items {
-			if item.Sequence == sequence {
-				if item.LogOffset > 0 {
-					return item.LogOffset
-				}
-				return nextOffset
-			}
-			if item.Sequence > sequence {
-				return originalOffset
-			}
-		}
-		offset = nextOffset
-		if len(items) < commandOffsetScanLines {
-			return originalOffset
-		}
-	}
 }
 
 func loadWorkerCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string) (workerCommandCursor, error) {
@@ -775,6 +1011,7 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	safe := make(map[uint64]bool)
 	pendingMessages := make([]uint64, 0)
 	pendingByTurn := make(map[string][]uint64)
+	pendingProfiles := make(map[string]uint64)
 
 	for _, item := range items {
 		recordedCommand := false
@@ -788,6 +1025,8 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				if item.Command.TurnID != "" {
 					pendingByTurn[item.Command.TurnID] = append(pendingByTurn[item.Command.TurnID], item.Sequence)
 				}
+			case sessionCommandProfile:
+				pendingProfiles[item.ID] = item.Sequence
 			default:
 				safe[item.Sequence] = true
 			}
@@ -813,6 +1052,13 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				safe[seq] = true
 			}
 			delete(pendingByTurn, item.Turn.ID)
+		case zotigosession.DisplayItemProfileChanged, zotigosession.DisplayItemProfileFailed:
+			if item.Profile != nil {
+				if seq, ok := pendingProfiles[item.Profile.CommandID]; ok {
+					safe[seq] = true
+					delete(pendingProfiles, item.Profile.CommandID)
+				}
+			}
 		}
 	}
 
@@ -867,7 +1113,9 @@ func isExpectedWorkerClose(err error) bool {
 	if err == nil {
 		return true
 	}
-	return errors.Is(err, context.Canceled) ||
+	var uncertain *profileStateUncertainError
+	return errors.As(err, &uncertain) ||
+		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, zotigotransport.ErrTransportClosed) ||
 		strings.Contains(err.Error(), "websocket: close") ||
@@ -935,11 +1183,11 @@ func startWorkerClientKeepalive(conn *websocket.Conn, pingInterval time.Duration
 	}
 }
 
-func acquireWorkerSessionLock(ctx context.Context, store zotigosession.Store, sessionID string) (func(), error) {
+func acquireWorkerSessionLock(ctx context.Context, store zotigosession.Store, sessionID string) (func() error, error) {
 	if err := store.Lock(ctx, sessionID); err != nil {
 		return nil, fmt.Errorf("lock session %s: %w", sessionID, err)
 	}
-	return func() {
-		_ = store.Unlock(context.Background(), sessionID)
+	return func() error {
+		return store.Unlock(context.Background(), sessionID)
 	}, nil
 }
