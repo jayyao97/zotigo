@@ -12,7 +12,8 @@ import (
 type Metadata struct {
 	ID               string    `json:"id"`
 	WorkingDirectory string    `json:"working_directory"` // The project path this session belongs to
-	LastPrompt       string    `json:"last_prompt"`       // Preview of the last user interaction
+	ProfileName      string    `json:"profile_name,omitempty"`
+	LastPrompt       string    `json:"last_prompt"` // Preview of the last user interaction
 	CreatedAt        time.Time `json:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at"`
 }

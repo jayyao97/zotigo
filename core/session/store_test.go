@@ -1,9 +1,15 @@
 package session
 
 import (
+	"bufio"
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"sync"
@@ -29,6 +35,7 @@ func TestFileStore_PutGet(t *testing.T) {
 		Metadata: Metadata{
 			ID:               "test_session_1",
 			WorkingDirectory: "/tmp/test",
+			ProfileName:      "gpt-high",
 			LastPrompt:       "Hello world",
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
@@ -76,11 +83,44 @@ func TestFileStore_PutGet(t *testing.T) {
 	if loaded.LastPrompt != sess.LastPrompt {
 		t.Errorf("LastPrompt mismatch: got %s, want %s", loaded.LastPrompt, sess.LastPrompt)
 	}
+	if loaded.ProfileName != sess.ProfileName {
+		t.Errorf("ProfileName mismatch: got %s, want %s", loaded.ProfileName, sess.ProfileName)
+	}
 	if len(loaded.Turns) != 1 {
 		t.Fatalf("Expected 1 turn, got %d", len(loaded.Turns))
 	}
 	if len(loaded.Turns[0].SafetyEvents) != 1 {
 		t.Fatalf("Expected 1 safety event, got %d", len(loaded.Turns[0].SafetyEvents))
+	}
+}
+
+func TestFileStoreUpdateProfileRestoresSessionWhenIndexUpdateFails(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	now := time.Now().UTC()
+	sess := &Session{Metadata: Metadata{
+		ID:          "profile-rollback",
+		ProfileName: "old",
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}}
+	if err := store.Put(context.Background(), sess); err != nil {
+		t.Fatalf("put initial session: %v", err)
+	}
+	if err := store.index.close(); err != nil {
+		t.Fatalf("close index: %v", err)
+	}
+	if err := store.UpdateProfile(context.Background(), sess.ID, "new", now.Add(time.Minute)); err == nil {
+		t.Fatal("expected index update failure")
+	}
+	loaded, err := store.Get(context.Background(), sess.ID)
+	if err != nil {
+		t.Fatalf("get rolled back session: %v", err)
+	}
+	if loaded == nil || loaded.ProfileName != "old" || !loaded.UpdatedAt.Equal(now) {
+		t.Fatalf("expected previous session after failed put, got %#v", loaded)
 	}
 }
 
@@ -261,6 +301,7 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 		Metadata: Metadata{
 			ID:               "sqlite_indexed",
 			WorkingDirectory: "/project/sqlite",
+			ProfileName:      "sqlite-profile",
 			LastPrompt:       "hello sqlite",
 			CreatedAt:        time.Now().Add(-time.Hour),
 			UpdatedAt:        time.Now(),
@@ -285,6 +326,52 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 	}
 	if listed[0].LastPrompt != "hello sqlite" {
 		t.Fatalf("Expected LastPrompt to round trip, got %q", listed[0].LastPrompt)
+	}
+	if listed[0].ProfileName != "sqlite-profile" {
+		t.Fatalf("Expected ProfileName to round trip, got %q", listed[0].ProfileName)
+	}
+}
+
+func TestFileStore_SQLiteIndexMigratesProfileName(t *testing.T) {
+	tmpDir := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(tmpDir, "session_index.sqlite"))
+	if err != nil {
+		t.Fatalf("open legacy index: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE sessions (
+		id TEXT PRIMARY KEY,
+		working_directory TEXT NOT NULL,
+		last_prompt TEXT NOT NULL DEFAULT '',
+		created_at INTEGER NOT NULL,
+		updated_at INTEGER NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy sessions table: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy index: %v", err)
+	}
+
+	store, err := NewFileStore(tmpDir)
+	if err != nil {
+		t.Fatalf("open migrated store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now()
+	if err := store.Put(context.Background(), &Session{Metadata: Metadata{
+		ID:               "migrated-profile",
+		WorkingDirectory: "/project/migrated",
+		ProfileName:      "gpt-high",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put migrated session: %v", err)
+	}
+	listed, err := store.List(context.Background(), ListFilter{})
+	if err != nil {
+		t.Fatalf("list migrated sessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ProfileName != "gpt-high" {
+		t.Fatalf("expected migrated profile name, got %#v", listed)
 	}
 }
 
@@ -682,6 +769,65 @@ func TestFileStore_Lock(t *testing.T) {
 	}
 	if locked {
 		t.Error("Expected session to be unlocked")
+	}
+}
+
+func TestFileStore_LockAcrossProcesses(t *testing.T) {
+	if os.Getenv("ZOTIGO_LOCK_HELPER") == "1" {
+		root := os.Getenv("ZOTIGO_LOCK_ROOT")
+		store, err := NewFileStore(root)
+		if err != nil {
+			t.Fatalf("create helper store: %v", err)
+		}
+		defer store.Close()
+		if err := store.Lock(context.Background(), "cross-process"); err != nil {
+			t.Fatalf("lock helper session: %v", err)
+		}
+		fmt.Fprintln(os.Stdout, "ready")
+		_, _ = io.Copy(io.Discard, os.Stdin)
+		if err := store.Unlock(context.Background(), "cross-process"); err != nil {
+			t.Fatalf("unlock helper session: %v", err)
+		}
+		return
+	}
+
+	root := t.TempDir()
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve test executable: %v", err)
+	}
+	cmd := exec.Command(executable, "-test.run=^TestFileStore_LockAcrossProcesses$")
+	cmd.Env = append(os.Environ(), "ZOTIGO_LOCK_HELPER=1", "ZOTIGO_LOCK_ROOT="+root)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("open helper stdin: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatalf("open helper stdout: %v", err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start helper: %v", err)
+	}
+	scanner := bufio.NewScanner(stdout)
+	if !scanner.Scan() || scanner.Text() != "ready" {
+		_ = stdin.Close()
+		_ = cmd.Wait()
+		t.Fatalf("wait for helper lock: line=%q err=%v", scanner.Text(), scanner.Err())
+	}
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatalf("create parent store: %v", err)
+	}
+	defer store.Close()
+	if err := store.Lock(context.Background(), "cross-process"); !errors.Is(err, ErrSessionLocked) {
+		t.Fatalf("expected cross-process session lock, got %v", err)
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatalf("release helper: %v", err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("wait helper: %v", err)
 	}
 }
 

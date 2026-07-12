@@ -14,3 +14,24 @@ func TestDefaultContextWindow(t *testing.T) {
 			config.DefaultContextWindow)
 	}
 }
+
+func TestResolveProfile(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProfile: " default ",
+		Profiles: map[string]config.ProfileConfig{
+			"default": {Provider: "openai"},
+			"other":   {Provider: "anthropic"},
+		},
+	}
+	name, profile, err := cfg.ResolveProfile("")
+	if err != nil || name != "default" || profile.Provider != "openai" {
+		t.Fatalf("resolve default profile: name=%q profile=%#v err=%v", name, profile, err)
+	}
+	name, profile, err = cfg.ResolveProfile(" other ")
+	if err != nil || name != "other" || profile.Provider != "anthropic" {
+		t.Fatalf("resolve explicit profile: name=%q profile=%#v err=%v", name, profile, err)
+	}
+	if _, _, err := cfg.ResolveProfile("missing"); err == nil {
+		t.Fatal("expected missing profile error")
+	}
+}

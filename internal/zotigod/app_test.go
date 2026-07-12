@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -25,8 +26,10 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/runner"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
+	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 )
 
 type sessionListResponse struct {
@@ -95,6 +98,25 @@ func (p *noopProvider) StreamChat(context.Context, []protocol.Message, []tools.T
 	return ch, nil
 }
 
+type blockingFinishProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *blockingFinishProvider) Name() string { return "blocking-finish" }
+
+func (p *blockingFinishProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	events := make(chan protocol.Event, 2)
+	go func() {
+		defer close(events)
+		close(p.started)
+		<-p.release
+		events <- protocol.NewTextDeltaEvent("old generation")
+		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return events, nil
+}
+
 type fakeDisplayItemSource struct {
 	mu             sync.Mutex
 	items          map[string][]zotigosession.DisplayItem
@@ -103,6 +125,40 @@ type fakeDisplayItemSource struct {
 	appendHook     func(sessionID string, item zotigosession.DisplayItem)
 	offsetCalls    atomic.Int32
 	offsetMaxLines []int
+}
+
+type blockingProfileUpdateStore struct {
+	zotigosession.Store
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingProfileUpdateStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.Store.(sessionProfileUpdater).UpdateProfile(ctx, id, profileName, updatedAt)
+}
+
+type rollbackFailingProfileStore struct {
+	zotigosession.Store
+	updates int
+}
+
+type unlockFailingStore struct {
+	zotigosession.Store
+}
+
+func (s unlockFailingStore) Unlock(context.Context, string) error {
+	return errors.New("unlock unavailable")
+}
+
+func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	s.updates++
+	if s.updates == 2 {
+		return errors.New("rollback unavailable")
+	}
+	return s.Store.(sessionProfileUpdater).UpdateProfile(ctx, id, profileName, updatedAt)
 }
 
 func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
@@ -284,6 +340,569 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
+	homeDir := t.TempDir()
+	t.Setenv("HOME", homeDir)
+	configDir := filepath.Join(homeDir, config.ConfigDirName)
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("create global config directory: %v", err)
+	}
+	globalConfig := `
+profiles:
+  global-fast:
+    provider: anthropic
+    model: claude-fast
+    api_key: global-secret
+`
+	if err := os.WriteFile(filepath.Join(configDir, config.ConfigFileName), []byte(globalConfig), 0644); err != nil {
+		t.Fatalf("write global config: %v", err)
+	}
+	projectDir := t.TempDir()
+	projectConfig := `
+default_profile: project-high
+profiles:
+  project-high:
+    provider: openai
+    model: gpt-5.5
+    thinking_level: high
+    api_key: should-not-leak
+    base_url: https://private.example.com
+    params:
+      private_option: should-not-leak
+`
+	if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var response profilesResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profiles response: %v", err)
+	}
+	if response.DefaultProfile != "project-high" {
+		t.Fatalf("expected default profile project-high, got %q", response.DefaultProfile)
+	}
+	for i := 1; i < len(response.Profiles); i++ {
+		if response.Profiles[i-1].Name >= response.Profiles[i].Name {
+			t.Fatalf("expected profiles sorted by name, got %#v", response.Profiles)
+		}
+	}
+	var projectProfile *publicProfile
+	var globalProfile *publicProfile
+	for i := range response.Profiles {
+		if response.Profiles[i].Name == "project-high" {
+			projectProfile = &response.Profiles[i]
+		}
+		if response.Profiles[i].Name == "global-fast" {
+			globalProfile = &response.Profiles[i]
+		}
+	}
+	if projectProfile == nil {
+		t.Fatal("expected project profile")
+	}
+	if projectProfile.Provider != "openai" || projectProfile.Model != "gpt-5.5" || projectProfile.ThinkingLevel != "high" {
+		t.Fatalf("unexpected project profile: %#v", projectProfile)
+	}
+	if globalProfile == nil || globalProfile.Provider != "anthropic" || globalProfile.Model != "claude-fast" {
+		t.Fatalf("expected merged global profile, got %#v", globalProfile)
+	}
+	for _, forbidden := range []string{"should-not-leak", "global-secret", "private.example.com", "private_option", "api_key", "base_url"} {
+		if strings.Contains(rec.Body.String(), forbidden) {
+			t.Fatalf("response leaked %q: %s", forbidden, rec.Body.String())
+		}
+	}
+}
+
+func TestProfilesRejectsRelativeWorkingDirectory(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles?working_directory=relative", nil))
+
+	assertAPIError(t, rec, http.StatusBadRequest, "invalid_request", "working_directory must be an absolute path")
+}
+
+func TestProfilesRejectsMissingDefaultProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte("default_profile: missing\n"), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", `default profile "missing" not found`)
+}
+
+func TestProfilesRejectsUnsupportedMethod(t *testing.T) {
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/config/profiles", nil))
+
+	assertAPIError(t, rec, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
+	if got := rec.Header().Get("Allow"); got != http.MethodGet {
+		t.Fatalf("expected Allow %q, got %q", http.MethodGet, got)
+	}
+}
+
+func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, store, "sess-offline-profile", workDir)
+	stored, err := store.Get(context.Background(), "sess-offline-profile")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "old"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save old profile: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-offline-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var response changeProfileResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profile response: %v", err)
+	}
+	if response.Profile != "new" || response.Status != "applied" {
+		t.Fatalf("unexpected profile response: %#v", response)
+	}
+	stored, err = store.Get(context.Background(), "sess-offline-profile")
+	if err != nil || stored.ProfileName != "new" {
+		t.Fatalf("expected persisted profile new, got session=%#v err=%v", stored, err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "sess-offline-profile")
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemProfileChanged || items[0].Profile == nil || items[0].Profile.From != "old" || items[0].Profile.To != "new" {
+		t.Fatalf("unexpected profile display items: %#v", items)
+	}
+	itemsRec := httptest.NewRecorder()
+	handler.ServeHTTP(itemsRec, httptest.NewRequest(http.MethodGet, "/sessions/sess-offline-profile/items", nil))
+	if itemsRec.Code != http.StatusOK {
+		t.Fatalf("expected items status %d, got %d: %s", http.StatusOK, itemsRec.Code, itemsRec.Body.String())
+	}
+	var publicItems itemsResponse
+	if err := decodeAPIData(t, itemsRec.Body.Bytes(), &publicItems); err != nil {
+		t.Fatalf("decode public items: %v", err)
+	}
+	if len(publicItems.Items) != 1 || publicItems.Items[0].Profile == nil || publicItems.Items[0].Profile.To != "new" {
+		t.Fatalf("unexpected public profile item: %#v", publicItems.Items)
+	}
+}
+
+func TestSessionProfileChangeRejectsOfflineSessionLockedByWorker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, store, "sess-locked-profile", workDir)
+	stored, err := store.Get(context.Background(), "sess-locked-profile")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "old"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save old profile: %v", err)
+	}
+	if err := store.Lock(context.Background(), "sess-locked-profile"); err != nil {
+		t.Fatalf("simulate worker lock: %v", err)
+	}
+	defer func() { _ = store.Unlock(context.Background(), "sess-locked-profile") }()
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-locked-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	assertAPIError(t, rec, http.StatusConflict, "session_in_use", "active in another process")
+	stored, err = store.Get(context.Background(), "sess-locked-profile")
+	if err != nil || stored.ProfileName != "old" {
+		t.Fatalf("expected locked session profile old, got session=%#v err=%v", stored, err)
+	}
+}
+
+func TestSessionProfileChangeReportsRollbackFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer baseStore.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, baseStore, "sess-rollback-profile", workDir)
+	stored, err := baseStore.Get(context.Background(), "sess-rollback-profile")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "old"
+	if err := baseStore.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save old profile: %v", err)
+	}
+	store := &rollbackFailingProfileStore{Store: baseStore}
+	var markerAttempts atomic.Int32
+	source := &fakeDisplayItemSource{
+		items: map[string][]zotigosession.DisplayItem{"sess-rollback-profile": {
+			{ID: "old-to-new", Sequence: 1, Type: zotigosession.DisplayItemProfileChanged, Profile: &zotigosession.DisplayProfileChange{From: "old", To: "new"}},
+			{ID: "new-to-old", Sequence: 2, Type: zotigosession.DisplayItemProfileChanged, Profile: &zotigosession.DisplayProfileChange{From: "new", To: "old"}},
+		}},
+		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+			if item.Type == zotigosession.DisplayItemProfileChanged && markerAttempts.Add(1) == 1 {
+				return errors.New("display log unavailable")
+			}
+			return nil
+		},
+	}
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-rollback-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", "rollback unavailable")
+	if !strings.Contains(rec.Body.String(), "display log unavailable") {
+		t.Fatalf("expected original append failure, got %s", rec.Body.String())
+	}
+	stored, err = baseStore.Get(context.Background(), "sess-rollback-profile")
+	if err != nil || stored.ProfileName != "new" {
+		t.Fatalf("expected uncertain durable profile new after rollback failure, got session=%#v err=%v", stored, err)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-rollback-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected retry to repair profile marker with status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-rollback-profile")
+	if err != nil {
+		t.Fatalf("load repaired marker: %v", err)
+	}
+	if len(items) != 3 || items[2].Type != zotigosession.DisplayItemProfileChanged || items[2].Profile == nil || items[2].Profile.To != "new" {
+		t.Fatalf("expected repaired profile marker, got %#v", items)
+	}
+}
+
+func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(t *testing.T) {
+	const providerName = "offline-profile-repair-provider"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  profile-a:\n    provider: %s\n    model: a\n  profile-b:\n    provider: %s\n    model: b\n", providerName, providerName, providerName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, store, "sess-repair-different-profile", workDir)
+	stored, err := store.Get(context.Background(), "sess-repair-different-profile")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "profile-a"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save uncertain profile metadata: %v", err)
+	}
+	commandA := zotigosession.DisplayItem{
+		ID:       "profile-command-a",
+		Sequence: 1,
+		Type:     zotigosession.DisplayItemSessionCommand,
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-a"},
+	}
+	pause := zotigosession.DisplayItem{
+		ID:       "pause-command",
+		Sequence: 2,
+		Type:     zotigosession.DisplayItemSessionCommand,
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandPause, TurnID: "turn-pending"},
+	}
+	commandB := zotigosession.DisplayItem{
+		ID:       "profile-command-b",
+		Sequence: 3,
+		Type:     zotigosession.DisplayItemSessionCommand,
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-b"},
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+		"sess-repair-different-profile": {commandA, pause, commandB},
+	}}
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-repair-different-profile/profile", strings.NewReader(`{"profile":"profile-b"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected offline repair status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	stored, err = store.Get(context.Background(), "sess-repair-different-profile")
+	if err != nil || stored.ProfileName != "profile-b" {
+		t.Fatalf("expected selected profile-b to remain durable, got session=%#v err=%v", stored, err)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-repair-different-profile")
+	if err != nil {
+		t.Fatalf("load repaired markers: %v", err)
+	}
+	if len(items) != 6 || items[3].Type != zotigosession.DisplayItemProfileChanged || items[3].Profile == nil || items[3].Profile.To != "profile-b" || items[4].Type != zotigosession.DisplayItemProfileFailed || items[4].Profile == nil || items[4].Profile.CommandID != commandA.ID || items[5].Type != zotigosession.DisplayItemProfileFailed || items[5].Profile == nil || items[5].Profile.CommandID != commandB.ID {
+		t.Fatalf("expected offline intent followed by correlated failures, got %#v", items)
+	}
+	if cursor := recoverAppliedCommandSequence(items); cursor != commandA.Sequence {
+		t.Fatalf("expected cursor to stop at ordinary command after %d, got %d", commandA.Sequence, cursor)
+	}
+
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName, Model: "b"}, localExec, agent.WithProfileName("profile-b"))
+	if err != nil {
+		t.Fatalf("create recovery agent: %v", err)
+	}
+	runtime := &workerRuntime{
+		sessionID: "sess-repair-different-profile",
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-repair-different-profile", source),
+	}
+	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, commandsResponse{
+			Commands:   []commandResponse{profileCommandFromItem(commandA), pauseCommandFromItem(pause), profileCommandFromItem(commandB)},
+			NextOffset: 1,
+		})
+	}))
+	defer commandServer.Close()
+	cursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{Sequence: commandA.Sequence})
+	if err != nil {
+		t.Fatalf("replay repaired commands: %v", err)
+	}
+	if cursor.Sequence != commandB.Sequence || ag.ActiveProfileName() != "profile-b" {
+		t.Fatalf("expected replay to skip completed profile commands, got cursor=%#v profile=%q", cursor, ag.ActiveProfileName())
+	}
+}
+
+func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: profile-a\nprofiles:\n  profile-a:\n    provider: openai\n    model: a\n  profile-b:\n    provider: openai\n    model: b\n  profile-c:\n    provider: openai\n    model: c\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, store, "sess-partial-profile-repair", workDir)
+	stored, err := store.Get(context.Background(), "sess-partial-profile-repair")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "profile-a"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save uncertain profile metadata: %v", err)
+	}
+	commandA := zotigosession.DisplayItem{ID: "profile-a", Sequence: 1, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-a"}}
+	commandC := zotigosession.DisplayItem{ID: "profile-c", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-c"}}
+	var failCOnce atomic.Bool
+	source := &fakeDisplayItemSource{
+		items: map[string][]zotigosession.DisplayItem{"sess-partial-profile-repair": {commandA, commandC}},
+		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+			if item.Type == zotigosession.DisplayItemProfileFailed && item.Profile != nil && item.Profile.CommandID == commandC.ID && !failCOnce.Swap(true) {
+				return errors.New("profile-c marker unavailable")
+			}
+			return nil
+		},
+	}
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-partial-profile-repair/profile", strings.NewReader(`{"profile":"profile-b"}`)))
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", "profile state is uncertain")
+	stored, err = store.Get(context.Background(), "sess-partial-profile-repair")
+	if err != nil || stored.ProfileName != "profile-b" {
+		t.Fatalf("expected uncertain metadata to retain profile-b, got session=%#v err=%v", stored, err)
+	}
+	partialItems, _, err := source.LoadItems(context.Background(), "sess-partial-profile-repair")
+	if err != nil {
+		t.Fatalf("load partial repair: %v", err)
+	}
+	if cursor := recoverAppliedCommandSequence(partialItems); cursor != commandC.Sequence {
+		t.Fatalf("expected durable offline intent to protect through command %d, got cursor %d", commandC.Sequence, cursor)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-partial-profile-repair/profile", strings.NewReader(`{"profile":"profile-b"}`)))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected retry status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-partial-profile-repair")
+	if err != nil {
+		t.Fatalf("load repaired markers: %v", err)
+	}
+	if len(items) != 5 || items[2].Type != zotigosession.DisplayItemProfileChanged || items[2].Profile == nil || items[2].Profile.To != "profile-b" || items[3].Type != zotigosession.DisplayItemProfileFailed || items[3].Profile == nil || items[3].Profile.CommandID != commandA.ID || items[4].Type != zotigosession.DisplayItemProfileFailed || items[4].Profile == nil || items[4].Profile.CommandID != commandC.ID {
+		t.Fatalf("expected durable offline intent and both correlated failures, got %#v", items)
+	}
+	if cursor := recoverAppliedCommandSequence(items); cursor != commandC.Sequence {
+		t.Fatalf("expected repaired cursor %d, got %d", commandC.Sequence, cursor)
+	}
+}
+
+func TestSessionProfileChangeReportsUnlockFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer baseStore.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	putStoredSession(t, baseStore, "sess-unlock-profile", workDir)
+	stored, err := baseStore.Get(context.Background(), "sess-unlock-profile")
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	stored.ProfileName = "old"
+	if err := baseStore.Put(context.Background(), stored); err != nil {
+		t.Fatalf("save old profile: %v", err)
+	}
+	store := unlockFailingStore{Store: baseStore}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-unlock-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", "unlock unavailable")
+	if err := baseStore.Unlock(context.Background(), "sess-unlock-profile"); err != nil {
+		t.Fatalf("cleanup session lock: %v", err)
+	}
+}
+
+func TestSessionProfileChangeQueuesCommandForRunningWorker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSessionWithWorkingDirectory(t, handler, workDir)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/"+created.ID+"/profile", strings.NewReader(`{"profile":"new"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	var response changeProfileResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profile response: %v", err)
+	}
+	if response.Profile != "new" || response.Status != "pending" {
+		t.Fatalf("unexpected profile response: %#v", response)
+	}
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Type != sessionCommandProfile || msg.Command.Profile == nil || msg.Command.Profile.Name != "new" {
+		t.Fatalf("unexpected worker profile command: %#v", msg)
+	}
+	if response.CommandID == "" || response.CommandID != msg.Command.ID {
+		t.Fatalf("expected response command id %q, got %q", msg.Command.ID, response.CommandID)
+	}
+
+	rec = httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/"+created.ID+"/profile", strings.NewReader(`{"profile":"old"}`)))
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected revert status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
+	}
+	msg = readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.Profile == nil || msg.Command.Profile.Name != "old" {
+		t.Fatalf("expected second command to supersede pending profile, got %#v", msg)
+	}
+}
+
+func TestSessionProfileChangeDoesNotRaceSessionStart(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  new:\n    provider: openai\n    model: new\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	launcher := workerLauncherFunc(func(context.Context, string, string) error {
+		close(launchStarted)
+		<-releaseLaunch
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workerConnectTimeout: 10 * time.Millisecond,
+	})
+	created := createSessionWithWorkingDirectory(t, handler, workDir)
+
+	startDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/start", nil))
+		startDone <- rec.Code
+	}()
+	<-launchStarted
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/"+created.ID+"/profile", strings.NewReader(`{"profile":"new"}`)))
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected starting session profile change status %d, got %d: %s", http.StatusServiceUnavailable, rec.Code, rec.Body.String())
+	}
+	stored, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	if stored.ProfileName != "old" {
+		t.Fatalf("expected start to preserve profile old, got %q", stored.ProfileName)
+	}
+
+	close(releaseLaunch)
+	if code := <-startDone; code != http.StatusServiceUnavailable {
+		t.Fatalf("expected start timeout status %d, got %d", http.StatusServiceUnavailable, code)
+	}
+}
+
 func TestSessionsCreateAndList(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -445,6 +1064,122 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 	}
 }
 
+func TestSessionsCreatePersistsSelectedProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	workDir := t.TempDir()
+	projectConfig := `
+default_profile: project-default
+profiles:
+  project-default:
+    provider: openai
+    model: gpt-default
+  project-high:
+    provider: openai
+    model: gpt-high
+    thinking_level: high
+`
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"working_directory":%q,"profile":"project-high"}`, workDir)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	var created Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ProfileName != "project-high" {
+		t.Fatalf("expected selected profile project-high, got %q", created.ProfileName)
+	}
+	stored, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load stored session: %v", err)
+	}
+	if stored == nil || stored.ProfileName != "project-high" {
+		t.Fatalf("expected stored profile project-high, got %#v", stored)
+	}
+	listed, err := store.List(context.Background(), zotigosession.ListFilter{})
+	if err != nil {
+		t.Fatalf("list stored sessions: %v", err)
+	}
+	if len(listed) != 1 || listed[0].ProfileName != "project-high" {
+		t.Fatalf("expected indexed profile project-high, got %#v", listed)
+	}
+	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	getRec := httptest.NewRecorder()
+	restarted.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID, nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected restarted GET status %d, got %d: %s", http.StatusOK, getRec.Code, getRec.Body.String())
+	}
+	var offline Session
+	if err := decodeAPIData(t, getRec.Body.Bytes(), &offline); err != nil {
+		t.Fatalf("decode restarted session: %v", err)
+	}
+	if offline.ProfileName != "project-high" || offline.Live {
+		t.Fatalf("expected offline session with persisted profile, got %#v", offline)
+	}
+}
+
+func TestSessionsCreatePersistsProjectDefaultProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	workDir := t.TempDir()
+	projectConfig := "default_profile: project-default\nprofiles:\n  project-default:\n    provider: openai\n    model: gpt-default\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	}
+	var created Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	if created.ProfileName != "project-default" {
+		t.Fatalf("expected project default profile, got %q", created.ProfileName)
+	}
+}
+
+func TestSessionsCreateRejectsUnknownProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	registry := newSessionRegistry()
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	workDir := t.TempDir()
+
+	body := fmt.Sprintf(`{"working_directory":%q,"profile":"missing"}`, workDir)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
+
+	assertAPIError(t, rec, http.StatusBadRequest, "invalid_request", `profile "missing" not found`)
+	if got := registry.List(); len(got) != 0 {
+		t.Fatalf("expected rejected profile not to create a session, got %#v", got)
+	}
+}
+
 func TestSessionsCreateRejectsInvalidWorkingDirectory(t *testing.T) {
 	handler := NewHandler()
 
@@ -516,6 +1251,32 @@ func TestSessionsGetByID(t *testing.T) {
 	}
 	if got.ID != created.ID || got.State != SessionStateCreated {
 		t.Fatalf("unexpected session: %#v", got)
+	}
+}
+
+func TestSessionsGetLiveFallsBackToRegistryWhenStoreFails(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID:          "sess-live-store-failure",
+		State:       SessionStateRunning,
+		ProfileName: "registry-profile",
+		CreatedAt:   time.Now().UTC(),
+	})
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		store: unavailableSessionStore{err: errors.New("store unavailable")},
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/sess-live-store-failure", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected live registry fallback status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var session Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &session); err != nil {
+		t.Fatalf("decode live session: %v", err)
+	}
+	if !session.Live || session.State != SessionStateRunning || session.ProfileName != "registry-profile" {
+		t.Fatalf("unexpected live registry fallback: %#v", session)
 	}
 }
 
@@ -998,6 +1759,70 @@ func TestSessionStartResumesStoredSession(t *testing.T) {
 	defer worker.Close()
 }
 
+func TestDisconnectedRunningSessionRejectsRemovedProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte("default_profile: new\nprofiles:\n  new:\n    provider: openai\n    model: new\n"), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-running-removed-profile",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID:               "sess-running-removed-profile",
+		State:            SessionStateRunning,
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+	})
+	var launches atomic.Int32
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store: store,
+		launcher: workerLauncherFunc(func(context.Context, string, string) error {
+			launches.Add(1)
+			return nil
+		}),
+		workerConnectTimeout: 10 * time.Millisecond,
+	})
+
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, httptest.NewRequest(http.MethodPost, "/sessions/sess-running-removed-profile/start", nil))
+	assertAPIError(t, startRec, http.StatusConflict, "profile_not_found", `profile "old" not found`)
+
+	messageRec := httptest.NewRecorder()
+	handler.ServeHTTP(messageRec, httptest.NewRequest(http.MethodPost, "/sessions/sess-running-removed-profile/messages", strings.NewReader(`{"text":"resume"}`)))
+	assertAPIError(t, messageRec, http.StatusConflict, "profile_not_found", `profile "old" not found`)
+	if got := launches.Load(); got != 0 {
+		t.Fatalf("expected no worker launch, got %d", got)
+	}
+
+	profileRec := httptest.NewRecorder()
+	handler.ServeHTTP(profileRec, httptest.NewRequest(http.MethodPut, "/sessions/sess-running-removed-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	if profileRec.Code != http.StatusOK {
+		t.Fatalf("expected profile repair status %d, got %d: %s", http.StatusOK, profileRec.Code, profileRec.Body.String())
+	}
+	stored, err := store.Get(context.Background(), "sess-running-removed-profile")
+	if err != nil || stored.ProfileName != "new" {
+		t.Fatalf("expected repaired durable profile new, got session=%#v err=%v", stored, err)
+	}
+	if session, ok := registry.Get("sess-running-removed-profile"); !ok || session.ProfileName != "new" {
+		t.Fatalf("expected repaired registry profile new, got %#v", session)
+	}
+}
+
 func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -1128,6 +1953,153 @@ func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
 	defer worker.Close()
 	if got := getSession(t, handler, "sess-stored"); got.State != SessionStateRunning {
 		t.Fatalf("expected active launch to remain running, got %#v", got)
+	}
+}
+
+func TestSessionStartOwnerCancellationDoesNotFailSharedLaunch(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	putStoredSession(t, store, "sess-owner-cancel", t.TempDir())
+	var server *httptest.Server
+	workers := newWorkerRegistry()
+	workerReady := make(chan *websocket.Conn, 1)
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		close(launchStarted)
+		<-releaseLaunch
+		go func() {
+			url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+			conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	registry := newSessionRegistry()
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workers:              workers,
+		workerConnectTimeout: time.Second,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/sess-owner-cancel/start", nil).WithContext(ownerCtx)
+		handler.ServeHTTP(rec, req)
+		ownerDone <- rec.Code
+	}()
+	<-launchStarted
+	cancelOwner()
+	<-ownerDone
+	if session, ok := registry.Get("sess-owner-cancel"); !ok || session.State != SessionStateStarting {
+		t.Fatalf("expected canceled owner to leave shared launch starting, got %#v", session)
+	}
+
+	observerDone := make(chan int, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-owner-cancel/start", nil))
+		observerDone <- rec.Code
+	}()
+	close(releaseLaunch)
+	if code := <-observerDone; code != http.StatusOK {
+		t.Fatalf("expected observer to complete shared launch with status %d, got %d", http.StatusOK, code)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+}
+
+func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	putStoredSession(t, store, "sess-owner-timeout", t.TempDir())
+	launchStarted := make(chan struct{})
+	releaseLaunch := make(chan struct{})
+	launcher := workerLauncherFunc(func(context.Context, string, string) error {
+		close(launchStarted)
+		<-releaseLaunch
+		return nil
+	})
+	registry := newSessionRegistry()
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store:                store,
+		launcher:             launcher,
+		workerConnectTimeout: 20 * time.Millisecond,
+	})
+
+	ownerCtx, cancelOwner := context.WithCancel(context.Background())
+	ownerDone := make(chan struct{})
+	go func() {
+		defer close(ownerDone)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/sess-owner-timeout/start", nil).WithContext(ownerCtx)
+		handler.ServeHTTP(rec, req)
+	}()
+	<-launchStarted
+	cancelOwner()
+	<-ownerDone
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		session, ok := registry.Get("sess-owner-timeout")
+		if ok && session.State == SessionStateFailed {
+			if !strings.Contains(session.Error, errWorkerConnectTimeout.Error()) {
+				t.Fatalf("unexpected daemon timeout error: %q", session.Error)
+			}
+			close(releaseLaunch)
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	close(releaseLaunch)
+	t.Fatalf("expected daemon-owned timeout to fail canceled launch, got %#v", func() Session {
+		session, _ := registry.Get("sess-owner-timeout")
+		return session
+	}())
+}
+
+func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	putStoredSession(t, store, "sess-launch-cancel", t.TempDir())
+	launcherCanceled := make(chan struct{})
+	launcher := workerLauncherFunc(func(ctx context.Context, _, _ string) error {
+		<-ctx.Done()
+		close(launcherCanceled)
+		return ctx.Err()
+	})
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store: store, launcher: launcher, workerConnectTimeout: 20 * time.Millisecond,
+	})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-launch-cancel/start", nil))
+	assertAPIError(t, rec, http.StatusServiceUnavailable, "service_unavailable", errWorkerConnectTimeout.Error())
+	select {
+	case <-launcherCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("startup timeout did not cancel launcher")
 	}
 }
 
@@ -1796,50 +2768,6 @@ func TestLoadWorkerCommandCursorDowngradesOffsetBeforePendingCommand(t *testing.
 	}
 }
 
-func TestAdvanceWorkerCommandOffsetFindsAppliedCommand(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("new file store: %v", err)
-	}
-	defer store.Close()
-	sessionID := "sess-live-offset"
-	now := time.Now().UTC()
-	if err := store.Put(context.Background(), &zotigosession.Session{
-		Metadata: zotigosession.Metadata{
-			ID:        sessionID,
-			CreatedAt: now,
-			UpdatedAt: now,
-		},
-	}); err != nil {
-		t.Fatalf("put session: %v", err)
-	}
-	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{Type: zotigosession.DisplayItemAssistantMessage}); err != nil {
-		t.Fatalf("append non-command: %v", err)
-	}
-	command, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemUserMessage,
-		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
-			Text: "live",
-		},
-	})
-	if err != nil {
-		t.Fatalf("append command: %v", err)
-	}
-
-	offset := advanceWorkerCommandOffset(context.Background(), store, sessionID, 0, command.Sequence)
-	if offset <= 0 {
-		t.Fatalf("expected live command offset to advance, got %d", offset)
-	}
-	items, _, nextOffset, err := store.ListDisplayItemsFromOffset(context.Background(), sessionID, offset, 10)
-	if err != nil {
-		t.Fatalf("read advanced offset: %v", err)
-	}
-	if len(items) != 0 || nextOffset != offset {
-		t.Fatalf("expected offset at end of complete log, got items=%#v next=%d offset=%d", items, nextOffset, offset)
-	}
-}
-
 func TestWorkerClientInitializesRuntimeBeforeConnect(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()
@@ -1869,6 +2797,826 @@ func TestWorkerClientInitializesRuntimeBeforeConnect(t *testing.T) {
 	}
 }
 
+func TestResolveWorkerProfile(t *testing.T) {
+	appConfig := &config.Config{
+		DefaultProfile: "default-profile",
+		Profiles: map[string]config.ProfileConfig{
+			"default-profile":  {Provider: "openai", Model: "default-model"},
+			"selected-profile": {Provider: "anthropic", Model: "selected-model"},
+		},
+	}
+
+	t.Run("persisted profile", func(t *testing.T) {
+		name, profile, err := resolveWorkerProfile(&zotigosession.Session{Metadata: zotigosession.Metadata{ProfileName: "selected-profile"}}, appConfig)
+		if err != nil {
+			t.Fatalf("resolve selected profile: %v", err)
+		}
+		if name != "selected-profile" || profile.Model != "selected-model" {
+			t.Fatalf("expected selected profile, got name=%q profile=%#v", name, profile)
+		}
+	})
+
+	t.Run("legacy session uses default", func(t *testing.T) {
+		name, profile, err := resolveWorkerProfile(&zotigosession.Session{}, appConfig)
+		if err != nil {
+			t.Fatalf("resolve default profile: %v", err)
+		}
+		if name != "default-profile" || profile.Model != "default-model" {
+			t.Fatalf("expected default profile, got name=%q profile=%#v", name, profile)
+		}
+	})
+}
+
+func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
+	const oldProviderName = "worker-profile-old"
+	const newProviderName = "worker-profile-new"
+	const newerProviderName = "worker-profile-newer"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newerProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n  newer:\n    provider: %s\n    model: newer\n", oldProviderName, newProviderName, newerProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-worker-profile",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	display := newWorkerDisplayLog("sess-worker-profile", storedDisplayItemSource{store: store})
+	runtime := &workerRuntime{
+		sessionID: "sess-worker-profile",
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   display,
+	}
+	commandItem, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemSessionCommand,
+		Command: &zotigosession.DisplayCommand{
+			Type:    sessionCommandProfile,
+			Profile: "new",
+		},
+	})
+	if err != nil {
+		t.Fatalf("append profile command: %v", err)
+	}
+	if err := runtime.HandleCommand(context.Background(), profileCommandFromItem(commandItem)); err != nil {
+		t.Fatalf("handle profile command: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		stored, err := store.Get(context.Background(), "sess-worker-profile")
+		items, _, itemsErr := store.ListDisplayItems(context.Background(), "sess-worker-profile")
+		if err == nil && stored != nil && stored.ProfileName == "new" && itemsErr == nil && len(items) == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	stored, err := store.Get(context.Background(), "sess-worker-profile")
+	if err != nil || stored.ProfileName != "new" {
+		t.Fatalf("expected persisted profile new, got session=%#v err=%v", stored, err)
+	}
+	if ag.ActiveProfileName() != "new" {
+		t.Fatalf("expected active profile new, got %q", ag.ActiveProfileName())
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "sess-worker-profile")
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if len(items) != 2 || items[1].Type != zotigosession.DisplayItemProfileChanged || items[1].Profile == nil || items[1].Profile.CommandID != commandItem.ID {
+		t.Fatalf("unexpected profile display items: %#v", items)
+	}
+	if cursor := recoverAppliedCommandSequence(items); cursor != commandItem.Sequence {
+		t.Fatalf("expected applied profile command cursor %d, got %d", commandItem.Sequence, cursor)
+	}
+	newerCommand, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
+		Type:    zotigosession.DisplayItemSessionCommand,
+		Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "newer"},
+	})
+	if err != nil {
+		t.Fatalf("append newer profile command: %v", err)
+	}
+	if err := runtime.HandleCommand(context.Background(), profileCommandFromItem(newerCommand)); err != nil {
+		t.Fatalf("handle newer profile command: %v", err)
+	}
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && ag.ActiveProfileName() != "newer" {
+		time.Sleep(time.Millisecond)
+	}
+	items, _, err = store.ListDisplayItems(context.Background(), "sess-worker-profile")
+	if err != nil {
+		t.Fatalf("load consecutive profile items: %v", err)
+	}
+	if len(items) != 4 || items[3].Profile == nil || items[3].Profile.CommandID != newerCommand.ID || items[3].Profile.From != "new" || items[3].Profile.To != "newer" {
+		t.Fatalf("expected consecutive marker new->newer, got %#v", items)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID:               "sess-worker-profile",
+		State:            SessionStateRunning,
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+	})
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	getRec := httptest.NewRecorder()
+	handler.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/sessions/sess-worker-profile", nil))
+	if getRec.Code != http.StatusOK {
+		t.Fatalf("expected live session status %d, got %d: %s", http.StatusOK, getRec.Code, getRec.Body.String())
+	}
+	var live Session
+	if err := decodeAPIData(t, getRec.Body.Bytes(), &live); err != nil {
+		t.Fatalf("decode live session: %v", err)
+	}
+	if live.ProfileName != "newer" {
+		t.Fatalf("expected durable profile to override stale registry value, got %#v", live)
+	}
+	startRec := httptest.NewRecorder()
+	handler.ServeHTTP(startRec, httptest.NewRequest(http.MethodPost, "/sessions/sess-worker-profile/start", nil))
+	if startRec.Code != http.StatusOK {
+		t.Fatalf("expected idempotent start status %d, got %d: %s", http.StatusOK, startRec.Code, startRec.Body.String())
+	}
+	var started Session
+	if err := decodeAPIData(t, startRec.Body.Bytes(), &started); err != nil {
+		t.Fatalf("decode idempotent start: %v", err)
+	}
+	if started.ProfileName != "newer" {
+		t.Fatalf("expected idempotent start profile new, got %#v", started)
+	}
+}
+
+func TestRecoverAppliedCommandSequenceWaitsForProfileResult(t *testing.T) {
+	command := zotigosession.DisplayItem{
+		ID:       "item-profile",
+		Sequence: 1,
+		Type:     zotigosession.DisplayItemSessionCommand,
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "new"},
+	}
+	if cursor := recoverAppliedCommandSequence([]zotigosession.DisplayItem{command}); cursor != 0 {
+		t.Fatalf("expected pending profile command cursor 0, got %d", cursor)
+	}
+	failed := zotigosession.DisplayItem{
+		Sequence: 2,
+		Type:     zotigosession.DisplayItemProfileFailed,
+		Profile:  &zotigosession.DisplayProfileChange{CommandID: command.ID, To: "new"},
+	}
+	if cursor := recoverAppliedCommandSequence([]zotigosession.DisplayItem{command, failed}); cursor != command.Sequence {
+		t.Fatalf("expected failed profile command cursor %d, got %d", command.Sequence, cursor)
+	}
+}
+
+func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
+	const oldProviderName = "worker-profile-failure-old"
+	const newProviderName = "worker-profile-failure-new"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n", oldProviderName, newProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	runtime := &workerRuntime{
+		sessionID: "sess-profile-failure",
+		workDir:   workDir,
+		store:     unavailableSessionStore{err: errors.New("store unavailable")},
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-profile-failure", source),
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-command",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "new"},
+	}); err != nil {
+		t.Fatalf("handle profile command: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items, _, _ := source.LoadItems(context.Background(), "sess-profile-failure")
+		if len(items) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-profile-failure")
+	if err != nil {
+		t.Fatalf("load failure item: %v", err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemProfileFailed || !strings.Contains(items[0].Error, "store unavailable") {
+		t.Fatalf("expected persisted profile failure, got %#v", items)
+	}
+	if got := ag.ActiveProfileName(); got != "old" {
+		t.Fatalf("expected active profile old after persistence failure, got %q", got)
+	}
+}
+
+func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
+	const oldProviderName = "worker-profile-build-failure-old"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  broken:\n    provider: provider-that-does-not-exist\n    model: broken\n", oldProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-profile-build-failure",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	runtime := &workerRuntime{
+		sessionID: "sess-profile-build-failure",
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-profile-build-failure", source),
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-command",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "broken"},
+	}); err != nil {
+		t.Fatalf("handle profile command: %v", err)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-profile-build-failure")
+	if err != nil {
+		t.Fatalf("load failure item: %v", err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemProfileFailed || !strings.Contains(items[0].Error, "provider-that-does-not-exist") {
+		t.Fatalf("expected provider build failure item, got %#v", items)
+	}
+	stored, err := store.Get(context.Background(), "sess-profile-build-failure")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if stored.ProfileName != "old" || ag.ActiveProfileName() != "old" {
+		t.Fatalf("expected old profile after provider build failure, got stored=%q active=%q", stored.ProfileName, ag.ActiveProfileName())
+	}
+}
+
+func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := "default_profile: old\nprofiles:\n  old:\n    provider: openai\n    model: old\n  broken:\n    provider: provider-that-does-not-exist\n    model: broken\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: "openai", Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}, appendErr: func(_ string, item zotigosession.DisplayItem) error {
+		if item.Type == zotigosession.DisplayItemProfileFailed {
+			return errors.New("display log unavailable")
+		}
+		return nil
+	}}
+	runtime := &workerRuntime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: newWorkerDisplayLog("sess-marker-failure", source)}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{ID: "profile-command", Type: sessionCommandProfile, Profile: &profileCommandPayload{Name: "broken"}}); err != nil {
+		t.Fatalf("handle profile command: %v", err)
+	}
+	fatalErr := runtime.currentFatalError()
+	var uncertain *profileCompletionUncertainError
+	if !errors.As(fatalErr, &uncertain) || !isExpectedWorkerClose(fatalErr) {
+		t.Fatalf("expected replayable completion uncertainty, got %v", fatalErr)
+	}
+}
+
+func TestWorkerRuntimeDoesNotCompleteLaterProfileAfterMarkerFailure(t *testing.T) {
+	localExec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: "openai", Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}, appendErr: func(_ string, item zotigosession.DisplayItem) error {
+		if item.Profile != nil && item.Profile.CommandID == "profile-a" {
+			return errors.New("display log unavailable")
+		}
+		return nil
+	}}
+	runtime := &workerRuntime{sessionID: "sess-marker-order", agent: ag, display: newWorkerDisplayLog("sess-marker-order", source)}
+	ready := make(chan struct{})
+	close(ready)
+	orderedA := make(chan struct{})
+	resultA := make(chan error, 1)
+	resultA <- agent.ErrRuntimeProfileSuperseded
+	completionA := make(chan error, 1)
+	runtime.finishProfileSwitch(ready, orderedA, "profile-a", "new", resultA, completionA)
+	if err := <-completionA; err == nil {
+		t.Fatal("expected first marker failure")
+	}
+
+	completionB := make(chan error, 1)
+	runtime.completeProfileFailure(orderedA, make(chan struct{}), completionB, "profile-b", "newer", errors.New("not applied"))
+	if err := <-completionB; err == nil {
+		t.Fatal("expected later profile to inherit fatal completion uncertainty")
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-marker-order")
+	if err != nil {
+		t.Fatalf("load items: %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("later profile marker crossed failed predecessor: %#v", items)
+	}
+}
+
+func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) {
+	const oldProviderName = "worker-profile-supersede-old"
+	const newProviderName = "worker-profile-supersede-new"
+	oldProvider := &blockingFinishProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return oldProvider, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n  broken:\n    provider: provider-that-does-not-exist\n    model: broken\n", oldProviderName, newProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-profile-supersede",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	runtime := &workerRuntime{
+		sessionID: "sess-profile-supersede",
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-profile-supersede", source),
+	}
+	events, err := ag.Run(context.Background(), "keep the current generation active")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	<-oldProvider.started
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-a",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "new"},
+	}); err != nil {
+		t.Fatalf("queue valid profile: %v", err)
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-b",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "broken"},
+	}); err != nil {
+		t.Fatalf("handle broken latest profile: %v", err)
+	}
+	close(oldProvider.release)
+	for range events {
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items, _, _ := source.LoadItems(context.Background(), "sess-profile-supersede")
+		if len(items) == 2 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-profile-supersede")
+	if err != nil {
+		t.Fatalf("load profile failures: %v", err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("expected superseded and build failure items, got %#v", items)
+	}
+	if items[0].Profile == nil || items[0].Profile.CommandID != "profile-a" || items[1].Profile == nil || items[1].Profile.CommandID != "profile-b" {
+		t.Fatalf("expected profile completion markers in command order, got %#v", items)
+	}
+	failures := map[string]string{}
+	for _, item := range items {
+		if item.Type != zotigosession.DisplayItemProfileFailed || item.Profile == nil {
+			t.Fatalf("expected profile failure item, got %#v", item)
+		}
+		failures[item.Profile.CommandID] = item.Error
+	}
+	if !strings.Contains(failures["profile-a"], agent.ErrRuntimeProfileSuperseded.Error()) {
+		t.Fatalf("expected profile A to be superseded, got %q", failures["profile-a"])
+	}
+	if !strings.Contains(failures["profile-b"], "provider-that-does-not-exist") {
+		t.Fatalf("expected profile B build failure, got %q", failures["profile-b"])
+	}
+	stored, err := store.Get(context.Background(), "sess-profile-supersede")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if stored.ProfileName != "old" || ag.ActiveProfileName() != "old" {
+		t.Fatalf("expected old profile to remain, got stored=%q active=%q", stored.ProfileName, ag.ActiveProfileName())
+	}
+}
+
+func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T) {
+	const oldProviderName = "worker-profile-linear-old"
+	const newProviderName = "worker-profile-linear-new"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n  broken:\n    provider: provider-that-does-not-exist\n    model: broken\n", oldProviderName, newProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer baseStore.Close()
+	now := time.Now().UTC()
+	if err := baseStore.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-profile-linear",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	store := &blockingProfileUpdateStore{
+		Store:   baseStore,
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	runtime := &workerRuntime{
+		sessionID: "sess-profile-linear",
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-profile-linear", storedDisplayItemSource{store: store}),
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-a",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "new"},
+	}); err != nil {
+		t.Fatalf("handle profile A: %v", err)
+	}
+	<-store.started
+
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- runtime.HandleCommand(context.Background(), commandResponse{
+			ID:      "profile-b",
+			Type:    sessionCommandProfile,
+			Profile: &profileCommandPayload{Name: "broken"},
+		})
+	}()
+	select {
+	case err := <-secondDone:
+		t.Fatalf("profile B crossed the active durable commit: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(store.release)
+	if err := <-secondDone; err != nil {
+		t.Fatalf("handle profile B: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) && ag.ActiveProfileName() != "new" {
+		time.Sleep(time.Millisecond)
+	}
+	stored, err := baseStore.Get(context.Background(), "sess-profile-linear")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if stored.ProfileName != "new" || ag.ActiveProfileName() != "new" {
+		t.Fatalf("expected profile A to linearize before B, got stored=%q active=%q", stored.ProfileName, ag.ActiveProfileName())
+	}
+	items, _, err := baseStore.ListDisplayItems(context.Background(), "sess-profile-linear")
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if len(items) != 2 || items[0].Type != zotigosession.DisplayItemProfileChanged || items[1].Type != zotigosession.DisplayItemProfileFailed {
+		t.Fatalf("expected applied A then failed B, got %#v", items)
+	}
+}
+
+func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
+	const oldProviderName = "worker-profile-uncertain-old"
+	const newProviderName = "worker-profile-uncertain-new"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n", oldProviderName, newProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer baseStore.Close()
+	now := time.Now().UTC()
+	if err := baseStore.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-profile-uncertain",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	command := zotigosession.DisplayItem{
+		ID:       "profile-command",
+		Sequence: 1,
+		Type:     zotigosession.DisplayItemSessionCommand,
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "new"},
+	}
+	messageCommand := zotigosession.DisplayItem{
+		ID:       "message-command",
+		Sequence: 2,
+		Type:     zotigosession.DisplayItemUserMessage,
+		Role:     string(protocol.RoleUser),
+		Content:  []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "must not run"}},
+		Command:  &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "must not run"},
+	}
+	var markerAttempts atomic.Int32
+	source := &fakeDisplayItemSource{
+		items: map[string][]zotigosession.DisplayItem{"sess-profile-uncertain": {command, messageCommand}},
+		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+			if item.Type == zotigosession.DisplayItemProfileChanged && markerAttempts.Add(1) == 1 {
+				return errors.New("display log unavailable")
+			}
+			return nil
+		},
+	}
+	store := &rollbackFailingProfileStore{Store: baseStore}
+	oldExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create old executor: %v", err)
+	}
+	defer oldExec.Close()
+	oldAgent, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, oldExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create old agent: %v", err)
+	}
+	firstRuntime := &workerRuntime{
+		sessionID: "sess-profile-uncertain",
+		workDir:   workDir,
+		store:     store,
+		agent:     oldAgent,
+		display:   newWorkerDisplayLog("sess-profile-uncertain", source),
+		fatalCh:   make(chan error, 1),
+	}
+	messageResponse, err := messageCommandFromItem(messageCommand, "")
+	if err != nil {
+		t.Fatalf("build message command: %v", err)
+	}
+	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		data, marshalErr := sonic.Marshal(commandsResponse{
+			Commands:   []commandResponse{profileCommandFromItem(command), messageResponse},
+			NextOffset: 2,
+		})
+		if marshalErr != nil {
+			http.Error(w, marshalErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write(data)
+	}))
+	defer commandServer.Close()
+	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-profile-uncertain", firstRuntime, workerCommandCursor{})
+	var uncertain *profileStateUncertainError
+	if !errors.As(replayErr, &uncertain) {
+		t.Fatalf("expected uncertain replay error, got %v", replayErr)
+	}
+	if cursor.Sequence != 0 || cursor.Offset != 0 {
+		t.Fatalf("expected cursor to remain before uncertain profile, got %#v", cursor)
+	}
+	select {
+	case fatalErr := <-firstRuntime.fatalCh:
+		if !errors.As(fatalErr, &uncertain) {
+			t.Fatalf("expected uncertain profile error, got %v", fatalErr)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected uncertain profile to stop worker runtime")
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-profile-uncertain")
+	if err != nil {
+		t.Fatalf("load pending command: %v", err)
+	}
+	if len(items) != 2 || recoverAppliedCommandSequence(items) != 0 {
+		t.Fatalf("expected uncertain command to remain pending, got %#v", items)
+	}
+	for _, item := range items {
+		if item.Type == zotigosession.DisplayItemTurnStarted {
+			t.Fatalf("message after uncertain profile was executed: %#v", items)
+		}
+	}
+	stored, err := baseStore.Get(context.Background(), "sess-profile-uncertain")
+	if err != nil || stored.ProfileName != "new" || oldAgent.ActiveProfileName() != "old" {
+		t.Fatalf("expected durable/runtime split before replay, stored=%#v active=%q err=%v", stored, oldAgent.ActiveProfileName(), err)
+	}
+
+	newExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create new executor: %v", err)
+	}
+	defer newExec.Close()
+	newAgent, err := agent.New(config.ProfileConfig{Provider: newProviderName, Model: "new"}, newExec, agent.WithProfileName("new"))
+	if err != nil {
+		t.Fatalf("create new agent: %v", err)
+	}
+	secondRuntime := &workerRuntime{
+		sessionID: "sess-profile-uncertain",
+		workDir:   workDir,
+		store:     baseStore,
+		agent:     newAgent,
+		display:   newWorkerDisplayLog("sess-profile-uncertain", source),
+	}
+	if err := secondRuntime.HandleCommand(context.Background(), profileCommandFromItem(command)); err != nil {
+		t.Fatalf("replay uncertain profile command: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items, _, _ = source.LoadItems(context.Background(), "sess-profile-uncertain")
+		if recoverAppliedCommandSequence(items) == command.Sequence {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if recoverAppliedCommandSequence(items) != command.Sequence {
+		t.Fatalf("expected replay to complete uncertain command, got %#v", items)
+	}
+}
+
+func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
+	const oldProviderName = "worker-profile-append-failure-old"
+	const newProviderName = "worker-profile-append-failure-new"
+	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n", oldProviderName, newProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:               "sess-profile-append-failure",
+		WorkingDirectory: workDir,
+		ProfileName:      "old",
+		CreatedAt:        now,
+		UpdatedAt:        now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(workDir)
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{
+		items: map[string][]zotigosession.DisplayItem{},
+		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+			if item.Type == zotigosession.DisplayItemProfileChanged {
+				return errors.New("display log unavailable")
+			}
+			return nil
+		},
+	}
+	runtime := &workerRuntime{
+		sessionID: "sess-profile-append-failure",
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-profile-append-failure", source),
+	}
+	if err := runtime.HandleCommand(context.Background(), commandResponse{
+		ID:      "profile-command",
+		Type:    sessionCommandProfile,
+		Profile: &profileCommandPayload{Name: "new"},
+	}); err != nil {
+		t.Fatalf("handle profile command: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		items, _, _ := source.LoadItems(context.Background(), "sess-profile-append-failure")
+		if len(items) > 0 {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-profile-append-failure")
+	if err != nil {
+		t.Fatalf("load failure item: %v", err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemProfileFailed || !strings.Contains(items[0].Error, "display log unavailable") {
+		t.Fatalf("expected profile failure item, got %#v", items)
+	}
+	stored, err := store.Get(context.Background(), "sess-profile-append-failure")
+	if err != nil {
+		t.Fatalf("get session: %v", err)
+	}
+	if stored.ProfileName != "old" || !stored.UpdatedAt.Equal(now) {
+		t.Fatalf("expected stored profile rollback, got profile=%q updated_at=%s", stored.ProfileName, stored.UpdatedAt)
+	}
+	if got := ag.ActiveProfileName(); got != "old" {
+		t.Fatalf("expected active profile old after display append failure, got %q", got)
+	}
+}
+
 func TestWorkerConnectRejectsNonLiveSession(t *testing.T) {
 	handler := NewHandler()
 	server := httptest.NewServer(handler)
@@ -1888,6 +3636,49 @@ func TestWorkerConnectRejectsNonLiveSession(t *testing.T) {
 	}
 }
 
+func TestConcurrentWorkerConnectKeepsFirstAttachedWorker(t *testing.T) {
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	sessionOps := newSessionOperationLocks()
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers, sessionOps: sessionOps})
+	created := Session{ID: "sess-concurrent-connect", State: SessionStateStarting, WorkingDirectory: t.TempDir(), CreatedAt: time.Now().UTC()}
+	registry.Add(created)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	unlock := sessionOps.lock(created.ID)
+	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + created.ID
+	connections := make(chan *websocket.Conn, 2)
+	for range 2 {
+		go func() {
+			conn, _, _ := websocket.DefaultDialer.Dial(url, nil)
+			connections <- conn
+		}()
+	}
+	first := <-connections
+	second := <-connections
+	defer func() {
+		if first != nil {
+			first.Close()
+		}
+		if second != nil {
+			second.Close()
+		}
+	}()
+	unlock()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		session, _ := registry.Get(created.ID)
+		if session.State == SessionStateRunning && workers.Has(created.ID) {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	session, _ := registry.Get(created.ID)
+	t.Fatalf("expected running session with one attached worker, got state=%q worker=%v", session.State, workers.Has(created.ID))
+}
+
 func TestWorkerSessionLockRejectsReuse(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -1902,13 +3693,17 @@ func TestWorkerSessionLockRejectsReuse(t *testing.T) {
 	if _, err := acquireWorkerSessionLock(context.Background(), store, "sess-lock"); err == nil {
 		t.Fatal("expected second lock to fail")
 	}
-	unlock()
+	if err := unlock(); err != nil {
+		t.Fatalf("release first lock: %v", err)
+	}
 
 	unlock, err = acquireWorkerSessionLock(context.Background(), store, "sess-lock")
 	if err != nil {
 		t.Fatalf("expected lock after unlock: %v", err)
 	}
-	unlock()
+	if err := unlock(); err != nil {
+		t.Fatalf("release reacquired lock: %v", err)
+	}
 }
 
 func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
@@ -2903,6 +4698,142 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 	}
 	if got := lastOpenTurnID(items); got != "" {
 		t.Fatalf("expected no open turn, got %q", got)
+	}
+}
+
+func TestWorkerRuntimeCloseWaitsForTurnPersistence(t *testing.T) {
+	done := make(chan struct{})
+	runtime := &workerRuntime{
+		turnActive: true,
+		turnDone:   done,
+	}
+	closed := make(chan struct{})
+	go func() {
+		runtime.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("worker runtime closed before active turn persistence completed")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(done)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("worker runtime did not close after turn persistence completed")
+	}
+}
+
+func TestWorkerRuntimeCloseWaitsForIdleProfileApply(t *testing.T) {
+	const providerName = "worker-close-idle-profile"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithProfileName("old"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	applyStarted := make(chan struct{})
+	releaseApply := make(chan struct{})
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new",
+		Config:   config.ProfileConfig{Provider: providerName},
+		Provider: &noopProvider{},
+		BeforeApply: func() error {
+			close(applyStarted)
+			<-releaseApply
+			return nil
+		},
+	})
+	<-applyStarted
+	runtime := &workerRuntime{agent: ag}
+	closed := make(chan struct{})
+	go func() {
+		runtime.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("worker runtime closed while idle profile apply was active")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseApply)
+	if err := <-result; err != nil {
+		t.Fatalf("apply runtime profile: %v", err)
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("worker runtime did not close after idle profile apply")
+	}
+}
+
+func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
+	const providerName = "worker-close-delayed-stream"
+	provider := &blockingFinishProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID:        "sess-close-stream",
+		CreatedAt: now,
+		UpdatedAt: now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	transport := zotigotransport.NewChannelTransport(10)
+	defer transport.Close()
+	runtime := &workerRuntime{
+		sessionID: "sess-close-stream",
+		store:     store,
+		agent:     ag,
+		display:   newWorkerDisplayLog("sess-close-stream", source),
+	}
+	runtime.runner = runner.New(ag, transport)
+	if err := runtime.startMessageTurn(context.Background(), "message-command", &messageCommandPayload{Text: "wait"}); err != nil {
+		t.Fatalf("start message turn: %v", err)
+	}
+	<-provider.started
+	closed := make(chan struct{})
+	go func() {
+		runtime.Close()
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("worker runtime closed before Agent stream exited")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(provider.release)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("worker runtime did not close after Agent stream exited")
+	}
+	stored, err := store.Get(context.Background(), "sess-close-stream")
+	if err != nil {
+		t.Fatalf("load final snapshot: %v", err)
+	}
+	if stored.AgentSnapshot.State == agent.StateRunning {
+		t.Fatalf("expected final non-running snapshot, got %q", stored.AgentSnapshot.State)
 	}
 }
 
@@ -4105,7 +6036,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 func TestSessionRegistryLifecycleTransitions(t *testing.T) {
 	registry := newSessionRegistry()
 
-	created := registry.Add(newSession(""))
+	created := registry.Add(newSession("", ""))
 	if created.State != SessionStateCreated {
 		t.Fatalf("expected state %q, got %q", SessionStateCreated, created.State)
 	}
@@ -4208,7 +6139,7 @@ func TestSessionRegistryRejectsInvalidLifecycleTransitions(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			registry := newSessionRegistry()
-			session := registry.Add(newSession(""))
+			session := registry.Add(newSession("", ""))
 			if err := tt.run(registry, session.ID); !errors.Is(err, errInvalidSessionTransition) {
 				t.Fatalf("expected invalid transition error, got %v", err)
 			}

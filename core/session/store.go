@@ -2,7 +2,15 @@ package session
 
 import (
 	"context"
+	"errors"
 )
+
+// ErrSessionLocked indicates that another process owns the session runtime.
+var ErrSessionLocked = errors.New("session is locked")
+
+// ErrProfileStateUncertain indicates that a profile metadata update failed and
+// at least one persisted view could not be rolled back.
+var ErrProfileStateUncertain = errors.New("profile state is uncertain")
 
 // Store defines the interface for session storage backends.
 // Implementations can be file-based (local), Redis, database, etc.

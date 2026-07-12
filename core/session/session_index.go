@@ -38,6 +38,7 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			working_directory TEXT NOT NULL,
+			profile_name TEXT NOT NULL DEFAULT '',
 			last_prompt TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -66,19 +67,29 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate session index: %w", err)
 		}
 	}
+	var profileColumnCount int
+	if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'profile_name'`).Scan(&profileColumnCount); err != nil {
+		return fmt.Errorf("inspect session index profile column: %w", err)
+	}
+	if profileColumnCount == 0 {
+		if _, err := i.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("add session index profile column: %w", err)
+		}
+	}
 	return nil
 }
 
 func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 	_, err := i.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, working_directory, last_prompt, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, working_directory, profile_name, last_prompt, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			working_directory = excluded.working_directory,
+			profile_name = excluded.profile_name,
 			last_prompt = excluded.last_prompt,
 			created_at = excluded.created_at,
 			updated_at = excluded.updated_at
-	`, meta.ID, meta.WorkingDirectory, meta.LastPrompt, formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))
+	`, meta.ID, meta.WorkingDirectory, meta.ProfileName, meta.LastPrompt, formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert session index: %w", err)
 	}
@@ -133,7 +144,7 @@ func (i *sessionIndex) deleteExcept(ctx context.Context, keep map[string]struct{
 
 func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata, error) {
 	var query strings.Builder
-	query.WriteString(`SELECT id, working_directory, last_prompt, created_at, updated_at FROM sessions`)
+	query.WriteString(`SELECT id, working_directory, profile_name, last_prompt, created_at, updated_at FROM sessions`)
 	args := make([]any, 0, 2)
 	if filter.WorkingDirectory != "" {
 		query.WriteString(` WHERE working_directory = ?`)
@@ -168,7 +179,7 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 		var meta Metadata
 		var createdAt int64
 		var updatedAt int64
-		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.ProfileName, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session index: %w", err)
 		}
 		meta.CreatedAt = parseIndexTime(createdAt)

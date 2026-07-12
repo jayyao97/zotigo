@@ -2,6 +2,7 @@ package agent_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -28,6 +29,77 @@ import (
 
 type StepMockProvider struct {
 	Step int
+}
+
+type blockingToolCallProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type blockingErrorProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+type delayedCloseProvider struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *delayedCloseProvider) Name() string { return "delayed-close" }
+
+func (p *delayedCloseProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	events := make(chan protocol.Event, 2)
+	go func() {
+		defer close(events)
+		close(p.started)
+		<-p.release
+		events <- protocol.NewTextDeltaEvent("done")
+		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return events, nil
+}
+
+func (p *blockingErrorProvider) Name() string { return "profile-error" }
+
+func (p *blockingErrorProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	events := make(chan protocol.Event, 1)
+	go func() {
+		defer close(events)
+		close(p.started)
+		<-p.release
+		events <- protocol.NewErrorEvent(errors.New("generation failed"))
+	}()
+	return events, nil
+}
+
+func (p *blockingToolCallProvider) Name() string { return "profile-old" }
+
+func (p *blockingToolCallProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 3)
+	go func() {
+		defer close(ch)
+		close(p.started)
+		<-p.release
+		ch <- protocol.Event{Type: protocol.EventTypeToolCallEnd, ToolCall: &protocol.ToolCall{ID: "profile-call", Name: "get_time", Arguments: "{}"}}
+		ch <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+	}()
+	return ch, nil
+}
+
+type profileTextProvider struct {
+	name string
+	text string
+}
+
+func (p *profileTextProvider) Name() string { return p.name }
+
+func (p *profileTextProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event, 2)
+	ch <- protocol.NewTextDeltaEvent(p.text)
+	ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	close(ch)
+	return ch, nil
 }
 
 func (p *StepMockProvider) Name() string { return "mock" }
@@ -81,6 +153,484 @@ func (t *TimeTool) Schema() any         { return nil }
 func (t *TimeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelLow}
 }
+
+func TestAgentRuntimeProfileSwitchUsesLatestProfileForNextGeneration(t *testing.T) {
+	const initialProviderName = "runtime-profile-initial"
+	oldProvider := &blockingToolCallProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(initialProviderName, func(config.ProfileConfig) (providers.Provider, error) {
+		return oldProvider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: initialProviderName, Model: "old-model"}, exec,
+		agent.WithProfileName("old-profile"),
+		agent.WithTools(&TimeTool{}),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "continue through a tool")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	<-oldProvider.started
+
+	firstCommitted := false
+	secondCommitted := false
+	firstResult := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:        "first-profile",
+		Config:      config.ProfileConfig{Provider: "first", Model: "first-model"},
+		Provider:    &profileTextProvider{name: "first", text: "wrong profile"},
+		BeforeApply: func() error { firstCommitted = true; return nil },
+	})
+	secondResult := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:        "second-profile",
+		Config:      config.ProfileConfig{Provider: "second", Model: "second-model"},
+		Provider:    &profileTextProvider{name: "second", text: "switched profile"},
+		BeforeApply: func() error { secondCommitted = true; return nil },
+	})
+	if err := <-firstResult; !errors.Is(err, agent.ErrRuntimeProfileSuperseded) {
+		t.Fatalf("expected first switch to be superseded, got %v", err)
+	}
+	close(oldProvider.release)
+
+	var text string
+	for event := range events {
+		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
+			text += event.ContentPartDelta.Text
+		}
+	}
+	if err := <-secondResult; err != nil {
+		t.Fatalf("apply second profile: %v", err)
+	}
+	if text != "switched profile" {
+		t.Fatalf("expected next generation from switched profile, got %q", text)
+	}
+	if got := ag.ActiveProfileName(); got != "second-profile" {
+		t.Fatalf("expected active profile second-profile, got %q", got)
+	}
+	if firstCommitted || !secondCommitted {
+		t.Fatalf("expected only the latest profile commit, got first=%t second=%t", firstCommitted, secondCommitted)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchKeepsCurrentProfileWhenCommitFails(t *testing.T) {
+	const providerName = "runtime-profile-commit-failure"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "old"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName, Model: "old"}, exec, agent.WithProfileName("old-profile"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	commitErr := errors.New("persist failed")
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:        "new-profile",
+		Config:      config.ProfileConfig{Provider: "new", Model: "new"},
+		Provider:    &profileTextProvider{name: "new", text: "new"},
+		BeforeApply: func() error { return commitErr },
+	})
+	if err := <-result; !errors.Is(err, commitErr) {
+		t.Fatalf("expected persistence error, got %v", err)
+	}
+	if got := ag.ActiveProfileName(); got != "old-profile" {
+		t.Fatalf("expected old profile after failed commit, got %q", got)
+	}
+}
+
+func TestAgentRuntimeProfileCommitDoesNotHoldAgentLock(t *testing.T) {
+	const providerName = "runtime-profile-nonblocking-commit"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "old"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithProfileName("old-profile"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	commitStarted := make(chan struct{})
+	releaseCommit := make(chan struct{})
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new"},
+		Provider: &profileTextProvider{name: "new", text: "new"},
+		BeforeApply: func() error {
+			close(commitStarted)
+			<-releaseCommit
+			return nil
+		},
+	})
+	<-commitStarted
+	described := make(chan struct{})
+	go func() {
+		_ = ag.Describe()
+		close(described)
+	}()
+	select {
+	case <-described:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("Describe blocked on profile durable commit")
+	}
+	close(releaseCommit)
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile: %v", err)
+	}
+}
+
+func TestAgentWaitForRuntimeIdleWaitsForProviderStreamExit(t *testing.T) {
+	const providerName = "runtime-idle-delayed-provider"
+	provider := &delayedCloseProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	events, err := ag.Run(ctx, "wait for provider shutdown")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	<-provider.started
+	cancel()
+	waitCtx, waitCancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer waitCancel()
+	if err := ag.WaitForRuntimeIdle(waitCtx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected runtime wait deadline while stream is open, got %v", err)
+	}
+	close(provider.release)
+	for range events {
+	}
+	if err := ag.WaitForRuntimeIdle(context.Background()); err != nil {
+		t.Fatalf("wait for runtime idle: %v", err)
+	}
+}
+
+func TestAgentRejectsConcurrentRun(t *testing.T) {
+	const providerName = "reject-concurrent-run"
+	provider := &delayedCloseProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return provider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "first turn")
+	if err != nil {
+		t.Fatalf("run first turn: %v", err)
+	}
+	<-provider.started
+	if _, err := ag.Run(context.Background(), "second turn"); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("expected concurrent run rejection, got %v", err)
+	}
+	close(provider.release)
+	for range events {
+	}
+}
+
+func TestAgentRuntimeProfileSwitchDoesNotInterruptRunningTool(t *testing.T) {
+	const initialProviderName = "runtime-profile-blocking-tool"
+	providers.Register(initialProviderName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"blocking_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ag, err := agent.New(config.ProfileConfig{Provider: initialProviderName, Model: "old-model"}, exec,
+		agent.WithProfileName("old-profile"),
+		agent.WithTools(&BlockingSafeTool{name: "blocking_tool", started: started, release: release}),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run the blocking tool")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	<-started
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new", Model: "new-model"},
+		Provider: &profileTextProvider{name: "new", text: "new generation"},
+	})
+	select {
+	case err := <-result:
+		t.Fatalf("profile applied before the running tool completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	var text string
+	var toolCompleted bool
+	for event := range events {
+		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
+			text += event.ContentPartDelta.Text
+		}
+		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil && strings.Contains(event.ToolResult.Text, "blocking_tool done") {
+			toolCompleted = true
+		}
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile after tool completion: %v", err)
+	}
+	if !toolCompleted {
+		t.Fatal("expected the running tool to complete without cancellation")
+	}
+	if text != "new generation" {
+		t.Fatalf("expected the next generation from the new profile, got %q", text)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchPreservesPendingApproval(t *testing.T) {
+	const initialProviderName = "runtime-profile-pending-approval"
+	providers.Register(initialProviderName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"approval_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: initialProviderName, Model: "old-model"}, exec,
+		agent.WithProfileName("old-profile"),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&ApprovalRequiredTool{name: "approval_tool"}),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run the approval tool")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	var lastEvent protocol.Event
+	for event := range events {
+		lastEvent = event
+	}
+	if lastEvent.FinishReason != "need_approval" {
+		t.Fatalf("expected pending approval, got finish reason %q", lastEvent.FinishReason)
+	}
+	if pending := ag.Snapshot().PendingActions; len(pending) != 1 {
+		t.Fatalf("expected one pending action before profile switch, got %d", len(pending))
+	}
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new", Model: "new-model"},
+		Provider: &profileTextProvider{name: "new", text: "approved with new profile"},
+	})
+	select {
+	case err := <-result:
+		t.Fatalf("profile applied before pending approval was resolved: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if pending := ag.Snapshot().PendingActions; len(pending) != 1 {
+		t.Fatalf("expected pending approval to survive profile switch, got %d actions", len(pending))
+	}
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("approve pending action: %v", err)
+	}
+	var text string
+	for event := range resumed {
+		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
+			text += event.ContentPartDelta.Text
+		}
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile before resumed generation: %v", err)
+	}
+	if text != "approved with new profile" {
+		t.Fatalf("expected resumed generation from new profile, got %q", text)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchWaitsForApprovedTool(t *testing.T) {
+	const initialProviderName = "runtime-profile-approved-tool"
+	providers.Register(initialProviderName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"approval_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ag, err := agent.New(config.ProfileConfig{Provider: initialProviderName, Model: "old-model"}, exec,
+		agent.WithProfileName("old-profile"),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithTools(&BlockingApprovalTool{name: "approval_tool", started: started, release: release}),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run the approval tool")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	for range events {
+	}
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("approve pending action: %v", err)
+	}
+	<-started
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new", Model: "new-model"},
+		Provider: &profileTextProvider{name: "new", text: "new generation"},
+	})
+	select {
+	case err := <-result:
+		t.Fatalf("profile applied while approved tool was still running: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	var text string
+	for event := range resumed {
+		if event.Type == protocol.EventTypeContentDelta && event.ContentPartDelta != nil {
+			text += event.ContentPartDelta.Text
+		}
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile after approved tool: %v", err)
+	}
+	if text != "new generation" {
+		t.Fatalf("expected resumed generation from new profile, got %q", text)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchAppliesWithoutLiveRuntimeActivity(t *testing.T) {
+	const providerName = "runtime-profile-restored-running"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "old"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithProfileName("old-profile"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	ag.Restore(agent.Snapshot{State: agent.StateRunning})
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new"},
+		Provider: &profileTextProvider{name: "new", text: "new"},
+	})
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile without live runtime activity: %v", err)
+	}
+	if got := ag.ActiveProfileName(); got != "new-profile" {
+		t.Fatalf("expected new profile, got %q", got)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchAppliesWhenGenerationExitsWithError(t *testing.T) {
+	const providerName = "runtime-profile-error-exit"
+	oldProvider := &blockingErrorProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return oldProvider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithProfileName("old-profile"))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "fail this generation")
+	if err != nil {
+		t.Fatalf("run agent: %v", err)
+	}
+	<-oldProvider.started
+	result := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "new-profile",
+		Config:   config.ProfileConfig{Provider: "new"},
+		Provider: &profileTextProvider{name: "new", text: "new"},
+	})
+	close(oldProvider.release)
+	for range events {
+	}
+	if err := <-result; err != nil {
+		t.Fatalf("apply profile after generation error: %v", err)
+	}
+	if got := ag.ActiveProfileName(); got != "new-profile" {
+		t.Fatalf("expected new profile after generation error, got %q", got)
+	}
+}
+
+func TestAgentRuntimeProfileSwitchRestoresRequestedApprovalPolicy(t *testing.T) {
+	const providerName = "runtime-profile-policy"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "old"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	forced := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:                "broken-classifier",
+		Config:              config.ProfileConfig{Provider: "new"},
+		Provider:            &profileTextProvider{name: "new", text: "new"},
+		ForceManualApproval: true,
+	})
+	if err := <-forced; err != nil {
+		t.Fatalf("apply forced-manual profile: %v", err)
+	}
+	if got := ag.Describe().ApprovalPolicy; got != agent.ApprovalPolicyManual {
+		t.Fatalf("expected forced manual policy, got %q", got)
+	}
+	healthy := ag.QueueRuntimeProfile(agent.RuntimeProfile{
+		Name:     "healthy-classifier",
+		Config:   config.ProfileConfig{Provider: "healthy"},
+		Provider: &profileTextProvider{name: "healthy", text: "healthy"},
+	})
+	if err := <-healthy; err != nil {
+		t.Fatalf("apply healthy profile: %v", err)
+	}
+	if got := ag.Describe().ApprovalPolicy; got != agent.ApprovalPolicyAuto {
+		t.Fatalf("expected requested auto policy to be restored, got %q", got)
+	}
+}
+
 func (t *TimeTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
 	if err := ctx.Err(); err != nil {
 		return nil, err

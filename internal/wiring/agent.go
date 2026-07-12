@@ -36,6 +36,7 @@ type AgentConfig struct {
 func NewAgent(cfg AgentConfig) (*agent.Agent, error) {
 	opts := []agent.AgentOption{
 		agent.WithApprovalPolicy(cfg.ApprovalPolicy),
+		agent.WithProfileName(cfg.ProfileName),
 	}
 	if cfg.PromptBuilder != nil {
 		opts = append(opts, agent.WithSystemPromptBuilder(cfg.PromptBuilder))
@@ -65,35 +66,71 @@ func NewAgent(cfg AgentConfig) (*agent.Agent, error) {
 	return ag, nil
 }
 
+// NewRuntimeProfile prepares a complete profile-dependent runtime bundle.
+func NewRuntimeProfile(cfg AgentConfig) (agent.RuntimeProfile, error) {
+	provider, err := providers.NewProvider(cfg.Profile)
+	if err != nil {
+		return agent.RuntimeProfile{}, fmt.Errorf("create provider: %w", err)
+	}
+	runtime := agent.RuntimeProfile{
+		Name:     cfg.ProfileName,
+		Config:   cfg.Profile,
+		Provider: provider,
+	}
+	classifier := buildClassifierRuntime(cfg)
+	runtime.Classifier = classifier.classifier
+	runtime.ClassifierProfileName = classifier.profileName
+	runtime.ClassifierProfile = classifier.profile
+	runtime.ClassifierUnavailableReason = classifier.unavailableReason
+	runtime.ForceManualApproval = classifier.forceManual
+	return runtime, nil
+}
+
 func configureClassifier(ag *agent.Agent, cfg AgentConfig) {
-	if cfg.Config == nil || !cfg.Profile.Safety.Classifier.IsEnabled() {
+	classifier := buildClassifierRuntime(cfg)
+	if classifier.profileName == "" && classifier.unavailableReason == "" {
 		return
 	}
+	if classifier.profileName != "" {
+		agent.WithClassifierProfile(classifier.profileName, classifier.profile)(ag)
+	}
+	if classifier.unavailableReason != "" {
+		agent.WithClassifierUnavailableReason(classifier.unavailableReason)(ag)
+	}
+	if classifier.forceManual {
+		ag.SetProfileApprovalFallback(true)
+	}
+	if classifier.classifier != nil {
+		agent.WithSafetyClassifier(classifier.classifier)(ag)
+	}
+}
 
-	classifierProfileName, classifierProfile, err := cfg.Config.ResolveClassifierProfile(cfg.ProfileName)
+type classifierRuntime struct {
+	classifier        agent.SafetyClassifier
+	profileName       string
+	profile           config.ProfileConfig
+	unavailableReason string
+	forceManual       bool
+}
+
+func buildClassifierRuntime(cfg AgentConfig) classifierRuntime {
+	if !cfg.ConfigureClassifier || cfg.Config == nil || !cfg.Profile.Safety.Classifier.IsEnabled() {
+		return classifierRuntime{}
+	}
+	profileName, profile, err := cfg.Config.ResolveClassifierProfile(cfg.ProfileName)
 	if err != nil {
-		ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
-		agent.WithClassifierUnavailableReason(err.Error())(ag)
-		return
+		return classifierRuntime{unavailableReason: err.Error(), forceManual: true}
 	}
-
-	agent.WithClassifierProfile(classifierProfileName, classifierProfile)(ag)
-	classifierProvider, err := providers.NewProvider(classifierProfile)
+	runtime := classifierRuntime{profileName: profileName, profile: profile}
+	provider, err := providers.NewProvider(profile)
 	if err != nil {
-		agent.WithClassifierUnavailableReason(
-			fmt.Sprintf("failed to create classifier provider %q: %v", classifierProfileName, err),
-		)(ag)
-		return
+		runtime.unavailableReason = fmt.Sprintf("failed to create classifier provider %q: %v", profileName, err)
+		return runtime
 	}
-
 	classifierOpts := []agent.ClassifierOption{}
 	if cfg.Observer != nil {
-		classifierOpts = append(classifierOpts, agent.WithClassifierObserver(cfg.Observer, classifierProfile.Model))
+		classifierOpts = append(classifierOpts, agent.WithClassifierObserver(cfg.Observer, profile.Model))
 	}
-	classifier := agent.NewProviderSafetyClassifier(
-		classifierProvider,
-		cfg.Profile.Safety.Classifier,
-		classifierOpts...,
-	)
-	agent.WithSafetyClassifier(classifier)(ag)
+	runtime.classifier = agent.NewProviderSafetyClassifier(provider, cfg.Profile.Safety.Classifier, classifierOpts...)
+	return runtime
 }

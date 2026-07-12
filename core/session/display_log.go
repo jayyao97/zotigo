@@ -21,6 +21,8 @@ const (
 	DisplayItemApprovalRequest  DisplayItemType = "approval_request"
 	DisplayItemApprovalDecision DisplayItemType = "approval_decision"
 	DisplayItemContextCompacted DisplayItemType = "context_compacted"
+	DisplayItemProfileChanged   DisplayItemType = "profile_changed"
+	DisplayItemProfileFailed    DisplayItemType = "profile_change_failed"
 )
 
 type DisplayContentPart struct {
@@ -99,11 +101,18 @@ type DisplayApprovalDecision struct {
 }
 
 type DisplayCommand struct {
-	Type   string                `json:"type,omitempty"`
-	Text   string                `json:"text,omitempty"`
-	Images []DisplayCommandImage `json:"images,omitempty"`
-	TurnID string                `json:"turn_id,omitempty"`
-	Reason string                `json:"reason,omitempty"`
+	Type    string                `json:"type,omitempty"`
+	Text    string                `json:"text,omitempty"`
+	Images  []DisplayCommandImage `json:"images,omitempty"`
+	TurnID  string                `json:"turn_id,omitempty"`
+	Reason  string                `json:"reason,omitempty"`
+	Profile string                `json:"profile,omitempty"`
+}
+
+type DisplayProfileChange struct {
+	CommandID string `json:"command_id,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
 }
 
 type DisplayCommandImage struct {
@@ -116,17 +125,18 @@ type DisplayCommandImage struct {
 }
 
 type DisplayItem struct {
-	ID        string               `json:"id"`
-	Sequence  uint64               `json:"sequence"`
-	Type      DisplayItemType      `json:"type"`
-	Role      string               `json:"role,omitempty"`
-	Content   []DisplayContentPart `json:"content,omitempty"`
-	Turn      *DisplayTurn         `json:"turn,omitempty"`
-	Approval  *DisplayApproval     `json:"approval,omitempty"`
-	Command   *DisplayCommand      `json:"command,omitempty"`
-	Error     string               `json:"error,omitempty"`
-	CreatedAt time.Time            `json:"created_at"`
-	LogOffset int64                `json:"-"`
+	ID        string                `json:"id"`
+	Sequence  uint64                `json:"sequence"`
+	Type      DisplayItemType       `json:"type"`
+	Role      string                `json:"role,omitempty"`
+	Content   []DisplayContentPart  `json:"content,omitempty"`
+	Turn      *DisplayTurn          `json:"turn,omitempty"`
+	Approval  *DisplayApproval      `json:"approval,omitempty"`
+	Command   *DisplayCommand       `json:"command,omitempty"`
+	Profile   *DisplayProfileChange `json:"profile,omitempty"`
+	Error     string                `json:"error,omitempty"`
+	CreatedAt time.Time             `json:"created_at"`
+	LogOffset int64                 `json:"-"`
 }
 
 type DisplayPageQuery struct {

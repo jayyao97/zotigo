@@ -7,9 +7,11 @@ state and display history.
 ## Public endpoints
 
 - `GET /health`
+- `GET /config/profiles`
 - `POST /sessions`
 - `GET /sessions`
 - `GET /sessions/{id}`
+- `PUT /sessions/{id}/profile`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
 - `POST /sessions/{id}/messages`
@@ -57,7 +59,8 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 
 Current error codes include `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
-`session_not_live`, `service_unavailable`, and `internal_error`.
+`session_not_live`, `session_in_use`, `profile_not_found`,
+`service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -68,6 +71,34 @@ endpoint errors still use the structured `{ "code", "message" }` shape.
 Unless a section explicitly says "raw response", response examples below show
 the endpoint-specific `data` payload.
 
+## Read profiles
+
+`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the
+effective profiles for a project after merging the global and project Zotigo
+configuration. `working_directory` follows the same rules as session creation:
+it must be an absolute path to an existing directory. If omitted, zotigod uses
+its current working directory.
+
+The response is safe for desktop clients and does not expose API keys, base
+URLs, provider parameters, or safety configuration:
+
+```json
+{
+  "default_profile": "gpt-5.5-high",
+  "profiles": [
+    {
+      "name": "gpt-5.5-high",
+      "provider": "openai",
+      "model": "gpt-5.5",
+      "thinking_level": "high"
+    }
+  ]
+}
+```
+
+Profiles are ordered by `name`. This endpoint only reads configuration and does
+not start a worker or create a session.
+
 ## Create sessions
 
 `POST /sessions` creates a zotigod session for a project directory. Desktop
@@ -75,7 +106,8 @@ clients should pass the project root selected by the user:
 
 ```json
 {
-  "working_directory": "/Users/me/workspace/project"
+  "working_directory": "/Users/me/workspace/project",
+  "profile": "gpt-5.5-high"
 }
 ```
 
@@ -84,16 +116,94 @@ directory. If it is omitted, zotigod uses its current working directory for
 CLI/backward compatibility. The directory is persisted in the core session
 store and returned in session responses as `working_directory`.
 
+`profile` is an optional profile name returned by `GET /config/profiles`. When
+it is omitted, zotigod resolves the project's current `default_profile` during
+session creation. The resolved profile is persisted and returned as `profile`,
+so worker restarts and offline session recovery keep using the profile selected
+for that session. An unknown explicit profile returns `400`. Legacy sessions
+without a stored profile continue to resolve the current project default when a
+worker starts.
+
+Changing the project default later does not change new-format sessions. Use the
+profile endpoint below to change the profile selected for an existing session.
+
 Workers launched for the session use this directory as their process working
 directory and as the source for project config, skills, project instructions,
 tools, shell execution, and LSP state. Legacy sessions without a stored working
 directory fall back to the worker process current directory.
+
+## Change a session profile
+
+`PUT /sessions/{id}/profile` changes the profile used by subsequent model
+generations:
+
+```json
+{
+  "profile": "gpt-5.5-high"
+}
+```
+
+Offline and not-yet-started sessions apply the change immediately and return
+`200` with `status: "applied"`. Live sessions accept a durable profile command
+and return `202` with `status: "pending"`:
+
+```json
+{
+  "profile": "gpt-5.5-high",
+  "status": "pending",
+  "command_id": "item_sess_8f0e12ab34cd56ef_8"
+}
+```
+
+An offline session can still be owned by a worker or CLI process that survived
+a daemon restart. In that case profile changes return `409` with code
+`session_in_use`; zotigod does not modify metadata while that process holds the
+session lock.
+
+Profile changes do not cancel an in-flight model stream, tool execution, or
+approval. The worker prepares the new provider and applies the latest pending
+profile before the next model generation. A pending approval and its eventual
+tool execution continue with the old profile. Multiple requests accepted before
+durable apply starts use last-request-wins semantics, including when the latest
+request fails validation or provider construction. Durable apply is the
+linearization point: a request received while a commit is active is processed
+after that commit. When no further generation is needed, the latest valid
+request is applied as the current runtime activity exits.
+
+After preparing the complete runtime profile, the worker updates the session's
+durable `profile_name` and appends `profile_changed` immediately before applying
+the prepared runtime in memory. If either durable write fails, the worker keeps
+the old runtime profile and appends `profile_change_failed`. Invalidated
+configuration and requests superseded before this apply boundary also append
+`profile_change_failed`. API keys and provider-specific configuration never
+appear in commands or display items.
+
+The stored session `profile_name` is the recovery source of truth. The display
+item is the completion marker for the durable profile command. If the worker
+stops after updating session metadata but before appending the marker, command
+replay completes the pending command; if it stops after appending the marker,
+the next worker starts directly from the stored profile.
+
+If both marker append and metadata rollback fail, the worker treats the profile
+state as uncertain. It does not append `profile_change_failed`, exits while
+leaving the command pending, and lets the next worker replay reconcile the
+durable profile and completion marker. An offline retry for the already stored
+target profile similarly repairs a missing marker before returning success.
+
+Starting or resuming a session validates its stored `profile_name` against the
+current effective configuration. If that profile was removed, startup returns
+`409` with code `profile_not_found` and does not launch a worker. Select an
+available profile with `PUT /sessions/{id}/profile` before retrying.
 
 ## Session liveness and recovery
 
 Session history and session runtime are separate. The session store on disk can
 contain old sessions and display logs even when the current `zotigod` process
 has no worker running for them.
+
+For a live registry session, `GET /sessions/{id}` prefers durable profile
+metadata. If the store is temporarily unavailable, it falls back to the live
+registry DTO rather than failing the whole read.
 
 Read APIs do not start workers:
 
@@ -241,6 +351,28 @@ Current item types include:
 - `approval_request`
 - `approval_decision`
 - `context_compacted`
+- `profile_changed`
+- `profile_change_failed`
+
+Profile result items expose the command correlation and transition without
+provider credentials:
+
+```json
+{
+  "id": "item_sess_8f0e12ab34cd56ef_9",
+  "sequence": 9,
+  "type": "profile_changed",
+  "profile": {
+    "command_id": "item_sess_8f0e12ab34cd56ef_8",
+    "from": "gpt-5.5-low",
+    "to": "gpt-5.5-high"
+  },
+  "created_at": "2026-01-02T03:04:12Z"
+}
+```
+
+`profile_change_failed` uses the same `profile` object and includes a public
+`error` string.
 
 `turn_paused` with `reason: "need_approval"` is not a completed turn. Desktop
 should use explicit turn lifecycle items instead of inferring turn completion
@@ -302,6 +434,17 @@ Starting a session launches an internal worker process from the current
 it does not connect before the startup timeout, the session is marked `failed`
 and the start or message request returns `503`.
 
+Worker launch belongs to the daemon rather than to the HTTP request that first
+triggered it. If that request is canceled, the shared launch continues and a
+later request can observe the same `starting` session. A daemon-owned startup
+timeout still marks the session `failed` even when no request remains waiting.
+
+Each worker constructs the configured observability backend once from the
+effective project configuration. The main Agent and classifiers created by
+later profile changes reuse that observer, so one session keeps a consistent
+trace lineage across model changes. Without configured credentials the shared
+observer is a no-op.
+
 Worker startup also acquires the same per-session file lock used by the CLI
 session manager. If another CLI, daemon worker, or local process already owns
 that session lock, the worker exits instead of reusing the session concurrently.
@@ -337,13 +480,15 @@ display-log turn is active, the worker appends `turn_interrupted` with reason
 `control_channel_closed` before closing. This prevents a desktop user from
 seeing a disconnected session while tools keep running in the background.
 
-Worker command delivery is split into a WebSocket reader and an ordered command
-consumer. The reader only reads frames, handles ping/pong control traffic,
-decodes commands, and enqueues them into an in-process command buffer. The
-consumer processes commands sequentially and saves the command cursor after each
-applied command. The command buffer is intentionally bounded at 32 items; if it
-fills, the worker treats itself as unhealthy and exits instead of staying
-connected but not applying pause or steering commands.
+Worker command delivery is split into a WebSocket reader and a durable-log
+consumer. The reader handles ping/pong traffic, decodes command notifications,
+and enqueues them into a bounded in-process buffer. A notification only wakes
+the consumer; the consumer fetches commands from the durable log at its saved
+offset and applies them in sequence order. This prevents concurrent HTTP
+handlers from changing execution order through WebSocket scheduling. The
+buffer is intentionally bounded at 32 items; if it fills, the worker treats
+itself as unhealthy and exits instead of staying connected but not applying
+control commands.
 
 If the daemon process restarts, old workers are not treated as still live.
 Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or
@@ -609,9 +754,18 @@ Raw response:
         ]
       },
       "created_at": "2026-01-02T03:04:10Z"
+    },
+    {
+      "id": "item_sess_8f0e12ab34cd56ef_8",
+      "sequence": 8,
+      "type": "profile",
+      "profile": {
+        "name": "gpt-5.5-high"
+      },
+      "created_at": "2026-01-02T03:04:11Z"
     }
   ],
-  "next_cursor": "7",
+  "next_cursor": "8",
   "next_offset": 8123
 }
 ```
@@ -622,6 +776,13 @@ sequence they have applied, so replay can skip already-applied commands while
 still advancing through the append-only log. If the log ends with a partial
 line, the offset cursor stops at the last complete line and the partial line is
 ignored until it is completed or truncated by a later append.
+
+Profile commands are complete only after the worker records either
+`profile_changed` or `profile_change_failed`. The worker does not advance the
+durable command cursor past an in-progress or uncertain profile command, and it
+does not execute later commands until that result is known. This keeps replay
+ordered when profile metadata and its display-log completion marker cannot be
+committed consistently.
 
 zotigod returns each accepted `steering_message` as its own command. The worker
 runtime owns semantic coalescing before injecting steering into the model
@@ -665,12 +826,13 @@ Response data:
 
 Status codes:
 
-- `202`: pause command accepted.
+- `202`: pause or live profile command accepted.
 - `201`: message or steering command created, or worker lifecycle confirmation
   appended.
-- `200`: internal command list returned.
+- `200`: internal command list returned, or an offline/created profile change
+  applied.
 - `400`: invalid request body, invalid image input, missing `turn_id`, empty
-  steering text, or invalid command query.
+  steering text, unknown profile, or invalid command query.
 - `413`: message or steering request body exceeds the public API size limit.
 - `404`: session not found.
 - `409`: command submitted to a non-running session, message submitted during an

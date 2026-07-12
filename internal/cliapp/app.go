@@ -19,8 +19,6 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
-	"github.com/jayyao97/zotigo/core/observability"
-	"github.com/jayyao97/zotigo/core/observability/langfuse"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
@@ -29,20 +27,6 @@ import (
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/internal/wiring"
 )
-
-func newObserver(cfg config.ObservabilityConfig, sessionIDPrefix string, staticMeta map[string]any) observability.Observer {
-	if cfg.Langfuse.IsEnabled() {
-		return langfuse.New(langfuse.Config{
-			Host:                cfg.Langfuse.Host,
-			PublicKey:           cfg.Langfuse.PublicKey,
-			SecretKey:           cfg.Langfuse.SecretKey,
-			FlushInterval:       time.Duration(cfg.Langfuse.FlushInterval) * time.Second,
-			SessionIDPrefix:     sessionIDPrefix,
-			StaticTraceMetadata: staticMeta,
-		})
-	}
-	return observability.Noop{}
-}
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
 type KittyFilterWriter struct {
@@ -93,10 +77,9 @@ func Run(args []string) int {
 		return 1
 	}
 
-	profileName := cfg.DefaultProfile
-	profile, ok := cfg.Profiles[profileName]
-	if !ok {
-		fmt.Printf("Profile '%s' not found in config.\n", profileName)
+	profileName, profile, err := cfg.ResolveProfile("")
+	if err != nil {
+		fmt.Println("Error resolving profile:", err)
 		return 1
 	}
 
@@ -195,7 +178,7 @@ func Run(args []string) int {
 		"process_start":  processStart.Format(time.RFC3339),
 		"resumed":        doResume,
 	}
-	observer := newObserver(cfg.Observability, currentSession.ID, staticMeta)
+	observer := wiring.NewObserver(cfg.Observability, currentSession.ID, staticMeta)
 	defer func() {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()

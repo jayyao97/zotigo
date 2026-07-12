@@ -24,13 +24,16 @@ import (
 
 // Agent orchestrates provider, tools, and conversation history.
 type Agent struct {
-	cfg           config.ProfileConfig
-	provider      providers.Provider
-	executor      executor.Executor
-	tools         map[string]tools.Tool
-	policy        ApprovalPolicy
-	promptBuilder *prompt.SystemPromptBuilder
-	userContext   *prompt.UserContextBuilder
+	cfg                 config.ProfileConfig
+	profileName         string
+	provider            providers.Provider
+	executor            executor.Executor
+	tools               map[string]tools.Tool
+	policy              ApprovalPolicy
+	requestedPolicy     ApprovalPolicy
+	profileForcesManual bool
+	promptBuilder       *prompt.SystemPromptBuilder
+	userContext         *prompt.UserContextBuilder
 
 	reminderBuilder *prompt.ReminderBuilder
 
@@ -65,6 +68,12 @@ type Agent struct {
 	pendingActions  []*PendingAction
 	deferredActions []*PendingAction
 	turns           []TurnAudit
+	pendingProfile  *runtimeProfileRequest
+	runtimeActivity int
+	profileActivity int
+	runActive       bool
+	runtimeIdle     chan struct{}
+	profileApplyMu  sync.Mutex
 }
 
 // AgentOption configures an Agent during construction.
@@ -89,7 +98,10 @@ func WithUserContextBuilder(uc *prompt.UserContextBuilder) AgentOption {
 
 // WithApprovalPolicy sets the tool approval policy.
 func WithApprovalPolicy(p ApprovalPolicy) AgentOption {
-	return func(a *Agent) { a.policy = p }
+	return func(a *Agent) {
+		a.requestedPolicy = p
+		a.refreshApprovalPolicy()
+	}
 }
 
 // WithCompressorSummarizer sets the LLM summarizer for high-quality summaries.
@@ -158,6 +170,11 @@ func WithObserver(obs observability.Observer) AgentOption {
 	}
 }
 
+// WithProfileName records the configured profile name for runtime reporting and switching.
+func WithProfileName(name string) AgentOption {
+	return func(a *Agent) { a.profileName = name }
+}
+
 // New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
 func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) (*Agent, error) {
@@ -175,18 +192,22 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		compressorCfg.ContextWindowSize = cfg.ContextWindow
 	}
 
+	runtimeIdle := make(chan struct{})
+	close(runtimeIdle)
 	a := &Agent{
-		cfg:          cfg,
-		provider:     p,
-		executor:     exec,
-		tools:        make(map[string]tools.Tool),
-		policy:       ApprovalPolicyAuto,
-		state:        StateIdle,
-		history:      make([]protocol.Message, 0),
-		turns:        make([]TurnAudit, 0),
-		loopDetector: services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
-		compressor:   services.NewCompressor(compressorCfg),
-		observer:     observability.Noop{},
+		cfg:             cfg,
+		provider:        p,
+		executor:        exec,
+		tools:           make(map[string]tools.Tool),
+		policy:          ApprovalPolicyAuto,
+		requestedPolicy: ApprovalPolicyAuto,
+		state:           StateIdle,
+		history:         make([]protocol.Message, 0),
+		turns:           make([]TurnAudit, 0),
+		loopDetector:    services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
+		compressor:      services.NewCompressor(compressorCfg),
+		observer:        observability.Noop{},
+		runtimeIdle:     runtimeIdle,
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -205,7 +226,24 @@ func (a *Agent) RegisterTool(t tools.Tool) {
 func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.policy = p
+	a.requestedPolicy = p
+	a.refreshApprovalPolicy()
+}
+
+// SetProfileApprovalFallback forces manual approval without overwriting the
+// policy selected by the host or user.
+func (a *Agent) SetProfileApprovalFallback(forceManual bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.profileForcesManual = forceManual
+	a.refreshApprovalPolicy()
+}
+
+func (a *Agent) refreshApprovalPolicy() {
+	a.policy = a.requestedPolicy
+	if a.profileForcesManual {
+		a.policy = ApprovalPolicyManual
+	}
 }
 
 // Executor returns the agent's executor.
@@ -238,13 +276,16 @@ func (a *Agent) Describe() Description {
 	defer a.mu.RUnlock()
 
 	d := Description{
-		Profile:           a.cfg.Provider,
+		Profile:           a.profileName,
 		Model:             a.cfg.Model,
 		ThinkingLevel:     a.cfg.ThinkingLevel,
 		ContextWindow:     a.cfg.ContextWindow,
 		ApprovalPolicy:    a.policy,
 		ClassifierEnabled: a.cfg.Safety.Classifier.IsEnabled(),
 		ReviewThreshold:   a.cfg.Safety.Classifier.ReviewThreshold,
+	}
+	if d.Profile == "" {
+		d.Profile = a.cfg.Provider
 	}
 	if a.provider != nil {
 		d.Provider = a.provider.Name()
@@ -444,6 +485,10 @@ func (a *Agent) Run(ctx context.Context, input string) (<-chan protocol.Event, e
 // RunMessage continues the execution loop with a structured message.
 func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan protocol.Event, error) {
 	a.mu.Lock()
+	if a.runActive {
+		a.mu.Unlock()
+		return nil, errors.New("agent is already running")
+	}
 
 	if msg.Role != "" {
 		if a.state == StatePaused {
@@ -463,12 +508,20 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	}
 
 	a.state = StateRunning
+	a.runActive = true
+	a.beginRuntimeActivityLocked()
 	a.mu.Unlock()
 
 	outCh := make(chan protocol.Event, 100)
 
 	go func() {
 		defer close(outCh)
+		defer func() {
+			a.mu.Lock()
+			a.runActive = false
+			a.mu.Unlock()
+		}()
+		defer a.endRuntimeActivity()
 
 		// Trace lifecycle: fresh user input opens a trace; a tool-result
 		// continuation overlays the saved trace identity onto the
@@ -537,9 +590,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 
+			a.applyPendingRuntimeProfile(true)
 			a.mu.Lock()
 			a.drainPendingTurnUserInputLocked()
 			msgs := a.buildContext()
+			provider := a.provider
+			model := a.cfg.Model
+			profileName := a.profileName
 			a.mu.Unlock()
 
 			// Prepare tools list (sorted by name for deterministic ordering,
@@ -559,8 +616,8 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			modelTurnStart := time.Now()
 			debug.Logf(
 				"agent turn start provider=%s model=%s messages=%d tools=%d est_tokens=%d",
-				a.provider.Name(),
-				a.cfg.Model,
+				provider.Name(),
+				model,
 				len(msgs),
 				len(toolList),
 				estimatedTokens,
@@ -572,7 +629,8 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// iteration via endGen, which guards against double-firing
 			// when the iteration has multiple exit paths (success,
 			// reactive recovery, terminal error).
-			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, a.cfg.Model, msgs, toolList, nil)
+			generationMeta := map[string]any{"profile": profileName}
+			genCtx := a.observer.StartGeneration(ctx, observability.GenerationMain, model, msgs, toolList, generationMeta)
 			genEnded := false
 			endGen := func(out observability.GenerationOutput, usage *protocol.Usage, gerr error) {
 				if genEnded {
@@ -582,7 +640,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				a.observer.EndGeneration(genCtx, out, usage, gerr)
 			}
 
-			stream, err := a.provider.StreamChat(genCtx, msgs, toolList)
+			stream, err := provider.StreamChat(genCtx, msgs, toolList)
 			if err != nil {
 				endGen(observability.GenerationOutput{}, nil, err)
 				if a.tryReactiveRecover(ctx, err, &reactiveRetries, maxReactiveRetries, outCh) {
@@ -1114,8 +1172,12 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 
 func (a *Agent) executeResolvedPendingActions(ctx context.Context, actions []*PendingAction, ensureSnapshot bool) (<-chan protocol.Event, error) {
 	outCh := make(chan protocol.Event, len(actions)+100)
+	a.mu.Lock()
+	a.beginRuntimeActivityLocked()
+	a.mu.Unlock()
 	go func() {
 		defer close(outCh)
+		defer a.endRuntimeActivity()
 		results, err := a.executeActions(ctx, actions, func(event protocol.Event) {
 			outCh <- event
 		}, ensureSnapshot)

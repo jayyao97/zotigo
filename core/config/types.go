@@ -1,6 +1,9 @@
 package config
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 // DefaultContextWindow is the assumed context size when a profile
 // does not specify ContextWindow. 200k matches every modern Claude,
@@ -78,6 +81,19 @@ type ProfileConfig struct {
 
 	// Additional provider-specific params can be added here or in a generic map
 	Params map[string]any `mapstructure:"params,omitempty" yaml:"params,omitempty"`
+}
+
+// ResolveProfile resolves an explicit profile name or the configured default.
+func (c *Config) ResolveProfile(name string) (string, ProfileConfig, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		name = strings.TrimSpace(c.DefaultProfile)
+	}
+	profile, ok := c.Profiles[name]
+	if !ok {
+		return "", ProfileConfig{}, fmt.Errorf("profile %q not found", name)
+	}
+	return name, profile, nil
 }
 
 // SafetyProfileConfig holds runtime safety behavior for a profile.

@@ -43,6 +43,31 @@ func (l *workerDisplayLog) CurrentTurnID() string {
 	return l.turnID
 }
 
+func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
+	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemProfileChanged,
+		Profile: &zotigosession.DisplayProfileChange{
+			CommandID: commandID,
+			From:      from,
+			To:        to,
+		},
+	})
+	return err
+}
+
+func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, from string, to string, profileErr error) error {
+	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+		Type:  zotigosession.DisplayItemProfileFailed,
+		Error: profileErr.Error(),
+		Profile: &zotigosession.DisplayProfileChange{
+			CommandID: commandID,
+			From:      from,
+			To:        to,
+		},
+	})
+	return err
+}
+
 func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
