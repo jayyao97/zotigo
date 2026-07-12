@@ -347,6 +347,7 @@ type handlerOptions struct {
 	workers              *workerRegistry
 	workerConnectTimeout time.Duration
 	store                zotigosession.Store
+	sessionOps           *sessionOperationLocks
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -423,6 +424,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.workerConnectTimeout == 0 && options.launcher != nil {
 		options.workerConnectTimeout = defaultWorkerConnectTimeout
 	}
+	if options.sessionOps == nil {
+		options.sessionOps = newSessionOperationLocks()
+	}
 	handler := &handler{
 		registry:             registry,
 		approvals:            newApprovalRegistry(),
@@ -431,7 +435,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workers:              options.workers,
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
-		sessionOps:           newSessionOperationLocks(),
+		sessionOps:           options.sessionOps,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
@@ -743,22 +747,43 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 }
 
 func (h *handler) launchWorkerInBackground(id string) {
-	var timeout *time.Timer
+	launchCtx := context.Background()
+	cancel := func() {}
+	var watchdog *time.Timer
 	if h.workerConnectTimeout > 0 {
-		timeout = time.AfterFunc(h.workerConnectTimeout, func() {
-			_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+		launchCtx, cancel = context.WithTimeout(launchCtx, h.workerConnectTimeout)
+		watchdog = time.AfterFunc(h.workerConnectTimeout, func() {
+			cancel()
+			unlock := h.sessionOps.lock(id)
+			defer unlock()
+			if !h.workers.Has(id) {
+				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+			}
 		})
 	}
 	go func() {
-		if err := h.launchWorker(context.Background(), id); err != nil {
-			if timeout != nil {
-				timeout.Stop()
+		defer cancel()
+		if err := h.launchWorker(launchCtx, id); err != nil {
+			if watchdog != nil && !watchdog.Stop() {
+				return
 			}
-			_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
+			unlock := h.sessionOps.lock(id)
+			defer unlock()
+			if errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
+				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+			} else {
+				_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
+			}
 			return
 		}
-		if err := h.waitForRunningWorker(context.Background(), id); err == nil && timeout != nil {
-			timeout.Stop()
+		if err := h.waitForRunningWorker(launchCtx, id); err != nil && errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
+			unlock := h.sessionOps.lock(id)
+			defer unlock()
+			if !h.workers.Has(id) {
+				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+			}
+		} else if watchdog != nil {
+			watchdog.Stop()
 		}
 	}()
 }
@@ -796,6 +821,11 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
+			unlock := h.sessionOps.lock(id)
+			if !h.workers.Has(id) {
+				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+			}
+			unlock()
 			return errWorkerConnectTimeout
 		case <-changed:
 		}

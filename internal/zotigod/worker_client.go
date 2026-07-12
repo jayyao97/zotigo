@@ -194,21 +194,23 @@ func readWorkerCommands(conn *websocket.Conn) (<-chan commandResponse, <-chan er
 }
 
 type workerRuntime struct {
-	sessionID    string
-	workDir      string
-	store        zotigosession.Store
-	agent        *agent.Agent
-	runner       *runner.Runner
-	transport    *workerRuntimeTransport
-	display      *workerDisplayLog
-	observer     observability.Observer
-	cleanup      func()
-	storeMu      sync.Mutex
-	profileMu    sync.Mutex
-	profileEpoch uint64
-	fatalCh      chan error
-	fatalMu      sync.Mutex
-	fatalErr     error
+	sessionID        string
+	workDir          string
+	store            zotigosession.Store
+	agent            *agent.Agent
+	runner           *runner.Runner
+	transport        *workerRuntimeTransport
+	display          *workerDisplayLog
+	observer         observability.Observer
+	cleanup          func()
+	storeMu          sync.Mutex
+	profileMu        sync.Mutex
+	profileEpoch     uint64
+	profileOrderMu   sync.Mutex
+	profileOrderTail <-chan struct{}
+	fatalCh          chan error
+	fatalMu          sync.Mutex
+	fatalErr         error
 
 	mu         sync.Mutex
 	turnCancel context.CancelFunc
@@ -435,21 +437,23 @@ func validateWorkerCommand(command commandResponse) error {
 
 func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *profileCommandPayload) (<-chan error, error) {
 	completion := make(chan error, 1)
+	predecessor, ordered := r.nextProfileOrder()
 	target := strings.TrimSpace(command.Name)
 	epoch, err := r.nextProfileEpoch()
 	if err != nil {
+		close(ordered)
 		close(completion)
 		return completion, err
 	}
 	r.agent.SupersedePendingRuntimeProfile()
 	appConfig, err := config.NewManager().LoadForDir(r.workDir)
 	if err != nil {
-		r.completeProfileFailure(ctx, completion, commandID, target, fmt.Errorf("load profiles: %w", err))
+		r.completeProfileFailure(predecessor, ordered, completion, commandID, target, fmt.Errorf("load profiles: %w", err))
 		return completion, nil
 	}
 	_, profile, err := appConfig.ResolveProfile(target)
 	if err != nil {
-		r.completeProfileFailure(ctx, completion, commandID, target, err)
+		r.completeProfileFailure(predecessor, ordered, completion, commandID, target, err)
 		return completion, nil
 	}
 	runtimeProfile, err := wiring.NewRuntimeProfile(wiring.AgentConfig{
@@ -460,18 +464,36 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 		ConfigureClassifier: true,
 	})
 	if err != nil {
-		r.completeProfileFailure(ctx, completion, commandID, target, err)
+		r.completeProfileFailure(predecessor, ordered, completion, commandID, target, err)
 		return completion, nil
 	}
-	from := r.agent.ActiveProfileName()
 	runtimeProfile.BeforeApply = func() error {
+		<-predecessor
+		if err := r.currentFatalError(); err != nil {
+			return err
+		}
+		from := r.agent.ActiveProfileName()
 		commitCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
 		defer cancel()
 		return r.commitLatestProfileSwitch(commitCtx, epoch, commandID, from, target)
 	}
 	result := r.agent.QueueRuntimeProfile(runtimeProfile)
-	go r.finishProfileSwitch(commandID, target, result, completion)
+	go r.finishProfileSwitch(predecessor, ordered, commandID, target, result, completion)
 	return completion, nil
+}
+
+func (r *workerRuntime) nextProfileOrder() (<-chan struct{}, chan struct{}) {
+	r.profileOrderMu.Lock()
+	defer r.profileOrderMu.Unlock()
+	predecessor := r.profileOrderTail
+	if predecessor == nil {
+		ready := make(chan struct{})
+		close(ready)
+		predecessor = ready
+	}
+	ordered := make(chan struct{})
+	r.profileOrderTail = ordered
+	return predecessor, ordered
 }
 
 func (r *workerRuntime) nextProfileEpoch() (uint64, error) {
@@ -498,9 +520,15 @@ func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uin
 	return err
 }
 
-func (r *workerRuntime) finishProfileSwitch(commandID string, target string, result <-chan error, completion chan<- error) {
+func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered chan struct{}, commandID string, target string, result <-chan error, completion chan<- error) {
 	defer close(completion)
 	err := <-result
+	<-predecessor
+	defer close(ordered)
+	if fatalErr := r.currentFatalError(); fatalErr != nil {
+		completion <- fatalErr
+		return
+	}
 	var uncertain *profileStateUncertainError
 	if errors.As(err, &uncertain) {
 		r.fail(uncertain)
@@ -512,6 +540,7 @@ func (r *workerRuntime) finishProfileSwitch(commandID string, target string, res
 	if errors.Is(err, agent.ErrRuntimeProfileSuperseded) {
 		err = r.recordProfileFailure(ctx, commandID, target, agent.ErrRuntimeProfileSuperseded)
 		if err != nil {
+			err = &profileCompletionUncertainError{cause: err}
 			r.fail(err)
 		}
 		completion <- err
@@ -520,6 +549,7 @@ func (r *workerRuntime) finishProfileSwitch(commandID string, target string, res
 	if err != nil {
 		err = r.recordProfileFailure(ctx, commandID, target, err)
 		if err != nil {
+			err = &profileCompletionUncertainError{cause: err}
 			r.fail(err)
 		}
 		completion <- err
@@ -528,13 +558,22 @@ func (r *workerRuntime) finishProfileSwitch(commandID string, target string, res
 	completion <- nil
 }
 
-func (r *workerRuntime) completeProfileFailure(ctx context.Context, completion chan<- error, commandID string, target string, cause error) {
+func (r *workerRuntime) completeProfileFailure(predecessor <-chan struct{}, ordered chan struct{}, completion chan<- error, commandID string, target string, cause error) {
+	defer close(completion)
+	<-predecessor
+	defer close(ordered)
+	if fatalErr := r.currentFatalError(); fatalErr != nil {
+		completion <- fatalErr
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
 	err := r.recordProfileFailure(ctx, commandID, target, cause)
 	if err != nil {
+		err = &profileCompletionUncertainError{cause: err}
 		r.fail(err)
 	}
 	completion <- err
-	close(completion)
 }
 
 type profileStateUncertainError struct {
@@ -545,6 +584,13 @@ func (e *profileStateUncertainError) Error() string {
 	return "profile state is uncertain: " + e.cause.Error()
 }
 func (e *profileStateUncertainError) Unwrap() error { return e.cause }
+
+type profileCompletionUncertainError struct{ cause error }
+
+func (e *profileCompletionUncertainError) Error() string {
+	return "profile command completion is uncertain: " + e.cause.Error()
+}
+func (e *profileCompletionUncertainError) Unwrap() error { return e.cause }
 
 func (r *workerRuntime) fail(err error) {
 	if err == nil {
@@ -857,6 +903,10 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 		completion <-chan error
 	}
 	pendingProfiles := make([]pendingProfile, 0)
+	completedProfiles, err := completedProfileCommandIDs(ctx, runtime)
+	if err != nil {
+		return cursor, err
+	}
 	flushProfiles := func() error {
 		for _, pending := range pendingProfiles {
 			select {
@@ -881,6 +931,13 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 		}
 		for _, command := range commands.Commands {
 			if command.Sequence <= cursor.Sequence {
+				continue
+			}
+			if command.Type == sessionCommandProfile && completedProfiles[command.ID] {
+				if err := flushProfiles(); err != nil {
+					return cursor, err
+				}
+				cursor.Sequence = command.Sequence
 				continue
 			}
 			if command.Type != sessionCommandProfile {
@@ -909,6 +966,36 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 			return cursor, nil
 		}
 	}
+}
+
+func completedProfileCommandIDs(ctx context.Context, runtime *workerRuntime) (map[string]bool, error) {
+	completed := make(map[string]bool)
+	pending := make(map[string]bool)
+	if runtime == nil || runtime.display == nil || runtime.display.items == nil {
+		return completed, nil
+	}
+	items, _, err := runtime.display.items.LoadItems(ctx, runtime.sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("load profile command completions: %w", err)
+	}
+	for _, item := range items {
+		if item.Command != nil && item.Command.Type == sessionCommandProfile {
+			pending[item.ID] = true
+		}
+		if item.Type != zotigosession.DisplayItemProfileChanged && item.Type != zotigosession.DisplayItemProfileFailed {
+			continue
+		}
+		if item.Profile != nil && item.Profile.CommandID != "" {
+			completed[item.Profile.CommandID] = true
+			delete(pending, item.Profile.CommandID)
+		} else if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil {
+			for commandID := range pending {
+				completed[commandID] = true
+			}
+			clear(pending)
+		}
+	}
+	return completed, nil
 }
 
 func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, cursor workerCommandCursor) (commandsResponse, error) {
@@ -1057,6 +1144,11 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				if seq, ok := pendingProfiles[item.Profile.CommandID]; ok {
 					safe[seq] = true
 					delete(pendingProfiles, item.Profile.CommandID)
+				} else if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile.CommandID == "" {
+					for commandID, pendingSeq := range pendingProfiles {
+						safe[pendingSeq] = true
+						delete(pendingProfiles, commandID)
+					}
 				}
 			}
 		}
@@ -1114,7 +1206,8 @@ func isExpectedWorkerClose(err error) bool {
 		return true
 	}
 	var uncertain *profileStateUncertainError
-	return errors.As(err, &uncertain) ||
+	var completionUncertain *profileCompletionUncertainError
+	return errors.As(err, &uncertain) || errors.As(err, &completionUncertain) ||
 		errors.Is(err, context.Canceled) ||
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, zotigotransport.ErrTransportClosed) ||

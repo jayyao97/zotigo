@@ -243,6 +243,9 @@ func (h *handler) applyStoredProfileLocked(ctx context.Context, id string, profi
 		}
 		return err
 	}
+	if _, err := h.repairPendingProfileCommands(ctx, id, profileName); err != nil {
+		return &profileStateUncertainError{cause: fmt.Errorf("repair pending profile commands: %w", err)}
+	}
 	return nil
 }
 
@@ -251,26 +254,73 @@ func (h *handler) ensureStoredProfileMarker(ctx context.Context, id string, prof
 	if err != nil {
 		return err
 	}
-
-scanLatestProfileResult:
-	for idx := len(items) - 1; idx >= 0; idx-- {
-		item := items[idx]
-		switch item.Type {
-		case zotigosession.DisplayItemProfileChanged:
-			if item.Profile != nil && item.Profile.To == profileName {
-				return nil
-			}
-			break scanLatestProfileResult
-		case zotigosession.DisplayItemProfileFailed:
-			break scanLatestProfileResult
+	if !hasOfflineProfileIntent(items, profileName) {
+		if _, err = h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemProfileChanged,
+			Profile: &zotigosession.DisplayProfileChange{
+				From: profileName,
+				To:   profileName,
+			},
+		}); err != nil {
+			return err
 		}
 	}
-	_, err = h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemProfileChanged,
-		Profile: &zotigosession.DisplayProfileChange{
-			From: profileName,
-			To:   profileName,
-		},
-	})
-	return err
+	_, err = h.repairPendingProfileCommandsFromItems(ctx, id, profileName, items)
+	if err != nil {
+		return &profileStateUncertainError{cause: fmt.Errorf("repair pending profile commands: %w", err)}
+	}
+	return nil
+}
+
+func hasOfflineProfileIntent(items []zotigosession.DisplayItem, profileName string) bool {
+	var latestProfileCommand uint64
+	var latestIntent uint64
+	var latestIntentProfile string
+	for _, item := range items {
+		if item.Command != nil && item.Command.Type == sessionCommandProfile {
+			latestProfileCommand = item.Sequence
+		}
+		if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil && item.Profile.CommandID == "" {
+			latestIntent = item.Sequence
+			latestIntentProfile = item.Profile.To
+		}
+	}
+	return latestIntent > latestProfileCommand && latestIntentProfile == profileName
+}
+
+func (h *handler) repairPendingProfileCommands(ctx context.Context, id string, profileName string) (bool, error) {
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return h.repairPendingProfileCommandsFromItems(ctx, id, profileName, items)
+}
+
+func (h *handler) repairPendingProfileCommandsFromItems(ctx context.Context, id string, profileName string, items []zotigosession.DisplayItem) (bool, error) {
+	completed := make(map[string]bool)
+	for _, item := range items {
+		if (item.Type == zotigosession.DisplayItemProfileChanged || item.Type == zotigosession.DisplayItemProfileFailed) && item.Profile != nil {
+			completed[item.Profile.CommandID] = item.Profile.CommandID != ""
+		}
+	}
+	hadPending := false
+	for _, item := range items {
+		if item.Command == nil || item.Command.Type != sessionCommandProfile || completed[item.ID] {
+			continue
+		}
+		hadPending = true
+		_, err := h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
+			Type:  zotigosession.DisplayItemProfileFailed,
+			Error: "superseded by offline profile change",
+			Profile: &zotigosession.DisplayProfileChange{
+				CommandID: item.ID,
+				From:      profileName,
+				To:        item.Command.Profile,
+			},
+		})
+		if err != nil {
+			return hadPending, err
+		}
+	}
+	return hadPending, nil
 }
