@@ -471,15 +471,17 @@ func min(a, b int) int {
 
 // MockSummarizer for testing
 type MockSummarizer struct {
-	MessagesSummary string
-	TextSummary     string
-	ShouldFail      bool
+	MessagesSummary  string
+	TextSummary      string
+	ShouldFail       bool
+	CapturedMessages []protocol.Message
 }
 
 func (m *MockSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (string, error) {
 	if m.ShouldFail {
 		return "", context.Canceled
 	}
+	m.CapturedMessages = append([]protocol.Message(nil), messages...)
 	return m.MessagesSummary, nil
 }
 
@@ -539,6 +541,37 @@ func TestCompressor_WithSummarizer(t *testing.T) {
 	}
 
 	_ = compressed // Use the variable
+}
+
+func TestCompressorExcludesContextualMessagesFromSummaryInput(t *testing.T) {
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 50,
+		TriggerRatio:      0.5,
+		PreserveRatio:     0.3,
+	})
+	summarizer := &MockSummarizer{
+		MessagesSummary: "<context_summary><goal>real goal</goal></context_summary>",
+	}
+	c.SetSummarizer(summarizer)
+
+	messages := []protocol.Message{
+		protocol.NewContextualUserMessage(strings.Repeat("environment context ", 30)),
+		protocol.NewUserMessage(strings.Repeat("real request ", 30)),
+		protocol.NewAssistantMessage(strings.Repeat("response ", 30)),
+		protocol.NewUserMessage("recent request"),
+	}
+	_, result, err := c.Compress(context.Background(), messages)
+	if err != nil {
+		t.Fatalf("compress: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("expected compression")
+	}
+	for _, msg := range summarizer.CapturedMessages {
+		if msg.IsContextualUser() {
+			t.Fatalf("contextual message reached summarizer: %#v", msg)
+		}
+	}
 }
 
 func TestCompressor_SummarizerFallback(t *testing.T) {

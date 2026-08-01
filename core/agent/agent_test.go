@@ -1574,6 +1574,72 @@ func TestAgentForceCompress(t *testing.T) {
 	}
 }
 
+func TestAgentForceCompressRebasesUserContext(t *testing.T) {
+	providers.Register("mock-context-rebase", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &VerboseMockProvider{}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(
+		config.ProfileConfig{Provider: "mock-context-rebase", ContextWindow: 200},
+		exec,
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: 2026-07-28"
+			}),
+		)),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	history := append(
+		[]protocol.Message{protocol.NewContextualUserMessage(
+			`<user_context update="full"><environment>old</environment></user_context>`,
+		)},
+		buildSeedHistory(20)...,
+	)
+	ag.Restore(agent.Snapshot{History: history})
+
+	result, err := ag.ForceCompress(context.Background())
+	if err != nil {
+		t.Fatalf("ForceCompress: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("expected compression")
+	}
+
+	snapshot := ag.Snapshot()
+	if snapshot.UserContextState == nil {
+		t.Fatal("expected rebased context state")
+	}
+	contextCount := 0
+	contextIndex := -1
+	summaryIndex := -1
+	for i, msg := range snapshot.History {
+		if msg.IsContextualUser() {
+			contextCount++
+			contextIndex = i
+			if !strings.Contains(msg.String(), "2026-07-28") ||
+				!strings.Contains(msg.String(), `update="full"`) {
+				t.Fatalf("expected current full context, got %q", msg.String())
+			}
+		}
+		if strings.HasPrefix(msg.String(), "[Previous conversation summary]") {
+			summaryIndex = i
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("expected exactly one rebased context, got %d", contextCount)
+	}
+	if summaryIndex < 0 || contextIndex != summaryIndex+1 {
+		t.Fatalf("expected context immediately after summary: summary=%d context=%d", summaryIndex, contextIndex)
+	}
+}
+
 func TestAgentResetLoopDetector(t *testing.T) {
 	providers.Register("mock-loop", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &StatsMockProvider{}, nil
@@ -3054,12 +3120,14 @@ func (p *AlwaysEmptyProvider) StreamChat(ctx context.Context, messages []protoco
 
 type ContextCaptureProvider struct {
 	Messages []protocol.Message
+	Calls    [][]protocol.Message
 }
 
 func (p *ContextCaptureProvider) Name() string { return "context-capture" }
 
 func (p *ContextCaptureProvider) StreamChat(ctx context.Context, messages []protocol.Message, t []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	p.Messages = append([]protocol.Message(nil), messages...)
+	p.Calls = append(p.Calls, append([]protocol.Message(nil), messages...))
 
 	ch := make(chan protocol.Event, 4)
 	go func() {
@@ -3112,7 +3180,7 @@ func (p *BlockingCaptureProvider) StreamChat(ctx context.Context, messages []pro
 	return ch, nil
 }
 
-func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
+func TestAgentPersistsUserContextBeforeRealUserMessage(t *testing.T) {
 	prov := &ContextCaptureProvider{}
 	providers.Register("context-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return prov, nil
@@ -3149,7 +3217,8 @@ func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
 	if prov.Messages[0].Role != protocol.RoleSystem {
 		t.Fatalf("expected first message system, got %s", prov.Messages[0].Role)
 	}
-	if prov.Messages[1].Role != protocol.RoleUser || !strings.Contains(prov.Messages[1].String(), "<user_context>") {
+	if !prov.Messages[1].IsContextualUser() ||
+		!strings.Contains(prov.Messages[1].String(), `<user_context update="full">`) {
 		t.Fatalf("expected second message to be meta user context, got %#v", prov.Messages[1])
 	}
 	if !strings.Contains(prov.Messages[1].String(), "cwd="+tmpDir) {
@@ -3160,14 +3229,233 @@ func TestAgentAddsTransientUserContextBeforeRealUserMessage(t *testing.T) {
 	}
 
 	history := ag.Snapshot().History
-	if len(history) == 0 || history[0].Role != protocol.RoleUser {
-		t.Fatalf("expected history to start with real user message, got %#v", history)
+	if len(history) < 3 || !history[0].IsContextualUser() {
+		t.Fatalf("expected history to start with contextual user message, got %#v", history)
 	}
-	if history[0].String() != "real request" {
-		t.Fatalf("expected history user message to stay unwrapped, got %q", history[0].String())
+	if history[1].Role != protocol.RoleUser || history[1].String() != "real request" {
+		t.Fatalf("expected real user message after context, got %#v", history[1])
 	}
-	if strings.Contains(history[0].String(), "<user_context>") {
-		t.Fatalf("context message should not be persisted in history: %q", history[0].String())
+	if ag.Snapshot().UserContextState == nil {
+		t.Fatal("expected user context baseline in snapshot")
+	}
+}
+
+func TestAgentUserContextPreservesProviderPrefixAcrossTurns(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("context-prefix-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "context-prefix-capture"}, exec,
+		agent.WithSystemPromptBuilder(prompt.NewSystemPromptBuilder(prompt.WithStaticPrompt("base system"))),
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: 2026-07-28"
+			}),
+		)),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	for _, input := range []string{"first", "second"} {
+		events, err := ag.Run(context.Background(), input)
+		if err != nil {
+			t.Fatalf("run %q: %v", input, err)
+		}
+		for range events {
+		}
+	}
+
+	if len(prov.Calls) != 2 {
+		t.Fatalf("expected two provider calls, got %d", len(prov.Calls))
+	}
+	first, second := prov.Calls[0], prov.Calls[1]
+	if len(first) != 3 || len(second) != 5 {
+		t.Fatalf("unexpected request sizes: first=%d second=%d", len(first), len(second))
+	}
+	for i := range first {
+		if first[i].Role != second[i].Role ||
+			first[i].String() != second[i].String() ||
+			first[i].Contextual != second[i].Contextual {
+			t.Fatalf("provider prefix changed at %d:\nfirst=%#v\nsecond=%#v", i, first[i], second[i])
+		}
+	}
+
+	contextCount := 0
+	for _, msg := range ag.Snapshot().History {
+		if msg.IsContextualUser() {
+			contextCount++
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("unchanged context should be persisted once, got %d", contextCount)
+	}
+}
+
+func TestAgentAppendsChangedUserContextBeforeNextTurn(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("context-delta-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	currentDate := "2026-07-28"
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "context-delta-capture"}, exec,
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: " + currentDate
+			}),
+		)),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	events, err := ag.Run(context.Background(), "first")
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	for range events {
+	}
+	currentDate = "2026-07-29"
+	events, err = ag.Run(context.Background(), "second")
+	if err != nil {
+		t.Fatalf("second run: %v", err)
+	}
+	for range events {
+	}
+
+	history := ag.Snapshot().History
+	if len(history) != 6 {
+		t.Fatalf("expected full context, two turns, and delta, got %#v", history)
+	}
+	if !history[3].IsContextualUser() ||
+		!strings.Contains(history[3].String(), `<user_context update="delta">`) ||
+		!strings.Contains(history[3].String(), "2026-07-29") {
+		t.Fatalf("expected date delta before second user message, got %#v", history[3])
+	}
+	if history[4].String() != "second" {
+		t.Fatalf("expected real second user message after delta, got %#v", history[4])
+	}
+}
+
+func TestAgentRestoresUserContextBaselineWithoutRepeatingFullContext(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("context-restore-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	newAgent := func(exec executor.Executor) *agent.Agent {
+		t.Helper()
+		ag, err := agent.New(config.ProfileConfig{Provider: "context-restore-capture"}, exec,
+			agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+				prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+					return "current_date: 2026-07-28"
+				}),
+			)),
+		)
+		if err != nil {
+			t.Fatalf("agent.New: %v", err)
+		}
+		return ag
+	}
+
+	exec1, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("first executor: %v", err)
+	}
+	defer exec1.Close()
+	first := newAgent(exec1)
+	events, err := first.Run(context.Background(), "first")
+	if err != nil {
+		t.Fatalf("first run: %v", err)
+	}
+	for range events {
+	}
+	snapshot := first.Snapshot()
+	if snapshot.UserContextState == nil {
+		t.Fatal("expected snapshot to persist user context baseline")
+	}
+
+	exec2, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("second executor: %v", err)
+	}
+	defer exec2.Close()
+	restored := newAgent(exec2)
+	restored.Restore(snapshot)
+	events, err = restored.Run(context.Background(), "second")
+	if err != nil {
+		t.Fatalf("restored run: %v", err)
+	}
+	for range events {
+	}
+
+	contextCount := 0
+	for _, msg := range restored.Snapshot().History {
+		if msg.IsContextualUser() {
+			contextCount++
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("restored baseline should avoid repeating unchanged context, got %d", contextCount)
+	}
+}
+
+func TestAgentLegacySnapshotAdoptsUserContextBeforeNextInput(t *testing.T) {
+	prov := &ContextCaptureProvider{}
+	providers.Register("context-legacy-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: "context-legacy-capture"}, exec,
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: 2026-07-28"
+			}),
+		)),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	ag.Restore(agent.Snapshot{History: []protocol.Message{
+		protocol.NewUserMessage("legacy request"),
+		protocol.NewAssistantMessage("legacy answer"),
+	}})
+
+	events, err := ag.Run(context.Background(), "new request")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for range events {
+	}
+
+	history := ag.Snapshot().History
+	if len(history) < 5 {
+		t.Fatalf("unexpected adopted history: %#v", history)
+	}
+	if history[0].String() != "legacy request" || history[1].String() != "legacy answer" {
+		t.Fatalf("legacy provider prefix changed: %#v", history[:2])
+	}
+	if !history[2].IsContextualUser() ||
+		!strings.Contains(history[2].String(), `<user_context update="full">`) {
+		t.Fatalf("expected full context before first new input, got %#v", history[2])
+	}
+	if history[3].String() != "new request" {
+		t.Fatalf("expected new request after adopted context, got %#v", history[3])
 	}
 }
 
@@ -3186,7 +3474,14 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatalf("executor: %v", err)
 	}
 	cfg := config.ProfileConfig{Provider: "blocking-capture-steering"}
-	ag, err := agent.New(cfg, exec)
+	currentDate := "2026-07-28"
+	ag, err := agent.New(cfg, exec,
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: " + currentDate
+			}),
+		)),
+	)
 	if err != nil {
 		t.Fatalf("agent.New: %v", err)
 	}
@@ -3200,6 +3495,7 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("provider did not start")
 	}
+	currentDate = "2026-07-29"
 	if err := ag.QueueTurnUserInput("first correction"); err != nil {
 		t.Fatalf("queue first input: %v", err)
 	}
@@ -3227,6 +3523,12 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 	got := second[len(second)-1]
 	if got.Role != protocol.RoleUser || got.String() != "first correction\n\nsecond correction" {
 		t.Fatalf("expected merged queued input as normal user message, got %#v", got)
+	}
+	contextUpdate := second[len(second)-2]
+	if !contextUpdate.IsContextualUser() ||
+		!strings.Contains(contextUpdate.String(), `<user_context update="delta">`) ||
+		!strings.Contains(contextUpdate.String(), "2026-07-29") {
+		t.Fatalf("expected context delta immediately before queued input, got %#v", contextUpdate)
 	}
 
 	history := ag.Snapshot().History
@@ -3653,7 +3955,13 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 		t.Fatalf("executor: %v", err)
 	}
 
-	ag, err := agent.New(config.ProfileConfig{Provider: "reactive-mock"}, exec)
+	ag, err := agent.New(config.ProfileConfig{Provider: "reactive-mock"}, exec,
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("environment", "environment", func(_ prompt.PromptContext) string {
+				return "current_date: 2026-07-28"
+			}),
+		)),
+	)
 	if err != nil {
 		t.Fatalf("agent: %v", err)
 	}
@@ -3693,6 +4001,19 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 	}
 	if lastFinish != protocol.FinishReasonStop {
 		t.Errorf("expected final FinishReasonStop, got %q", lastFinish)
+	}
+	contextCount := 0
+	for _, msg := range ag.Snapshot().History {
+		if !msg.IsContextualUser() {
+			continue
+		}
+		contextCount++
+		if !strings.Contains(msg.String(), `<user_context update="full">`) {
+			t.Fatalf("expected rebased full context after reactive compaction, got %q", msg.String())
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("expected exactly one rebased context message, got %d", contextCount)
 	}
 }
 

@@ -61,19 +61,20 @@ type Agent struct {
 
 	middlewares []Middleware
 
-	mu              sync.RWMutex
-	state           State
-	history         []protocol.Message
-	pendingTurnUser []protocol.Message
-	pendingActions  []*PendingAction
-	deferredActions []*PendingAction
-	turns           []TurnAudit
-	pendingProfile  *runtimeProfileRequest
-	runtimeActivity int
-	profileActivity int
-	runActive       bool
-	runtimeIdle     chan struct{}
-	profileApplyMu  sync.Mutex
+	mu               sync.RWMutex
+	state            State
+	history          []protocol.Message
+	userContextState *prompt.UserContextState
+	pendingTurnUser  []protocol.Message
+	pendingActions   []*PendingAction
+	deferredActions  []*PendingAction
+	turns            []TurnAudit
+	pendingProfile   *runtimeProfileRequest
+	runtimeActivity  int
+	profileActivity  int
+	runActive        bool
+	runtimeIdle      chan struct{}
+	profileApplyMu   sync.Mutex
 }
 
 // AgentOption configures an Agent during construction.
@@ -84,14 +85,14 @@ func WithSystemPromptBuilder(pb *prompt.SystemPromptBuilder) AgentOption {
 	return func(a *Agent) { a.promptBuilder = pb }
 }
 
-// WithUserPromptWrapper sets the builder used to add transient user-context
-// messages. Deprecated: use WithUserContextBuilder.
+// WithUserPromptWrapper sets the builder used to add contextual user messages.
+// Deprecated: use WithUserContextBuilder.
 func WithUserPromptWrapper(uw *prompt.UserPromptWrapper) AgentOption {
 	return func(a *Agent) { a.userContext = uw }
 }
 
-// WithUserContextBuilder sets the builder used to add transient user-context
-// messages before the real user turn without persisting them in history.
+// WithUserContextBuilder sets the builder used to persist contextual user
+// messages before real user turns.
 func WithUserContextBuilder(uc *prompt.UserContextBuilder) AgentOption {
 	return func(a *Agent) { a.userContext = uc }
 }
@@ -359,13 +360,9 @@ func (a *Agent) ForceCompress(ctx context.Context) (*services.CompressionResult,
 		return nil, fmt.Errorf("compressor not initialized")
 	}
 
-	compressed, result, err := a.compressor.Compress(ctx, a.history)
+	result, err := a.compressHistoryLocked(ctx, false)
 	if err != nil {
 		return nil, err
-	}
-
-	if result.Compressed {
-		a.history = compressed
 	}
 
 	return &result, nil
@@ -384,13 +381,14 @@ func (a *Agent) Snapshot() Snapshot {
 	turns := make([]TurnAudit, len(a.turns))
 	copy(turns, a.turns)
 	return Snapshot{
-		State:           a.state,
-		History:         hist,
-		PendingActions:  pending,
-		DeferredActions: deferred,
-		TurnSafety:      a.turnSafety,
-		Turns:           turns,
-		CreatedAt:       time.Now(),
+		State:            a.state,
+		History:          hist,
+		PendingActions:   pending,
+		DeferredActions:  deferred,
+		TurnSafety:       a.turnSafety,
+		Turns:            turns,
+		UserContextState: a.userContextState.Clone(),
+		CreatedAt:        time.Now(),
 	}
 }
 
@@ -404,6 +402,7 @@ func (a *Agent) Restore(s Snapshot) {
 	a.pendingActions = s.PendingActions
 	a.deferredActions = s.DeferredActions
 	a.turnSafety = s.TurnSafety
+	a.userContextState = s.UserContextState.Clone()
 	if s.Turns == nil {
 		a.turns = make([]TurnAudit, 0)
 	} else {
@@ -496,9 +495,14 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			return nil, fmt.Errorf("cannot add user input while agent is paused")
 		}
 
-		a.history = append(a.history, msg)
 		if msg.Role == protocol.RoleUser {
+			if err := a.appendUserInputLocked(msg); err != nil {
+				a.mu.Unlock()
+				return nil, err
+			}
 			a.startNewTurn(msg.String())
+		} else {
+			a.history = append(a.history, msg)
 		}
 	}
 
@@ -592,7 +596,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			a.applyPendingRuntimeProfile(true)
 			a.mu.Lock()
-			a.drainPendingTurnUserInputLocked()
+			if _, err := a.drainPendingTurnUserInputLocked(); err != nil {
+				a.mu.Unlock()
+				turnErr = err
+				outCh <- protocol.NewErrorEvent(err)
+				return
+			}
 			msgs := a.buildContext()
 			provider := a.provider
 			model := a.cfg.Model
@@ -921,7 +930,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			}
 
 			a.mu.Lock()
-			if a.drainPendingTurnUserInputLocked() {
+			if drained, err := a.drainPendingTurnUserInputLocked(); err != nil {
+				a.mu.Unlock()
+				turnErr = err
+				outCh <- protocol.NewErrorEvent(err)
+				return
+			} else if drained {
 				a.mu.Unlock()
 				continue
 			}
@@ -954,7 +968,12 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			// No tool calls -> turn finished
 			a.mu.Lock()
-			if a.drainPendingTurnUserInputLocked() {
+			if drained, err := a.drainPendingTurnUserInputLocked(); err != nil {
+				a.mu.Unlock()
+				turnErr = err
+				outCh <- protocol.NewErrorEvent(err)
+				return
+			} else if drained {
 				a.mu.Unlock()
 				continue
 			}
@@ -1936,8 +1955,8 @@ func (a *Agent) buildContext() []protocol.Message {
 
 	// System prompt messages. The first block is the stable product prompt; any
 	// system-scoped dynamic capability context, such as available skills, stays
-	// in later system blocks. Project/environment/date context is injected below
-	// as a transient user-context message so it does not enter history.
+	// in later system blocks. Project/environment/date context is already
+	// persisted in history at real user boundaries.
 	if a.promptBuilder != nil {
 		for _, text := range a.promptBuilder.BuildMessages(pctx) {
 			msgs = append(msgs, protocol.NewSystemMessage(text))
@@ -1948,10 +1967,9 @@ func (a *Agent) buildContext() []protocol.Message {
 
 	// Check if compression is needed
 	if a.compressor != nil && a.compressor.NeedsCompression(history) {
-		compressed, result, err := a.compressor.Compress(context.Background(), history)
+		result, err := a.compressHistoryLocked(context.Background(), false)
 		if err == nil && result.Compressed {
-			history = compressed
-			a.history = history
+			history = a.history
 		}
 	}
 
@@ -1960,16 +1978,13 @@ func (a *Agent) buildContext() []protocol.Message {
 		history = a.compressor.TruncateToolResults(history, 2000)
 	}
 
-	if a.userContext != nil {
-		history = a.withUserContextMessage(history, pctx)
-	}
 	msgs = append(msgs, history...)
 	return msgs
 }
 
-func (a *Agent) drainPendingTurnUserInputLocked() bool {
+func (a *Agent) drainPendingTurnUserInputLocked() (bool, error) {
 	if len(a.pendingTurnUser) == 0 {
-		return false
+		return false, nil
 	}
 	content := make([]protocol.ContentPart, 0, len(a.pendingTurnUser))
 	texts := make([]string, 0, len(a.pendingTurnUser))
@@ -1997,38 +2012,98 @@ func (a *Agent) drainPendingTurnUserInputLocked() bool {
 		}
 	}
 	flushText()
-	a.pendingTurnUser = nil
-	a.history = append(a.history, protocol.Message{
+	msg := protocol.Message{
 		Role:      protocol.RoleUser,
 		Content:   content,
 		CreatedAt: time.Now(),
-	})
-	return true
+	}
+	if err := a.appendUserInputLocked(msg); err != nil {
+		return false, err
+	}
+	a.pendingTurnUser = nil
+	return true, nil
 }
 
-func (a *Agent) withUserContextMessage(history []protocol.Message, pctx prompt.PromptContext) []protocol.Message {
-	contextText := a.userContext.BuildMetaUserContext(pctx)
-	if contextText == "" {
-		return history
+func (a *Agent) appendUserInputLocked(msg protocol.Message) error {
+	if a.userContext != nil {
+		contextText, state, err := a.userContext.BuildUpdate(a.promptContext(), a.userContextState)
+		if err != nil {
+			return fmt.Errorf("build user context: %w", err)
+		}
+		if contextText != "" {
+			a.history = append(a.history, protocol.NewContextualUserMessage(contextText))
+		}
+		a.userContextState = state.Clone()
+	}
+	a.history = append(a.history, msg)
+	return nil
+}
+
+func (a *Agent) promptContext() prompt.PromptContext {
+	return prompt.PromptContext{
+		WorkDir:  a.executor.WorkDir(),
+		Platform: a.executor.Platform(),
+		Model:    a.cfg.Model,
+	}
+}
+
+func (a *Agent) compressHistoryLocked(
+	ctx context.Context,
+	force bool,
+) (services.CompressionResult, error) {
+	var (
+		compressed []protocol.Message
+		result     services.CompressionResult
+		err        error
+	)
+	if force {
+		compressed, result, err = a.compressor.ForceCompress(ctx, a.history)
+	} else {
+		compressed, result, err = a.compressor.Compress(ctx, a.history)
+	}
+	if err != nil || !result.Compressed {
+		return result, err
 	}
 
-	userIdx := -1
-	for i := len(history) - 1; i >= 0; i-- {
-		if history[i].Role == protocol.RoleUser {
-			userIdx = i
-			break
+	rebased, state, err := a.rebaseUserContext(compressed)
+	if err != nil {
+		return services.CompressionResult{}, err
+	}
+	a.history = rebased
+	a.userContextState = state
+	result.MessagesAfter = len(rebased)
+	result.CompressedTokens = a.compressor.CountTokens(rebased)
+	return result, nil
+}
+
+func (a *Agent) rebaseUserContext(
+	history []protocol.Message,
+) ([]protocol.Message, *prompt.UserContextState, error) {
+	if a.userContext == nil {
+		return history, a.userContextState, nil
+	}
+	contextText, state, err := a.userContext.BuildFull(a.promptContext())
+	if err != nil {
+		return nil, nil, fmt.Errorf("build user context after compaction: %w", err)
+	}
+
+	withoutContext := make([]protocol.Message, 0, len(history)+1)
+	insertAt := 0
+	for _, msg := range history {
+		if msg.IsContextualUser() {
+			continue
+		}
+		withoutContext = append(withoutContext, msg)
+		if strings.HasPrefix(msg.String(), "[Previous conversation summary]") {
+			insertAt = len(withoutContext)
 		}
 	}
-	if userIdx < 0 {
-		return history
+	if contextText != "" {
+		withoutContext = append(withoutContext, protocol.Message{})
+		copy(withoutContext[insertAt+1:], withoutContext[insertAt:])
+		withoutContext[insertAt] = protocol.NewContextualUserMessage(contextText)
 	}
-
-	meta := protocol.NewUserMessage(contextText)
-	out := make([]protocol.Message, 0, len(history)+1)
-	out = append(out, history[:userIdx]...)
-	out = append(out, meta)
-	out = append(out, history[userIdx:]...)
-	return out
+	return withoutContext, state.Clone(), nil
 }
 
 // safeDirs returns all directories that are safe for auto-approved read access.
@@ -2057,10 +2132,7 @@ func (a *Agent) tryReactiveRecover(ctx context.Context, err error, retries *int,
 	}
 
 	a.mu.Lock()
-	compressed, result, cerr := a.compressor.ForceCompress(ctx, a.history)
-	if cerr == nil && result.Compressed {
-		a.history = compressed
-	}
+	result, cerr := a.compressHistoryLocked(ctx, true)
 	a.mu.Unlock()
 
 	if cerr != nil || !result.Compressed {

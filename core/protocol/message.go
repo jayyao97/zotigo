@@ -11,6 +11,7 @@ type Message struct {
 	ID         string           `json:"id,omitempty"`
 	Role       Role             `json:"role"`
 	Content    []ContentPart    `json:"content"`
+	Contextual bool             `json:"contextual,omitempty"`
 	Metadata   *MessageMetadata `json:"metadata,omitempty"`
 	CreatedAt  time.Time        `json:"created_at"`
 	FinishedAt *time.Time       `json:"finished_at,omitempty"`
@@ -210,6 +211,16 @@ func NewUserMessage(text string) Message {
 		},
 		CreatedAt: time.Now(),
 	}
+}
+
+func NewContextualUserMessage(text string) Message {
+	msg := NewUserMessage(text)
+	msg.Contextual = true
+	return msg
+}
+
+func (m Message) IsContextualUser() bool {
+	return m.Role == RoleUser && m.Contextual
 }
 
 func NewAssistantMessage(text string) Message {

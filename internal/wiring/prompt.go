@@ -33,7 +33,7 @@ func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
 
 func NewUserContextBuilder(cfg PromptConfig) *prompt.UserContextBuilder {
 	opts := []prompt.UserContextOption{
-		prompt.WithContext("environment", func(ctx prompt.PromptContext) string {
+		prompt.WithKeyedContext("environment", "environment", func(ctx prompt.PromptContext) string {
 			lines := []string{
 				fmt.Sprintf("working_directory: %s", ctx.WorkDir),
 				fmt.Sprintf("platform: %s", ctx.Platform),
@@ -56,9 +56,13 @@ func NewUserContextBuilder(cfg PromptConfig) *prompt.UserContextBuilder {
 			if data, err := os.ReadFile(path); err == nil {
 				content := string(data)
 				source := fmt.Sprintf(`source="%s"`, name)
-				opts = append(opts, prompt.WithAttributedContext("project_instructions", source, func(_ prompt.PromptContext) string {
-					return content
-				}))
+				key := "project_instructions:" + name
+				opts = append(opts, prompt.WithKeyedAttributedContext(
+					key,
+					"project_instructions",
+					source,
+					func(_ prompt.PromptContext) string { return content },
+				))
 			}
 		}
 	}

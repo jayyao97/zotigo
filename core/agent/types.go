@@ -3,6 +3,7 @@ package agent
 import (
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
@@ -16,13 +17,14 @@ const (
 
 // Snapshot represents the serializable state of the agent.
 type Snapshot struct {
-	State           State              `json:"state"`
-	History         []protocol.Message `json:"history"`
-	PendingActions  []*PendingAction   `json:"pending_actions,omitempty"`
-	DeferredActions []*PendingAction   `json:"deferred_actions,omitempty"`
-	TurnSafety      TurnSafetyState    `json:"turn_safety,omitempty"`
-	Turns           []TurnAudit        `json:"turns,omitempty"`
-	CreatedAt       time.Time          `json:"created_at"`
+	State            State                    `json:"state"`
+	History          []protocol.Message       `json:"history"`
+	PendingActions   []*PendingAction         `json:"pending_actions,omitempty"`
+	DeferredActions  []*PendingAction         `json:"deferred_actions,omitempty"`
+	TurnSafety       TurnSafetyState          `json:"turn_safety,omitempty"`
+	Turns            []TurnAudit              `json:"turns,omitempty"`
+	UserContextState *prompt.UserContextState `json:"user_context_state,omitempty"`
+	CreatedAt        time.Time                `json:"created_at"`
 }
 
 // PendingAction represents a tool call that needs approval or execution result.

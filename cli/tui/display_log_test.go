@@ -305,6 +305,7 @@ func TestInitialDisplayItemsReadsDisplayLogNotRuntimeHistory(t *testing.T) {
 	model, sess := newDisplayLogTestModel(t)
 	sess.AgentSnapshot = agent.Snapshot{
 		History: []protocol.Message{
+			protocol.NewContextualUserMessage(`<user_context update="full">dynamic</user_context>`),
 			protocol.NewUserMessage("runtime prompt"),
 			protocol.NewAssistantMessage("runtime answer"),
 		},

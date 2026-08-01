@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 )
 
 func TestFileStore_PutGet(t *testing.T) {
@@ -41,7 +42,11 @@ func TestFileStore_PutGet(t *testing.T) {
 			UpdatedAt:        time.Now(),
 		},
 		AgentSnapshot: agent.Snapshot{
-			State:     agent.StateIdle,
+			State: agent.StateIdle,
+			UserContextState: &prompt.UserContextState{
+				Version:  1,
+				Sections: map[string]string{"environment": "digest"},
+			},
 			CreatedAt: time.Now(),
 		},
 		Turns: []Turn{
@@ -85,6 +90,10 @@ func TestFileStore_PutGet(t *testing.T) {
 	}
 	if loaded.ProfileName != sess.ProfileName {
 		t.Errorf("ProfileName mismatch: got %s, want %s", loaded.ProfileName, sess.ProfileName)
+	}
+	if loaded.AgentSnapshot.UserContextState == nil ||
+		loaded.AgentSnapshot.UserContextState.Sections["environment"] != "digest" {
+		t.Fatalf("user context state did not round-trip: %#v", loaded.AgentSnapshot.UserContextState)
 	}
 	if len(loaded.Turns) != 1 {
 		t.Fatalf("Expected 1 turn, got %d", len(loaded.Turns))
