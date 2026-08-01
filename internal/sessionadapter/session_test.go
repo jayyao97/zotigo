@@ -14,6 +14,7 @@ func TestLastUserPrompt(t *testing.T) {
 		protocol.NewUserMessage("first"),
 		protocol.NewAssistantMessage("assistant"),
 		protocol.NewUserMessage("latest"),
+		protocol.NewContextualUserMessage("<user_context>new date</user_context>"),
 	}
 
 	if got := LastUserPrompt(history); got != "latest" {

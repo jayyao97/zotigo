@@ -1,8 +1,11 @@
 package prompt
 
 import (
+	"crypto/sha256"
 	_ "embed"
 	"fmt"
+	"html"
+	"sort"
 	"strings"
 )
 
@@ -77,6 +80,7 @@ type PromptContext struct {
 // ContextSection is an XML-tagged block of dynamic context.
 // Provider is called lazily at Build/Wrap time with the current PromptContext.
 type ContextSection struct {
+	Key        string
 	Tag        string
 	Attributes string
 	Provider   func(PromptContext) string
@@ -176,7 +180,7 @@ func (b *SystemPromptBuilder) BuildMessages(ctx PromptContext) []string {
 	return msgs
 }
 
-// UserContextBuilder builds a transient user-context message.
+// UserContextBuilder builds persistent, append-only user-context messages.
 type UserContextBuilder struct {
 	ContextSections []ContextSection
 }
@@ -187,7 +191,7 @@ type UserContextOption func(*UserContextBuilder)
 // WithContext returns a UserContextOption that appends a lazy context section.
 func WithContext(tag string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
-		w.ContextSections = append(w.ContextSections, ContextSection{Tag: tag, Provider: provider})
+		w.ContextSections = append(w.ContextSections, ContextSection{Key: tag, Tag: tag, Provider: provider})
 	}
 }
 
@@ -195,7 +199,37 @@ func WithContext(tag string, provider func(PromptContext) string) UserContextOpt
 // the opening tag.
 func WithAttributedContext(tag, attributes string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
-		w.ContextSections = append(w.ContextSections, ContextSection{Tag: tag, Attributes: attributes, Provider: provider})
+		w.ContextSections = append(w.ContextSections, ContextSection{
+			Key:        defaultContextSectionKey(tag, attributes),
+			Tag:        tag,
+			Attributes: attributes,
+			Provider:   provider,
+		})
+	}
+}
+
+// WithKeyedContext appends a lazy user-context section with a stable diff key.
+func WithKeyedContext(key, tag string, provider func(PromptContext) string) UserContextOption {
+	return func(w *UserContextBuilder) {
+		w.ContextSections = append(w.ContextSections, ContextSection{Key: key, Tag: tag, Provider: provider})
+	}
+}
+
+// WithKeyedAttributedContext appends a keyed lazy user-context section with
+// attributes on the opening tag.
+func WithKeyedAttributedContext(
+	key string,
+	tag string,
+	attributes string,
+	provider func(PromptContext) string,
+) UserContextOption {
+	return func(w *UserContextBuilder) {
+		w.ContextSections = append(w.ContextSections, ContextSection{
+			Key:        key,
+			Tag:        tag,
+			Attributes: attributes,
+			Provider:   provider,
+		})
 	}
 }
 
@@ -231,7 +265,7 @@ func NewUserPromptWrapper(opts ...UserPromptOption) *UserPromptWrapper {
 }
 
 // Wrap is retained for legacy direct callers. New agent code should use Build
-// and send the result as a separate transient user-context message.
+// and persist the result as a separate contextual user message.
 func (w *UserContextBuilder) Wrap(rawInput string, ctx PromptContext) string {
 	context := w.Build(ctx)
 	if context == "" {
@@ -256,6 +290,141 @@ func (w *UserContextBuilder) BuildMetaUserContext(ctx PromptContext) string {
 	b.WriteString(context)
 	b.WriteString("\n</user_context>")
 	return b.String()
+}
+
+const userContextStateVersion = 1
+
+type RenderedUserContextSection struct {
+	Key        string
+	Tag        string
+	Attributes string
+	Content    string
+	Digest     string
+}
+
+type UserContextState struct {
+	Version  int               `json:"version"`
+	Sections map[string]string `json:"sections,omitempty"`
+}
+
+func (s *UserContextState) Clone() *UserContextState {
+	if s == nil {
+		return nil
+	}
+	sections := make(map[string]string, len(s.Sections))
+	for key, digest := range s.Sections {
+		sections[key] = digest
+	}
+	return &UserContextState{Version: s.Version, Sections: sections}
+}
+
+// BuildUpdate returns a full context for an uninitialized state, or only
+// changed and removed sections for an existing state.
+func (w *UserContextBuilder) BuildUpdate(
+	ctx PromptContext,
+	previous *UserContextState,
+) (string, UserContextState, error) {
+	sections, state, err := w.renderSections(ctx)
+	if err != nil {
+		return "", UserContextState{}, err
+	}
+
+	if previous == nil || previous.Version != userContextStateVersion {
+		return renderUserContextUpdate("full", sections, nil), state, nil
+	}
+
+	changed := make([]RenderedUserContextSection, 0, len(sections))
+	for _, section := range sections {
+		if previous.Sections[section.Key] != section.Digest {
+			changed = append(changed, section)
+		}
+	}
+	var removed []string
+	for key := range previous.Sections {
+		if _, ok := state.Sections[key]; !ok {
+			removed = append(removed, key)
+		}
+	}
+	sort.Strings(removed)
+	return renderUserContextUpdate("delta", changed, removed), state, nil
+}
+
+func (w *UserContextBuilder) BuildFull(ctx PromptContext) (string, UserContextState, error) {
+	return w.BuildUpdate(ctx, nil)
+}
+
+func (w *UserContextBuilder) renderSections(
+	ctx PromptContext,
+) ([]RenderedUserContextSection, UserContextState, error) {
+	rendered := make([]RenderedUserContextSection, 0, len(w.ContextSections))
+	state := UserContextState{
+		Version:  userContextStateVersion,
+		Sections: make(map[string]string, len(w.ContextSections)),
+	}
+	seen := make(map[string]struct{}, len(w.ContextSections))
+	for _, section := range w.ContextSections {
+		key := strings.TrimSpace(section.Key)
+		if key == "" {
+			key = defaultContextSectionKey(section.Tag, section.Attributes)
+		}
+		if _, exists := seen[key]; exists {
+			return nil, UserContextState{}, fmt.Errorf("duplicate user context key %q", key)
+		}
+		seen[key] = struct{}{}
+		content := section.Provider(ctx)
+		if strings.TrimSpace(content) == "" {
+			continue
+		}
+		attributes := strings.TrimSpace(section.Attributes)
+		digest := fmt.Sprintf("%x", sha256.Sum256([]byte(
+			section.Tag+"\x00"+attributes+"\x00"+content,
+		)))
+		state.Sections[key] = digest
+		rendered = append(rendered, RenderedUserContextSection{
+			Key:        key,
+			Tag:        section.Tag,
+			Attributes: attributes,
+			Content:    content,
+			Digest:     digest,
+		})
+	}
+	return rendered, state, nil
+}
+
+func renderUserContextUpdate(
+	update string,
+	sections []RenderedUserContextSection,
+	removed []string,
+) string {
+	if len(sections) == 0 && len(removed) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	fmt.Fprintf(&b, "<user_context update=%q>\n", update)
+	for _, section := range sections {
+		openTag := section.Tag
+		if section.Attributes != "" {
+			openTag += " " + section.Attributes
+		}
+		fmt.Fprintf(&b, "<%s>\n%s\n</%s>\n\n", openTag, section.Content, section.Tag)
+	}
+	for _, key := range removed {
+		fmt.Fprintf(
+			&b,
+			"<context_removed key=%q>\nThe previously supplied context section no longer applies.\n</context_removed>\n\n",
+			html.EscapeString(key),
+		)
+	}
+	b.WriteString("</user_context>")
+	return b.String()
+}
+
+func defaultContextSectionKey(tag, attributes string) string {
+	attributes = strings.TrimSpace(attributes)
+	if attributes == "" {
+		return tag
+	}
+	return tag + "[" + attributes + "]"
 }
 
 func renderContextSections(ctx PromptContext, sections []ContextSection) string {

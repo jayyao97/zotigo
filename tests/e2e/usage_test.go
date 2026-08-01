@@ -5,10 +5,14 @@ package e2e
 import (
 	"context"
 	"sort"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/testutil"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -195,6 +199,189 @@ func TestE2E_PromptCaching(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestE2E_DeepSeekDynamicContextCaching verifies cache reuse across ten turns
+// while a persistent user-context section alternates between unchanged and
+// changed values. The section is synthetic so the test is deterministic; it
+// exercises the same full/delta path used by production runtime context.
+//
+// Run: go test -tags=e2e -v -count=1 -run '^TestE2E_DeepSeekDynamicContextCaching$' ./tests/e2e/
+func TestE2E_DeepSeekDynamicContextCaching(t *testing.T) {
+	e2eCfg, err := testutil.LoadE2EConfig()
+	if err != nil {
+		t.Fatalf("Failed to load e2e config: %v", err)
+	}
+
+	profiles := deepSeekProfiles(e2eCfg.AllProfiles())
+	if len(profiles) == 0 {
+		t.Skip("No DeepSeek profiles configured")
+	}
+
+	names := make([]string, 0, len(profiles))
+	for name := range profiles {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		profile := profiles[name]
+		t.Run(name, func(t *testing.T) {
+			if profile.APIKey == "" {
+				t.Skipf("No API key for profile %s", name)
+			}
+
+			contextValues := []string{
+				"state-1", "state-1", "state-2", "state-2", "state-3",
+				"state-4", "state-4", "state-5", "state-6", "state-6",
+			}
+			currentContext := contextValues[0]
+			ag := newDynamicCachingTestAgent(t, profile, func() string {
+				return currentContext
+			})
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+			defer cancel()
+
+			for turn, value := range contextValues {
+				currentContext = value
+				runAndDrain(t, ctx, ag, "Reply with exactly: ok")
+				t.Logf("Turn %d synthetic context: %s", turn+1, value)
+			}
+
+			usages := assistantUsages(ag.Snapshot().History)
+			if len(usages) != len(contextValues) {
+				t.Fatalf("Expected %d assistant turns, got %d", len(contextValues), len(usages))
+			}
+
+			contextMessages := 0
+			fullUpdates := 0
+			deltaUpdates := 0
+			for _, msg := range ag.Snapshot().History {
+				if !msg.IsContextualUser() {
+					continue
+				}
+				contextMessages++
+				text := msg.String()
+				switch {
+				case strings.Contains(text, `update="full"`):
+					fullUpdates++
+				case strings.Contains(text, `update="delta"`):
+					deltaUpdates++
+				}
+			}
+			if contextMessages != 6 || fullUpdates != 1 || deltaUpdates != 5 {
+				t.Fatalf(
+					"Expected 1 full and 5 delta context messages, got total=%d full=%d delta=%d",
+					contextMessages, fullUpdates, deltaUpdates,
+				)
+			}
+
+			var sumRates float64
+			var totalInput, totalCacheRead int
+			var warmSumRates float64
+			var warmInput, warmCacheReadTokens int
+			warmCacheRead := 0
+			for turn, usage := range usages {
+				turnInput := usage.TotalInput()
+				if turnInput == 0 {
+					t.Fatalf("Turn %d reported zero total input tokens", turn+1)
+				}
+				rate := float64(usage.CacheReadInputTokens) / float64(turnInput)
+				sumRates += rate
+				totalInput += turnInput
+				totalCacheRead += usage.CacheReadInputTokens
+				if turn > 0 && usage.CacheReadInputTokens > 0 {
+					warmCacheRead++
+				}
+				if turn > 0 {
+					warmSumRates += rate
+					warmInput += turnInput
+					warmCacheReadTokens += usage.CacheReadInputTokens
+				}
+				t.Logf(
+					"Turn %d usage: input=%d cache_create=%d cache_read=%d cache_read_rate=%.2f%%",
+					turn+1, usage.InputTokens, usage.CacheCreationInputTokens,
+					usage.CacheReadInputTokens, rate*100,
+				)
+			}
+
+			meanRate := sumRates / float64(len(usages))
+			overallRate := float64(totalCacheRead) / float64(totalInput)
+			warmMeanRate := warmSumRates / float64(len(usages)-1)
+			warmOverallRate := float64(warmCacheReadTokens) / float64(warmInput)
+			t.Logf(
+				"Summary (all): mean_turn_cache_read_rate=%.2f%% overall_cache_read_rate=%.2f%%",
+				meanRate*100, overallRate*100,
+			)
+			t.Logf(
+				"Summary (warm): mean_turn_cache_read_rate=%.2f%% overall_cache_read_rate=%.2f%% turns_with_cache=%d/%d",
+				warmMeanRate*100, warmOverallRate*100, warmCacheRead, len(usages)-1,
+			)
+			if warmCacheRead == 0 {
+				t.Fatal("Expected cache reads on at least one warm turn")
+			}
+		})
+	}
+}
+
+func newDynamicCachingTestAgent(
+	t *testing.T,
+	profile config.ProfileConfig,
+	contextValue func() string,
+) *agent.Agent {
+	t.Helper()
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	pb := prompt.NewSystemPromptBuilder()
+	var largePrompt strings.Builder
+	largePrompt.WriteString("You are a concise assistant. Reply with exactly the requested text.\n")
+	for i := 0; i < 150; i++ {
+		largePrompt.WriteString("Stable cache-prefix rule: preserve deterministic instructions across every request.\n")
+	}
+	pb.SetStaticPrompt(largePrompt.String())
+
+	ag, err := agent.New(profile, exec,
+		agent.WithSystemPromptBuilder(pb),
+		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
+			prompt.WithKeyedContext("synthetic_runtime_state", "runtime_state", func(_ prompt.PromptContext) string {
+				return contextValue()
+			}),
+		)),
+		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+	)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+	return ag
+}
+
+func assistantUsages(history []protocol.Message) []*protocol.Usage {
+	usages := make([]*protocol.Usage, 0, len(history))
+	for _, msg := range history {
+		if msg.Role != protocol.RoleAssistant {
+			continue
+		}
+		if msg.Metadata == nil || msg.Metadata.Usage == nil {
+			usages = append(usages, &protocol.Usage{})
+			continue
+		}
+		usages = append(usages, msg.Metadata.Usage)
+	}
+	return usages
+}
+
+func deepSeekProfiles(profiles map[string]config.ProfileConfig) map[string]config.ProfileConfig {
+	result := make(map[string]config.ProfileConfig)
+	for name, profile := range profiles {
+		haystack := strings.ToLower(name + " " + profile.Model + " " + profile.BaseURL)
+		if strings.Contains(haystack, "deepseek") {
+			result[name] = profile
+		}
+	}
+	return result
 }
 
 // TestE2E_ToolOrderDeterminism verifies that tools are passed to the provider

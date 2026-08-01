@@ -31,6 +31,28 @@ func TestMessageSerialization(t *testing.T) {
 	}
 }
 
+func TestContextualUserMessageSerialization(t *testing.T) {
+	msg := protocol.NewContextualUserMessage("<user_context>context</user_context>")
+	if !msg.IsContextualUser() {
+		t.Fatal("expected contextual user message")
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded protocol.Message
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !decoded.IsContextualUser() {
+		t.Fatalf("contextual marker did not round trip: %s", data)
+	}
+	if protocol.NewUserMessage("real").IsContextualUser() {
+		t.Fatal("ordinary user message must not be contextual")
+	}
+}
+
 func TestAssistantMessageWithToolCall(t *testing.T) {
 	tc := protocol.ToolCall{
 		ID:        "call_123",

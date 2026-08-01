@@ -322,18 +322,22 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	transcriptPath := c.saveTranscript(toCompress)
 	result.TranscriptPath = transcriptPath
 
+	// Contextual user messages describe runtime state rather than conversation
+	// goals. The agent re-establishes the current full context after compaction.
+	summaryInput := withoutContextualUserMessages(toCompress)
+
 	// Generate summary
 	var summary string
 	var err error
 
 	if c.summarizer != nil {
-		summary, err = c.summarizer.SummarizeMessages(ctx, toCompress)
+		summary, err = c.summarizer.SummarizeMessages(ctx, summaryInput)
 		if err != nil {
 			// Fallback to simple summary
-			summary = c.simpleSummary(toCompress)
+			summary = c.simpleSummary(summaryInput)
 		}
 	} else {
-		summary = c.simpleSummary(toCompress)
+		summary = c.simpleSummary(summaryInput)
 	}
 
 	// Summarize long tool outputs in preserved messages
@@ -428,7 +432,7 @@ func (c *Compressor) findSafePartitionPoint(messages []protocol.Message, preserv
 	// Adjust to safe boundary: find the nearest user message boundary
 	// A safe boundary is just before a user message (after the previous tool/assistant)
 	for idx := roughIdx; idx < len(messages); idx++ {
-		if messages[idx].Role == protocol.RoleUser {
+		if messages[idx].Role == protocol.RoleUser && !messages[idx].IsContextualUser() {
 			// Check if previous message exists and isn't a tool message
 			// (which would mean we're in the middle of a chain)
 			if idx > 0 && messages[idx-1].Role == protocol.RoleTool {
@@ -440,7 +444,7 @@ func (c *Compressor) findSafePartitionPoint(messages []protocol.Message, preserv
 
 	// If no safe boundary found, try searching backwards
 	for idx := roughIdx; idx > 0; idx-- {
-		if messages[idx].Role == protocol.RoleUser {
+		if messages[idx].Role == protocol.RoleUser && !messages[idx].IsContextualUser() {
 			if idx > 0 && messages[idx-1].Role == protocol.RoleTool {
 				continue
 			}
@@ -622,7 +626,7 @@ func (c *Compressor) extractSummaryData(messages []protocol.Message) summaryData
 		for _, part := range msg.Content {
 			switch part.Type {
 			case protocol.ContentTypeText:
-				if msg.Role == protocol.RoleUser && len(part.Text) > 0 {
+				if msg.Role == protocol.RoleUser && !msg.IsContextualUser() && len(part.Text) > 0 {
 					goals = append(goals, firstSentence(part.Text, 150))
 				}
 			case protocol.ContentTypeToolCall:
@@ -667,6 +671,17 @@ func (c *Compressor) extractSummaryData(messages []protocol.Message) summaryData
 		Files:   files,
 		HasMore: len(fileSet) > maxFiles,
 	}
+}
+
+func withoutContextualUserMessages(messages []protocol.Message) []protocol.Message {
+	filtered := make([]protocol.Message, 0, len(messages))
+	for _, msg := range messages {
+		if msg.IsContextualUser() {
+			continue
+		}
+		filtered = append(filtered, msg)
+	}
+	return filtered
 }
 
 // firstSentence returns the first sentence of text, capped at maxLen.

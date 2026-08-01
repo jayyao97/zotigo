@@ -245,3 +245,122 @@ func TestUserContextBuilderAttributedSection(t *testing.T) {
 		t.Fatalf("expected normal closing tag, got %q", result)
 	}
 }
+
+func TestUserContextBuilderBuildUpdate(t *testing.T) {
+	environment := "current_date: 2026-07-28"
+	project := "project rules"
+	w := NewUserContextBuilder(
+		WithKeyedContext("environment", "environment", func(_ PromptContext) string {
+			return environment
+		}),
+		WithKeyedAttributedContext(
+			"project_instructions:AGENTS.md",
+			"project_instructions",
+			`source="AGENTS.md"`,
+			func(_ PromptContext) string { return project },
+		),
+	)
+
+	full, state, err := w.BuildUpdate(PromptContext{}, nil)
+	if err != nil {
+		t.Fatalf("build full update: %v", err)
+	}
+	if !strings.Contains(full, `<user_context update="full">`) {
+		t.Fatalf("expected full context, got %q", full)
+	}
+	if len(state.Sections) != 2 {
+		t.Fatalf("expected two section digests, got %#v", state.Sections)
+	}
+
+	unchanged, unchangedState, err := w.BuildUpdate(PromptContext{}, &state)
+	if err != nil {
+		t.Fatalf("build unchanged update: %v", err)
+	}
+	if unchanged != "" {
+		t.Fatalf("expected no unchanged update, got %q", unchanged)
+	}
+	if len(unchangedState.Sections) != 2 {
+		t.Fatalf("expected state to remain complete, got %#v", unchangedState.Sections)
+	}
+
+	environment = "current_date: 2026-07-29"
+	delta, changedState, err := w.BuildUpdate(PromptContext{}, &state)
+	if err != nil {
+		t.Fatalf("build delta: %v", err)
+	}
+	if !strings.Contains(delta, `<user_context update="delta">`) {
+		t.Fatalf("expected delta context, got %q", delta)
+	}
+	if !strings.Contains(delta, "2026-07-29") {
+		t.Fatalf("expected changed environment, got %q", delta)
+	}
+	if strings.Contains(delta, "project rules") {
+		t.Fatalf("unchanged project section should not be repeated: %q", delta)
+	}
+
+	project = ""
+	removed, removedState, err := w.BuildUpdate(PromptContext{}, &changedState)
+	if err != nil {
+		t.Fatalf("build removal: %v", err)
+	}
+	if !strings.Contains(removed, `<context_removed key="project_instructions:AGENTS.md">`) {
+		t.Fatalf("expected project removal marker, got %q", removed)
+	}
+	if _, ok := removedState.Sections["project_instructions:AGENTS.md"]; ok {
+		t.Fatalf("removed section should not remain in state: %#v", removedState.Sections)
+	}
+}
+
+func TestUserContextBuilderTenTurnDynamicSequence(t *testing.T) {
+	values := []string{
+		"state-1", "state-1", "state-2", "state-2", "state-3",
+		"state-4", "state-4", "state-5", "state-6", "state-6",
+	}
+	current := values[0]
+	builder := NewUserContextBuilder(
+		WithKeyedContext("synthetic_runtime_state", "runtime_state", func(_ PromptContext) string {
+			return current
+		}),
+	)
+
+	var state *UserContextState
+	fullUpdates := 0
+	deltaUpdates := 0
+	unchangedUpdates := 0
+	for turn, value := range values {
+		current = value
+		update, nextState, err := builder.BuildUpdate(PromptContext{}, state)
+		if err != nil {
+			t.Fatalf("turn %d: build update: %v", turn+1, err)
+		}
+		switch {
+		case strings.Contains(update, `update="full"`):
+			fullUpdates++
+		case strings.Contains(update, `update="delta"`):
+			deltaUpdates++
+		case update == "":
+			unchangedUpdates++
+		default:
+			t.Fatalf("turn %d: unexpected update %q", turn+1, update)
+		}
+		state = nextState.Clone()
+	}
+
+	if fullUpdates != 1 || deltaUpdates != 5 || unchangedUpdates != 4 {
+		t.Fatalf(
+			"expected full=1 delta=5 unchanged=4, got full=%d delta=%d unchanged=%d",
+			fullUpdates, deltaUpdates, unchangedUpdates,
+		)
+	}
+}
+
+func TestUserContextBuilderBuildUpdateRejectsDuplicateKeys(t *testing.T) {
+	w := NewUserContextBuilder(
+		WithKeyedContext("duplicate", "one", func(_ PromptContext) string { return "" }),
+		WithKeyedContext("duplicate", "two", func(_ PromptContext) string { return "two" }),
+	)
+
+	if _, _, err := w.BuildUpdate(PromptContext{}, nil); err == nil {
+		t.Fatal("expected duplicate context keys to fail")
+	}
+}
