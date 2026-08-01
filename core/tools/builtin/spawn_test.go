@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -54,9 +55,10 @@ func (p *spawnRecordingProvider) snapshot() ([]protocol.Message, []string) {
 }
 
 type spawnTraceProvider struct {
-	mu    sync.Mutex
-	name  string
-	calls int
+	mu       sync.Mutex
+	name     string
+	toolName string
+	calls    int
 }
 
 func (p *spawnTraceProvider) StreamChat(_ context.Context, _ []protocol.Message, _ []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
@@ -69,12 +71,16 @@ func (p *spawnTraceProvider) StreamChat(_ context.Context, _ []protocol.Message,
 	go func() {
 		defer close(ch)
 		if call == 1 {
+			toolName := p.toolName
+			if toolName == "" {
+				toolName = "read_file"
+			}
 			ch <- protocol.Event{
 				Type:  protocol.EventTypeToolCallEnd,
 				Index: 0,
 				ToolCall: &protocol.ToolCall{
 					ID:        "call_1",
-					Name:      "read_file",
+					Name:      toolName,
 					Arguments: `{"path":"foo.go"}`,
 				},
 			}
@@ -91,6 +97,36 @@ func (p *spawnTraceProvider) Name() string { return p.name }
 
 type namedTool struct {
 	name string
+}
+
+type approvalSpawnTool struct {
+	calls int
+}
+
+func (t *approvalSpawnTool) Name() string        { return "approval_tool" }
+func (t *approvalSpawnTool) Description() string { return "approval tool" }
+func (t *approvalSpawnTool) Schema() any         { return map[string]any{"type": "object"} }
+func (t *approvalSpawnTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
+}
+func (t *approvalSpawnTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	t.calls++
+	return "executed", nil
+}
+
+type lowRiskSpawnTool struct {
+	calls int
+}
+
+func (t *lowRiskSpawnTool) Name() string        { return "low_risk_tool" }
+func (t *lowRiskSpawnTool) Description() string { return "low risk tool" }
+func (t *lowRiskSpawnTool) Schema() any         { return map[string]any{"type": "object"} }
+func (t *lowRiskSpawnTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow}
+}
+func (t *lowRiskSpawnTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	t.calls++
+	return "executed", nil
 }
 
 func (t namedTool) Name() string        { return t.name }
@@ -246,6 +282,95 @@ func TestSpawnToolReturnsCompactTrace(t *testing.T) {
 	output := spawnTestOutputText(t, result)
 	if !strings.Contains(output, "Trace:\n[trace-agent] read_file(path=foo.go)") {
 		t.Fatalf("spawn output should include compact subagent trace:\n%s", output)
+	}
+}
+
+func TestSpawnToolPropagatesBypassPolicy(t *testing.T) {
+	tests := []struct {
+		name        string
+		policy      agent.ApprovalPolicy
+		wantErr     string
+		wantExecute int
+	}{
+		{name: "auto pauses", policy: agent.ApprovalPolicyAuto, wantErr: "subagent paused for approval"},
+		{name: "bypass executes", policy: agent.ApprovalPolicyBypass, wantExecute: 1},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			name := "spawn_policy_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+			provider := &spawnTraceProvider{name: name, toolName: "approval_tool"}
+			providers.Register(name, func(config.ProfileConfig) (providers.Provider, error) {
+				return provider, nil
+			})
+			approvalTool := &approvalSpawnTool{}
+			spawn := NewSpawnTool(
+				config.ProfileConfig{Provider: name, Model: "mock"},
+				[]tools.Tool{approvalTool},
+				WithApprovalPolicySource(func() agent.ApprovalPolicy { return test.policy }),
+			)
+
+			_, err := spawn.Execute(context.Background(), newSpawnTestExecutor(t), `{"description":"run gated tool","prompt":"Use the approval tool"}`)
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("Execute error = %v, want containing %q", err, test.wantErr)
+				}
+			} else if err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if approvalTool.calls != test.wantExecute {
+				t.Fatalf("tool executions = %d, want %d", approvalTool.calls, test.wantExecute)
+			}
+		})
+	}
+}
+
+func TestSpawnToolReadsApprovalPolicyAtSpawnTime(t *testing.T) {
+	name := "spawn_live_policy_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	providers.Register(name, func(config.ProfileConfig) (providers.Provider, error) {
+		return &spawnTraceProvider{name: name, toolName: "approval_tool"}, nil
+	})
+	policy := agent.ApprovalPolicyAuto
+	approvalTool := &approvalSpawnTool{}
+	spawn := NewSpawnTool(
+		config.ProfileConfig{Provider: name, Model: "mock"},
+		[]tools.Tool{approvalTool},
+		WithApprovalPolicySource(func() agent.ApprovalPolicy { return policy }),
+	)
+	exec := newSpawnTestExecutor(t)
+
+	_, err := spawn.Execute(context.Background(), exec, `{"description":"run gated tool","prompt":"Use the approval tool"}`)
+	if err == nil || !strings.Contains(err.Error(), "subagent paused for approval") {
+		t.Fatalf("Auto Execute error = %v, want approval pause", err)
+	}
+
+	policy = agent.ApprovalPolicyBypass
+	if _, err := spawn.Execute(context.Background(), exec, `{"description":"run gated tool","prompt":"Use the approval tool"}`); err != nil {
+		t.Fatalf("Bypass Execute: %v", err)
+	}
+	if approvalTool.calls != 1 {
+		t.Fatalf("tool executions = %d, want 1", approvalTool.calls)
+	}
+}
+
+func TestSpawnToolKeepsAutoChildPolicyForManualParent(t *testing.T) {
+	name := "spawn_manual_parent_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	provider := &spawnTraceProvider{name: name, toolName: "low_risk_tool"}
+	providers.Register(name, func(config.ProfileConfig) (providers.Provider, error) {
+		return provider, nil
+	})
+	tool := &lowRiskSpawnTool{}
+	spawn := NewSpawnTool(
+		config.ProfileConfig{Provider: name, Model: "mock"},
+		[]tools.Tool{tool},
+		WithApprovalPolicySource(func() agent.ApprovalPolicy { return agent.ApprovalPolicyManual }),
+	)
+
+	if _, err := spawn.Execute(context.Background(), newSpawnTestExecutor(t), `{"description":"run low risk tool","prompt":"Use the low risk tool"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if tool.calls != 1 {
+		t.Fatalf("tool executions = %d, want 1", tool.calls)
 	}
 }
 

@@ -65,6 +65,8 @@ type Model struct {
 	initialPrinted     bool
 	kittyChecked       bool
 	autoApprove        bool
+	bypassPermissions  bool
+	resumeBypass       bool
 	streamFlushed      int // lines already committed to scrollback during streaming
 	turnStartTime      time.Time
 	displayTurnID      string
@@ -119,24 +121,42 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 		// a session inherits whatever policy was active. Without this
 		// sync, shift-tab would start at "off" while the agent was
 		// actually in Auto.
-		autoApprove: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
+		autoApprove:       ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
+		bypassPermissions: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyBypass,
 	}
 
-	// If the agent was saved in a paused state with pending actions,
-	// restore the approval UI so the user can approve/deny.
+	// A bypassed resume executes registered pending tools immediately. Normal
+	// policies restore the approval UI so the user can approve or deny them.
 	snap := ag.Snapshot()
 	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
-		m.approving = true
-		m.approvalChoice = 0
-		m.setPendingApprovals(snap.PendingActions)
 		m.restoreOpenDisplayTurnID()
+		if m.bypassPermissions {
+			m.resumeBypass = true
+			m.thinking = true
+			m.turnStartTime = time.Now()
+		} else {
+			m.approving = true
+			m.approvalChoice = 0
+			m.setPendingApprovals(snap.PendingActions)
+		}
 	}
 
 	return &m
 }
 
 func (m *Model) Init() tea.Cmd {
-	return textarea.Blink
+	if !m.resumeBypass {
+		return textarea.Blink
+	}
+	ch, err := m.agent.ExecuteBypassedPendingActions(m.ctx)
+	m.resumeBypass = false
+	if err != nil {
+		return tea.Batch(textarea.Blink, func() tea.Msg { return errMsg(err) })
+	}
+	resume := func() tea.Msg {
+		return streamReadyMsg(ch)
+	}
+	return tea.Batch(textarea.Blink, resume)
 }
 
 func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
@@ -272,6 +292,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if keyStr == "shift+tab" {
+			m.bypassPermissions = false
 			m.autoApprove = !m.autoApprove
 			if m.autoApprove {
 				m.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)
@@ -452,6 +473,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.commitLine(userMsgStr), m.startRun(msg))
 		}
 	case streamReadyMsg:
+		m.resumeBypass = false
 		m.eventCh = msg
 		m.currentAsstMsg = ""
 		m.displayAsstContent = nil

@@ -70,7 +70,13 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 	}
 
 	if cfg.Spawn {
-		ag.RegisterTool(builtin.NewSpawnTool(cfg.Profile, childTools))
+		ag.RegisterTool(builtin.NewSpawnTool(
+			cfg.Profile,
+			childTools,
+			builtin.WithApprovalPolicySource(func() agent.ApprovalPolicy {
+				return ag.Describe().ApprovalPolicy
+			}),
+		))
 	}
 
 	return nil

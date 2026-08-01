@@ -89,11 +89,15 @@ func (c *Config) ResolveProfile(name string) (string, ProfileConfig, error) {
 	if name == "" {
 		name = strings.TrimSpace(c.DefaultProfile)
 	}
-	profile, ok := c.Profiles[name]
-	if !ok {
-		return "", ProfileConfig{}, fmt.Errorf("profile %q not found", name)
+	if profile, ok := c.Profiles[name]; ok {
+		return name, profile, nil
 	}
-	return name, profile, nil
+	for canonicalName, profile := range c.Profiles {
+		if strings.EqualFold(canonicalName, name) {
+			return canonicalName, profile, nil
+		}
+	}
+	return "", ProfileConfig{}, fmt.Errorf("profile %q not found", name)
 }
 
 // SafetyProfileConfig holds runtime safety behavior for a profile.
@@ -217,19 +221,19 @@ func (c *Config) ResolveClassifierProfile(activeProfileName string) (string, Pro
 	if c == nil {
 		return "", ProfileConfig{}, fmt.Errorf("config is nil")
 	}
-	active, ok := c.Profiles[activeProfileName]
-	if !ok {
+	canonicalActiveName, active, err := c.ResolveProfile(activeProfileName)
+	if err != nil {
 		return "", ProfileConfig{}, fmt.Errorf("active profile %q not found", activeProfileName)
 	}
 
-	targetName := activeProfileName
+	targetName := canonicalActiveName
 	if name := active.Safety.Classifier.Profile; name != "" {
 		targetName = name
 	}
 
-	target, ok := c.Profiles[targetName]
-	if !ok {
+	canonicalTargetName, target, err := c.ResolveProfile(targetName)
+	if err != nil {
 		return "", ProfileConfig{}, fmt.Errorf("classifier profile %q not found", targetName)
 	}
-	return targetName, target, nil
+	return canonicalTargetName, target, nil
 }

@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 

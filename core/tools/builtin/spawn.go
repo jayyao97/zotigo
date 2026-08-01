@@ -28,9 +28,24 @@ const (
 
 // SpawnTool runs a short-lived child agent for focused research or implementation work.
 type SpawnTool struct {
-	mu         sync.RWMutex
-	cfg        config.ProfileConfig
-	childTools []tools.Tool
+	mu                   sync.RWMutex
+	cfg                  config.ProfileConfig
+	childTools           []tools.Tool
+	approvalPolicySource func() agent.ApprovalPolicy
+}
+
+// SpawnOption configures optional SpawnTool behavior.
+type SpawnOption func(*SpawnTool)
+
+// WithApprovalPolicySource supplies the parent Agent's current policy. Spawn
+// only propagates bypass mode; normal children retain their existing Auto
+// policy because they have no approval UI.
+func WithApprovalPolicySource(source func() agent.ApprovalPolicy) SpawnOption {
+	return func(tool *SpawnTool) {
+		if source != nil {
+			tool.approvalPolicySource = source
+		}
+	}
 }
 
 // SetProfile changes the profile used by subsequently created subagents.
@@ -42,7 +57,11 @@ func (t *SpawnTool) SetProfile(cfg config.ProfileConfig) {
 
 // NewSpawnTool constructs a spawn tool. childTools is the tool pool the child
 // may receive; spawn is intentionally not added to child agents.
-func NewSpawnTool(cfg config.ProfileConfig, childTools []tools.Tool) *SpawnTool {
+func NewSpawnTool(
+	cfg config.ProfileConfig,
+	childTools []tools.Tool,
+	opts ...SpawnOption,
+) *SpawnTool {
 	copied := make([]tools.Tool, 0, len(childTools))
 	for _, tool := range childTools {
 		if tool == nil || tool.Name() == "spawn" {
@@ -50,7 +69,13 @@ func NewSpawnTool(cfg config.ProfileConfig, childTools []tools.Tool) *SpawnTool 
 		}
 		copied = append(copied, tool)
 	}
-	return &SpawnTool{cfg: cfg, childTools: copied}
+	tool := &SpawnTool{cfg: cfg, childTools: copied}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(tool)
+		}
+	}
+	return tool
 }
 
 func (t *SpawnTool) Name() string { return "spawn" }
@@ -194,10 +219,18 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	t.mu.RLock()
 	profile := t.cfg
 	t.mu.RUnlock()
+	policy := agent.ApprovalPolicyAuto
+	if t.approvalPolicySource != nil && t.approvalPolicySource() == agent.ApprovalPolicyBypass {
+		// Preserve the existing child Auto behavior for normal parent modes:
+		// the parent already approved delegation and child agents have no UI in
+		// which to answer another prompt. Bypass is the only policy that must
+		// cross this boundary to uphold its no-approval contract.
+		policy = agent.ApprovalPolicyBypass
+	}
 	child, err := agent.New(profile, childExec,
 		agent.WithSystemPromptBuilder(spawnPromptBuilder(args.AgentType)),
 		agent.WithTools(childTools...),
-		agent.WithApprovalPolicy(agent.ApprovalPolicyAuto),
+		agent.WithApprovalPolicy(policy),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create subagent: %w", err)

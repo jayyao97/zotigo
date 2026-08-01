@@ -242,7 +242,7 @@ func (a *Agent) SetProfileApprovalFallback(forceManual bool) {
 
 func (a *Agent) refreshApprovalPolicy() {
 	a.policy = a.requestedPolicy
-	if a.profileForcesManual {
+	if a.profileForcesManual && a.requestedPolicy != ApprovalPolicyBypass {
 		a.policy = ApprovalPolicyManual
 	}
 }
@@ -1032,6 +1032,63 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	return a.executeResolvedPendingActions(ctx, resolvedActions, false)
 }
 
+// ExecuteBypassedPendingActions resumes a paused snapshot without carrying its
+// old approval decisions into an explicitly bypassed process. Registered tools
+// execute without classification or snapshots; tools unavailable in the
+// current process remain blocked.
+func (a *Agent) ExecuteBypassedPendingActions(ctx context.Context) (<-chan protocol.Event, error) {
+	a.mu.RLock()
+	if a.policy != ApprovalPolicyBypass {
+		a.mu.RUnlock()
+		return nil, fmt.Errorf("approval policy is not bypass_permissions")
+	}
+	if a.state != StatePaused || len(a.pendingActions) == 0 {
+		a.mu.RUnlock()
+		return nil, fmt.Errorf("agent is not paused")
+	}
+	saved := a.activeTraceCtx
+	actions := make([]*PendingAction, 0, len(a.deferredActions)+len(a.pendingActions))
+	for _, action := range append(append([]*PendingAction(nil), a.deferredActions...), a.pendingActions...) {
+		resolved := *action
+		if _, ok := a.tools[action.Name]; ok {
+			resolved.Decision = ActionDecision{
+				Decision: ExecutionDecisionAutoExecute,
+				Source:   SafetyDecisionSourceBypass,
+				Reason:   "permission checks bypassed",
+			}
+		} else {
+			resolved.Decision = ActionDecision{
+				Decision:  ExecutionDecisionBlock,
+				Source:    SafetyDecisionSourceHardRule,
+				Reason:    "tool not found",
+				RiskLevel: tools.LevelBlocked.String(),
+			}
+		}
+		actions = append(actions, &resolved)
+	}
+	a.mu.RUnlock()
+	if saved != nil {
+		ctx = a.observer.ResumeTrace(ctx, saved)
+	}
+
+	for _, action := range actions {
+		a.appendSafetyEvent(AuditEvent{
+			ToolCallID:     action.ToolCallID,
+			ToolName:       action.Name,
+			DecisionSource: action.Decision.Source,
+			Decision:       mapExecutionDecision(action.Decision.Decision),
+			Reason:         action.Decision.Reason,
+			RiskLevel:      action.Decision.RiskLevel,
+			SnapshotStatus: SnapshotStatusNotNeeded,
+			ContextSummary: AuditContextSummary{
+				UserPrompt: a.turnSafety.CurrentUserPrompt,
+				Trigger:    action.Decision.Reason,
+			},
+		})
+	}
+	return a.executeResolvedPendingActions(ctx, orderedActions(actions), false)
+}
+
 // SubmitToolOutputs submits tool results and resumes the agent loop.
 func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolResult) (<-chan protocol.Event, error) {
 	return a.submitToolOutputs(ctx, outputs, true)
@@ -1497,6 +1554,10 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 //	              |                   | or approval when classifier is off
 //	LevelBlocked  | block             | block
 //
+// Bypass mode is intentionally outside this matrix: once the tool name is
+// known, it skips Tool.Classify, the LLM classifier, snapshots, and approval.
+// The explicit CLI flag enabling it carries the corresponding warning.
+//
 // Auto threshold is config.Safety.Classifier.ReviewThreshold; default
 // LevelMedium. Manual threshold is fixed at LevelLow — any mutation
 // gets a prompt. When the threshold is set to "off", the classifier is
@@ -1511,6 +1572,13 @@ func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) Act
 			Source:    SafetyDecisionSourceHardRule,
 			Reason:    "tool not found",
 			RiskLevel: tools.LevelBlocked.String(),
+		}
+	}
+	if a.policy == ApprovalPolicyBypass {
+		return ActionDecision{
+			Decision: ExecutionDecisionAutoExecute,
+			Source:   SafetyDecisionSourceBypass,
+			Reason:   "permission checks bypassed",
 		}
 	}
 
@@ -2089,13 +2157,19 @@ func (a *Agent) rebaseUserContext(
 
 	withoutContext := make([]protocol.Message, 0, len(history)+1)
 	insertAt := 0
+	foundSummary := false
 	for _, msg := range history {
 		if msg.IsContextualUser() {
 			continue
 		}
 		withoutContext = append(withoutContext, msg)
-		if strings.HasPrefix(msg.String(), "[Previous conversation summary]") {
+		// Successful compression always rebuilds history as leading system
+		// messages, one summary, then the preserved tail. Locate the summary by
+		// that structural position so user-authored marker text cannot move the
+		// rebased context later in history.
+		if !foundSummary && msg.Role != protocol.RoleSystem {
 			insertAt = len(withoutContext)
+			foundSummary = true
 		}
 	}
 	if contextText != "" {

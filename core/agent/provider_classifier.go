@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/config"
@@ -26,6 +27,10 @@ type ProviderSafetyClassifier struct {
 	timeout   time.Duration
 	maxRecent int
 	maxChars  int
+	// Some thinking models reject any forced tool choice. Remember that
+	// capability after the first explicit rejection so later classifications
+	// do not pay for the same guaranteed 400 response.
+	forcedToolChoiceRejected atomic.Bool
 
 	observer observability.Observer // Noop by default; never nil
 	model    string                 // recorded on classifier generations
@@ -156,20 +161,29 @@ func (c *ProviderSafetyClassifier) Classify(ctx context.Context, req SafetyClass
 		len(req.ToolArguments),
 	)
 
-	var lastErr error
-	for attempt := 1; attempt <= classifierMaxAttempts; attempt++ {
-		resp, err, retriable := c.classifyOnce(ctx, req, userPrompt, attempt)
+	forceToolChoice := !c.forcedToolChoiceRejected.Load()
+	transportAttempts := 0
+	for attempt := 1; ; attempt++ {
+		resp, err, retriable := c.classifyOnce(ctx, req, userPrompt, attempt, forceToolChoice)
 		if err == nil {
 			return resp, nil
 		}
-		lastErr = err
-		if !retriable || attempt == classifierMaxAttempts {
+		if forceToolChoice && forcedToolChoiceUnsupported(err) {
+			c.forcedToolChoiceRejected.Store(true)
+			forceToolChoice = false
+			debug.Logf(
+				"classifier fallback provider=%s tool=%s attempt=%d reason=forced_tool_choice_unsupported",
+				c.provider.Name(), req.ToolName, attempt,
+			)
+			continue
+		}
+		transportAttempts++
+		if !retriable || transportAttempts == classifierMaxAttempts {
 			return SafetyClassifierResponse{}, err
 		}
 		debug.Logf("classifier retry provider=%s tool=%s attempt=%d err=%v",
 			c.provider.Name(), req.ToolName, attempt, err)
 	}
-	return SafetyClassifierResponse{}, lastErr
 }
 
 // classifyOnce runs a single classifier attempt. Returns (response,
@@ -181,7 +195,7 @@ func (c *ProviderSafetyClassifier) Classify(ctx context.Context, req SafetyClass
 // parentCtx flows in from Classify — derived (not replaced) when we
 // install our own per-attempt timeout so the active turn's traceID
 // stays accessible for observability.
-func (c *ProviderSafetyClassifier) classifyOnce(parentCtx context.Context, req SafetyClassifierRequest, userPrompt string, attempt int) (SafetyClassifierResponse, error, bool) {
+func (c *ProviderSafetyClassifier) classifyOnce(parentCtx context.Context, req SafetyClassifierRequest, userPrompt string, attempt int, forceToolChoice bool) (SafetyClassifierResponse, error, bool) {
 	ctx, cancel := context.WithTimeout(parentCtx, c.timeout)
 	defer cancel()
 
@@ -224,9 +238,15 @@ func (c *ProviderSafetyClassifier) classifyOnce(parentCtx context.Context, req S
 		c.observer.EndGeneration(genCtx, out, usage, gerr)
 	}
 
-	stream, err := c.provider.StreamChat(genCtx, msgs, []tools.Tool{classifierDecisionTool{}},
-		providers.WithToolChoiceTool(classifierToolName),
-		providers.WithReasoningEffort("low"),
+	streamOpts := []providers.StreamChatOption{providers.WithReasoningEffort("low")}
+	if forceToolChoice {
+		streamOpts = append(streamOpts, providers.WithToolChoiceTool(classifierToolName))
+	}
+	stream, err := c.provider.StreamChat(
+		genCtx,
+		msgs,
+		[]tools.Tool{classifierDecisionTool{}},
+		streamOpts...,
 	)
 	if err != nil {
 		endGen(observability.GenerationOutput{}, err)
@@ -314,6 +334,14 @@ func (c *ProviderSafetyClassifier) classifyOnce(parentCtx context.Context, req S
 		resp.RequiresSnapshot,
 	)
 	return resp, nil, false
+}
+
+func forcedToolChoiceUnsupported(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "thinking mode does not support this tool_choice")
 }
 
 // buildUserPrompt assembles a bounded request body for the classifier.

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"strings"
 	"testing"
 
 	"charm.land/bubbles/v2/textarea"
@@ -53,6 +54,20 @@ func TestRenderAgentBanner(t *testing.T) {
 			wantIn: []string{"enabled but unavailable"},
 		},
 		{
+			name: "bypass policy suppresses classifier status",
+			desc: agent.Description{
+				Provider:            "anthropic-chat",
+				Model:               "deepseek-v4-flash",
+				ApprovalPolicy:      agent.ApprovalPolicyBypass,
+				ClassifierEnabled:   true,
+				ClassifierAvailable: true,
+				ClassifierProvider:  "anthropic",
+				ClassifierModel:     "deepseek-v4-flash",
+			},
+			wantIn:  []string{"bypass_permissions", "Classifier:", "bypassed"},
+			wantOut: []string{"threshold="},
+		},
+		{
 			name: "no thinking level suppresses the row",
 			desc: agent.Description{
 				Provider: "openai-chat",
@@ -75,6 +90,75 @@ func TestRenderAgentBanner(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestWriteInputFooterWarnsWhenPermissionsBypassed(t *testing.T) {
+	ta := textarea.New()
+	ta.SetWidth(80)
+	model := &Model{input: ta, bypassPermissions: true}
+	var output strings.Builder
+
+	model.writeInputFooter(&output)
+
+	if !strings.Contains(output.String(), "BYPASS PERMISSIONS") {
+		t.Fatalf("expected bypass warning, got %q", output.String())
+	}
+	if strings.Contains(output.String(), "Auto-approve") {
+		t.Fatalf("bypass warning must not be labeled auto-approve: %q", output.String())
+	}
+}
+
+func TestNewModelResumesPendingActionsWithoutApprovalInBypassMode(t *testing.T) {
+	ag := newDisplayLogTestAgent(t)
+	ag.SetApprovalPolicy(agent.ApprovalPolicyBypass)
+	ag.Restore(agent.Snapshot{
+		State: agent.StatePaused,
+		PendingActions: []*agent.PendingAction{
+			{ToolCallID: "call-1", Name: "read_file"},
+		},
+	})
+
+	model := NewModel(ag, nil, "", nil)
+	if model.approving {
+		t.Fatal("bypassed resume must not reopen the approval UI")
+	}
+	if !model.resumeBypass || !model.thinking {
+		t.Fatalf("bypassed resume state = resume:%v thinking:%v, want both true", model.resumeBypass, model.thinking)
+	}
+}
+
+func TestBypassResumeStartsBeforeShiftTabCanChangePolicy(t *testing.T) {
+	ag := newDisplayLogTestAgent(t)
+	ag.SetApprovalPolicy(agent.ApprovalPolicyBypass)
+	ag.Restore(agent.Snapshot{
+		State: agent.StatePaused,
+		PendingActions: []*agent.PendingAction{
+			{ToolCallID: "call-1", Name: "missing_tool"},
+		},
+	})
+	model := NewModel(ag, nil, "", nil)
+
+	initMsg := model.Init()()
+	batch, ok := initMsg.(tea.BatchMsg)
+	if !ok || len(batch) != 2 {
+		t.Fatalf("Init message = %T %#v, want two-command batch", initMsg, initMsg)
+	}
+	updated, _ := model.Update(tea.KeyPressMsg{Code: tea.KeyTab, Mod: tea.ModShift})
+	model = updated.(*Model)
+	if got := model.agent.Describe().ApprovalPolicy; got != agent.ApprovalPolicyAuto {
+		t.Fatalf("policy after Shift+Tab = %q, want auto", got)
+	}
+
+	msg := batch[1]()
+	stream, ok := msg.(streamReadyMsg)
+	if !ok {
+		t.Fatalf("resume command returned %T (%v), want streamReadyMsg", msg, msg)
+	}
+	for range stream {
+	}
+	if model.resumeBypass {
+		t.Fatal("resumeBypass must be cleared after startup")
 	}
 }
 

@@ -34,6 +34,7 @@ graph TD
         OpenAI["OpenAI API"]
         Claude["Anthropic API"]
         Gemini["Google Gemini API"]
+        DeepSeek["DeepSeek API"]
     end
 
     TUI --> Protocol
@@ -44,6 +45,7 @@ graph TD
     Adapter --> OpenAI
     Adapter --> Claude
     Adapter --> Gemini
+    Adapter --> DeepSeek
 ```
 
 ### 1. Presentation Layer (Top)
@@ -130,6 +132,10 @@ profiles:
     provider: gemini
     model: gemini-3.0-pro-latest
     api_key: ...
+  deepseek:
+    provider: deepseek
+    model: deepseek-v4-flash
+    api_key: ...                   # Base URL and Anthropic-compatible driver are built in
 ```
 
 The `safety.classifier` block is optional. If omitted, Zotigo uses built-in defaults. If `classifier.profile` is omitted, the classifier reuses the current active profile.
@@ -138,6 +144,18 @@ Run:
 ```bash
 go run ./cmd/zotigo
 ```
+
+To run every registered tool without classification, snapshots, or approval:
+
+```bash
+zotigo --dangerously-skip-permissions
+```
+
+This mode also bypasses tool-level blocked decisions. Use it only in an
+environment where unrestricted tool execution is acceptable. The policy also
+applies to resumed pending actions and spawned subagents; unavailable tools
+remain blocked. Pressing Shift+Tab exits bypass mode and returns to normal
+approval modes.
 
 Note:
 - `go install github.com/jayyao97/zotigo/cmd/zotigo@latest` and `go run ./cmd/zotigo` start the same interactive CLI.

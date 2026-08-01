@@ -35,3 +35,23 @@ func TestResolveProfile(t *testing.T) {
 		t.Fatal("expected missing profile error")
 	}
 }
+
+func TestResolveProfileIgnoresNameCase(t *testing.T) {
+	cfg := &config.Config{
+		DefaultProfile: "deepseek-v4-Flash",
+		Profiles: map[string]config.ProfileConfig{
+			"deepseek-v4-flash": {Provider: "deepseek"},
+		},
+	}
+
+	name, profile, err := cfg.ResolveProfile("")
+	if err != nil {
+		t.Fatalf("resolve default profile: %v", err)
+	}
+	if name != "deepseek-v4-flash" {
+		t.Fatalf("resolved name = %q, want canonical map key", name)
+	}
+	if profile.Provider != "deepseek" {
+		t.Fatalf("provider = %q, want deepseek", profile.Provider)
+	}
+}

@@ -156,8 +156,10 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 }
 
 func (m *Model) writeInputFooter(sb *strings.Builder) {
-	// Only show indicator when auto-approve is on
-	if m.autoApprove {
+	if m.bypassPermissions {
+		sb.WriteString(errorStyle.Render(">> BYPASS PERMISSIONS — safety checks disabled"))
+		sb.WriteString("\n")
+	} else if m.autoApprove {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
 		sb.WriteString("\n")
 	}

@@ -857,13 +857,37 @@ type ShellCallProvider struct {
 type StaticSafetyClassifier struct {
 	Response agent.SafetyClassifierResponse
 	Err      error
+	Calls    int
 }
 
 func (c *StaticSafetyClassifier) Classify(_ context.Context, req agent.SafetyClassifierRequest) (agent.SafetyClassifierResponse, error) {
+	c.Calls++
 	if c.Err != nil {
 		return agent.SafetyClassifierResponse{}, c.Err
 	}
 	return c.Response, nil
+}
+
+type BypassProbeTool struct {
+	classifyCalls int
+	executeCalls  int
+}
+
+func (t *BypassProbeTool) Name() string        { return "bypass_probe" }
+func (t *BypassProbeTool) Description() string { return "probe bypass execution" }
+func (t *BypassProbeTool) Schema() any         { return nil }
+func (t *BypassProbeTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	t.classifyCalls++
+	return tools.SafetyDecision{
+		Level:            tools.LevelBlocked,
+		RequiresApproval: true,
+		RequiresSnapshot: true,
+		Reason:           "must not be consulted in bypass mode",
+	}
+}
+func (t *BypassProbeTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	t.executeCalls++
+	return "bypass executed", nil
 }
 
 type SnapshotTestExecutor struct {
@@ -1034,6 +1058,134 @@ func TestAgentReActLoop(t *testing.T) {
 	}
 	if content != "It is 12:00" {
 		t.Errorf("Expected 'It is 12:00', got '%s'", content)
+	}
+}
+
+func TestAgentBypassPermissionsSkipsAllSafetyChecks(t *testing.T) {
+	const providerName = "bypass-permissions"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Tool: "bypass_probe", Args: `{}`}, nil
+	})
+
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	defer exec.Close()
+	tool := &BypassProbeTool{}
+	classifier := &StaticSafetyClassifier{Response: agent.SafetyClassifierResponse{
+		Decision: agent.SafetyClassifierDecisionDeny,
+	}}
+	ag, err := agent.New(config.ProfileConfig{
+		Provider: providerName,
+		Safety: config.SafetyProfileConfig{Classifier: config.SafetyClassifierConfig{
+			Enabled:         config.BoolPtr(true),
+			ReviewThreshold: "safe",
+		}},
+	}, exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyBypass),
+		agent.WithSafetyClassifier(classifier),
+		agent.WithTools(tool),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+
+	// A missing classifier profile normally forces Manual, but an explicit
+	// bypass request must remain authoritative.
+	ag.SetProfileApprovalFallback(true)
+	if got := ag.Describe().ApprovalPolicy; got != agent.ApprovalPolicyBypass {
+		t.Fatalf("approval policy = %q, want bypass", got)
+	}
+
+	events, err := ag.Run(context.Background(), "run the probe")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	var finish protocol.FinishReason
+	for event := range events {
+		if event.Type == protocol.EventTypeError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+		if event.Type == protocol.EventTypeFinish {
+			finish = event.FinishReason
+		}
+	}
+
+	if finish != protocol.FinishReasonStop {
+		t.Fatalf("finish = %q, want stop", finish)
+	}
+	if tool.classifyCalls != 0 {
+		t.Fatalf("Tool.Classify called %d times, want 0", tool.classifyCalls)
+	}
+	if classifier.Calls != 0 {
+		t.Fatalf("safety classifier called %d times, want 0", classifier.Calls)
+	}
+	if tool.executeCalls != 1 {
+		t.Fatalf("Tool.Execute called %d times, want 1", tool.executeCalls)
+	}
+	if ag.Snapshot().TurnSafety.SnapshotAttempted {
+		t.Fatal("snapshot must not be attempted in bypass mode")
+	}
+}
+
+func TestAgentBypassResumeExecutesRegisteredAndBlocksUnknownTools(t *testing.T) {
+	const providerName = "bypass-resume"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "resumed"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	defer exec.Close()
+	tool := &BypassProbeTool{}
+	ag, err := agent.New(
+		config.ProfileConfig{Provider: providerName},
+		exec,
+		agent.WithApprovalPolicy(agent.ApprovalPolicyBypass),
+		agent.WithTools(tool),
+	)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	assistant := protocol.NewAssistantMessage("")
+	assistant.AddToolCall(protocol.ToolCall{ID: "known", Name: tool.Name(), Arguments: `{}`})
+	assistant.AddToolCall(protocol.ToolCall{ID: "unknown", Name: "missing_tool", Arguments: `{}`})
+	ag.Restore(agent.Snapshot{
+		State:   agent.StatePaused,
+		History: []protocol.Message{protocol.NewUserMessage("continue"), assistant},
+		PendingActions: []*agent.PendingAction{
+			{ToolCallID: "known", Name: tool.Name(), Arguments: `{}`, Order: 0},
+			{ToolCallID: "unknown", Name: "missing_tool", Arguments: `{}`, Order: 1},
+		},
+	})
+
+	events, err := ag.ExecuteBypassedPendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("ExecuteBypassedPendingActions: %v", err)
+	}
+	results := make(map[string]protocol.ToolResult)
+	for event := range events {
+		if event.Type == protocol.EventTypeError {
+			t.Fatalf("unexpected error event: %v", event.Error)
+		}
+		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
+			results[event.ToolResult.ToolCallID] = *event.ToolResult
+		}
+	}
+
+	if tool.classifyCalls != 0 {
+		t.Fatalf("Tool.Classify called %d times, want 0", tool.classifyCalls)
+	}
+	if tool.executeCalls != 1 {
+		t.Fatalf("Tool.Execute called %d times, want 1", tool.executeCalls)
+	}
+	if result := results["unknown"]; result.Type != protocol.ToolResultTypeExecutionDenied || !result.IsError {
+		t.Fatalf("unknown tool result = %#v, want execution denied", result)
+	}
+	if ag.Snapshot().TurnSafety.SnapshotAttempted {
+		t.Fatal("snapshot must not be attempted for bypassed resumed actions")
 	}
 }
 
@@ -1602,6 +1754,10 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 		)},
 		buildSeedHistory(20)...,
 	)
+	history = append(history,
+		protocol.NewUserMessage("[Previous conversation summary]\nuser-authored marker collision"),
+		protocol.NewAssistantMessage("marker acknowledged"),
+	)
 	ag.Restore(agent.Snapshot{History: history})
 
 	result, err := ag.ForceCompress(context.Background())
@@ -1619,6 +1775,7 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 	contextCount := 0
 	contextIndex := -1
 	summaryIndex := -1
+	markerIndex := -1
 	for i, msg := range snapshot.History {
 		if msg.IsContextualUser() {
 			contextCount++
@@ -1628,8 +1785,11 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 				t.Fatalf("expected current full context, got %q", msg.String())
 			}
 		}
-		if strings.HasPrefix(msg.String(), "[Previous conversation summary]") {
+		if summaryIndex < 0 && strings.HasPrefix(msg.String(), "[Previous conversation summary]") {
 			summaryIndex = i
+		}
+		if msg.String() == "[Previous conversation summary]\nuser-authored marker collision" {
+			markerIndex = i
 		}
 	}
 	if contextCount != 1 {
@@ -1637,6 +1797,9 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 	}
 	if summaryIndex < 0 || contextIndex != summaryIndex+1 {
 		t.Fatalf("expected context immediately after summary: summary=%d context=%d", summaryIndex, contextIndex)
+	}
+	if markerIndex < 0 || contextIndex >= markerIndex {
+		t.Fatalf("user marker moved context: context=%d marker=%d", contextIndex, markerIndex)
 	}
 }
 

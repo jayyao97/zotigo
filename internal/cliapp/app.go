@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
@@ -52,10 +53,19 @@ func Run(args []string) int {
 
 	resumeFlag := fs.Bool("resume", false, "Resume a previous session")
 	rFlag := fs.Bool("r", false, "Resume a previous session (shorthand)")
+	bypassPermissions := fs.Bool(
+		"dangerously-skip-permissions",
+		false,
+		"Execute all registered tools without safety checks or approval",
+	)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	doResume := *resumeFlag || *rFlag
+	approvalPolicy := agent.ApprovalPolicyAuto
+	if *bypassPermissions {
+		approvalPolicy = agent.ApprovalPolicyBypass
+	}
 
 	cm := config.NewManager()
 	configPath, err := cm.GetConfigPath()
@@ -192,7 +202,7 @@ func Run(args []string) int {
 		Executor:           exec,
 		PromptBuilder:      pb,
 		UserContextBuilder: ucb,
-		ApprovalPolicy:     agent.ApprovalPolicyAuto,
+		ApprovalPolicy:     approvalPolicy,
 		TranscriptDir:      transcriptDir,
 		Observer:           observer,
 		// ToolSpan goes outermost so it observes every tool call,

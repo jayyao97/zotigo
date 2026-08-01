@@ -401,6 +401,8 @@ func formatPendingActions(actions []*agent.PendingAction) string {
 				badge = "classifier"
 			case agent.SafetyDecisionSourceHardRule:
 				badge = "policy"
+			case agent.SafetyDecisionSourceBypass:
+				badge = "bypass"
 			}
 			if act.Decision.RiskLevel != "" && act.Decision.RiskLevel != "normal" {
 				badge = strings.TrimSpace(badge + " " + act.Decision.RiskLevel)
@@ -443,6 +445,8 @@ func renderAgentBanner(d agent.Description) string {
 	add("Policy", string(d.ApprovalPolicy))
 
 	switch {
+	case d.ApprovalPolicy == agent.ApprovalPolicyBypass:
+		add("Classifier", "bypassed")
 	case d.ClassifierAvailable:
 		cls := d.ClassifierProvider
 		if d.ClassifierModel != "" {
