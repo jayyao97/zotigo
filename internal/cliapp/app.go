@@ -231,12 +231,14 @@ func Run(args []string) int {
 
 	lspManager := lsp.NewManager(cwd)
 	defer func() { _ = lspManager.StopAll() }()
+	spawnApprovalBroker := tui.NewSpawnApprovalBroker()
 	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:      cfg,
-		Profile:     profile,
-		ShellPolicy: builtin.DefaultShellPolicy(),
-		LSPManager:  lspManager,
-		Spawn:       true,
+		Config:                 cfg,
+		Profile:                profile,
+		ShellPolicy:            builtin.DefaultShellPolicy(),
+		LSPManager:             lspManager,
+		Spawn:                  true,
+		SpawnApprovalRequester: spawnApprovalBroker,
 	}); err != nil {
 		fmt.Println("Error registering tools:", err)
 		return 1
@@ -246,7 +248,7 @@ func Run(args []string) int {
 	cmdbuiltin.RegisterAll(cmdRegistry)
 
 	p := tea.NewProgram(
-		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry),
+		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry, tui.WithSpawnApprovalBroker(spawnApprovalBroker)),
 		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
 	)
 	if _, err := p.Run(); err != nil {

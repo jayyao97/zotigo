@@ -14,9 +14,10 @@ type ToolSetConfig struct {
 	Config  *config.Config
 	Profile config.ProfileConfig
 
-	ShellPolicy *builtin.ShellPolicy
-	LSPManager  *lsp.Manager
-	Spawn       bool
+	ShellPolicy            *builtin.ShellPolicy
+	LSPManager             *lsp.Manager
+	Spawn                  bool
+	SpawnApprovalRequester builtin.SpawnApprovalRequester
 }
 
 func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
@@ -70,13 +71,15 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 	}
 
 	if cfg.Spawn {
-		ag.RegisterTool(builtin.NewSpawnTool(
-			cfg.Profile,
-			childTools,
+		spawnOpts := []builtin.SpawnOption{
 			builtin.WithApprovalPolicySource(func() agent.ApprovalPolicy {
 				return ag.Describe().ApprovalPolicy
 			}),
-		))
+		}
+		if cfg.SpawnApprovalRequester != nil {
+			spawnOpts = append(spawnOpts, builtin.WithSpawnApprovalRequester(cfg.SpawnApprovalRequester))
+		}
+		ag.RegisterTool(builtin.NewSpawnTool(cfg.Profile, childTools, spawnOpts...))
 	}
 
 	return nil

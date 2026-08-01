@@ -14,7 +14,14 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/core/transport"
 )
+
+type spawnApprovalRequesterFunc func(context.Context, SpawnApprovalRequest) ([]transport.ApprovalResult, error)
+
+func (f spawnApprovalRequesterFunc) RequestSpawnApproval(ctx context.Context, request SpawnApprovalRequest) ([]transport.ApprovalResult, error) {
+	return f(ctx, request)
+}
 
 type spawnRecordingProvider struct {
 	mu       sync.Mutex
@@ -353,6 +360,60 @@ func TestSpawnToolReadsApprovalPolicyAtSpawnTime(t *testing.T) {
 	}
 }
 
+func TestSpawnToolRoutesApprovalThroughParent(t *testing.T) {
+	tests := []struct {
+		name        string
+		approved    bool
+		omitResult  bool
+		wantExecute int
+	}{
+		{name: "approved", approved: true, wantExecute: 1},
+		{name: "denied", approved: false},
+		{name: "missing decision is denied", omitResult: true},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			name := "spawn_parent_approval_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+			providers.Register(name, func(config.ProfileConfig) (providers.Provider, error) {
+				return &spawnTraceProvider{name: name, toolName: "approval_tool"}, nil
+			})
+			approvalTool := &approvalSpawnTool{}
+			requests := 0
+			requester := spawnApprovalRequesterFunc(func(_ context.Context, request SpawnApprovalRequest) ([]transport.ApprovalResult, error) {
+				requests++
+				if request.AgentName != "reviewer" || len(request.Actions) != 1 {
+					t.Fatalf("unexpected approval request: %+v", request)
+				}
+				if test.omitResult {
+					return nil, nil
+				}
+				return []transport.ApprovalResult{{
+					ToolCallID: request.Actions[0].ToolCallID,
+					Approved:   test.approved,
+					Reason:     "test decision",
+				}}, nil
+			})
+			spawn := NewSpawnTool(
+				config.ProfileConfig{Provider: name, Model: "mock"},
+				[]tools.Tool{approvalTool},
+				WithApprovalPolicySource(func() agent.ApprovalPolicy { return agent.ApprovalPolicyAuto }),
+				WithSpawnApprovalRequester(requester),
+			)
+
+			if _, err := spawn.Execute(context.Background(), newSpawnTestExecutor(t), `{"name":"reviewer","description":"run gated tool","prompt":"Use the approval tool"}`); err != nil {
+				t.Fatalf("Execute: %v", err)
+			}
+			if requests != 1 {
+				t.Fatalf("approval requests = %d, want 1", requests)
+			}
+			if approvalTool.calls != test.wantExecute {
+				t.Fatalf("tool executions = %d, want %d", approvalTool.calls, test.wantExecute)
+			}
+		})
+	}
+}
+
 func TestSpawnToolKeepsAutoChildPolicyForManualParent(t *testing.T) {
 	name := "spawn_manual_parent_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
 	provider := &spawnTraceProvider{name: name, toolName: "low_risk_tool"}
@@ -371,6 +432,32 @@ func TestSpawnToolKeepsAutoChildPolicyForManualParent(t *testing.T) {
 	}
 	if tool.calls != 1 {
 		t.Fatalf("tool executions = %d, want 1", tool.calls)
+	}
+}
+
+func TestSpawnToolPropagatesManualPolicyWhenParentCanApprove(t *testing.T) {
+	name := "spawn_manual_broker_" + strings.NewReplacer("/", "_", " ", "_").Replace(t.Name())
+	providers.Register(name, func(config.ProfileConfig) (providers.Provider, error) {
+		return &spawnTraceProvider{name: name, toolName: "low_risk_tool"}, nil
+	})
+	tool := &lowRiskSpawnTool{}
+	requests := 0
+	requester := spawnApprovalRequesterFunc(func(_ context.Context, request SpawnApprovalRequest) ([]transport.ApprovalResult, error) {
+		requests++
+		return []transport.ApprovalResult{{ToolCallID: request.Actions[0].ToolCallID, Approved: true}}, nil
+	})
+	spawn := NewSpawnTool(
+		config.ProfileConfig{Provider: name, Model: "mock"},
+		[]tools.Tool{tool},
+		WithApprovalPolicySource(func() agent.ApprovalPolicy { return agent.ApprovalPolicyManual }),
+		WithSpawnApprovalRequester(requester),
+	)
+
+	if _, err := spawn.Execute(context.Background(), newSpawnTestExecutor(t), `{"description":"run low risk tool","prompt":"Use the low risk tool"}`); err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if requests != 1 || tool.calls != 1 {
+		t.Fatalf("approval requests = %d, tool executions = %d; want 1 each", requests, tool.calls)
 	}
 }
 

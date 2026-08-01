@@ -105,6 +105,9 @@ func (m *Model) liveView() string {
 }
 
 func (m *Model) writeApprovalView(sb *strings.Builder) {
+	if m.approvalContext != "" {
+		sb.WriteString(warningStyle.Render("⚠ ") + m.approvalContext + " requests approval\n")
+	}
 	if len(m.pendingApprovals) > 1 {
 		current := m.pendingApprovals[m.approvalItemChoice]
 		tc := current.ToolCall

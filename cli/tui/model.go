@@ -56,8 +56,11 @@ type Model struct {
 	approvalItemChoice int
 	pendingApprovals   []*agent.PendingAction
 	approvalDecisions  map[string]bool
+	approvalContext    string
 	pendingToolName    string
 	pendingToolArgs    string
+	spawnBroker        *SpawnApprovalBroker
+	spawnRequest       *spawnApprovalRequest
 	err                error
 	eventCh            <-chan protocol.Event
 	width              int
@@ -79,7 +82,15 @@ type streamReadyMsg <-chan protocol.Event
 type errMsg error
 type denialSettledMsg struct{}
 
-func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) *Model {
+type ModelOption func(*Model)
+
+func WithSpawnApprovalBroker(broker *SpawnApprovalBroker) ModelOption {
+	return func(model *Model) {
+		model.spawnBroker = broker
+	}
+}
+
+func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry, opts ...ModelOption) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Zotigo..."
 	ta.Focus()
@@ -124,6 +135,11 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 		autoApprove:       ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
 		bypassPermissions: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyBypass,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&m)
+		}
+	}
 
 	// A bypassed resume executes registered pending tools immediately. Normal
 	// policies restore the approval UI so the user can approve or deny them.
@@ -145,18 +161,24 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 }
 
 func (m *Model) Init() tea.Cmd {
+	cmds := []tea.Cmd{textarea.Blink}
+	if cmd := waitForSpawnApproval(m.spawnBroker); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	if !m.resumeBypass {
-		return textarea.Blink
+		return tea.Batch(cmds...)
 	}
 	ch, err := m.agent.ExecuteBypassedPendingActions(m.ctx)
 	m.resumeBypass = false
 	if err != nil {
-		return tea.Batch(textarea.Blink, func() tea.Msg { return errMsg(err) })
+		cmds = append(cmds, func() tea.Msg { return errMsg(err) })
+		return tea.Batch(cmds...)
 	}
 	resume := func() tea.Msg {
 		return streamReadyMsg(ch)
 	}
-	return tea.Batch(textarea.Blink, resume)
+	cmds = append(cmds, resume)
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
@@ -223,6 +245,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transcriptMsg:
 		m.appendTranscript(string(msg))
 		return m, nil
+
+	case spawnApprovalRequestMsg:
+		if msg.request == nil {
+			return m, waitForSpawnApproval(m.spawnBroker)
+		}
+		m.spawnRequest = msg.request
+		m.approving = true
+		m.approvalChoice = 0
+		m.setPendingApprovals(msg.request.request.Actions)
+		m.approvalContext = "Subagent " + msg.request.request.AgentName
+		return m, waitForSpawnApprovalCancellation(msg.request)
+
+	case spawnApprovalResolvedMsg:
+		return m, waitForSpawnApproval(m.spawnBroker)
+
+	case spawnApprovalCanceledMsg:
+		if m.spawnRequest != msg.request {
+			return m, nil
+		}
+		m.spawnRequest = nil
+		m.approving = false
+		m.approvalContext = ""
+		m.pendingApprovals = nil
+		m.approvalDecisions = nil
+		m.pendingToolName = ""
+		return m, tea.Batch(
+			m.commitLine(warningStyle.Render("⚠ ")+"Subagent approval expired or was canceled"),
+			waitForSpawnApproval(m.spawnBroker),
+		)
 
 	case tea.MouseWheelMsg:
 		if !m.viewportEnabled {
@@ -319,12 +370,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				switch m.approvalChoice {
 				case 0: // Accept
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.acceptCurrentApproval()
 					}
 					return m.submitApproval()
 				case 1: // Deny → back to input
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.denyCurrentApproval("")
 					}
 					return m.denyAndReturn("")
@@ -334,7 +385,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil // empty text, do nothing
 					}
 					m.input.Reset()
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.denyCurrentApproval(v)
 					}
 					return m.denyAndReturn(v)

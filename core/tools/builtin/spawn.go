@@ -16,6 +16,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/core/transport"
 )
 
 const (
@@ -32,19 +33,38 @@ type SpawnTool struct {
 	cfg                  config.ProfileConfig
 	childTools           []tools.Tool
 	approvalPolicySource func() agent.ApprovalPolicy
+	approvalRequester    SpawnApprovalRequester
 }
 
 // SpawnOption configures optional SpawnTool behavior.
 type SpawnOption func(*SpawnTool)
 
-// WithApprovalPolicySource supplies the parent Agent's current policy. Spawn
-// only propagates bypass mode; normal children retain their existing Auto
-// policy because they have no approval UI.
+// SpawnApprovalRequest identifies approval-gated actions from a child agent.
+type SpawnApprovalRequest struct {
+	AgentName string
+	Actions   []*agent.PendingAction
+}
+
+// SpawnApprovalRequester routes child approvals to the parent host.
+type SpawnApprovalRequester interface {
+	RequestSpawnApproval(context.Context, SpawnApprovalRequest) ([]transport.ApprovalResult, error)
+}
+
+// WithApprovalPolicySource supplies the parent Agent's current policy. Bypass
+// always propagates; other policies propagate when the parent host can route
+// child approval requests.
 func WithApprovalPolicySource(source func() agent.ApprovalPolicy) SpawnOption {
 	return func(tool *SpawnTool) {
 		if source != nil {
 			tool.approvalPolicySource = source
 		}
+	}
+}
+
+// WithSpawnApprovalRequester lets a parent host approve or deny child actions.
+func WithSpawnApprovalRequester(requester SpawnApprovalRequester) SpawnOption {
+	return func(tool *SpawnTool) {
+		tool.approvalRequester = requester
 	}
 }
 
@@ -220,12 +240,11 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	profile := t.cfg
 	t.mu.RUnlock()
 	policy := agent.ApprovalPolicyAuto
-	if t.approvalPolicySource != nil && t.approvalPolicySource() == agent.ApprovalPolicyBypass {
-		// Preserve the existing child Auto behavior for normal parent modes:
-		// the parent already approved delegation and child agents have no UI in
-		// which to answer another prompt. Bypass is the only policy that must
-		// cross this boundary to uphold its no-approval contract.
-		policy = agent.ApprovalPolicyBypass
+	if t.approvalPolicySource != nil {
+		parentPolicy := t.approvalPolicySource()
+		if parentPolicy == agent.ApprovalPolicyBypass || t.approvalRequester != nil {
+			policy = parentPolicy
+		}
 	}
 	child, err := agent.New(profile, childExec,
 		agent.WithSystemPromptBuilder(spawnPromptBuilder(args.AgentType)),
@@ -240,37 +259,58 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	if err != nil {
 		return nil, fmt.Errorf("failed to run subagent: %w", err)
 	}
-	var finish protocol.FinishReason
 	var trace []string
 	eventSink, hasEventSink := agent.ToolEventSinkFromContext(ctx)
-	for event := range events {
-		if event.Type == protocol.EventTypeFinish {
-			finish = event.FinishReason
-		}
-		if event.Type == protocol.EventTypeToolCallEnd && event.ToolCall != nil {
-			line := "[" + args.Name + "] " + formatSpawnTraceToolCall(event.ToolCall)
-			trace = append(trace, line)
-			if hasEventSink {
-				eventSink(protocol.Event{
-					Type: protocol.EventTypeToolProgress,
-					ToolResult: &protocol.ToolResult{
-						ToolCallID: "subagent-progress:" + args.Name,
-						ToolName:   "spawn",
-						Type:       protocol.ToolResultTypeText,
-						Text:       line,
-					},
-				})
+	for {
+		var finish protocol.FinishReason
+		for event := range events {
+			if event.Type == protocol.EventTypeFinish {
+				finish = event.FinishReason
+			}
+			if event.Type == protocol.EventTypeToolCallEnd && event.ToolCall != nil {
+				line := "[" + args.Name + "] " + formatSpawnTraceToolCall(event.ToolCall)
+				trace = append(trace, line)
+				if hasEventSink {
+					eventSink(protocol.Event{
+						Type: protocol.EventTypeToolProgress,
+						ToolResult: &protocol.ToolResult{
+							ToolCallID: "subagent-progress:" + args.Name,
+							ToolName:   "spawn",
+							Type:       protocol.ToolResultTypeText,
+							Text:       line,
+						},
+					})
+				}
+			}
+			if event.Type == protocol.EventTypeError && event.Error != nil {
+				return nil, fmt.Errorf("subagent error: %w", event.Error)
 			}
 		}
-		if event.Type == protocol.EventTypeError && event.Error != nil {
-			return nil, fmt.Errorf("subagent error: %w", event.Error)
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("subagent timed out or was cancelled: %w", err)
 		}
-	}
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("subagent timed out or was cancelled: %w", err)
-	}
-	if finish == "need_approval" {
-		return nil, fmt.Errorf("subagent paused for approval; narrow the task or use an agent type/tool set that can complete without approval")
+		if finish != "need_approval" {
+			break
+		}
+		if t.approvalRequester == nil {
+			return nil, fmt.Errorf("subagent paused for approval; parent host does not support child approvals")
+		}
+
+		pending := child.Snapshot().PendingActions
+		if len(pending) == 0 {
+			return nil, fmt.Errorf("subagent requested approval without pending actions")
+		}
+		results, err := t.approvalRequester.RequestSpawnApproval(ctx, SpawnApprovalRequest{
+			AgentName: args.Name,
+			Actions:   pending,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("request subagent approval: %w", err)
+		}
+		events, err = child.ResolvePendingActions(ctx, deniedSpawnToolResults(results, pending))
+		if err != nil {
+			return nil, fmt.Errorf("resolve subagent approval: %w", err)
+		}
 	}
 
 	snap := child.Snapshot()
@@ -284,6 +324,36 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		text:  formatSpawnResult(args.Name, args.AgentType, childWorkDir, args.Description, report, trace, countSubagentToolCalls(snap.History), usage),
 		usage: usage,
 	}, nil
+}
+
+func deniedSpawnToolResults(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
+	byID := make(map[string]transport.ApprovalResult, len(results))
+	for _, result := range results {
+		byID[result.ToolCallID] = result
+	}
+	denied := make(map[string]protocol.ToolResult)
+	for _, action := range pending {
+		result, decided := byID[action.ToolCallID]
+		if decided && result.Approved {
+			continue
+		}
+		reason := result.Reason
+		if reason == "" {
+			if decided {
+				reason = "User denied permission"
+			} else {
+				reason = "No approval decision received"
+			}
+		}
+		denied[action.ToolCallID] = protocol.ToolResult{
+			ToolCallID: action.ToolCallID,
+			ToolName:   action.Name,
+			Type:       protocol.ToolResultTypeExecutionDenied,
+			Reason:     reason,
+			IsError:    true,
+		}
+	}
+	return denied
 }
 
 type spawnOutput struct {
