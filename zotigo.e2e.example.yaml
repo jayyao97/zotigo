@@ -5,19 +5,21 @@
 #
 # Run e2e tests: go test -tags=e2e ./tests/e2e/...
 
-default_profile: gpt-4o
+default_profile: gpt-5.6-sol
 
 profiles:
-  gpt-4o:
+  gpt-5.6-sol:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol
     api_key: "your-openai-api-key"
     base_url: "https://api.openai.com/v1"
+    thinking_level: medium
+    context_window: 1050000
     safety:
       classifier:
         enabled: true                   # master switch; false skips the classifier entirely
         review_threshold: medium        # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
-        profile: gpt-5.4-reasoning      # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
+        profile: gpt-5.6-luna-reasoning # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
         timeout_ms: 20000               # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
         max_recent_actions: 6           # how many prior agent actions to include as context when asking the classifier to decide
         capture_raw_audit_context: false  # store raw tool args in the audit log — enable for forensics/debugging, off by default to keep logs small
@@ -25,9 +27,19 @@ profiles:
 
   claude-sonnet:
     provider: anthropic
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5
     api_key: "your-anthropic-api-key"
     base_url: "https://api.anthropic.com"
+    thinking_level: disabled
+    context_window: 1000000
+
+  claude-opus:
+    provider: anthropic
+    model: claude-opus-5
+    api_key: "your-anthropic-api-key"
+    base_url: "https://api.anthropic.com"
+    thinking_level: high
+    context_window: 1000000
 
   gemini-flash:
     provider: gemini
@@ -37,18 +49,20 @@ profiles:
   # Thinking/reasoning profiles
   claude-sonnet-thinking:
     provider: anthropic
-    model: claude-sonnet-4-20250514
+    model: claude-sonnet-5
     api_key: "your-anthropic-api-key"
     base_url: "https://api.anthropic.com"
     thinking_level: medium
+    context_window: 1000000
   gemini-pro-thinking:
     provider: gemini
     model: gemini-3-pro-preview
     api_key: "your-gemini-api-key"
     thinking_level: low
-  gpt-5.4-reasoning:
+  gpt-5.6-luna-reasoning:
     provider: openai
-    model: gpt-5.4
+    model: gpt-5.6-luna
     api_key: "your-openai-api-key"
     base_url: "https://api.openai.com/v1"
-    thinking_level: medium
+    thinking_level: low
+    context_window: 1050000

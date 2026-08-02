@@ -74,7 +74,7 @@ type PromptContext struct {
 	WorkDir   string
 	SessionID string
 	Platform  string // "darwin", "linux", "windows"
-	Model     string // e.g. "claude-sonnet-4-20250514"
+	Model     string // e.g. "claude-sonnet-5"
 }
 
 // ContextSection is an XML-tagged block of dynamic context.

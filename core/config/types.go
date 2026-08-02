@@ -6,13 +6,12 @@ import (
 )
 
 // DefaultContextWindow is the assumed context size when a profile
-// does not specify ContextWindow. 200k matches every modern Claude,
-// GPT-5/o, and Gemini family; smaller models (gpt-4 8k, local llama)
-// need an explicit `context_window: <N>` in the profile rather than a
-// baked-in per-model table here. The upstream numbers shift too often
-// (gpt-4o went 128k → 200k mid-life) for a registry to stay accurate,
-// and a stale guess looks more authoritative than "I don't know"
-// while being just as wrong. Profile config is the source of truth.
+// does not specify ContextWindow. 200k is a conservative fallback;
+// current frontier models often have larger windows, while older and
+// local models may have smaller ones. The upstream numbers shift too
+// often for a baked-in per-model registry to stay accurate, and a stale
+// guess looks more authoritative than "I don't know" while being just
+// as wrong. Profile config is the source of truth.
 const DefaultContextWindow = 200_000
 
 // Config represents the top-level configuration structure.
@@ -55,15 +54,16 @@ func (c LangfuseConfig) IsEnabled() bool {
 // ProfileConfig defines a specific configuration for an AI model usage.
 // It maps a user-defined name (e.g., "code-buddy") to a provider implementation (e.g., "openai").
 type ProfileConfig struct {
-	Provider string `mapstructure:"provider" yaml:"provider"` // e.g. "openai", "claude"
-	Model    string `mapstructure:"model" yaml:"model"`       // e.g. "gpt-4o"
+	Provider string `mapstructure:"provider" yaml:"provider"` // e.g. "openai", "anthropic"
+	Model    string `mapstructure:"model" yaml:"model"`       // e.g. "gpt-5.6-sol"
 	APIKey   string `mapstructure:"api_key" yaml:"api_key"`
 	BaseURL  string `mapstructure:"base_url,omitempty" yaml:"base_url,omitempty"`
 
-	// ThinkingLevel enables extended thinking/reasoning mode.
-	// Values: "" (disabled), "low", "medium", "high".
+	// ThinkingLevel selects the provider's thinking/reasoning mode.
+	// Values: "" (provider default), "disabled" (Anthropic only),
+	// "low", "medium", "high".
 	// Providers map this to their native thinking config:
-	//   Anthropic: budget_tokens (low=2048, medium=8192, high=32768)
+	//   Anthropic: adaptive thinking and output_config.effort
 	//   OpenAI: reasoning_effort (low, medium, high)
 	//   Gemini: ThinkingLevel (LOW, MEDIUM, HIGH)
 	ThinkingLevel string `mapstructure:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
@@ -122,10 +122,9 @@ type SafetyClassifierConfig struct {
 }
 
 // IsEnabled returns whether the classifier is enabled.
-// Returns false when Enabled is nil. After Manager.Load() merges defaults
-// for every profile (built-in and user-defined), nil is replaced with the
-// default value (true), so IsEnabled() returns true unless the user
-// explicitly set enabled: false.
+// Returns false when Enabled is nil. After Manager.Load() applies defaults
+// to every configured profile, nil is replaced with the default value (true),
+// so IsEnabled() returns true unless the user explicitly set enabled: false.
 func (c SafetyClassifierConfig) IsEnabled() bool {
 	if c.Enabled == nil {
 		return false
@@ -163,30 +162,7 @@ type WebToolsConfig struct {
 // DefaultConfig returns the default configuration values.
 func DefaultConfig() *Config {
 	return &Config{
-		DefaultProfile: "gpt-4o",
-		Profiles: map[string]ProfileConfig{
-			"gpt-4o": {
-				Provider: "openai",
-				Model:    "gpt-4o",
-				Safety: SafetyProfileConfig{
-					Classifier: defaultSafetyClassifierConfig(),
-				},
-			},
-			"claude-sonnet": {
-				Provider: "claude",
-				Model:    "claude-4-6-sonnet-latest",
-				Safety: SafetyProfileConfig{
-					Classifier: defaultSafetyClassifierConfig(),
-				},
-			},
-			"gemini-pro": {
-				Provider: "gemini",
-				Model:    "gemini-3.0-pro-latest",
-				Safety: SafetyProfileConfig{
-					Classifier: defaultSafetyClassifierConfig(),
-				},
-			},
-		},
+		Profiles: make(map[string]ProfileConfig),
 		Security: SecurityConfig{
 			SandboxEnabled: true,
 			AllowedTools:   []string{"ls", "cat", "grep"},

@@ -68,7 +68,7 @@ func resolveOpenAIMode(cfg config.ProfileConfig) string {
 
 // modelUsesResponsesAPI returns true for OpenAI models whose thinking
 // event stream only lives on /v1/responses. The list is intentionally
-// prefix-based — new variants in the same family (gpt-5-mini, o3-pro,
+// prefix-based — new variants in the same family (gpt-5.6-terra, o3-pro,
 // etc.) auto-route without code changes.
 func modelUsesResponsesAPI(model string) bool {
 	m := strings.ToLower(strings.TrimSpace(model))

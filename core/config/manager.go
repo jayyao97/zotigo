@@ -31,8 +31,6 @@ func (m *Manager) Load() (*Config, error) {
 
 func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 	defaults := DefaultConfig()
-	m.v.SetDefault("default_profile", defaults.DefaultProfile)
-	m.v.SetDefault("profiles", defaults.Profiles)
 	m.v.SetDefault("security", defaults.Security)
 	m.v.SetDefault("ui", defaults.UI)
 	m.v.SetDefault("tools", defaults.Tools)
@@ -78,18 +76,12 @@ func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 		return nil, fmt.Errorf("failed to unmarshal config: %w", err)
 	}
 
-	// Post-process: Ensure default profiles are present if not overridden
 	if cfg.Profiles == nil {
 		cfg.Profiles = make(map[string]ProfileConfig)
 	}
-	for name, profile := range defaults.Profiles {
-		if _, exists := cfg.Profiles[name]; !exists {
-			cfg.Profiles[name] = profile
-		}
-	}
 
-	// Apply safety.classifier defaults to EVERY profile, including user-defined
-	// ones. Without this, a custom profile (e.g. "my-ollama") would load with
+	// Apply safety.classifier defaults to every configured profile. Without
+	// this, a custom profile (e.g. "my-ollama") would load with
 	// Classifier.Enabled == nil, and IsEnabled() would silently return false —
 	// contradicting the documented default.
 	classifierDefaults := defaultSafetyClassifierConfig()

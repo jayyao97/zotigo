@@ -20,26 +20,30 @@ Runtime CLI config still uses `~/.zotigo/config.yaml`.
 ## Example
 
 ```yaml
-default_profile: gpt-4o
+default_profile: gpt-5.6-sol
 
 profiles:
-  gpt-4o:
+  gpt-5.6-sol:
     provider: openai
-    model: gpt-4o
-    api_key: "sk-or-v1-..."
-    base_url: "https://openrouter.ai/api/v1"
+    model: gpt-5.6-sol
+    api_key: "your-openai-api-key"
+    base_url: "https://api.openai.com/v1"
+    thinking_level: medium
+    context_window: 1050000
     safety:
       classifier:
         enabled: true              # master switch; false skips the classifier entirely
         review_threshold: medium   # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
-        profile: gpt-5.4-reasoning # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
+        profile: gpt-5.6-luna-reasoning # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
         timeout_ms: 20000          # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
 
-  gpt-5.4-reasoning:
+  gpt-5.6-luna-reasoning:
     provider: openai
-    model: gpt-5.4
-    api_key: "sk-or-v1-..."
-    base_url: "https://openrouter.ai/api/v1"
+    model: gpt-5.6-luna
+    api_key: "your-openai-api-key"
+    base_url: "https://api.openai.com/v1"
+    thinking_level: low
+    context_window: 1050000
 ```
 
 ## File Resolution Order

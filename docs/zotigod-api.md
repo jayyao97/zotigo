@@ -84,12 +84,12 @@ URLs, provider parameters, or safety configuration:
 
 ```json
 {
-  "default_profile": "gpt-5.5-high",
+  "default_profile": "gpt-5.6-sol-high",
   "profiles": [
     {
-      "name": "gpt-5.5-high",
+      "name": "gpt-5.6-sol-high",
       "provider": "openai",
-      "model": "gpt-5.5",
+      "model": "gpt-5.6-sol",
       "thinking_level": "high"
     }
   ]
@@ -107,7 +107,7 @@ clients should pass the project root selected by the user:
 ```json
 {
   "working_directory": "/Users/me/workspace/project",
-  "profile": "gpt-5.5-high"
+  "profile": "gpt-5.6-sol-high"
 }
 ```
 
@@ -139,7 +139,7 @@ generations:
 
 ```json
 {
-  "profile": "gpt-5.5-high"
+  "profile": "gpt-5.6-sol-high"
 }
 ```
 
@@ -149,7 +149,7 @@ and return `202` with `status: "pending"`:
 
 ```json
 {
-  "profile": "gpt-5.5-high",
+  "profile": "gpt-5.6-sol-high",
   "status": "pending",
   "command_id": "item_sess_8f0e12ab34cd56ef_8"
 }
@@ -364,8 +364,8 @@ provider credentials:
   "type": "profile_changed",
   "profile": {
     "command_id": "item_sess_8f0e12ab34cd56ef_8",
-    "from": "gpt-5.5-low",
-    "to": "gpt-5.5-high"
+    "from": "gpt-5.6-terra-low",
+    "to": "gpt-5.6-sol-high"
   },
   "created_at": "2026-01-02T03:04:12Z"
 }
@@ -760,7 +760,7 @@ Raw response:
       "sequence": 8,
       "type": "profile",
       "profile": {
-        "name": "gpt-5.5-high"
+        "name": "gpt-5.6-sol-high"
       },
       "created_at": "2026-01-02T03:04:11Z"
     }

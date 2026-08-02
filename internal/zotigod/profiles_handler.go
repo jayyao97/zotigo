@@ -64,10 +64,13 @@ func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
 		return
 	}
-	defaultProfileName, _, err := appConfig.ResolveProfile("")
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "default "+err.Error())
-		return
+	defaultProfileName := ""
+	if strings.TrimSpace(appConfig.DefaultProfile) != "" {
+		defaultProfileName, _, err = appConfig.ResolveProfile("")
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "default "+err.Error())
+			return
+		}
 	}
 
 	profiles := make([]publicProfile, 0, len(appConfig.Profiles))

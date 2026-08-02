@@ -102,32 +102,54 @@ go install github.com/jayyao97/zotigo/cmd/zotigo@latest
 
 ## Configuration
 
-On first run (`go run ./cmd/zotigo`), Zotigo creates the default config at `~/.zotigo/config.yaml` if it does not exist.
+On first run (`go run ./cmd/zotigo`), Zotigo creates a config template at `~/.zotigo/config.yaml` if it does not exist.
+
+Zotigo does not inject model profiles into the effective configuration. The
+available profiles come only from the global config and the current project's
+config; project values are merged over global values.
 
 ```yaml
-default_profile: gpt-4o
+default_profile: gpt-5.6-sol
 profiles:
-  gpt-4o:
+  gpt-5.6-sol:
     provider: openai
-    model: gpt-4o
+    model: gpt-5.6-sol
     api_key: sk-...
+    thinking_level: medium
+    context_window: 1050000
     safety:
       classifier:
         enabled: true                   # master switch; false skips the classifier entirely
         review_threshold: medium        # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
-        profile: gpt-5-mini             # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
+        profile: gpt-5.6-luna           # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
         timeout_ms: 20000               # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
         max_recent_actions: 6           # how many prior agent actions to include as context when asking the classifier to decide
         capture_raw_audit_context: false  # store raw tool args in the audit log — enable for forensics/debugging, off by default to keep logs small
         max_audit_context_chars: 1200   # per-entry cap applied only when capture_raw_audit_context is true
-  gpt-5-mini:
+  gpt-5.6-terra:
     provider: openai
-    model: gpt-5-mini
+    model: gpt-5.6-terra
     api_key: sk-...
-  claude-sonnet:
-    provider: claude
-    model: claude-4-6-sonnet-latest
+    thinking_level: low
+    context_window: 1050000
+  gpt-5.6-luna:
+    provider: openai
+    model: gpt-5.6-luna
+    api_key: sk-...
+    thinking_level: low
+    context_window: 1050000
+  claude-sonnet-5:
+    provider: anthropic
+    model: claude-sonnet-5
     api_key: sk-ant-...
+    thinking_level: medium
+    context_window: 1000000
+  claude-opus-5:
+    provider: anthropic
+    model: claude-opus-5
+    api_key: sk-ant-...
+    thinking_level: high
+    context_window: 1000000
   gemini-pro:
     provider: gemini
     model: gemini-3.0-pro-latest
@@ -139,6 +161,11 @@ profiles:
 ```
 
 The `safety.classifier` block is optional. If omitted, Zotigo uses built-in defaults. If `classifier.profile` is omitted, the classifier reuses the current active profile.
+
+The example uses the current API IDs from the
+[OpenAI model guide](https://developers.openai.com/api/docs/guides/model-guidance?model=gpt-5.6)
+and [Claude model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
+Zotigo still has no built-in model Profile; copy only the profiles you need.
 
 Run:
 ```bash
