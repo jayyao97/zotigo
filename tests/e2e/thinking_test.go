@@ -40,7 +40,7 @@ func TestE2E_ThinkingMode(t *testing.T) {
 			expectReasoning: true, // Gemini returns thought parts
 		},
 		"openai": {
-			profileName:     "gpt-5.4-reasoning",
+			profileName:     "gpt-5.6-luna-reasoning",
 			provider:        "openai",
 			expectReasoning: false, // OpenAI reasoning is internal, not surfaced
 		},

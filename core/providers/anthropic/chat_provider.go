@@ -12,7 +12,7 @@ import (
 type ChatProvider struct {
 	client        *anthropic.Client
 	model         string
-	thinkingLevel string // "", "low", "medium", "high"
+	thinkingLevel string // "", "disabled", "low", "medium", "high"
 }
 
 func (p *ChatProvider) Name() string {
@@ -78,7 +78,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	if level == "" {
 		level = p.thinkingLevel
 	}
-	applyThinkingConfig(&params, level, resolved.ToolChoice)
+	applyThinkingConfig(&params, level)
 
 	stream := p.client.Messages.NewStreaming(ctx, params)
 
@@ -233,11 +233,17 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	return ch, nil
 }
 
-func applyThinkingConfig(params *anthropic.MessageNewParams, level string, toolChoice providers.ToolChoice) {
-	// Anthropic rejects thinking when tool_choice forces tool use.
-	// Classifier calls pin record_decision, so those must stay
-	// non-thinking even when the main profile has thinking enabled.
-	if level != "" && toolChoice.Mode == providers.ToolChoiceAuto {
+func applyThinkingConfig(params *anthropic.MessageNewParams, level string) {
+	if level == "disabled" {
+		disabled := anthropic.NewThinkingConfigDisabledParam()
+		params.Thinking = anthropic.ThinkingConfigParamUnion{OfDisabled: &disabled}
+		return
+	}
+
+	// Adaptive thinking supports both automatic and forced tool choice.
+	// Keep the resolved effort stable instead of silently changing it
+	// for classifier calls that pin record_decision.
+	if level != "" {
 		params.Thinking = anthropic.ThinkingConfigParamUnion{
 			OfAdaptive: &anthropic.ThinkingConfigAdaptiveParam{
 				Display: anthropic.ThinkingConfigAdaptiveDisplaySummarized,

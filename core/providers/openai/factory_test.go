@@ -13,6 +13,9 @@ func TestModelUsesResponsesAPI(t *testing.T) {
 	}{
 		// gpt-5 family — reasoning-first, Responses API required.
 		{"gpt-5", true},
+		{"gpt-5.6-sol", true},
+		{"gpt-5.6-terra", true},
+		{"gpt-5.6-luna", true},
 		{"gpt-5-mini", true},
 		{"gpt-5-codex", true},
 		{"gpt-5-nano", true},

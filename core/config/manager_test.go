@@ -10,28 +10,34 @@ import (
 
 func TestConfigDefaults(t *testing.T) {
 	defaults := config.DefaultConfig()
-	if defaults.DefaultProfile != "gpt-4o" {
-		t.Errorf("Expected default profile 'gpt-4o', got '%s'", defaults.DefaultProfile)
+	if defaults.DefaultProfile != "" {
+		t.Errorf("Expected no default profile, got %q", defaults.DefaultProfile)
 	}
+	if len(defaults.Profiles) != 0 {
+		t.Errorf("Expected no built-in profiles, got %#v", defaults.Profiles)
+	}
+	if defaults.Tools.Web.TimeoutSec == 0 || defaults.Security.AllowedTools == nil || defaults.UI.Theme == "" {
+		t.Fatalf("Expected non-profile defaults to remain populated: %#v", defaults)
+	}
+}
 
-	// Check if default profiles exist
-	if _, ok := defaults.Profiles["gpt-4o"]; !ok {
-		t.Error("Expected gpt-4o profile to exist")
-	}
+func TestLoadDoesNotInjectProfiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 
-	classifier := defaults.Profiles["gpt-4o"].Safety.Classifier
-	if !classifier.IsEnabled() {
-		t.Error("Expected classifier to be enabled by default")
+	cfg, err := config.NewManager().LoadForDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadForDir: %v", err)
 	}
-	if classifier.ReviewThreshold == "" {
-		t.Error("Expected classifier review_threshold default to be set")
+	if cfg.DefaultProfile != "" {
+		t.Fatalf("DefaultProfile = %q, want empty", cfg.DefaultProfile)
 	}
-	if classifier.Profile != "" {
-		t.Error("Expected classifier profile to default to current active profile when omitted")
+	if len(cfg.Profiles) != 0 {
+		t.Fatalf("Profiles = %#v, want empty", cfg.Profiles)
 	}
 }
 
 func TestProjectConfigMerge(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	tmpDir, err := os.MkdirTemp("", "zotigo_project_test")
 	if err != nil {
 		t.Fatalf("Failed to create temp dir: %v", err)
@@ -77,9 +83,8 @@ ui:
 		t.Errorf("Expected model gpt-4-turbo, got %s", profile.Model)
 	}
 
-	// Verify defaults preserved
-	if _, ok := cfg.Profiles["gpt-4o"]; !ok {
-		t.Error("Expected default profiles to be preserved")
+	if len(cfg.Profiles) != 1 {
+		t.Fatalf("Expected only the explicitly configured profile, got %#v", cfg.Profiles)
 	}
 
 	if cfg.Tools.Web.TimeoutSec == 0 {
@@ -361,7 +366,7 @@ profiles:
 }
 
 func TestResolveClassifierProfile_DefaultsToActiveProfile(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := classifierTestConfig()
 
 	name, profile, err := cfg.ResolveClassifierProfile("gpt-4o")
 	if err != nil {
@@ -376,7 +381,7 @@ func TestResolveClassifierProfile_DefaultsToActiveProfile(t *testing.T) {
 }
 
 func TestResolveClassifierProfile_UsesExplicitProfile(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := classifierTestConfig()
 	cfg.Profiles["gpt-5-mini"] = config.ProfileConfig{
 		Provider: "openai",
 		Model:    "gpt-5-mini",
@@ -398,7 +403,7 @@ func TestResolveClassifierProfile_UsesExplicitProfile(t *testing.T) {
 }
 
 func TestResolveClassifierProfileIgnoresNameCase(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := classifierTestConfig()
 	cfg.Profiles["deepseek-v4-flash"] = config.ProfileConfig{
 		Provider: "deepseek",
 		Model:    "deepseek-v4-flash",
@@ -420,7 +425,7 @@ func TestResolveClassifierProfileIgnoresNameCase(t *testing.T) {
 }
 
 func TestResolveClassifierProfile_MissingExplicitProfile(t *testing.T) {
-	cfg := config.DefaultConfig()
+	cfg := classifierTestConfig()
 	active := cfg.Profiles["gpt-4o"]
 	active.Safety.Classifier.Profile = "missing-mini"
 	cfg.Profiles["gpt-4o"] = active
@@ -429,4 +434,13 @@ func TestResolveClassifierProfile_MissingExplicitProfile(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error for missing classifier profile")
 	}
+}
+
+func classifierTestConfig() *config.Config {
+	cfg := config.DefaultConfig()
+	cfg.Profiles["gpt-4o"] = config.ProfileConfig{
+		Provider: "openai",
+		Model:    "gpt-4o",
+	}
+	return cfg
 }

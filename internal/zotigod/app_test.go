@@ -270,8 +270,11 @@ func (s *fakeDisplayItemSource) AppendItemIf(ctx context.Context, sessionID stri
 func createSession(t *testing.T, handler http.Handler) Session {
 	t.Helper()
 
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
 	}
@@ -285,6 +288,7 @@ func createSession(t *testing.T, handler http.Handler) Session {
 func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workDir string) Session {
 	t.Helper()
 
+	writeTestProfileConfig(t, workDir)
 	rec := httptest.NewRecorder()
 	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
@@ -298,13 +302,30 @@ func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workD
 	return session
 }
 
+func writeTestProfileConfig(t *testing.T, workDir string) {
+	t.Helper()
+
+	configPath := filepath.Join(workDir, config.ProjectConfig)
+	if _, err := os.Stat(configPath); err == nil {
+		return
+	} else if !os.IsNotExist(err) {
+		t.Fatalf("stat project config: %v", err)
+	}
+	const contents = "default_profile: test\nprofiles:\n  test:\n    provider: openai\n    model: test\n"
+	if err := os.WriteFile(configPath, []byte(contents), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+}
+
 func putStoredSession(t *testing.T, store zotigosession.Store, id string, workDir string) {
 	t.Helper()
+	writeTestProfileConfig(t, workDir)
 	now := time.Now().UTC()
 	if err := store.Put(context.Background(), &zotigosession.Session{
 		Metadata: zotigosession.Metadata{
 			ID:               id,
 			WorkingDirectory: workDir,
+			ProfileName:      "test",
 			CreatedAt:        now,
 			UpdatedAt:        now,
 		},
@@ -388,6 +409,9 @@ profiles:
 	if response.DefaultProfile != "project-high" {
 		t.Fatalf("expected default profile project-high, got %q", response.DefaultProfile)
 	}
+	if len(response.Profiles) != 2 {
+		t.Fatalf("expected only global and project profiles, got %#v", response.Profiles)
+	}
 	for i := 1; i < len(response.Profiles); i++ {
 		if response.Profiles[i-1].Name >= response.Profiles[i].Name {
 			t.Fatalf("expected profiles sorted by name, got %#v", response.Profiles)
@@ -416,6 +440,26 @@ profiles:
 		if strings.Contains(rec.Body.String(), forbidden) {
 			t.Fatalf("response leaked %q: %s", forbidden, rec.Body.String())
 		}
+	}
+}
+
+func TestProfilesReturnsEmptyWhenNoProfilesConfigured(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var response profilesResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profiles response: %v", err)
+	}
+	if response.DefaultProfile != "" || len(response.Profiles) != 0 {
+		t.Fatalf("expected empty effective profile config, got %#v", response)
 	}
 }
 
@@ -933,6 +977,8 @@ func TestSessionsCreateAndList(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
@@ -949,7 +995,8 @@ func TestSessionsCreateAndList(t *testing.T) {
 	}
 
 	rec = httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
 
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d", http.StatusCreated, rec.Code)
@@ -1064,6 +1111,7 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 	}
 	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"working_directory":%q}`, workDir)))
@@ -1227,9 +1275,12 @@ func TestSessionsCreateDoesNotRegisterWhenPersistenceFails(t *testing.T) {
 	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		store: unavailableSessionStore{err: errors.New("store unavailable")},
 	})
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
 	}
@@ -6023,10 +6074,13 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 	}
 	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 	createdIDs := make([]string, 0, 11)
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
+	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
 
 	for i := 0; i < 11; i++ {
 		rec := httptest.NewRecorder()
-		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("create %d: expected status %d, got %d", i, http.StatusCreated, rec.Code)
 		}

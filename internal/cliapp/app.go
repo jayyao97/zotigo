@@ -76,7 +76,7 @@ func Run(args []string) int {
 				fmt.Printf("Error creating config file: %v\n", err)
 				return 1
 			}
-			fmt.Println("Config created. Please edit the file to set your API key before running again.")
+			fmt.Println("Config created. Please add a profile, set default_profile, and configure its API key before running again.")
 			return 0
 		}
 	}
