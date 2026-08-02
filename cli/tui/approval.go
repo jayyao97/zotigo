@@ -32,6 +32,7 @@ func (m *Model) setPendingApprovals(actions []*agent.PendingAction) {
 	m.pendingApprovals = append([]*agent.PendingAction(nil), actions...)
 	m.approvalDecisions = make(map[string]bool, len(actions))
 	m.approvalItemChoice = 0
+	m.approvalContext = ""
 	m.pendingToolName = formatPendingActions(actions)
 }
 
@@ -87,6 +88,15 @@ func (m *Model) submitApprovalBatch(reason string) (*Model, tea.Cmd) {
 	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
 	m.thinking = true
 	m.turnStartTime = time.Now()
+	if request := m.spawnRequest; request != nil {
+		m.spawnRequest = nil
+		m.approvalContext = ""
+		cmd := func() tea.Msg {
+			request.resolve(results)
+			return spawnApprovalResolvedMsg{}
+		}
+		return m, tea.Batch(m.commitLine(approvalMsg), cmd)
+	}
 
 	cmd := func() tea.Msg {
 		ch, err := m.agent.ResolvePendingActions(m.ctx, deniedToolResultsFromTUI(results, m.pendingApprovals))

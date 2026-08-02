@@ -56,8 +56,11 @@ type Model struct {
 	approvalItemChoice int
 	pendingApprovals   []*agent.PendingAction
 	approvalDecisions  map[string]bool
+	approvalContext    string
 	pendingToolName    string
 	pendingToolArgs    string
+	spawnBroker        *SpawnApprovalBroker
+	spawnRequest       *spawnApprovalRequest
 	err                error
 	eventCh            <-chan protocol.Event
 	width              int
@@ -65,6 +68,8 @@ type Model struct {
 	initialPrinted     bool
 	kittyChecked       bool
 	autoApprove        bool
+	bypassPermissions  bool
+	resumeBypass       bool
 	streamFlushed      int // lines already committed to scrollback during streaming
 	turnStartTime      time.Time
 	displayTurnID      string
@@ -77,7 +82,15 @@ type streamReadyMsg <-chan protocol.Event
 type errMsg error
 type denialSettledMsg struct{}
 
-func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry) *Model {
+type ModelOption func(*Model)
+
+func WithSpawnApprovalBroker(broker *SpawnApprovalBroker) ModelOption {
+	return func(model *Model) {
+		model.spawnBroker = broker
+	}
+}
+
+func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry, opts ...ModelOption) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Zotigo..."
 	ta.Focus()
@@ -119,24 +132,53 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 		// a session inherits whatever policy was active. Without this
 		// sync, shift-tab would start at "off" while the agent was
 		// actually in Auto.
-		autoApprove: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
+		autoApprove:       ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
+		bypassPermissions: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyBypass,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&m)
+		}
 	}
 
-	// If the agent was saved in a paused state with pending actions,
-	// restore the approval UI so the user can approve/deny.
+	// A bypassed resume executes registered pending tools immediately. Normal
+	// policies restore the approval UI so the user can approve or deny them.
 	snap := ag.Snapshot()
 	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
-		m.approving = true
-		m.approvalChoice = 0
-		m.setPendingApprovals(snap.PendingActions)
 		m.restoreOpenDisplayTurnID()
+		if m.bypassPermissions {
+			m.resumeBypass = true
+			m.thinking = true
+			m.turnStartTime = time.Now()
+		} else {
+			m.approving = true
+			m.approvalChoice = 0
+			m.setPendingApprovals(snap.PendingActions)
+		}
 	}
 
 	return &m
 }
 
 func (m *Model) Init() tea.Cmd {
-	return textarea.Blink
+	cmds := []tea.Cmd{textarea.Blink}
+	if cmd := waitForSpawnApproval(m.spawnBroker); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
+	if !m.resumeBypass {
+		return tea.Batch(cmds...)
+	}
+	ch, err := m.agent.ExecuteBypassedPendingActions(m.ctx)
+	m.resumeBypass = false
+	if err != nil {
+		cmds = append(cmds, func() tea.Msg { return errMsg(err) })
+		return tea.Batch(cmds...)
+	}
+	resume := func() tea.Msg {
+		return streamReadyMsg(ch)
+	}
+	cmds = append(cmds, resume)
+	return tea.Batch(cmds...)
 }
 
 func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
@@ -203,6 +245,35 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case transcriptMsg:
 		m.appendTranscript(string(msg))
 		return m, nil
+
+	case spawnApprovalRequestMsg:
+		if msg.request == nil {
+			return m, waitForSpawnApproval(m.spawnBroker)
+		}
+		m.spawnRequest = msg.request
+		m.approving = true
+		m.approvalChoice = 0
+		m.setPendingApprovals(msg.request.request.Actions)
+		m.approvalContext = "Subagent " + msg.request.request.AgentName
+		return m, waitForSpawnApprovalCancellation(msg.request)
+
+	case spawnApprovalResolvedMsg:
+		return m, waitForSpawnApproval(m.spawnBroker)
+
+	case spawnApprovalCanceledMsg:
+		if m.spawnRequest != msg.request {
+			return m, nil
+		}
+		m.spawnRequest = nil
+		m.approving = false
+		m.approvalContext = ""
+		m.pendingApprovals = nil
+		m.approvalDecisions = nil
+		m.pendingToolName = ""
+		return m, tea.Batch(
+			m.commitLine(warningStyle.Render("⚠ ")+"Subagent approval expired or was canceled"),
+			waitForSpawnApproval(m.spawnBroker),
+		)
 
 	case tea.MouseWheelMsg:
 		if !m.viewportEnabled {
@@ -272,6 +343,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 
 		if keyStr == "shift+tab" {
+			m.bypassPermissions = false
 			m.autoApprove = !m.autoApprove
 			if m.autoApprove {
 				m.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)
@@ -298,12 +370,12 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case "enter":
 				switch m.approvalChoice {
 				case 0: // Accept
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.acceptCurrentApproval()
 					}
 					return m.submitApproval()
 				case 1: // Deny → back to input
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.denyCurrentApproval("")
 					}
 					return m.denyAndReturn("")
@@ -313,7 +385,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						return m, nil // empty text, do nothing
 					}
 					m.input.Reset()
-					if len(m.pendingApprovals) > 1 {
+					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
 						return m.denyCurrentApproval(v)
 					}
 					return m.denyAndReturn(v)
@@ -452,6 +524,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Batch(m.commitLine(userMsgStr), m.startRun(msg))
 		}
 	case streamReadyMsg:
+		m.resumeBypass = false
 		m.eventCh = msg
 		m.currentAsstMsg = ""
 		m.displayAsstContent = nil

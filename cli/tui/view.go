@@ -105,6 +105,9 @@ func (m *Model) liveView() string {
 }
 
 func (m *Model) writeApprovalView(sb *strings.Builder) {
+	if m.approvalContext != "" {
+		sb.WriteString(warningStyle.Render("⚠ ") + m.approvalContext + " requests approval\n")
+	}
 	if len(m.pendingApprovals) > 1 {
 		current := m.pendingApprovals[m.approvalItemChoice]
 		tc := current.ToolCall
@@ -156,8 +159,10 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 }
 
 func (m *Model) writeInputFooter(sb *strings.Builder) {
-	// Only show indicator when auto-approve is on
-	if m.autoApprove {
+	if m.bypassPermissions {
+		sb.WriteString(errorStyle.Render(">> BYPASS PERMISSIONS — safety checks disabled"))
+		sb.WriteString("\n")
+	} else if m.autoApprove {
 		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
 		sb.WriteString("\n")
 	}

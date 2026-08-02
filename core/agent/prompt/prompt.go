@@ -191,7 +191,7 @@ type UserContextOption func(*UserContextBuilder)
 // WithContext returns a UserContextOption that appends a lazy context section.
 func WithContext(tag string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
-		w.ContextSections = append(w.ContextSections, ContextSection{Key: tag, Tag: tag, Provider: provider})
+		w.ContextSections = append(w.ContextSections, ContextSection{Tag: tag, Provider: provider})
 	}
 }
 
@@ -200,7 +200,6 @@ func WithContext(tag string, provider func(PromptContext) string) UserContextOpt
 func WithAttributedContext(tag, attributes string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
 		w.ContextSections = append(w.ContextSections, ContextSection{
-			Key:        defaultContextSectionKey(tag, attributes),
 			Tag:        tag,
 			Attributes: attributes,
 			Provider:   provider,
@@ -365,7 +364,14 @@ func (w *UserContextBuilder) renderSections(
 	for _, section := range w.ContextSections {
 		key := strings.TrimSpace(section.Key)
 		if key == "" {
-			key = defaultContextSectionKey(section.Tag, section.Attributes)
+			baseKey := defaultContextSectionKey(section.Tag, section.Attributes)
+			key = baseKey
+			for occurrence := 2; ; occurrence++ {
+				if _, exists := seen[key]; !exists {
+					break
+				}
+				key = fmt.Sprintf("%s#%d", baseKey, occurrence)
+			}
 		}
 		if _, exists := seen[key]; exists {
 			return nil, UserContextState{}, fmt.Errorf("duplicate user context key %q", key)

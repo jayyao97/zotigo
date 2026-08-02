@@ -311,6 +311,31 @@ func TestUserContextBuilderBuildUpdate(t *testing.T) {
 	}
 }
 
+func TestUserContextBuilderLegacyDuplicateTagsGetStableKeys(t *testing.T) {
+	w := NewUserContextBuilder(
+		WithContext("note", func(_ PromptContext) string { return "first" }),
+		WithContext("note", func(_ PromptContext) string { return "second" }),
+	)
+
+	full, state, err := w.BuildUpdate(PromptContext{}, nil)
+	if err != nil {
+		t.Fatalf("BuildUpdate: %v", err)
+	}
+	if strings.Count(full, "<note>") != 2 {
+		t.Fatalf("expected both legacy sections, got %q", full)
+	}
+	if len(state.Sections) != 2 || state.Sections["note"] == "" || state.Sections["note#2"] == "" {
+		t.Fatalf("unexpected stable keys: %#v", state.Sections)
+	}
+	unchanged, nextState, err := w.BuildUpdate(PromptContext{}, &state)
+	if err != nil {
+		t.Fatalf("second BuildUpdate: %v", err)
+	}
+	if unchanged != "" || len(nextState.Sections) != 2 {
+		t.Fatalf("unchanged update = %q state=%#v", unchanged, nextState.Sections)
+	}
+}
+
 func TestUserContextBuilderTenTurnDynamicSequence(t *testing.T) {
 	values := []string{
 		"state-1", "state-1", "state-2", "state-2", "state-3",

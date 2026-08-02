@@ -41,6 +41,9 @@ type PendingAction struct {
 type ApprovalPolicy string
 
 const (
-	ApprovalPolicyAuto   ApprovalPolicy = "auto"   // Auto-execute everything
-	ApprovalPolicyManual ApprovalPolicy = "manual" // Ask for everything
+	ApprovalPolicyAuto   ApprovalPolicy = "auto"   // Apply tool policy and classifier rules
+	ApprovalPolicyManual ApprovalPolicy = "manual" // Ask before every non-safe action
+	// ApprovalPolicyBypass skips tool safety classification, classifier calls,
+	// snapshots, and user approval for every registered tool.
+	ApprovalPolicyBypass ApprovalPolicy = "bypass_permissions"
 )

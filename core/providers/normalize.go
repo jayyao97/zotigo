@@ -39,6 +39,10 @@ func MergeConsecutiveUserMessages(msgs []protocol.Message) []protocol.Message {
 			merged = append(merged, prev.Content...)
 			merged = append(merged, m.Content...)
 			prev.Content = merged
+			// A merged message is contextual only when every source message is.
+			// Once real user input is included, downstream protocol helpers must
+			// continue to treat the combined message as user-authored content.
+			prev.Contextual = prev.Contextual && m.Contextual
 			out[len(out)-1] = prev
 			continue
 		}

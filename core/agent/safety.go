@@ -24,6 +24,7 @@ const (
 	SafetyDecisionSourceHardRule     SafetyDecisionSource = "hard_rule"
 	SafetyDecisionSourceClassifier   SafetyDecisionSource = "classifier"
 	SafetyDecisionSourceUserApproval SafetyDecisionSource = "user_approval"
+	SafetyDecisionSourceBypass       SafetyDecisionSource = "bypass"
 )
 
 // SafetyClassifierDecision is the classifier output shape.

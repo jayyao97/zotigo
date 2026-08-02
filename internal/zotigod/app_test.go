@@ -440,6 +440,30 @@ func TestProfilesRejectsMissingDefaultProfile(t *testing.T) {
 	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", `default profile "missing" not found`)
 }
 
+func TestProfilesReturnsCanonicalDefaultProfileName(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	projectDir := t.TempDir()
+	projectConfig := "default_profile: deepseek-v4-Flash\nprofiles:\n  deepseek-v4-Flash:\n    provider: deepseek\n    model: deepseek-v4-flash\n"
+	if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+
+	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
+	rec := httptest.NewRecorder()
+	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	var response profilesResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &response); err != nil {
+		t.Fatalf("decode profiles response: %v", err)
+	}
+	if response.DefaultProfile != "deepseek-v4-flash" {
+		t.Fatalf("default profile = %q, want canonical lower-case key", response.DefaultProfile)
+	}
+}
+
 func TestProfilesRejectsUnsupportedMethod(t *testing.T) {
 	rec := httptest.NewRecorder()
 	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/config/profiles", nil))
@@ -474,7 +498,7 @@ func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
 	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-offline-profile/profile", strings.NewReader(`{"profile":"new"}`)))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-offline-profile/profile", strings.NewReader(`{"profile":"NEW"}`)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
@@ -820,7 +844,7 @@ func TestSessionProfileChangeQueuesCommandForRunningWorker(t *testing.T) {
 	defer worker.Close()
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/"+created.ID+"/profile", strings.NewReader(`{"profile":"new"}`)))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/"+created.ID+"/profile", strings.NewReader(`{"profile":"NEW"}`)))
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
 	}

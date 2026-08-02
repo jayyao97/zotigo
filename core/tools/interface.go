@@ -28,7 +28,8 @@ const (
 	// pattern (e.g. shell's ShellPolicy), or the tool otherwise has
 	// strong reason for concern.
 	LevelHigh
-	// LevelBlocked: hard refuse; never execute under any policy.
+	// LevelBlocked: hard refuse under Manual and Auto. The explicit
+	// bypass-permissions policy skips classification entirely.
 	LevelBlocked
 )
 

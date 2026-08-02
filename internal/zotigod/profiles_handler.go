@@ -64,7 +64,8 @@ func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
 		return
 	}
-	if _, _, err := appConfig.ResolveProfile(""); err != nil {
+	defaultProfileName, _, err := appConfig.ResolveProfile("")
+	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "default "+err.Error())
 		return
 	}
@@ -83,7 +84,7 @@ func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 	})
 
 	writeAPIJSON(w, http.StatusOK, profilesResponse{
-		DefaultProfile: appConfig.DefaultProfile,
+		DefaultProfile: defaultProfileName,
 		Profiles:       profiles,
 	})
 }
@@ -125,15 +126,16 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	if workingDirectory == "" {
 		workingDirectory = h.sessionWorkingDirectory(r.Context(), id)
 	}
-	exists, err := profileExistsForDirectory(workingDirectory, target)
+	canonicalTarget, found, err := resolveProfileForDirectory(workingDirectory, target)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
 		return
 	}
-	if !exists {
+	if !found {
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("profile %q not found", target))
 		return
 	}
+	target = canonicalTarget
 
 	applyWithoutWorker := !live || session.State == SessionStateCreated ||
 		(session.State == SessionStateRunning && !h.workers.Has(id))
@@ -181,13 +183,16 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	writeAPIJSON(w, http.StatusAccepted, changeProfileResponse{Profile: target, Status: "pending", CommandID: item.ID})
 }
 
-func profileExistsForDirectory(workingDirectory string, profileName string) (bool, error) {
+func resolveProfileForDirectory(workingDirectory string, profileName string) (string, bool, error) {
 	appConfig, err := config.NewManager().LoadForDir(workingDirectory)
 	if err != nil {
-		return false, err
+		return "", false, err
 	}
-	_, _, err = appConfig.ResolveProfile(profileName)
-	return err == nil, nil
+	canonicalName, _, err := appConfig.ResolveProfile(profileName)
+	if err != nil {
+		return "", false, nil
+	}
+	return canonicalName, true, nil
 }
 
 func (h *handler) applyStoredProfile(ctx context.Context, id string, profileName string) error {

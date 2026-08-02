@@ -397,6 +397,28 @@ func TestResolveClassifierProfile_UsesExplicitProfile(t *testing.T) {
 	}
 }
 
+func TestResolveClassifierProfileIgnoresNameCase(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.Profiles["deepseek-v4-flash"] = config.ProfileConfig{
+		Provider: "deepseek",
+		Model:    "deepseek-v4-flash",
+	}
+	active := cfg.Profiles["gpt-4o"]
+	active.Safety.Classifier.Profile = "deepseek-v4-Flash"
+	cfg.Profiles["gpt-4o"] = active
+
+	name, profile, err := cfg.ResolveClassifierProfile("GPT-4O")
+	if err != nil {
+		t.Fatalf("ResolveClassifierProfile error: %v", err)
+	}
+	if name != "deepseek-v4-flash" {
+		t.Fatalf("resolved name = %q, want canonical map key", name)
+	}
+	if profile.Provider != "deepseek" {
+		t.Fatalf("provider = %q, want deepseek", profile.Provider)
+	}
+}
+
 func TestResolveClassifierProfile_MissingExplicitProfile(t *testing.T) {
 	cfg := config.DefaultConfig()
 	active := cfg.Profiles["gpt-4o"]

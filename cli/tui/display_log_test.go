@@ -210,6 +210,36 @@ func TestDenyAndReturnWritesInterruptedTurn(t *testing.T) {
 	}
 }
 
+func TestBypassResumeRestoresPausedDisplayTurn(t *testing.T) {
+	seed, _ := newDisplayLogTestModel(t)
+	seed.appendTurnPaused()
+	ag := newDisplayLogTestAgent(t)
+	ag.SetApprovalPolicy(agent.ApprovalPolicyBypass)
+	ag.Restore(agent.Snapshot{
+		State: agent.StatePaused,
+		PendingActions: []*agent.PendingAction{
+			{ToolCallID: "call-1", Name: "read_file"},
+		},
+	})
+
+	resumed := NewModel(ag, seed.sessionMgr, seed.sessionID, nil)
+	if resumed.displayTurnID != seed.displayTurnID {
+		t.Fatalf("display turn ID = %q, want resumed paused turn %q", resumed.displayTurnID, seed.displayTurnID)
+	}
+	if !resumed.resumeBypass || resumed.approving {
+		t.Fatalf("unexpected bypass resume state: resume=%v approving=%v", resumed.resumeBypass, resumed.approving)
+	}
+	resumed.appendTurnCompleted(protocol.FinishReasonStop)
+	items := loadDisplayLog(t, resumed)
+	if got := lastOpenDisplayTurnID(items); got != "" {
+		t.Fatalf("bypass completion left display turn %q open", got)
+	}
+	last := items[len(items)-1]
+	if last.Turn == nil || last.Turn.ID != seed.displayTurnID {
+		t.Fatalf("completion turn = %#v, want ID %q", last.Turn, seed.displayTurnID)
+	}
+}
+
 func TestAppendTurnFailedFlushesVisibleAssistantContent(t *testing.T) {
 	model, _ := newDisplayLogTestModel(t)
 	model.displayAsstContent = []session.DisplayContentPart{

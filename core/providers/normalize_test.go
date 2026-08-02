@@ -107,6 +107,43 @@ func TestMergeConsecutiveUserMessages_DoesNotMutateInput(t *testing.T) {
 	}
 }
 
+func TestMergeConsecutiveUserMessages_ContextualOnlyWhenAllInputsAreContextual(t *testing.T) {
+	tests := []struct {
+		name string
+		in   []protocol.Message
+		want bool
+	}{
+		{
+			name: "context followed by real user input",
+			in: []protocol.Message{
+				protocol.NewContextualUserMessage("context"),
+				protocol.NewUserMessage("question"),
+			},
+			want: false,
+		},
+		{
+			name: "all contextual",
+			in: []protocol.Message{
+				protocol.NewContextualUserMessage("first"),
+				protocol.NewContextualUserMessage("second"),
+			},
+			want: true,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := providers.MergeConsecutiveUserMessages(test.in)
+			if len(got) != 1 {
+				t.Fatalf("merged messages = %d, want 1", len(got))
+			}
+			if got[0].Contextual != test.want {
+				t.Fatalf("Contextual = %v, want %v", got[0].Contextual, test.want)
+			}
+		})
+	}
+}
+
 func userText(s string) protocol.Message {
 	return protocol.Message{Role: protocol.RoleUser, Content: textParts(s)}
 }

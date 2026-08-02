@@ -22,6 +22,7 @@ type scriptedProvider struct {
 	name      string
 	scripts   [][]protocol.Event
 	errs      []error
+	choices   []providers.ToolChoice
 	callCount atomic.Int32
 }
 
@@ -29,6 +30,7 @@ func (p *scriptedProvider) Name() string { return p.name }
 
 func (p *scriptedProvider) StreamChat(ctx context.Context, messages []protocol.Message, tls []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	idx := int(p.callCount.Add(1) - 1)
+	p.choices = append(p.choices, providers.ResolveOptions(opts).ToolChoice)
 	if idx < len(p.errs) && p.errs[idx] != nil {
 		return nil, p.errs[idx]
 	}
@@ -43,6 +45,94 @@ func (p *scriptedProvider) StreamChat(ctx context.Context, messages []protocol.M
 		}
 	}()
 	return ch, nil
+}
+
+func TestClassifier_FallsBackWhenThinkingRejectsForcedToolChoice(t *testing.T) {
+	prov := &scriptedProvider{
+		name: "deepseek-anthropic-compatible",
+		scripts: [][]protocol.Event{
+			{protocol.NewErrorEvent(errors.New("400 Bad Request: Thinking mode does not support this tool_choice"))},
+			{
+				protocol.NewTextDeltaEvent(`{"decision":"allow","reason":"read only","requires_snapshot":false}`),
+				protocol.NewFinishEvent(protocol.FinishReasonStop),
+			},
+			{
+				protocol.NewTextDeltaEvent(`{"decision":"deny","reason":"blocked","requires_snapshot":false}`),
+				protocol.NewFinishEvent(protocol.FinishReasonStop),
+			},
+		},
+	}
+	c := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
+
+	resp, err := c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "read_file", RiskLevel: "safe"})
+	if err != nil {
+		t.Fatalf("classify: %v", err)
+	}
+	if resp.Decision != SafetyClassifierDecisionAllow {
+		t.Fatalf("decision = %s, want allow", resp.Decision)
+	}
+	if len(prov.choices) != 2 {
+		t.Fatalf("tool choices = %d, want 2", len(prov.choices))
+	}
+	if prov.choices[0].Mode != providers.ToolChoiceSpecific {
+		t.Fatalf("first tool choice = %v, want specific", prov.choices[0].Mode)
+	}
+	if prov.choices[1].Mode != providers.ToolChoiceAuto {
+		t.Fatalf("fallback tool choice = %v, want auto", prov.choices[1].Mode)
+	}
+
+	resp, err = c.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell", RiskLevel: "high"})
+	if err != nil {
+		t.Fatalf("second classify: %v", err)
+	}
+	if resp.Decision != SafetyClassifierDecisionDeny {
+		t.Fatalf("second decision = %s, want deny", resp.Decision)
+	}
+	if len(prov.choices) != 3 {
+		t.Fatalf("tool choices after second classify = %d, want 3", len(prov.choices))
+	}
+	if prov.choices[2].Mode != providers.ToolChoiceAuto {
+		t.Fatalf("remembered fallback tool choice = %v, want auto", prov.choices[2].Mode)
+	}
+}
+
+func TestForcedToolChoiceUnsupported(t *testing.T) {
+	if !forcedToolChoiceUnsupported(errors.New("Thinking mode does not support this tool_choice")) {
+		t.Fatal("expected DeepSeek compatibility error to trigger fallback")
+	}
+	if forcedToolChoiceUnsupported(errors.New("upstream 502")) {
+		t.Fatal("generic transport errors must keep forced tool choice on retry")
+	}
+}
+
+func TestClassifierCompatibilityFallbackDoesNotConsumeTransportRetry(t *testing.T) {
+	prov := &scriptedProvider{
+		name: "deepseek-after-transient-error",
+		errs: []error{errors.New("temporary upstream failure")},
+		scripts: [][]protocol.Event{
+			nil,
+			{protocol.NewErrorEvent(errors.New("Thinking mode does not support this tool_choice"))},
+			{
+				protocol.NewTextDeltaEvent(`{"decision":"allow","reason":"read only","requires_snapshot":false}`),
+				protocol.NewFinishEvent(protocol.FinishReasonStop),
+			},
+		},
+	}
+	classifier := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
+
+	resp, err := classifier.Classify(context.Background(), SafetyClassifierRequest{ToolName: "read_file", RiskLevel: "safe"})
+	if err != nil {
+		t.Fatalf("Classify: %v", err)
+	}
+	if resp.Decision != SafetyClassifierDecisionAllow {
+		t.Fatalf("decision = %q, want allow", resp.Decision)
+	}
+	if got := prov.callCount.Load(); got != 3 {
+		t.Fatalf("provider calls = %d, want transient + compatibility + fallback", got)
+	}
+	if prov.choices[2].Mode != providers.ToolChoiceAuto {
+		t.Fatalf("final tool choice = %v, want auto", prov.choices[2].Mode)
+	}
 }
 
 // newToolCallEvent returns a tool_call_end event carrying a decision

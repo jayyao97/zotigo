@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
+	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
@@ -52,10 +53,19 @@ func Run(args []string) int {
 
 	resumeFlag := fs.Bool("resume", false, "Resume a previous session")
 	rFlag := fs.Bool("r", false, "Resume a previous session (shorthand)")
+	bypassPermissions := fs.Bool(
+		"dangerously-skip-permissions",
+		false,
+		"Execute all registered tools without safety checks or approval",
+	)
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
 	doResume := *resumeFlag || *rFlag
+	approvalPolicy := agent.ApprovalPolicyAuto
+	if *bypassPermissions {
+		approvalPolicy = agent.ApprovalPolicyBypass
+	}
 
 	cm := config.NewManager()
 	configPath, err := cm.GetConfigPath()
@@ -192,7 +202,7 @@ func Run(args []string) int {
 		Executor:           exec,
 		PromptBuilder:      pb,
 		UserContextBuilder: ucb,
-		ApprovalPolicy:     agent.ApprovalPolicyAuto,
+		ApprovalPolicy:     approvalPolicy,
 		TranscriptDir:      transcriptDir,
 		Observer:           observer,
 		// ToolSpan goes outermost so it observes every tool call,
@@ -221,12 +231,14 @@ func Run(args []string) int {
 
 	lspManager := lsp.NewManager(cwd)
 	defer func() { _ = lspManager.StopAll() }()
+	spawnApprovalBroker := tui.NewSpawnApprovalBroker()
 	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:      cfg,
-		Profile:     profile,
-		ShellPolicy: builtin.DefaultShellPolicy(),
-		LSPManager:  lspManager,
-		Spawn:       true,
+		Config:                 cfg,
+		Profile:                profile,
+		ShellPolicy:            builtin.DefaultShellPolicy(),
+		LSPManager:             lspManager,
+		Spawn:                  true,
+		SpawnApprovalRequester: spawnApprovalBroker,
 	}); err != nil {
 		fmt.Println("Error registering tools:", err)
 		return 1
@@ -236,7 +248,7 @@ func Run(args []string) int {
 	cmdbuiltin.RegisterAll(cmdRegistry)
 
 	p := tea.NewProgram(
-		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry),
+		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry, tui.WithSpawnApprovalBroker(spawnApprovalBroker)),
 		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
 	)
 	if _, err := p.Run(); err != nil {
