@@ -254,6 +254,8 @@ type handler struct {
 	launcher             workerLauncher
 	workerConnectTimeout time.Duration
 	sessionOps           *sessionOperationLocks
+	titleSuggestion      titleSuggestionFunc
+	titleTimeout         time.Duration
 }
 
 type createSessionRequest struct {
@@ -348,6 +350,8 @@ type handlerOptions struct {
 	workerConnectTimeout time.Duration
 	store                zotigosession.Store
 	sessionOps           *sessionOperationLocks
+	titleSuggestion      titleSuggestionFunc
+	titleTimeout         time.Duration
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -427,6 +431,12 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.sessionOps == nil {
 		options.sessionOps = newSessionOperationLocks()
 	}
+	if options.titleSuggestion == nil {
+		options.titleSuggestion = generateTitleSuggestion
+	}
+	if options.titleTimeout == 0 {
+		options.titleTimeout = defaultTitleSuggestionTimeout
+	}
 	handler := &handler{
 		registry:             registry,
 		approvals:            newApprovalRegistry(),
@@ -436,6 +446,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
 		sessionOps:           options.sessionOps,
+		titleSuggestion:      options.titleSuggestion,
+		titleTimeout:         options.titleTimeout,
 	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
@@ -635,6 +647,8 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionStart(w, r, id)
 	case "steering":
 		h.handleSessionSteering(w, r, id)
+	case "title-suggestion":
+		h.handleSessionTitleSuggestion(w, r, id)
 	default:
 		if imageName, ok := strings.CutPrefix(action, "images/"); ok {
 			h.handleSessionImage(w, r, id, imageName)

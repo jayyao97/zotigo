@@ -14,6 +14,7 @@ state and display history.
 - `PUT /sessions/{id}/profile`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
+- `POST /sessions/{id}/title-suggestion`
 - `POST /sessions/{id}/messages`
 - `POST /sessions/{id}/pause`
 - `POST /sessions/{id}/steering`
@@ -409,6 +410,44 @@ Status codes:
 - `400`: invalid pagination parameters.
 - `404`: session not found.
 - `405`: method not allowed.
+
+## Generate a conversation title suggestion
+
+`POST /sessions/{id}/title-suggestion` generates a short title from the first
+successfully completed turn. The request has no body. Zotigod reads the first
+`user_message` associated with that turn and the last visible
+`assistant_message` before its `turn_completed` marker from the durable display
+log. Failed and interrupted turns are skipped.
+
+Response data:
+
+```json
+{
+  "title": "修复 DeepSeek Safety 配置"
+}
+```
+
+The endpoint uses the session's effective profile for a separate, tool-free
+provider request with low reasoning effort. It does not call the main Agent or
+append anything to `Agent.History`, `AgentSnapshot`, or the display log. It also
+does not start a worker, so a stored completed session can generate a suggestion
+while remaining offline.
+
+Only text content from the selected successfully completed turn is used.
+Reasoning, tool calls, tool results, steering, later turns, and dynamic user
+context are excluded. For an image-only prompt, the final assistant text may
+provide the title source.
+
+Status codes:
+
+- `200`: title suggestion generated.
+- `404`: session not found.
+- `405`: method not allowed.
+- `409`: no turn has completed successfully, or the first successfully
+  completed turn has no usable text.
+- `500`: session, display log, or effective configuration could not be read.
+- `502`: provider construction, streaming, or output validation failed.
+- `504`: title generation exceeded 15 seconds.
 
 ## Submit, pause, and steering
 
