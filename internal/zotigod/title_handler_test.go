@@ -208,7 +208,7 @@ func TestSessionTitleSuggestionErrors(t *testing.T) {
 		handler := newHandler(registry, source, handlerOptions{})
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/title-suggestion", nil))
-		assertAPIError(t, rec, http.StatusConflict, "conflict", "has not completed")
+		assertAPIError(t, rec, http.StatusConflict, "conflict", "no turn has completed")
 	})
 
 	t.Run("timeout", func(t *testing.T) {
