@@ -295,6 +295,14 @@ func Run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "[zotigod] ", log.LstdFlags)
+	configPath, created, err := config.NewManager().EnsureGlobalConfig()
+	if err != nil {
+		logger.Printf("Config initialization failed: %v", err)
+		return 1
+	}
+	if created {
+		logger.Printf("Created default config template at %s. Add a profile, set default_profile, and configure its API key before creating sessions.", configPath)
+	}
 	launcher, err := newProcessWorkerLauncher("http://"+*addr, logger)
 	if err != nil {
 		logger.Printf("Worker launcher disabled: %v", err)

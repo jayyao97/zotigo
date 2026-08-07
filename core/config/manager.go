@@ -1,6 +1,7 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -141,21 +142,45 @@ func (m *Manager) Save(cfg *Config) error {
 	}
 
 	filePath := filepath.Join(configDir, ConfigFileName)
-
-	vSave := viper.New()
-	vSave.SetConfigType("yaml")
-
-	vSave.Set("default_profile", cfg.DefaultProfile)
-	vSave.Set("profiles", cfg.Profiles)
-	vSave.Set("security", cfg.Security)
-	vSave.Set("ui", cfg.UI)
-	vSave.Set("tools", cfg.Tools)
-
-	if err := vSave.WriteConfigAs(filePath); err != nil {
+	if err := configWriter(cfg).WriteConfigAs(filePath); err != nil {
 		return fmt.Errorf("failed to write config file: %w", err)
 	}
 
 	return nil
+}
+
+// EnsureGlobalConfig creates the default global config only when it is absent.
+// The exclusive file creation makes concurrent calls safe without overwriting
+// a config created by another process.
+func (m *Manager) EnsureGlobalConfig() (path string, created bool, err error) {
+	path, err = m.GetConfigPath()
+	if err != nil {
+		return "", false, fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return path, false, fmt.Errorf("failed to create config directory: %w", err)
+	}
+
+	err = configWriter(DefaultConfig()).SafeWriteConfigAs(path)
+	if err == nil {
+		return path, true, nil
+	}
+	var alreadyExists viper.ConfigFileAlreadyExistsError
+	if errors.As(err, &alreadyExists) || os.IsExist(err) {
+		return path, false, nil
+	}
+	return path, false, fmt.Errorf("failed to write config file: %w", err)
+}
+
+func configWriter(cfg *Config) *viper.Viper {
+	writer := viper.New()
+	writer.SetConfigType("yaml")
+	writer.Set("default_profile", cfg.DefaultProfile)
+	writer.Set("profiles", cfg.Profiles)
+	writer.Set("security", cfg.Security)
+	writer.Set("ui", cfg.UI)
+	writer.Set("tools", cfg.Tools)
+	return writer
 }
 
 func (m *Manager) GetConfigPath() (string, error) {
