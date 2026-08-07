@@ -53,9 +53,10 @@ type Session struct {
 }
 
 var (
-	errSessionNotFound          = errors.New("session not found")
-	errInvalidSessionTransition = errors.New("invalid session state transition")
-	errSessionProfileNotFound   = errors.New("session profile not found")
+	errSessionNotFound               = errors.New("session not found")
+	errInvalidSessionTransition      = errors.New("invalid session state transition")
+	errSessionProfileNotFound        = errors.New("session profile not found")
+	errWorkerDisconnectedBeforeReady = errors.New("worker disconnected before becoming ready")
 )
 
 type sessionRegistry struct {
@@ -211,6 +212,15 @@ func (r *sessionRegistry) FailStarting(id string, message string) (Session, erro
 		session.State = SessionStateFailed
 		session.EndedAt = &now
 		session.Error = message
+	})
+}
+
+func (r *sessionRegistry) ResetStarting(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
+		session.State = SessionStateCreated
+		session.StartedAt = nil
+		session.EndedAt = nil
+		session.Error = ""
 	})
 }
 
@@ -457,6 +467,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 	}
+	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
@@ -769,65 +780,50 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 }
 
 func (h *handler) launchWorkerInBackground(id string) {
-	launchCtx := context.Background()
-	cancel := func() {}
+	launchCtx, cancel := context.WithCancel(context.Background())
 	var watchdog *time.Timer
 	if h.workerConnectTimeout > 0 {
-		launchCtx, cancel = context.WithTimeout(launchCtx, h.workerConnectTimeout)
 		watchdog = time.AfterFunc(h.workerConnectTimeout, func() {
-			cancel()
 			unlock := h.sessionOps.lock(id)
-			defer unlock()
 			if !h.workers.Has(id) {
 				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+				cancel()
 			}
+			unlock()
 		})
 	}
 	go func() {
 		defer cancel()
 		if err := h.launchWorker(launchCtx, id); err != nil {
-			if watchdog != nil && !watchdog.Stop() {
-				return
+			if watchdog != nil {
+				watchdog.Stop()
 			}
 			unlock := h.sessionOps.lock(id)
 			defer unlock()
-			if errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
-				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
-			} else {
-				_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
-			}
+			_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
 			return
 		}
-		if err := h.waitForRunningWorker(launchCtx, id); err != nil && errors.Is(launchCtx.Err(), context.DeadlineExceeded) {
-			unlock := h.sessionOps.lock(id)
-			defer unlock()
-			if !h.workers.Has(id) {
-				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
-			}
-		} else if watchdog != nil {
+		_ = h.waitForRunningWorker(launchCtx, id)
+		if watchdog != nil {
 			watchdog.Stop()
 		}
 	}()
 }
 
 func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
-	waitCtx := ctx
-	cancel := func() {}
-	if h.workerConnectTimeout > 0 {
-		waitCtx, cancel = context.WithTimeout(ctx, h.workerConnectTimeout)
-	}
-	defer cancel()
-
 	for {
 		session, ok, changed := h.registry.Watch(id)
 		if !ok {
 			return errSessionNotFound
 		}
 		switch session.State {
+		case SessionStateCreated:
+			return errWorkerDisconnectedBeforeReady
 		case SessionStateRunning:
 			if h.workers.Has(id) {
 				return nil
 			}
+			return errWorkerDisconnectedBeforeReady
 		case SessionStateFailed:
 			if session.Error == errWorkerConnectTimeout.Error() {
 				return errWorkerConnectTimeout
@@ -839,16 +835,8 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 		}
 
 		select {
-		case <-waitCtx.Done():
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			unlock := h.sessionOps.lock(id)
-			if !h.workers.Has(id) {
-				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
-			}
-			unlock()
-			return errWorkerConnectTimeout
+		case <-ctx.Done():
+			return ctx.Err()
 		case <-changed:
 		}
 	}
@@ -940,6 +928,8 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "invalid session state transition")
 	case errors.Is(err, errWorkerConnectTimeout):
 		writeAPIError(w, http.StatusServiceUnavailable, errWorkerConnectTimeout.Error())
+	case errors.Is(err, errWorkerDisconnectedBeforeReady):
+		writeAPIError(w, http.StatusServiceUnavailable, errWorkerDisconnectedBeforeReady.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errSessionProfileNotFound):
@@ -1011,8 +1001,33 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	session, err := h.registry.MarkRunning(id)
-	h.writeTransition(w, session, err)
+
+	unlock := h.sessionOps.lock(id)
+	defer unlock()
+	session, ok := h.registry.Get(id)
+	if !ok {
+		h.writeTransition(w, Session{}, errSessionNotFound)
+		return
+	}
+	if !h.workers.Has(id) {
+		writeAPIError(w, http.StatusConflict, "worker ready requires an active connection")
+		return
+	}
+	switch session.State {
+	case SessionStateStarting:
+		session, err := h.registry.MarkRunning(id)
+		h.writeTransition(w, session, err)
+	case SessionStateRunning:
+		writeAPIJSON(w, http.StatusOK, session)
+	default:
+		h.writeTransition(w, Session{}, errInvalidSessionTransition)
+	}
+}
+
+func (h *handler) handleWorkerDisconnect(id string) {
+	unlock := h.sessionOps.lock(id)
+	defer unlock()
+	_, _ = h.registry.ResetStarting(id)
 }
 
 func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id string) {

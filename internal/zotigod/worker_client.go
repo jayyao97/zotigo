@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
 	"github.com/jayyao97/zotigo/core/middleware"
@@ -39,6 +41,8 @@ import (
 
 const workerHTTPTimeout = 10 * time.Second
 
+const workerDialErrorBodyLimit = 4 * 1024
+
 const (
 	defaultWorkerClientPingInterval = 15 * time.Second
 	defaultWorkerClientPongWait     = 45 * time.Second
@@ -51,6 +55,7 @@ type workerClientConfig struct {
 }
 
 func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr error) {
+	bootStarted := time.Now()
 	if strings.TrimSpace(cfg.SessionID) == "" {
 		return fmt.Errorf("session_id is required")
 	}
@@ -59,21 +64,28 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		return fmt.Errorf("daemon_url is required")
 	}
 
+	stepStarted := time.Now()
 	store, err := zotigosession.NewFileStore("")
 	if err != nil {
 		return fmt.Errorf("open session store: %w", err)
 	}
+	logWorkerBootStep(cfg.SessionID, "session_store", stepStarted, bootStarted)
+	stepStarted = time.Now()
 	unlock, err := acquireWorkerSessionLock(ctx, store, cfg.SessionID)
 	if err != nil {
 		_ = store.Close()
 		return err
 	}
+	logWorkerBootStep(cfg.SessionID, "session_lock", stepStarted, bootStarted)
 	var runtime *workerRuntime
 	var conn *websocket.Conn
 	stopKeepalive := func() {}
 	var runErr error
 	httpClient := &http.Client{Timeout: workerHTTPTimeout}
 	defer func() {
+		if runErr == nil {
+			runErr = returnErr
+		}
 		stopKeepalive()
 		if runtime != nil {
 			runtime.Close()
@@ -85,17 +97,32 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = wrapped
 			}
 		}
-		if conn != nil {
-			_ = conn.Close()
-		}
 		if runErr != nil && !isExpectedWorkerClose(runErr) {
 			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-			defer cancel()
 			_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, runErr)
+			cancel()
+		}
+		if conn != nil {
+			_ = conn.Close()
 		}
 		_ = store.Close()
 	}()
 
+	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID)
+	if err != nil {
+		return err
+	}
+	stepStarted = time.Now()
+	var resp *http.Response
+	conn, resp, err = websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	if err != nil {
+		return fmt.Errorf("connect worker websocket: %w", workerWebSocketDialError(err, resp))
+	}
+	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
+	stopKeepalive = startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
+	commandCh, readErrCh := readWorkerCommands(conn)
+
+	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:  cfg.SessionID,
 		DaemonURL:  daemonURL,
@@ -105,7 +132,9 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if err != nil {
 		return err
 	}
+	logWorkerBootStep(cfg.SessionID, "runtime", stepStarted, bootStarted)
 
+	stepStarted = time.Now()
 	cursor, err := loadWorkerCommandCursor(ctx, store, cfg.SessionID)
 	if err != nil {
 		return err
@@ -114,18 +143,20 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if err != nil {
 		return err
 	}
-
-	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID)
-	if err != nil {
+	logWorkerBootStep(cfg.SessionID, "command_replay", stepStarted, bootStarted)
+	select {
+	case err := <-readErrCh:
+		runErr = err
 		return err
+	default:
 	}
-	conn, _, err = websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
-	if err != nil {
-		return fmt.Errorf("connect worker websocket: %w", err)
-	}
-	stopKeepalive = startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 
-	commandCh, readErrCh := readWorkerCommands(conn)
+	stepStarted = time.Now()
+	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID); err != nil {
+		return fmt.Errorf("report worker ready: %w", err)
+	}
+	logWorkerBootStep(cfg.SessionID, "ready", stepStarted, bootStarted)
+
 	for {
 		select {
 		case err := <-runtime.fatalCh:
@@ -223,6 +254,7 @@ type workerRuntime struct {
 }
 
 func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRuntime, error) {
+	stepStarted := time.Now()
 	cwd, err := os.Getwd()
 	if err != nil {
 		return nil, fmt.Errorf("resolve workdir: %w", err)
@@ -231,10 +263,12 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, err
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "ensure_session", stepStarted)
 	if strings.TrimSpace(sess.WorkingDirectory) != "" {
 		cwd = sess.WorkingDirectory
 	}
 
+	stepStarted = time.Now()
 	cm := config.NewManager()
 	appConfig, err := cm.LoadForDir(cwd)
 	if err != nil {
@@ -244,18 +278,23 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, err
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "config", stepStarted)
 
+	stepStarted = time.Now()
 	localExec, err := executor.NewLocalExecutor(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create executor: %w", err)
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "executor", stepStarted)
 
 	readTracker := tools.NewReadTracker(cwd)
+	stepStarted = time.Now()
 	skills, err := wiring.NewSkillManager(cwd)
 	if err != nil {
 		_ = localExec.Close()
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "skills", stepStarted)
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 	observer := wiring.NewObserver(appConfig.Observability, cfg.SessionID, map[string]any{
@@ -264,6 +303,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		"worker":         true,
 	})
 
+	stepStarted = time.Now()
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
 		Config:      appConfig,
 		ProfileName: profileName,
@@ -290,9 +330,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "agent", stepStarted)
 	agent.WithSkillManager(skills)(ag)
 	ag.Restore(sess.AgentSnapshot)
 
+	stepStarted = time.Now()
 	lspManager := lsp.NewManager(cwd)
 	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
 		Config:      appConfig,
@@ -306,6 +348,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
+	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
@@ -896,6 +939,47 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 		body.Error = err.Error()
 	}
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/finish", body)
+}
+
+func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string) error {
+	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", struct{}{})
+}
+
+func workerWebSocketDialError(dialErr error, resp *http.Response) error {
+	if resp == nil {
+		return dialErr
+	}
+	defer func() { _ = resp.Body.Close() }()
+	body, readErr := io.ReadAll(io.LimitReader(resp.Body, workerDialErrorBodyLimit+1))
+	if readErr != nil {
+		return fmt.Errorf("%s (read response body: %v): %w", resp.Status, readErr, dialErr)
+	}
+	truncated := len(body) > workerDialErrorBodyLimit
+	if truncated {
+		body = body[:workerDialErrorBodyLimit]
+	}
+	text := strings.TrimSpace(string(body))
+	if text == "" {
+		return fmt.Errorf("%s: %w", resp.Status, dialErr)
+	}
+	if truncated {
+		text += "…"
+	}
+	return fmt.Errorf("%s body=%q: %w", resp.Status, text, dialErr)
+}
+
+func logWorkerBootStep(sessionID string, step string, started time.Time, bootStarted time.Time) {
+	debug.Logf(
+		"worker boot session=%s step=%s elapsed_ms=%d total_ms=%d",
+		sessionID,
+		step,
+		time.Since(started).Milliseconds(),
+		time.Since(bootStarted).Milliseconds(),
+	)
+}
+
+func logWorkerRuntimeStep(sessionID string, step string, started time.Time) {
+	debug.Logf("worker runtime session=%s step=%s elapsed_ms=%d", sessionID, step, time.Since(started).Milliseconds())
 }
 
 func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, runtime *workerRuntime, cursor workerCommandCursor) (workerCommandCursor, error) {

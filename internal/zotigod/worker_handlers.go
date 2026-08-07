@@ -44,11 +44,5 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	worker := h.workers.Register(sessionID, conn)
-	if session.State == SessionStateStarting {
-		if _, err := h.registry.MarkRunning(sessionID); err != nil {
-			worker.close()
-			return
-		}
-	}
+	h.workers.Register(sessionID, conn)
 }

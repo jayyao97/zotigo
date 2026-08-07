@@ -31,6 +31,7 @@ type workerRegistry struct {
 	mu           sync.Mutex
 	workers      map[string]*workerConnection
 	waiters      map[string][]chan struct{}
+	onDisconnect func(string)
 	pingInterval time.Duration
 	pongWait     time.Duration
 }
@@ -42,6 +43,12 @@ func newWorkerRegistry() *workerRegistry {
 		pingInterval: defaultWorkerPingInterval,
 		pongWait:     defaultWorkerPongWait,
 	}
+}
+
+func (r *workerRegistry) SetDisconnectHandler(handler func(string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onDisconnect = handler
 }
 
 func (r *workerRegistry) Register(sessionID string, conn *websocket.Conn) *workerConnection {
@@ -130,10 +137,16 @@ func (r *workerRegistry) removeWaiter(sessionID string, waiter chan struct{}) {
 
 func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) {
 	r.mu.Lock()
+	removed := false
 	if r.workers[sessionID] == worker {
 		delete(r.workers, sessionID)
+		removed = true
 	}
+	onDisconnect := r.onDisconnect
 	r.mu.Unlock()
+	if removed && onDisconnect != nil {
+		onDisconnect(sessionID)
+	}
 }
 
 type workerConnection struct {
