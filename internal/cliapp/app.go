@@ -68,17 +68,15 @@ func Run(args []string) int {
 	}
 
 	cm := config.NewManager()
-	configPath, err := cm.GetConfigPath()
-	if err == nil {
-		if _, err := os.Stat(configPath); os.IsNotExist(err) {
-			fmt.Printf("Config file not found. Creating default template at: %s\n", configPath)
-			if err := cm.Save(config.DefaultConfig()); err != nil {
-				fmt.Printf("Error creating config file: %v\n", err)
-				return 1
-			}
-			fmt.Println("Config created. Please add a profile, set default_profile, and configure its API key before running again.")
-			return 0
-		}
+	configPath, created, err := cm.EnsureGlobalConfig()
+	if err != nil {
+		fmt.Printf("Error creating config file: %v\n", err)
+		return 1
+	}
+	if created {
+		fmt.Printf("Config file not found. Creating default template at: %s\n", configPath)
+		fmt.Println("Config created. Please add a profile, set default_profile, and configure its API key before running again.")
+		return 0
 	}
 
 	cfg, err := cm.Load()

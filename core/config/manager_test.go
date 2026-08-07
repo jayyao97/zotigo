@@ -3,10 +3,121 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/config"
 )
+
+func TestEnsureGlobalConfigCreatesTemplateAndParentDirectory(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "missing", "home")
+	t.Setenv("HOME", home)
+
+	path, created, err := config.NewManager().EnsureGlobalConfig()
+	if err != nil {
+		t.Fatalf("EnsureGlobalConfig: %v", err)
+	}
+	if !created {
+		t.Fatal("EnsureGlobalConfig created = false, want true")
+	}
+	wantPath := filepath.Join(home, config.ConfigDirName, config.ConfigFileName)
+	if path != wantPath {
+		t.Fatalf("path = %q, want %q", path, wantPath)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("stat config: %v", err)
+	}
+
+	cfg, err := config.NewManager().LoadForDir(t.TempDir())
+	if err != nil {
+		t.Fatalf("load created config: %v", err)
+	}
+	if cfg.DefaultProfile != "" || len(cfg.Profiles) != 0 {
+		t.Fatalf("created template contains a usable profile: %#v", cfg)
+	}
+}
+
+func TestEnsureGlobalConfigPreservesExistingFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, config.ConfigDirName, config.ConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatalf("create config directory: %v", err)
+	}
+	want := []byte("custom: unchanged\n")
+	if err := os.WriteFile(path, want, 0600); err != nil {
+		t.Fatalf("write existing config: %v", err)
+	}
+
+	gotPath, created, err := config.NewManager().EnsureGlobalConfig()
+	if err != nil {
+		t.Fatalf("EnsureGlobalConfig: %v", err)
+	}
+	if gotPath != path || created {
+		t.Fatalf("EnsureGlobalConfig = (%q, %t), want (%q, false)", gotPath, created, path)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read existing config: %v", err)
+	}
+	if string(got) != string(want) {
+		t.Fatalf("existing config changed: got %q, want %q", got, want)
+	}
+}
+
+func TestEnsureGlobalConfigConcurrentCallsDoNotOverwrite(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	const callers = 16
+	results := make(chan bool, callers)
+	errors := make(chan error, callers)
+	var waitGroup sync.WaitGroup
+	for range callers {
+		waitGroup.Add(1)
+		go func() {
+			defer waitGroup.Done()
+			_, created, err := config.NewManager().EnsureGlobalConfig()
+			results <- created
+			errors <- err
+		}()
+	}
+	waitGroup.Wait()
+	close(results)
+	close(errors)
+
+	createdCount := 0
+	for created := range results {
+		if created {
+			createdCount++
+		}
+	}
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("EnsureGlobalConfig: %v", err)
+		}
+	}
+	if createdCount != 1 {
+		t.Fatalf("created count = %d, want 1", createdCount)
+	}
+
+	path := filepath.Join(home, config.ConfigDirName, config.ConfigFileName)
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read created config: %v", err)
+	}
+	_, created, err := config.NewManager().EnsureGlobalConfig()
+	if err != nil || created {
+		t.Fatalf("repeated EnsureGlobalConfig = (%t, %v), want (false, nil)", created, err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after repeated call: %v", err)
+	}
+	if string(after) != string(before) {
+		t.Fatal("repeated EnsureGlobalConfig changed the config")
+	}
+}
 
 func TestConfigDefaults(t *testing.T) {
 	defaults := config.DefaultConfig()
