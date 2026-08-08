@@ -31,6 +31,7 @@ type workerRegistry struct {
 	mu           sync.Mutex
 	workers      map[string]*workerConnection
 	waiters      map[string][]chan struct{}
+	onDisconnect func(string)
 	pingInterval time.Duration
 	pongWait     time.Duration
 }
@@ -44,8 +45,14 @@ func newWorkerRegistry() *workerRegistry {
 	}
 }
 
-func (r *workerRegistry) Register(sessionID string, conn *websocket.Conn) *workerConnection {
-	worker := newWorkerConnection(sessionID, conn, r)
+func (r *workerRegistry) SetDisconnectHandler(handler func(string)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onDisconnect = handler
+}
+
+func (r *workerRegistry) Register(sessionID string, generation string, conn *websocket.Conn) *workerConnection {
+	worker := newWorkerConnection(sessionID, generation, conn, r)
 
 	r.mu.Lock()
 	existing := r.workers[sessionID]
@@ -64,6 +71,13 @@ func (r *workerRegistry) Register(sessionID string, conn *websocket.Conn) *worke
 	go worker.writeLoop()
 	go worker.readLoop()
 	return worker
+}
+
+func (r *workerRegistry) Matches(sessionID string, generation string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	return worker != nil && worker.generation == generation
 }
 
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
@@ -130,28 +144,36 @@ func (r *workerRegistry) removeWaiter(sessionID string, waiter chan struct{}) {
 
 func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) {
 	r.mu.Lock()
+	removed := false
 	if r.workers[sessionID] == worker {
 		delete(r.workers, sessionID)
+		removed = true
 	}
+	onDisconnect := r.onDisconnect
 	r.mu.Unlock()
+	if removed && onDisconnect != nil {
+		onDisconnect(sessionID)
+	}
 }
 
 type workerConnection struct {
-	sessionID string
-	conn      *websocket.Conn
-	registry  *workerRegistry
-	sendCh    chan workerMessage
-	doneCh    chan struct{}
-	closeOnce sync.Once
+	sessionID  string
+	generation string
+	conn       *websocket.Conn
+	registry   *workerRegistry
+	sendCh     chan workerMessage
+	doneCh     chan struct{}
+	closeOnce  sync.Once
 }
 
-func newWorkerConnection(sessionID string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
+func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID: sessionID,
-		conn:      conn,
-		registry:  registry,
-		sendCh:    make(chan workerMessage, 32),
-		doneCh:    make(chan struct{}),
+		sessionID:  sessionID,
+		generation: generation,
+		conn:       conn,
+		registry:   registry,
+		sendCh:     make(chan workerMessage, 32),
+		doneCh:     make(chan struct{}),
 	}
 }
 
