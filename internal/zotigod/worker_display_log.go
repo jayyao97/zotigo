@@ -68,6 +68,18 @@ func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, 
 	return err
 }
 
+func (l *workerDisplayLog) ApprovalPolicyChanged(ctx context.Context, commandID string, from string, to string) error {
+	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalPolicyChanged,
+		ApprovalPolicy: &zotigosession.DisplayApprovalPolicyChange{
+			CommandID: commandID,
+			From:      from,
+			To:        to,
+		},
+	})
+	return err
+}
+
 func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()

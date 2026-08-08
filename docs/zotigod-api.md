@@ -12,6 +12,7 @@ state and display history.
 - `GET /sessions`
 - `GET /sessions/{id}`
 - `PUT /sessions/{id}/profile`
+- `PUT /sessions/{id}/approval-policy`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
 - `POST /sessions/{id}/title-suggestion`
@@ -108,7 +109,8 @@ clients should pass the project root selected by the user:
 ```json
 {
   "working_directory": "/Users/me/workspace/project",
-  "profile": "gpt-5.6-sol-high"
+  "profile": "gpt-5.6-sol-high",
+  "approval_policy": "auto"
 }
 ```
 
@@ -127,6 +129,11 @@ worker starts.
 
 Changing the project default later does not change new-format sessions. Use the
 profile endpoint below to change the profile selected for an existing session.
+
+`approval_policy` is optional and defaults to `auto`. Desktop clients may also
+set it to `bypass_permissions` for Full access. The value is persisted with the
+session and restored by replacement workers. The public Desktop API does not
+accept `manual`.
 
 Workers launched for the session use this directory as their process working
 directory and as the source for project config, skills, project instructions,
@@ -196,15 +203,55 @@ current effective configuration. If that profile was removed, startup returns
 `409` with code `profile_not_found` and does not launch a worker. Select an
 available profile with `PUT /sessions/{id}/profile` before retrying.
 
+## Change a session approval policy
+
+`PUT /sessions/{id}/approval-policy` changes how subsequent tool calls are
+approved:
+
+```json
+{
+  "approval_policy": "bypass_permissions"
+}
+```
+
+The accepted values are `auto` and `bypass_permissions`. The latter skips tool
+safety classification and approval for the session, so clients should label it
+clearly as Full access.
+
+Session responses report the policy selected by the client. A profile may make
+the effective runtime policy more restrictive—for example, `auto` may fall back
+to manual approval when its classifier is unavailable. Clients should therefore
+label `auto` as Auto or Default, not as approval-free operation.
+
+The change is accepted only while the session is idle. An open turn, pending
+approval, or queued first message returns `409`. Offline and not-yet-started
+sessions apply the change immediately and return `200` with
+`status: "applied"`. A running worker receives a durable command and the API
+returns `202` with `status: "pending"` and a `command_id`.
+
+The worker applies changes in a fail-safe order. Returning from Full access to
+Auto changes the in-memory Agent before persisting Auto; enabling Full access
+changes the Agent only after persistence succeeds. It then appends an
+`approval_policy_changed` completion item. Command replay uses that item to
+distinguish an applied command from one interrupted by a worker crash. The
+stored session value is used when a replacement worker starts.
+
+Persistence is ordered fail-safe by permission direction. Enabling Full access
+updates the list/index views before the authoritative session JSON; returning to
+Auto updates the authoritative JSON first. A crash can therefore make list
+views temporarily report a more permissive policy than the worker will use,
+but never a less permissive one. Retrying the same Auto selection repairs those
+derived views.
+
 ## Session liveness and recovery
 
 Session history and session runtime are separate. The session store on disk can
 contain old sessions and display logs even when the current `zotigod` process
 has no worker running for them.
 
-For a live registry session, `GET /sessions/{id}` prefers durable profile
-metadata. If the store is temporarily unavailable, it falls back to the live
-registry DTO rather than failing the whole read.
+For a live registry session, `GET /sessions/{id}` prefers durable profile and
+approval-policy metadata. If the store is temporarily unavailable, it falls
+back to the live registry DTO rather than failing the whole read.
 
 Read APIs do not start workers:
 
@@ -221,6 +268,7 @@ return it as offline:
   "state": "offline",
   "live": false,
   "working_directory": "/Users/me/workspace/project",
+  "approval_policy": "auto",
   "created_at": "2026-01-02T03:04:05Z"
 }
 ```

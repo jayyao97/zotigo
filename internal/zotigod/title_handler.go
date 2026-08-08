@@ -94,7 +94,7 @@ func (h *handler) handleSessionTitleSuggestion(w http.ResponseWriter, r *http.Re
 
 func (h *handler) sessionForTitleSuggestion(ctx context.Context, id string) (Session, bool, error) {
 	if session, ok := h.registry.Get(id); ok {
-		session, err := h.sessionWithStoredProfile(ctx, session)
+		session, err := h.sessionWithStoredMetadata(ctx, session)
 		return session, true, err
 	}
 	return h.storedSession(ctx, id)

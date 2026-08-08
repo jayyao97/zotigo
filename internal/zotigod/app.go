@@ -40,15 +40,16 @@ const (
 )
 
 type Session struct {
-	ID               string       `json:"id"`
-	State            SessionState `json:"state"`
-	Live             bool         `json:"live"`
-	WorkingDirectory string       `json:"working_directory,omitempty"`
-	ProfileName      string       `json:"profile,omitempty"`
-	CreatedAt        time.Time    `json:"created_at"`
-	StartedAt        *time.Time   `json:"started_at,omitempty"`
-	EndedAt          *time.Time   `json:"ended_at,omitempty"`
-	Error            string       `json:"error,omitempty"`
+	ID               string               `json:"id"`
+	State            SessionState         `json:"state"`
+	Live             bool                 `json:"live"`
+	WorkingDirectory string               `json:"working_directory,omitempty"`
+	ProfileName      string               `json:"profile,omitempty"`
+	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy"`
+	CreatedAt        time.Time            `json:"created_at"`
+	StartedAt        *time.Time           `json:"started_at,omitempty"`
+	EndedAt          *time.Time           `json:"ended_at,omitempty"`
+	Error            string               `json:"error,omitempty"`
 	seq              uint64
 }
 
@@ -100,6 +101,9 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 	if session.State == "" {
 		session.State = SessionStateCreated
 	}
+	if session.ApprovalPolicy == "" {
+		session.ApprovalPolicy = agent.ApprovalPolicyAuto
+	}
 	session.Live = true
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = time.Now().UTC()
@@ -117,6 +121,7 @@ func newSession(workingDirectory string, profileName string) Session {
 		Live:             true,
 		WorkingDirectory: workingDirectory,
 		ProfileName:      profileName,
+		ApprovalPolicy:   agent.ApprovalPolicyAuto,
 		CreatedAt:        time.Now().UTC(),
 	}
 }
@@ -186,6 +191,12 @@ func (r *sessionRegistry) Pause(id string) (Session, error) {
 func (r *sessionRegistry) UpdateProfile(id string, profileName string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.ProfileName = profileName
+	})
+}
+
+func (r *sessionRegistry) UpdateApprovalPolicy(id string, policy agent.ApprovalPolicy) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+		session.ApprovalPolicy = policy
 	})
 }
 
@@ -269,8 +280,9 @@ type handler struct {
 }
 
 type createSessionRequest struct {
-	WorkingDirectory string `json:"working_directory,omitempty"`
-	Profile          string `json:"profile,omitempty"`
+	WorkingDirectory string               `json:"working_directory,omitempty"`
+	Profile          string               `json:"profile,omitempty"`
+	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy,omitempty"`
 }
 
 type finishSessionRequest struct {
@@ -513,6 +525,11 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		approvalPolicy, err := normalizeSessionApprovalPolicy(req.ApprovalPolicy, true)
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		appConfig, err := config.NewManager().LoadForDir(workingDirectory)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
@@ -528,6 +545,7 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		session := newSession(workingDirectory, profileName)
+		session.ApprovalPolicy = approvalPolicy
 		if err := h.persistSession(r.Context(), session); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
@@ -572,6 +590,7 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 			ID:               session.ID,
 			WorkingDirectory: session.WorkingDirectory,
 			ProfileName:      session.ProfileName,
+			ApprovalPolicy:   session.ApprovalPolicy,
 			CreatedAt:        session.CreatedAt,
 			UpdatedAt:        session.CreatedAt,
 		},
@@ -603,6 +622,7 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	for _, meta := range metadata {
 		if _, ok := seen[meta.ID]; ok {
 			sessions[registryIndex[meta.ID]].ProfileName = meta.ProfileName
+			sessions[registryIndex[meta.ID]].ApprovalPolicy = meta.ApprovalPolicy
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -611,12 +631,17 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 }
 
 func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live bool) Session {
+	approvalPolicy := meta.ApprovalPolicy
+	if approvalPolicy == "" {
+		approvalPolicy = agent.ApprovalPolicyAuto
+	}
 	return Session{
 		ID:               meta.ID,
 		State:            state,
 		Live:             live,
 		WorkingDirectory: meta.WorkingDirectory,
 		ProfileName:      meta.ProfileName,
+		ApprovalPolicy:   approvalPolicy,
 		CreatedAt:        meta.CreatedAt,
 	}
 }
@@ -667,6 +692,8 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionPause(w, r, id)
 	case "profile":
 		h.handleSessionProfile(w, r, id)
+	case "approval-policy":
+		h.handleSessionApprovalPolicy(w, r, id)
 	case "start":
 		h.handleSessionStart(w, r, id)
 	case "steering":
@@ -738,6 +765,7 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 		stored, err := h.store.Get(r.Context(), id)
 		if err == nil && stored != nil {
 			session.ProfileName = stored.ProfileName
+			session.ApprovalPolicy = stored.ApprovalPolicy
 		}
 	}
 	session.Live = true
@@ -772,14 +800,14 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 	}
 	if h.launcher == nil || (!launched && session.State != SessionStateStarting) {
 		session.Live = true
-		return h.sessionWithStoredProfile(ctx, session)
+		return h.sessionWithStoredMetadata(ctx, session)
 	}
 	if err := h.waitForRunningWorker(ctx, id); err != nil {
 		return Session{}, err
 	}
 	if running, ok := h.registry.Get(id); ok && running.State == SessionStateRunning {
 		running.Live = true
-		return h.sessionWithStoredProfile(ctx, running)
+		return h.sessionWithStoredMetadata(ctx, running)
 	}
 	return Session{}, errWorkerConnectTimeout
 }
@@ -911,16 +939,17 @@ func (h *handler) validateSessionProfile(ctx context.Context, session Session) e
 	return nil
 }
 
-func (h *handler) sessionWithStoredProfile(ctx context.Context, session Session) (Session, error) {
+func (h *handler) sessionWithStoredMetadata(ctx context.Context, session Session) (Session, error) {
 	if h.store == nil {
 		return session, nil
 	}
 	stored, err := h.store.Get(ctx, session.ID)
 	if err != nil {
-		return Session{}, fmt.Errorf("load session profile: %w", err)
+		return Session{}, fmt.Errorf("load session metadata: %w", err)
 	}
 	if stored != nil {
 		session.ProfileName = stored.ProfileName
+		session.ApprovalPolicy = stored.ApprovalPolicy
 	}
 	return session, nil
 }

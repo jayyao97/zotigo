@@ -8,21 +8,22 @@ import (
 type DisplayItemType string
 
 const (
-	DisplayItemUserMessage      DisplayItemType = "user_message"
-	DisplayItemSteeringMessage  DisplayItemType = "steering_message"
-	DisplayItemSessionCommand   DisplayItemType = "session_command"
-	DisplayItemAssistantMessage DisplayItemType = "assistant_message"
-	DisplayItemError            DisplayItemType = "error"
-	DisplayItemTurnStarted      DisplayItemType = "turn_started"
-	DisplayItemTurnPaused       DisplayItemType = "turn_paused"
-	DisplayItemTurnCompleted    DisplayItemType = "turn_completed"
-	DisplayItemTurnFailed       DisplayItemType = "turn_failed"
-	DisplayItemTurnInterrupted  DisplayItemType = "turn_interrupted"
-	DisplayItemApprovalRequest  DisplayItemType = "approval_request"
-	DisplayItemApprovalDecision DisplayItemType = "approval_decision"
-	DisplayItemContextCompacted DisplayItemType = "context_compacted"
-	DisplayItemProfileChanged   DisplayItemType = "profile_changed"
-	DisplayItemProfileFailed    DisplayItemType = "profile_change_failed"
+	DisplayItemUserMessage           DisplayItemType = "user_message"
+	DisplayItemSteeringMessage       DisplayItemType = "steering_message"
+	DisplayItemSessionCommand        DisplayItemType = "session_command"
+	DisplayItemAssistantMessage      DisplayItemType = "assistant_message"
+	DisplayItemError                 DisplayItemType = "error"
+	DisplayItemTurnStarted           DisplayItemType = "turn_started"
+	DisplayItemTurnPaused            DisplayItemType = "turn_paused"
+	DisplayItemTurnCompleted         DisplayItemType = "turn_completed"
+	DisplayItemTurnFailed            DisplayItemType = "turn_failed"
+	DisplayItemTurnInterrupted       DisplayItemType = "turn_interrupted"
+	DisplayItemApprovalRequest       DisplayItemType = "approval_request"
+	DisplayItemApprovalDecision      DisplayItemType = "approval_decision"
+	DisplayItemContextCompacted      DisplayItemType = "context_compacted"
+	DisplayItemProfileChanged        DisplayItemType = "profile_changed"
+	DisplayItemProfileFailed         DisplayItemType = "profile_change_failed"
+	DisplayItemApprovalPolicyChanged DisplayItemType = "approval_policy_changed"
 )
 
 type DisplayContentPart struct {
@@ -101,15 +102,22 @@ type DisplayApprovalDecision struct {
 }
 
 type DisplayCommand struct {
-	Type    string                `json:"type,omitempty"`
-	Text    string                `json:"text,omitempty"`
-	Images  []DisplayCommandImage `json:"images,omitempty"`
-	TurnID  string                `json:"turn_id,omitempty"`
-	Reason  string                `json:"reason,omitempty"`
-	Profile string                `json:"profile,omitempty"`
+	Type           string                `json:"type,omitempty"`
+	Text           string                `json:"text,omitempty"`
+	Images         []DisplayCommandImage `json:"images,omitempty"`
+	TurnID         string                `json:"turn_id,omitempty"`
+	Reason         string                `json:"reason,omitempty"`
+	Profile        string                `json:"profile,omitempty"`
+	ApprovalPolicy string                `json:"approval_policy,omitempty"`
 }
 
 type DisplayProfileChange struct {
+	CommandID string `json:"command_id,omitempty"`
+	From      string `json:"from,omitempty"`
+	To        string `json:"to,omitempty"`
+}
+
+type DisplayApprovalPolicyChange struct {
 	CommandID string `json:"command_id,omitempty"`
 	From      string `json:"from,omitempty"`
 	To        string `json:"to,omitempty"`
@@ -125,18 +133,19 @@ type DisplayCommandImage struct {
 }
 
 type DisplayItem struct {
-	ID        string                `json:"id"`
-	Sequence  uint64                `json:"sequence"`
-	Type      DisplayItemType       `json:"type"`
-	Role      string                `json:"role,omitempty"`
-	Content   []DisplayContentPart  `json:"content,omitempty"`
-	Turn      *DisplayTurn          `json:"turn,omitempty"`
-	Approval  *DisplayApproval      `json:"approval,omitempty"`
-	Command   *DisplayCommand       `json:"command,omitempty"`
-	Profile   *DisplayProfileChange `json:"profile,omitempty"`
-	Error     string                `json:"error,omitempty"`
-	CreatedAt time.Time             `json:"created_at"`
-	LogOffset int64                 `json:"-"`
+	ID             string                       `json:"id"`
+	Sequence       uint64                       `json:"sequence"`
+	Type           DisplayItemType              `json:"type"`
+	Role           string                       `json:"role,omitempty"`
+	Content        []DisplayContentPart         `json:"content,omitempty"`
+	Turn           *DisplayTurn                 `json:"turn,omitempty"`
+	Approval       *DisplayApproval             `json:"approval,omitempty"`
+	Command        *DisplayCommand              `json:"command,omitempty"`
+	Profile        *DisplayProfileChange        `json:"profile,omitempty"`
+	ApprovalPolicy *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
+	Error          string                       `json:"error,omitempty"`
+	CreatedAt      time.Time                    `json:"created_at"`
+	LogOffset      int64                        `json:"-"`
 }
 
 type DisplayPageQuery struct {
