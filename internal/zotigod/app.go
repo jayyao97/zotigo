@@ -274,7 +274,12 @@ type createSessionRequest struct {
 }
 
 type finishSessionRequest struct {
-	Error string `json:"error,omitempty"`
+	Error      string `json:"error,omitempty"`
+	Generation string `json:"generation,omitempty"`
+}
+
+type workerReadyRequest struct {
+	Generation string `json:"generation"`
 }
 
 // Run starts zotigod and returns a process exit code.
@@ -1001,6 +1006,16 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	var req workerReadyRequest
+	if err := readOptionalJSON(r, &req); err != nil {
+		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
+		return
+	}
+	req.Generation = strings.TrimSpace(req.Generation)
+	if req.Generation == "" {
+		writeAPIError(w, http.StatusBadRequest, "worker generation is required")
+		return
+	}
 
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
@@ -1009,8 +1024,8 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		h.writeTransition(w, Session{}, errSessionNotFound)
 		return
 	}
-	if !h.workers.Has(id) {
-		writeAPIError(w, http.StatusConflict, "worker ready requires an active connection")
+	if !h.workers.Matches(id, req.Generation) {
+		writeAPIError(w, http.StatusConflict, "worker ready does not match the active connection")
 		return
 	}
 	switch session.State {
@@ -1040,6 +1055,10 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 	var req finishSessionRequest
 	if err := readOptionalJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
+		return
+	}
+	if req.Generation != "" && !h.workers.Matches(id, req.Generation) {
+		writeAPIError(w, http.StatusConflict, "worker finish does not match the active connection")
 		return
 	}
 

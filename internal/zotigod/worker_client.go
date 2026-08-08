@@ -79,6 +79,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	logWorkerBootStep(cfg.SessionID, "session_lock", stepStarted, bootStarted)
 	var runtime *workerRuntime
 	var conn *websocket.Conn
+	var generation string
 	stopKeepalive := func() {}
 	var runErr error
 	httpClient := &http.Client{Timeout: workerHTTPTimeout}
@@ -99,7 +100,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		}
 		if runErr != nil && !isExpectedWorkerClose(runErr) {
 			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-			_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, runErr)
+			_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, generation, runErr)
 			cancel()
 		}
 		if conn != nil {
@@ -117,6 +118,12 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	conn, resp, err = websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("connect worker websocket: %w", workerWebSocketDialError(err, resp))
+	}
+	if resp != nil {
+		generation = strings.TrimSpace(resp.Header.Get(workerGenerationHeader))
+	}
+	if generation == "" {
+		return fmt.Errorf("connect worker websocket: missing worker generation")
 	}
 	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
 	stopKeepalive = startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
@@ -152,7 +159,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	}
 
 	stepStarted = time.Now()
-	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID); err != nil {
+	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
 		return fmt.Errorf("report worker ready: %w", err)
 	}
 	logWorkerBootStep(cfg.SessionID, "ready", stepStarted, bootStarted)
@@ -933,16 +940,16 @@ func postWorkerJSON(ctx context.Context, client *http.Client, daemonURL string, 
 	return nil
 }
 
-func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL string, sessionID string, err error) error {
-	body := finishSessionRequest{}
+func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string, err error) error {
+	body := finishSessionRequest{Generation: generation}
 	if err != nil && !isExpectedWorkerClose(err) {
 		body.Error = err.Error()
 	}
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/finish", body)
 }
 
-func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string) error {
-	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", struct{}{})
+func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
+	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", workerReadyRequest{Generation: generation})
 }
 
 func workerWebSocketDialError(dialErr error, resp *http.Response) error {

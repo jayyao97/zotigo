@@ -51,8 +51,8 @@ func (r *workerRegistry) SetDisconnectHandler(handler func(string)) {
 	r.onDisconnect = handler
 }
 
-func (r *workerRegistry) Register(sessionID string, conn *websocket.Conn) *workerConnection {
-	worker := newWorkerConnection(sessionID, conn, r)
+func (r *workerRegistry) Register(sessionID string, generation string, conn *websocket.Conn) *workerConnection {
+	worker := newWorkerConnection(sessionID, generation, conn, r)
 
 	r.mu.Lock()
 	existing := r.workers[sessionID]
@@ -71,6 +71,13 @@ func (r *workerRegistry) Register(sessionID string, conn *websocket.Conn) *worke
 	go worker.writeLoop()
 	go worker.readLoop()
 	return worker
+}
+
+func (r *workerRegistry) Matches(sessionID string, generation string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	return worker != nil && worker.generation == generation
 }
 
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
@@ -150,21 +157,23 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 }
 
 type workerConnection struct {
-	sessionID string
-	conn      *websocket.Conn
-	registry  *workerRegistry
-	sendCh    chan workerMessage
-	doneCh    chan struct{}
-	closeOnce sync.Once
+	sessionID  string
+	generation string
+	conn       *websocket.Conn
+	registry   *workerRegistry
+	sendCh     chan workerMessage
+	doneCh     chan struct{}
+	closeOnce  sync.Once
 }
 
-func newWorkerConnection(sessionID string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
+func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID: sessionID,
-		conn:      conn,
-		registry:  registry,
-		sendCh:    make(chan workerMessage, 32),
-		doneCh:    make(chan struct{}),
+		sessionID:  sessionID,
+		generation: generation,
+		conn:       conn,
+		registry:   registry,
+		sendCh:     make(chan workerMessage, 32),
+		doneCh:     make(chan struct{}),
 	}
 }
 

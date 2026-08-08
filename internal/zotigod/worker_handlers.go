@@ -6,6 +6,8 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const workerGenerationHeader = "X-Zotigo-Worker-Generation"
+
 var workerUpgrader = websocket.Upgrader{}
 
 func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
@@ -33,7 +35,10 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := workerUpgrader.Upgrade(w, r, nil)
+	generation := newZotigodID("worker")
+	responseHeader := http.Header{}
+	responseHeader.Set(workerGenerationHeader, generation)
+	conn, err := workerUpgrader.Upgrade(w, r, responseHeader)
 	if err != nil {
 		return
 	}
@@ -44,5 +49,5 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
-	h.workers.Register(sessionID, conn)
+	h.workers.Register(sessionID, generation, conn)
 }

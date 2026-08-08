@@ -2192,6 +2192,9 @@ func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
 }
 
 func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	connected := make(chan *websocket.Conn, 2)
 	var launches atomic.Int32
@@ -2217,7 +2220,20 @@ func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
 	})
 	server = httptest.NewServer(handler)
 	defer server.Close()
-	created := registry.Add(newSession("", ""))
+	created := registry.Add(newSession(workDir, "test"))
+	waitForConnection := func(label string) *websocket.Conn {
+		t.Helper()
+		select {
+		case conn := <-connected:
+			if conn == nil {
+				t.Fatalf("%s worker did not connect", label)
+			}
+			return conn
+		case <-time.After(2 * time.Second):
+			t.Fatalf("timed out waiting for %s worker connection", label)
+			return nil
+		}
+	}
 
 	startDone := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -2225,10 +2241,7 @@ func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/start", nil))
 		startDone <- rec
 	}()
-	worker := <-connected
-	if worker == nil {
-		t.Fatal("first worker did not connect")
-	}
+	worker := waitForConnection("first")
 	<-time.After(4 * connectTimeout)
 	if got := getSession(t, handler, created.ID); got.State != SessionStateStarting {
 		t.Fatalf("session state after connect timeout = %q, want %q", got.State, SessionStateStarting)
@@ -2257,10 +2270,7 @@ func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
 	if retryRec.Code != http.StatusOK {
 		t.Fatalf("retry start status = %d: %s", retryRec.Code, retryRec.Body.String())
 	}
-	retriedWorker := <-connected
-	if retriedWorker == nil {
-		t.Fatal("retry worker did not connect")
-	}
+	retriedWorker := waitForConnection("retry")
 	defer retriedWorker.Close()
 }
 
@@ -2275,12 +2285,70 @@ func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("ready without connection status = %d, want %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateStarting {
 		t.Fatalf("session state after rejected ready = %q, want %q", got.State, SessionStateStarting)
+	}
+}
+
+func TestWorkerAttachRejectsStaleGeneration(t *testing.T) {
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := registry.Add(Session{ID: "sess-stale-ready", State: SessionStateStarting})
+
+	first, staleGeneration := connectWorker(t, server, created.ID)
+	_ = first.Close()
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		if session, _ := registry.Get(created.ID); session.State == SessionStateCreated {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if session, _ := registry.Get(created.ID); session.State != SessionStateCreated {
+		t.Fatalf("session state after first worker disconnected = %q, want %q", session.State, SessionStateCreated)
+	}
+	if _, err := registry.Start(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	second, currentGeneration := connectWorker(t, server, created.ID)
+	defer second.Close()
+
+	staleResp, err := postWorkerReady(server, created.ID, staleGeneration)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer staleResp.Body.Close()
+	if staleResp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale ready status = %d, want %d", staleResp.StatusCode, http.StatusConflict)
+	}
+	if session, _ := registry.Get(created.ID); session.State != SessionStateStarting {
+		t.Fatalf("session state after stale ready = %q, want %q", session.State, SessionStateStarting)
+	}
+	finishBody, err := sonic.Marshal(finishSessionRequest{Generation: staleGeneration, Error: "old worker failed"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	finishResp, err := server.Client().Post(server.URL+"/internal/sessions/"+created.ID+"/worker/finish", "application/json", bytes.NewReader(finishBody))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer finishResp.Body.Close()
+	if finishResp.StatusCode != http.StatusConflict {
+		t.Fatalf("stale finish status = %d, want %d", finishResp.StatusCode, http.StatusConflict)
+	}
+	if session, _ := registry.Get(created.ID); session.State != SessionStateStarting {
+		t.Fatalf("session state after stale finish = %q, want %q", session.State, SessionStateStarting)
+	}
+
+	markWorkerReady(t, server, created.ID, currentGeneration)
+	if session, _ := registry.Get(created.ID); session.State != SessionStateRunning {
+		t.Fatalf("session state after current ready = %q, want %q", session.State, SessionStateRunning)
 	}
 }
 
@@ -2301,10 +2369,10 @@ func TestWorkerAttachTransitionsToRunning(t *testing.T) {
 	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	worker := connectWorker(t, server, created.ID)
+	worker, generation := connectWorker(t, server, created.ID)
 	defer worker.Close()
 
-	resp, err := server.Client().Post(server.URL+"/internal/sessions/"+created.ID+"/worker/attach", "application/json", nil)
+	resp, err := postWorkerReady(server, created.ID, generation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2321,7 +2389,7 @@ func TestWorkerAttachTransitionsToRunning(t *testing.T) {
 		t.Fatalf("expected state %q, got %q", SessionStateRunning, running.State)
 	}
 
-	repeated, err := server.Client().Post(server.URL+"/internal/sessions/"+created.ID+"/worker/attach", "application/json", nil)
+	repeated, err := postWorkerReady(server, created.ID, generation)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -2340,12 +2408,12 @@ func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 
-	worker := connectWorker(t, server, created.ID)
+	worker, generation := connectWorker(t, server, created.ID)
 	defer worker.Close()
 	if got := getSession(t, handler, created.ID); got.State != SessionStateStarting {
 		t.Fatalf("expected state %q before ready, got %q", SessionStateStarting, got.State)
 	}
-	markWorkerReady(t, server, created.ID)
+	markWorkerReady(t, server, created.ID, generation)
 
 	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
 		t.Fatalf("expected state %q, got %q", SessionStateRunning, got.State)
@@ -2974,7 +3042,9 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case r.URL.Path == "/internal/workers/connect":
-			conn, err := workerUpgrader.Upgrade(w, r, nil)
+			responseHeader := http.Header{}
+			responseHeader.Set(workerGenerationHeader, "test-generation")
+			conn, err := workerUpgrader.Upgrade(w, r, responseHeader)
 			if err != nil {
 				return
 			}
@@ -3921,21 +3991,29 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 
 	unlock := sessionOps.lock(created.ID)
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + created.ID
-	connections := make(chan *websocket.Conn, 2)
+	type connectedWorker struct {
+		conn       *websocket.Conn
+		generation string
+	}
+	connections := make(chan connectedWorker, 2)
 	for range 2 {
 		go func() {
-			conn, _, _ := websocket.DefaultDialer.Dial(url, nil)
-			connections <- conn
+			conn, resp, _ := websocket.DefaultDialer.Dial(url, nil)
+			generation := ""
+			if resp != nil {
+				generation = resp.Header.Get(workerGenerationHeader)
+			}
+			connections <- connectedWorker{conn: conn, generation: generation}
 		}()
 	}
 	first := <-connections
 	second := <-connections
 	defer func() {
-		if first != nil {
-			first.Close()
+		if first.conn != nil {
+			first.conn.Close()
 		}
-		if second != nil {
-			second.Close()
+		if second.conn != nil {
+			second.conn.Close()
 		}
 	}()
 	unlock()
@@ -3950,7 +4028,11 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 	if session.State != SessionStateStarting {
 		t.Fatalf("session state after connect = %q, want %q", session.State, SessionStateStarting)
 	}
-	markWorkerReady(t, server, created.ID)
+	generation := first.generation
+	if !workers.Matches(created.ID, generation) {
+		generation = second.generation
+	}
+	markWorkerReady(t, server, created.ID, generation)
 	session, _ = registry.Get(created.ID)
 	if session.State != SessionStateRunning {
 		t.Fatalf("session state after ready = %q, want %q", session.State, SessionStateRunning)
@@ -5857,7 +5939,7 @@ func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 	approval := createApprovalRequestForTest(t, handler, created.ID)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
 	}
@@ -6188,7 +6270,7 @@ func TestWorkerAttachRejectsCreatedSession(t *testing.T) {
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", nil))
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
@@ -6222,7 +6304,11 @@ func TestSessionTransitionEndpointsRejectMissingSession(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rec := httptest.NewRecorder()
-			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tt.path, nil))
+			var body io.Reader
+			if tt.name == "worker attach" {
+				body = workerReadyBody("stale")
+			}
+			handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, tt.path, body))
 
 			if rec.Code != http.StatusNotFound {
 				t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
@@ -6508,10 +6594,10 @@ func attachWorker(t *testing.T, handler http.Handler, id string) Session {
 	t.Helper()
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	worker := connectWorker(t, server, id)
+	worker, generation := connectWorker(t, server, id)
 	defer worker.Close()
 
-	resp, err := server.Client().Post(server.URL+"/internal/sessions/"+id+"/worker/attach", "application/json", nil)
+	resp, err := postWorkerReady(server, id, generation)
 	if err != nil {
 		t.Fatalf("attach worker: %v", err)
 	}
@@ -6590,19 +6676,20 @@ func getApprovalRequest(t *testing.T, handler http.Handler, sessionID string, ap
 
 func dialWorker(t *testing.T, server *httptest.Server, sessionID string) *websocket.Conn {
 	t.Helper()
-	conn := connectWorker(t, server, sessionID)
-	markWorkerReady(t, server, sessionID)
+	conn, generation := connectWorker(t, server, sessionID)
+	markWorkerReady(t, server, sessionID, generation)
 	return conn
 }
 
 func connectReadyWorker(server *httptest.Server, sessionID string) (*websocket.Conn, error) {
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		return nil, err
 	}
+	generation := resp.Header.Get(workerGenerationHeader)
 
-	resp, err := server.Client().Post(server.URL+"/internal/sessions/"+sessionID+"/worker/attach", "application/json", nil)
+	resp, err = postWorkerReady(server, sessionID, generation)
 	if err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -6615,20 +6702,25 @@ func connectReadyWorker(server *httptest.Server, sessionID string) (*websocket.C
 	return conn, nil
 }
 
-func connectWorker(t *testing.T, server *httptest.Server, sessionID string) *websocket.Conn {
+func connectWorker(t *testing.T, server *httptest.Server, sessionID string) (*websocket.Conn, string) {
 	t.Helper()
 
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial worker websocket: %v", err)
 	}
-	return conn
+	generation := resp.Header.Get(workerGenerationHeader)
+	if generation == "" {
+		_ = conn.Close()
+		t.Fatal("worker websocket response missing generation")
+	}
+	return conn, generation
 }
 
-func markWorkerReady(t *testing.T, server *httptest.Server, sessionID string) {
+func markWorkerReady(t *testing.T, server *httptest.Server, sessionID string, generation string) {
 	t.Helper()
-	resp, err := server.Client().Post(server.URL+"/internal/sessions/"+sessionID+"/worker/attach", "application/json", nil)
+	resp, err := postWorkerReady(server, sessionID, generation)
 	if err != nil {
 		t.Fatalf("mark worker ready: %v", err)
 	}
@@ -6636,6 +6728,19 @@ func markWorkerReady(t *testing.T, server *httptest.Server, sessionID string) {
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("mark worker ready status = %d", resp.StatusCode)
 	}
+}
+
+func postWorkerReady(server *httptest.Server, sessionID string, generation string) (*http.Response, error) {
+	body, err := sonic.Marshal(workerReadyRequest{Generation: generation})
+	if err != nil {
+		return nil, err
+	}
+	return server.Client().Post(server.URL+"/internal/sessions/"+sessionID+"/worker/attach", "application/json", bytes.NewReader(body))
+}
+
+func workerReadyBody(generation string) io.Reader {
+	body, _ := sonic.Marshal(workerReadyRequest{Generation: generation})
+	return bytes.NewReader(body)
 }
 
 func readWorkerMessage(t *testing.T, conn *websocket.Conn) workerMessage {
