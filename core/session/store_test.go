@@ -37,6 +37,7 @@ func TestFileStore_PutGet(t *testing.T) {
 			ID:               "test_session_1",
 			WorkingDirectory: "/tmp/test",
 			ProfileName:      "gpt-high",
+			ApprovalPolicy:   agent.ApprovalPolicyBypass,
 			LastPrompt:       "Hello world",
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
@@ -91,6 +92,9 @@ func TestFileStore_PutGet(t *testing.T) {
 	if loaded.ProfileName != sess.ProfileName {
 		t.Errorf("ProfileName mismatch: got %s, want %s", loaded.ProfileName, sess.ProfileName)
 	}
+	if loaded.ApprovalPolicy != agent.ApprovalPolicyBypass {
+		t.Errorf("ApprovalPolicy mismatch: got %s, want %s", loaded.ApprovalPolicy, agent.ApprovalPolicyBypass)
+	}
 	if loaded.AgentSnapshot.UserContextState == nil ||
 		loaded.AgentSnapshot.UserContextState.Sections["environment"] != "digest" {
 		t.Fatalf("user context state did not round-trip: %#v", loaded.AgentSnapshot.UserContextState)
@@ -130,6 +134,92 @@ func TestFileStoreUpdateProfileRestoresSessionWhenIndexUpdateFails(t *testing.T)
 	}
 	if loaded == nil || loaded.ProfileName != "old" || !loaded.UpdatedAt.Equal(now) {
 		t.Fatalf("expected previous session after failed put, got %#v", loaded)
+	}
+}
+
+func TestFileStoreUpdateApprovalPolicyFailsSafeWhenIndexUpdateFails(t *testing.T) {
+	tests := []struct {
+		name              string
+		initial           agent.ApprovalPolicy
+		target            agent.ApprovalPolicy
+		wantAuthoritative agent.ApprovalPolicy
+		wantDerived       agent.ApprovalPolicy
+	}{
+		{
+			name:              "upgrade keeps auto authoritative",
+			initial:           agent.ApprovalPolicyAuto,
+			target:            agent.ApprovalPolicyBypass,
+			wantAuthoritative: agent.ApprovalPolicyAuto,
+			wantDerived:       agent.ApprovalPolicyAuto,
+		},
+		{
+			name:              "downgrade keeps auto authoritative",
+			initial:           agent.ApprovalPolicyBypass,
+			target:            agent.ApprovalPolicyAuto,
+			wantAuthoritative: agent.ApprovalPolicyAuto,
+			wantDerived:       agent.ApprovalPolicyBypass,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rootDir := t.TempDir()
+			store, err := NewFileStore(rootDir)
+			if err != nil {
+				t.Fatalf("create store: %v", err)
+			}
+			now := time.Now().UTC()
+			sess := &Session{Metadata: Metadata{
+				ID:             "approval-policy-fail-safe",
+				ApprovalPolicy: tt.initial,
+				CreatedAt:      now,
+				UpdatedAt:      now,
+			}}
+			if err := store.Put(context.Background(), sess); err != nil {
+				t.Fatalf("put initial session: %v", err)
+			}
+			if err := store.index.close(); err != nil {
+				t.Fatalf("close index: %v", err)
+			}
+			if err := store.UpdateApprovalPolicy(context.Background(), sess.ID, tt.target, now.Add(time.Minute)); err == nil {
+				t.Fatal("expected index update failure")
+			}
+			loaded, err := store.Get(context.Background(), sess.ID)
+			if err != nil {
+				t.Fatalf("get session: %v", err)
+			}
+			if loaded == nil || loaded.ApprovalPolicy != tt.wantAuthoritative {
+				t.Fatalf("authoritative policy = %#v, want %q", loaded, tt.wantAuthoritative)
+			}
+			reg, err := store.loadRegistryStrict()
+			if err != nil {
+				t.Fatalf("load registry: %v", err)
+			}
+			if len(reg.Sessions) != 1 || reg.Sessions[0].ApprovalPolicy != tt.wantDerived {
+				t.Fatalf("registry policy = %#v, want %q", reg.Sessions, tt.wantDerived)
+			}
+
+			reopened, err := NewFileStore(rootDir)
+			if err != nil {
+				t.Fatalf("reopen store: %v", err)
+			}
+			defer reopened.Close()
+			listed, err := reopened.List(context.Background(), ListFilter{})
+			if err != nil {
+				t.Fatalf("list reopened store: %v", err)
+			}
+			if len(listed) != 1 || listed[0].ApprovalPolicy != tt.wantDerived {
+				t.Fatalf("indexed policy = %#v, want %q", listed, tt.wantDerived)
+			}
+			if tt.initial == agent.ApprovalPolicyBypass {
+				if err := reopened.UpdateApprovalPolicy(context.Background(), sess.ID, agent.ApprovalPolicyAuto, now.Add(2*time.Minute)); err != nil {
+					t.Fatalf("repair derived policy: %v", err)
+				}
+				listed, err = reopened.List(context.Background(), ListFilter{})
+				if err != nil || len(listed) != 1 || listed[0].ApprovalPolicy != agent.ApprovalPolicyAuto {
+					t.Fatalf("repaired indexed policy = %#v, err = %v", listed, err)
+				}
+			}
+		})
 	}
 }
 
@@ -311,6 +401,7 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 			ID:               "sqlite_indexed",
 			WorkingDirectory: "/project/sqlite",
 			ProfileName:      "sqlite-profile",
+			ApprovalPolicy:   agent.ApprovalPolicyBypass,
 			LastPrompt:       "hello sqlite",
 			CreatedAt:        time.Now().Add(-time.Hour),
 			UpdatedAt:        time.Now(),
@@ -338,6 +429,9 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 	}
 	if listed[0].ProfileName != "sqlite-profile" {
 		t.Fatalf("Expected ProfileName to round trip, got %q", listed[0].ProfileName)
+	}
+	if listed[0].ApprovalPolicy != agent.ApprovalPolicyBypass {
+		t.Fatalf("Expected ApprovalPolicy to round trip, got %q", listed[0].ApprovalPolicy)
 	}
 }
 
@@ -381,6 +475,33 @@ func TestFileStore_SQLiteIndexMigratesProfileName(t *testing.T) {
 	}
 	if len(listed) != 1 || listed[0].ProfileName != "gpt-high" {
 		t.Fatalf("expected migrated profile name, got %#v", listed)
+	}
+	if listed[0].ApprovalPolicy != agent.ApprovalPolicyAuto {
+		t.Fatalf("expected migrated approval policy auto, got %#v", listed)
+	}
+}
+
+func TestFileStore_GetDefaultsMissingApprovalPolicyToAuto(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	data, err := json.Marshal(&Session{Metadata: Metadata{ID: "legacy-policy", CreatedAt: now, UpdatedAt: now}})
+	if err != nil {
+		t.Fatalf("marshal legacy session: %v", err)
+	}
+	if err := os.WriteFile(store.sessionPath("legacy-policy"), data, 0644); err != nil {
+		t.Fatalf("write legacy session: %v", err)
+	}
+	loaded, err := store.Get(context.Background(), "legacy-policy")
+	if err != nil {
+		t.Fatalf("get legacy session: %v", err)
+	}
+	if loaded.ApprovalPolicy != agent.ApprovalPolicyAuto {
+		t.Fatalf("approval policy = %q, want auto", loaded.ApprovalPolicy)
 	}
 }
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/core/agent"
 )
 
 const (
@@ -96,6 +97,7 @@ func (s *FileStore) Get(ctx context.Context, id string) (*Session, error) {
 func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	sess.EnsureInitialized()
 
 	path := s.sessionPath(sess.ID)
 	data, err := json.MarshalIndent(sess, "", "  ")
@@ -119,6 +121,31 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 // UpdateProfile updates only profile metadata and restores every persisted view
 // if a derived index or legacy registry write fails.
 func (s *FileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+		sess.ProfileName = profileName
+		return metadataUpdatePlan{restoreAuthoritativeOnFailure: true}
+	})
+}
+
+// UpdateApprovalPolicy updates approval policy metadata in a fail-safe order so
+// interrupted writes can only make derived views overestimate runtime access.
+func (s *FileStore) UpdateApprovalPolicy(ctx context.Context, id string, policy agent.ApprovalPolicy, updatedAt time.Time) error {
+	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+		loweringPermissions := sess.ApprovalPolicy == agent.ApprovalPolicyBypass && policy == agent.ApprovalPolicyAuto
+		sess.ApprovalPolicy = policy
+		// During upgrades, publish the more-dangerous derived view before the
+		// authoritative runtime value. During downgrades, do the reverse. A crash
+		// can therefore only make clients overestimate the effective permission.
+		return metadataUpdatePlan{authoritativeLast: !loweringPermissions}
+	})
+}
+
+type metadataUpdatePlan struct {
+	authoritativeLast             bool
+	restoreAuthoritativeOnFailure bool
+}
+
+func (s *FileStore) updateMetadata(ctx context.Context, id string, updatedAt time.Time, update func(*Session) metadataUpdatePlan) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -139,28 +166,35 @@ func (s *FileStore) UpdateProfile(ctx context.Context, id string, profileName st
 		return fmt.Errorf("read previous registry: %w", err)
 	}
 	updatedSession := *previousSession
-	updatedSession.ProfileName = profileName
+	plan := update(&updatedSession)
 	updatedSession.UpdatedAt = updatedAt
 	data, err := json.MarshalIndent(&updatedSession, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal updated session: %w", err)
 	}
-	if err := writeFileAtomic(path, data, 0644); err != nil {
-		return fmt.Errorf("write updated session: %w", err)
+	if !plan.authoritativeLast {
+		if err := writeFileAtomic(path, data, 0644); err != nil {
+			return fmt.Errorf("write updated session: %w", err)
+		}
 	}
 	if err := s.index.upsert(ctx, updatedSession.Metadata); err != nil {
-		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+		return s.rollbackMetadataUpdateLocked(ctx, err, plan.restoreAuthoritativeOnFailure, path, previousData, previousSession, previousRegistry, previousRegistryExists)
 	}
 	if err := s.updateRegistry(updatedSession.Metadata); err != nil {
-		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+		return s.rollbackMetadataUpdateLocked(ctx, err, plan.restoreAuthoritativeOnFailure, path, previousData, previousSession, previousRegistry, previousRegistryExists)
 	}
 	if err := s.recordLegacyRegistryMTime(ctx); err != nil {
-		return s.rollbackProfileUpdateLocked(ctx, err, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+		return s.rollbackMetadataUpdateLocked(ctx, err, plan.restoreAuthoritativeOnFailure, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+	}
+	if plan.authoritativeLast {
+		if err := writeFileAtomic(path, data, 0644); err != nil {
+			return s.rollbackMetadataUpdateLocked(ctx, err, false, path, previousData, previousSession, previousRegistry, previousRegistryExists)
+		}
 	}
 	return nil
 }
 
-func (s *FileStore) rollbackProfileUpdateLocked(ctx context.Context, cause error, path string, previousData []byte, previousSession *Session, previousRegistry []byte, previousRegistryExists bool) error {
+func (s *FileStore) rollbackMetadataUpdateLocked(ctx context.Context, cause error, restoreAuthoritative bool, path string, previousData []byte, previousSession *Session, previousRegistry []byte, previousRegistryExists bool) error {
 	rollbackCtx := context.WithoutCancel(ctx)
 	cancel := func() {}
 	if deadline, ok := ctx.Deadline(); ok {
@@ -169,8 +203,10 @@ func (s *FileStore) rollbackProfileUpdateLocked(ctx context.Context, cause error
 	defer cancel()
 	ctx = rollbackCtx
 	rollbackErrors := []error{cause}
-	if err := restoreFile(path, previousData, true); err != nil {
-		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore session file: %w", err))
+	if restoreAuthoritative {
+		if err := restoreFile(path, previousData, true); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore session file: %w", err))
+		}
 	}
 	if err := s.index.upsert(ctx, previousSession.Metadata); err != nil {
 		rollbackErrors = append(rollbackErrors, fmt.Errorf("restore session index: %w", err))
@@ -183,7 +219,7 @@ func (s *FileStore) rollbackProfileUpdateLocked(ctx context.Context, cause error
 		}
 	}
 	joined := errors.Join(rollbackErrors...)
-	if len(rollbackErrors) > 1 {
+	if restoreAuthoritative && len(rollbackErrors) > 1 {
 		return errors.Join(ErrProfileStateUncertain, joined)
 	}
 	return joined

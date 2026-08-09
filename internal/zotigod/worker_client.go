@@ -285,6 +285,10 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, err
 	}
+	approvalPolicy, err := normalizeSessionApprovalPolicy(sess.ApprovalPolicy, true)
+	if err != nil {
+		return nil, fmt.Errorf("load approval policy: %w", err)
+	}
 	logWorkerRuntimeStep(cfg.SessionID, "config", stepStarted)
 
 	stepStarted = time.Now()
@@ -324,7 +328,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 			WorkDir:                    cwd,
 			IncludeProjectInstructions: true,
 		}),
-		ApprovalPolicy:      agent.ApprovalPolicyAuto,
+		ApprovalPolicy:      approvalPolicy,
 		TranscriptDir:       transcriptDir,
 		Observer:            observer,
 		ConfigureClassifier: true,
@@ -444,6 +448,8 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command commandRespon
 		return nil, r.queueTurnUserInput(ctx, command.Steering)
 	case sessionCommandProfile:
 		return r.switchProfile(ctx, command.ID, command.Profile)
+	case sessionCommandApprovalPolicy:
+		return nil, r.setApprovalPolicy(ctx, command.ID, command.ApprovalPolicy)
 	default:
 		return nil, nil
 	}
@@ -463,6 +469,9 @@ func validateWorkerCommand(command commandResponse) error {
 	if command.Profile != nil {
 		payloads++
 	}
+	if command.ApprovalPolicy != nil {
+		payloads++
+	}
 	switch command.Type {
 	case sessionCommandMessage:
 		if command.Message == nil || payloads != 1 {
@@ -480,8 +489,47 @@ func validateWorkerCommand(command commandResponse) error {
 		if command.Profile == nil || strings.TrimSpace(command.Profile.Name) == "" || payloads != 1 {
 			return fmt.Errorf("invalid profile command payload")
 		}
+	case sessionCommandApprovalPolicy:
+		if command.ApprovalPolicy == nil || payloads != 1 {
+			return fmt.Errorf("invalid approval policy command payload")
+		}
+		if _, err := normalizeSessionApprovalPolicy(command.ApprovalPolicy.Policy, false); err != nil {
+			return fmt.Errorf("invalid approval policy command payload: %w", err)
+		}
 	default:
 		return nil
+	}
+	return nil
+}
+
+func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *approvalPolicyCommandPayload) error {
+	target, err := normalizeSessionApprovalPolicy(command.Policy, false)
+	if err != nil {
+		return err
+	}
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, r.workDir)
+	if err != nil {
+		return err
+	}
+	from := sess.ApprovalPolicy
+	sess.ApprovalPolicy = target
+	sess.UpdatedAt = time.Now().UTC()
+	loweringPermissions := from == agent.ApprovalPolicyBypass && target == agent.ApprovalPolicyAuto
+	if loweringPermissions {
+		// Stop bypassing approval before publishing the safer persisted value.
+		// If persistence fails, keeping the Agent on Auto is the safe outcome.
+		r.agent.SetApprovalPolicy(target)
+	}
+	if err := persistSessionApprovalPolicy(ctx, r.store, sess); err != nil {
+		return fmt.Errorf("persist approval policy: %w", err)
+	}
+	if !loweringPermissions {
+		r.agent.SetApprovalPolicy(target)
+	}
+	if err := r.display.ApprovalPolicyChanged(ctx, commandID, string(from), string(target)); err != nil {
+		return fmt.Errorf("record approval policy change: %w", err)
 	}
 	return nil
 }
@@ -995,7 +1043,7 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 		completion <-chan error
 	}
 	pendingProfiles := make([]pendingProfile, 0)
-	completedProfiles, err := completedProfileCommandIDs(ctx, runtime)
+	completedProfiles, completedApprovalPolicies, err := completedWorkerCommandIDs(ctx, runtime)
 	if err != nil {
 		return cursor, err
 	}
@@ -1032,6 +1080,13 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 				cursor.Sequence = command.Sequence
 				continue
 			}
+			if command.Type == sessionCommandApprovalPolicy && completedApprovalPolicies[command.ID] {
+				if err := flushProfiles(); err != nil {
+					return cursor, err
+				}
+				cursor.Sequence = command.Sequence
+				continue
+			}
 			if command.Type != sessionCommandProfile {
 				if err := flushProfiles(); err != nil {
 					return cursor, err
@@ -1060,17 +1115,21 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 	}
 }
 
-func completedProfileCommandIDs(ctx context.Context, runtime *workerRuntime) (map[string]bool, error) {
-	completed := make(map[string]bool)
+func completedWorkerCommandIDs(ctx context.Context, runtime *workerRuntime) (map[string]bool, map[string]bool, error) {
+	completedProfiles := make(map[string]bool)
+	completedApprovalPolicies := make(map[string]bool)
 	pending := make(map[string]bool)
 	if runtime == nil || runtime.display == nil || runtime.display.items == nil {
-		return completed, nil
+		return completedProfiles, completedApprovalPolicies, nil
 	}
 	items, _, err := runtime.display.items.LoadItems(ctx, runtime.sessionID)
 	if err != nil {
-		return nil, fmt.Errorf("load profile command completions: %w", err)
+		return nil, nil, fmt.Errorf("load worker command completions: %w", err)
 	}
 	for _, item := range items {
+		if item.Type == zotigosession.DisplayItemApprovalPolicyChanged && item.ApprovalPolicy != nil && item.ApprovalPolicy.CommandID != "" {
+			completedApprovalPolicies[item.ApprovalPolicy.CommandID] = true
+		}
 		if item.Command != nil && item.Command.Type == sessionCommandProfile {
 			pending[item.ID] = true
 		}
@@ -1078,16 +1137,16 @@ func completedProfileCommandIDs(ctx context.Context, runtime *workerRuntime) (ma
 			continue
 		}
 		if item.Profile != nil && item.Profile.CommandID != "" {
-			completed[item.Profile.CommandID] = true
+			completedProfiles[item.Profile.CommandID] = true
 			delete(pending, item.Profile.CommandID)
 		} else if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil {
 			for commandID := range pending {
-				completed[commandID] = true
+				completedProfiles[commandID] = true
 			}
 			clear(pending)
 		}
 	}
-	return completed, nil
+	return completedProfiles, completedApprovalPolicies, nil
 }
 
 func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, cursor workerCommandCursor) (commandsResponse, error) {
@@ -1191,6 +1250,7 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	pendingMessages := make([]uint64, 0)
 	pendingByTurn := make(map[string][]uint64)
 	pendingProfiles := make(map[string]uint64)
+	pendingApprovalPolicies := make(map[string]uint64)
 
 	for _, item := range items {
 		recordedCommand := false
@@ -1206,6 +1266,8 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				}
 			case sessionCommandProfile:
 				pendingProfiles[item.ID] = item.Sequence
+			case sessionCommandApprovalPolicy:
+				pendingApprovalPolicies[item.ID] = item.Sequence
 			default:
 				safe[item.Sequence] = true
 			}
@@ -1241,6 +1303,13 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 						safe[pendingSeq] = true
 						delete(pendingProfiles, commandID)
 					}
+				}
+			}
+		case zotigosession.DisplayItemApprovalPolicyChanged:
+			if item.ApprovalPolicy != nil {
+				if seq, ok := pendingApprovalPolicies[item.ApprovalPolicy.CommandID]; ok {
+					safe[seq] = true
+					delete(pendingApprovalPolicies, item.ApprovalPolicy.CommandID)
 				}
 			}
 		}

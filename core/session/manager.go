@@ -10,12 +10,13 @@ import (
 
 // Metadata holds the summary info for listing/indexing.
 type Metadata struct {
-	ID               string    `json:"id"`
-	WorkingDirectory string    `json:"working_directory"` // The project path this session belongs to
-	ProfileName      string    `json:"profile_name,omitempty"`
-	LastPrompt       string    `json:"last_prompt"` // Preview of the last user interaction
-	CreatedAt        time.Time `json:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
+	ID               string               `json:"id"`
+	WorkingDirectory string               `json:"working_directory"` // The project path this session belongs to
+	ProfileName      string               `json:"profile_name,omitempty"`
+	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy,omitempty"`
+	LastPrompt       string               `json:"last_prompt"` // Preview of the last user interaction
+	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 }
 
 // Session represents the full state on disk.
@@ -71,6 +72,9 @@ func (m *Manager) CreateNew(workDir string) (*Session, error) {
 
 // EnsureInitialized backfills fields added in newer versions so old sessions remain usable.
 func (s *Session) EnsureInitialized() {
+	if s.ApprovalPolicy == "" {
+		s.ApprovalPolicy = agent.ApprovalPolicyAuto
+	}
 	if s.Turns == nil {
 		s.Turns = make([]Turn, 0)
 	}

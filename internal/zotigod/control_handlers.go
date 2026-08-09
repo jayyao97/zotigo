@@ -12,21 +12,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 const (
-	sessionCommandMessage      = "message"
-	sessionCommandPause        = "pause"
-	sessionCommandSteering     = "steering"
-	sessionCommandProfile      = "profile"
-	userPauseReason            = "user_pause"
-	controlChannelClosedReason = "control_channel_closed"
-	workerRestartedReason      = "worker_restarted"
-	defaultCommandsLimit       = 200
-	maxCommandsLimit           = 200
-	commandOffsetScanLines     = maxCommandsLimit
+	sessionCommandMessage        = "message"
+	sessionCommandPause          = "pause"
+	sessionCommandSteering       = "steering"
+	sessionCommandProfile        = "profile"
+	sessionCommandApprovalPolicy = "approval_policy"
+	userPauseReason              = "user_pause"
+	controlChannelClosedReason   = "control_channel_closed"
+	workerRestartedReason        = "worker_restarted"
+	defaultCommandsLimit         = 200
+	maxCommandsLimit             = 200
+	commandOffsetScanLines       = maxCommandsLimit
 )
 
 var errCommandImageUnavailable = errors.New("command image payload unavailable")
@@ -66,14 +68,15 @@ type commandsResponse struct {
 }
 
 type commandResponse struct {
-	ID        string                  `json:"id"`
-	Sequence  uint64                  `json:"sequence"`
-	Type      string                  `json:"type"`
-	CreatedAt time.Time               `json:"created_at"`
-	Message   *messageCommandPayload  `json:"message,omitempty"`
-	Steering  *steeringCommandPayload `json:"steering,omitempty"`
-	Pause     *pauseCommandPayload    `json:"pause,omitempty"`
-	Profile   *profileCommandPayload  `json:"profile,omitempty"`
+	ID             string                        `json:"id"`
+	Sequence       uint64                        `json:"sequence"`
+	Type           string                        `json:"type"`
+	CreatedAt      time.Time                     `json:"created_at"`
+	Message        *messageCommandPayload        `json:"message,omitempty"`
+	Steering       *steeringCommandPayload       `json:"steering,omitempty"`
+	Pause          *pauseCommandPayload          `json:"pause,omitempty"`
+	Profile        *profileCommandPayload        `json:"profile,omitempty"`
+	ApprovalPolicy *approvalPolicyCommandPayload `json:"approval_policy,omitempty"`
 }
 
 type messageCommandPayload struct {
@@ -96,6 +99,10 @@ type profileCommandPayload struct {
 	Name string `json:"name"`
 }
 
+type approvalPolicyCommandPayload struct {
+	Policy agent.ApprovalPolicy `json:"policy"`
+}
+
 type commandImageData struct {
 	MimeType   string `json:"mime_type,omitempty"`
 	SizeBytes  int    `json:"size_bytes,omitempty"`
@@ -106,15 +113,16 @@ type commandImageData struct {
 }
 
 type publicCommandResponse struct {
-	ID        string                       `json:"id"`
-	Sequence  uint64                       `json:"sequence"`
-	Type      string                       `json:"type"`
-	Text      string                       `json:"text,omitempty"`
-	Images    []publicCommandImageResponse `json:"images,omitempty"`
-	TurnID    string                       `json:"turn_id,omitempty"`
-	Reason    string                       `json:"reason,omitempty"`
-	Profile   string                       `json:"profile,omitempty"`
-	CreatedAt time.Time                    `json:"created_at"`
+	ID             string                       `json:"id"`
+	Sequence       uint64                       `json:"sequence"`
+	Type           string                       `json:"type"`
+	Text           string                       `json:"text,omitempty"`
+	Images         []publicCommandImageResponse `json:"images,omitempty"`
+	TurnID         string                       `json:"turn_id,omitempty"`
+	Reason         string                       `json:"reason,omitempty"`
+	Profile        string                       `json:"profile,omitempty"`
+	ApprovalPolicy agent.ApprovalPolicy         `json:"approval_policy,omitempty"`
+	CreatedAt      time.Time                    `json:"created_at"`
 }
 
 type publicCommandImageResponse struct {
@@ -808,6 +816,9 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 			case sessionCommandProfile:
 				resp.Commands = append(resp.Commands, profileCommandFromItem(item))
 				appended = true
+			case sessionCommandApprovalPolicy:
+				resp.Commands = append(resp.Commands, approvalPolicyCommandFromItem(item))
+				appended = true
 			}
 			if appended && len(resp.Commands) >= query.Limit {
 				break
@@ -905,6 +916,8 @@ func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (com
 		return pauseCommandFromItem(item), true, nil
 	case sessionCommandProfile:
 		return profileCommandFromItem(item), true, nil
+	case sessionCommandApprovalPolicy:
+		return approvalPolicyCommandFromItem(item), true, nil
 	default:
 		return commandResponse{}, false, nil
 	}
@@ -1034,6 +1047,10 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 		if command.Profile != nil {
 			resp.Profile = command.Profile.Name
 		}
+	case sessionCommandApprovalPolicy:
+		if command.ApprovalPolicy != nil {
+			resp.ApprovalPolicy = command.ApprovalPolicy.Policy
+		}
 	}
 	return resp
 }
@@ -1109,6 +1126,20 @@ func profileCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	}
 	if item.Command != nil {
 		command.Profile.Name = item.Command.Profile
+	}
+	return command
+}
+
+func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) commandResponse {
+	command := commandResponse{
+		ID:             item.ID,
+		Sequence:       item.Sequence,
+		Type:           sessionCommandApprovalPolicy,
+		CreatedAt:      item.CreatedAt,
+		ApprovalPolicy: &approvalPolicyCommandPayload{},
+	}
+	if item.Command != nil {
+		command.ApprovalPolicy.Policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
 	}
 	return command
 }
