@@ -29,10 +29,13 @@ import (
 // Arguments (e.g. to inject defaults); the Executor field is the same
 // value passed to the tool's Execute.
 type ToolCall struct {
-	Tool      tools.Tool
-	Name      string
-	Arguments string
-	Executor  executor.Executor
+	// ToolCallID correlates host-side durability and approval records with
+	// the provider call before the tool may produce side effects.
+	ToolCallID string
+	Tool       tools.Tool
+	Name       string
+	Arguments  string
+	Executor   executor.Executor
 }
 
 // Next is the next link in the middleware chain. The innermost Next

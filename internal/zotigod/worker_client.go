@@ -47,6 +47,7 @@ const (
 	defaultWorkerClientPingInterval = 15 * time.Second
 	defaultWorkerClientPongWait     = 45 * time.Second
 	workerCommandBufferSize         = 32
+	workerDeltaBufferSize           = 256
 )
 
 type workerClientConfig struct {
@@ -81,6 +82,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	var conn *websocket.Conn
 	var generation string
 	stopKeepalive := func() {}
+	var clientWriter *workerClientWriter
 	var runErr error
 	httpClient := &http.Client{Timeout: workerHTTPTimeout}
 	defer func() {
@@ -126,15 +128,18 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		return fmt.Errorf("connect worker websocket: missing worker generation")
 	}
 	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
-	stopKeepalive = startWorkerClientKeepalive(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
+	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
+	stopKeepalive = clientWriter.Close
 	commandCh, readErrCh := readWorkerCommands(conn)
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:  cfg.SessionID,
 		DaemonURL:  daemonURL,
+		Generation: generation,
 		Store:      store,
 		HTTPClient: httpClient,
+		SendDelta:  clientWriter.SendDelta,
 	})
 	if err != nil {
 		return err
@@ -197,8 +202,10 @@ type workerCommandCursor struct {
 type workerRuntimeConfig struct {
 	SessionID  string
 	DaemonURL  string
+	Generation string
 	Store      zotigosession.Store
 	HTTPClient *http.Client
+	SendDelta  func(displayDeltaEvent)
 }
 
 func readWorkerCommands(conn *websocket.Conn) (<-chan commandResponse, <-chan error) {
@@ -240,6 +247,7 @@ type workerRuntime struct {
 	runner           *runner.Runner
 	transport        *workerRuntimeTransport
 	display          *workerDisplayLog
+	displayWake      *displayWakeNotifier
 	observer         observability.Observer
 	cleanup          func()
 	storeMu          sync.Mutex
@@ -313,6 +321,21 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		"process_start":  time.Now().UTC().Format(time.RFC3339),
 		"worker":         true,
 	})
+	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
+	display.delta = cfg.SendDelta
+	var displayWake *displayWakeNotifier
+	if cfg.DaemonURL != "" && cfg.Generation != "" && cfg.HTTPClient != nil {
+		displayWake = newDisplayWakeNotifier(cfg.HTTPClient, cfg.DaemonURL, cfg.SessionID, cfg.Generation)
+		display.wake = displayWake.Wake
+	}
+	if err := recoverInterruptedToolExecutions(ctx, cfg.Store, sess); err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
+		_ = observer.Close(context.Background())
+		_ = localExec.Close()
+		return nil, fmt.Errorf("recover interrupted tool executions: %w", err)
+	}
 
 	stepStarted = time.Now()
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
@@ -334,9 +357,13 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		ConfigureClassifier: true,
 		Middleware: []agent.Middleware{
 			middleware.ReadTracker(readTracker),
+			workerToolExecutionMiddleware(display),
 		},
 	})
 	if err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
@@ -354,6 +381,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		LSPManager:  lspManager,
 		Spawn:       true,
 	}); err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -361,8 +391,10 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
-	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -370,14 +402,15 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	transport := newWorkerRuntimeTransport(cfg.SessionID, cfg.DaemonURL, cfg.HTTPClient, display)
 	runtime := &workerRuntime{
-		sessionID: cfg.SessionID,
-		workDir:   cwd,
-		store:     cfg.Store,
-		agent:     ag,
-		transport: transport,
-		display:   display,
-		observer:  observer,
-		fatalCh:   make(chan error, 1),
+		sessionID:   cfg.SessionID,
+		workDir:     cwd,
+		store:       cfg.Store,
+		agent:       ag,
+		transport:   transport,
+		display:     display,
+		displayWake: displayWake,
+		observer:    observer,
+		fatalCh:     make(chan error, 1),
 	}
 	runtime.runner = runner.New(ag, transport, runner.WithListeners(runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
@@ -421,6 +454,9 @@ func (r *workerRuntime) Close() {
 	}
 	if r.agent != nil {
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
+	}
+	if r.displayWake != nil {
+		r.displayWake.Close()
 	}
 	if r.cleanup != nil {
 		r.cleanup()
@@ -1000,6 +1036,10 @@ func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL strin
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", workerReadyRequest{Generation: generation})
 }
 
+func reportWorkerDisplayWake(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
+	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/events/wake", displayWakeRequest{Generation: generation})
+}
+
 func workerWebSocketDialError(dialErr error, resp *http.Response) error {
 	if resp == nil {
 		return dialErr
@@ -1398,43 +1438,95 @@ func workerConnectURL(daemonURL string, sessionID string) (string, error) {
 	return parsed.String(), nil
 }
 
-func startWorkerClientKeepalive(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) func() {
+type workerClientWriter struct {
+	conn      *websocket.Conn
+	pingEvery time.Duration
+	sendCh    chan workerMessage
+	done      chan struct{}
+	closeOnce sync.Once
+}
+
+func newWorkerClientWriter(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) *workerClientWriter {
 	if pongWait > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		conn.SetPongHandler(func(string) error {
 			return conn.SetReadDeadline(time.Now().Add(pongWait))
 		})
 	}
-	if pingInterval <= 0 {
-		return func() {}
+	writer := &workerClientWriter{
+		conn:      conn,
+		pingEvery: pingInterval,
+		sendCh:    make(chan workerMessage, workerDeltaBufferSize),
+		done:      make(chan struct{}),
 	}
+	go writer.run()
+	return writer
+}
 
-	done := make(chan struct{})
-	var stopOnce sync.Once
-	go func() {
-		ticker := time.NewTicker(pingInterval)
+func (w *workerClientWriter) SendDelta(delta displayDeltaEvent) {
+	msg := workerMessage{Type: workerMessageDelta, Delta: &delta}
+	select {
+	case <-w.done:
+		return
+	default:
+	}
+	select {
+	case w.sendCh <- msg:
+	case <-w.done:
+	default:
+		// Deltas are previews. Never stall model generation; the completed
+		// durable item replaces any partial preview that was dropped here.
+	}
+}
+
+func (w *workerClientWriter) Close() {
+	w.closeOnce.Do(func() { close(w.done) })
+}
+
+func (w *workerClientWriter) run() {
+	var ticker *time.Ticker
+	var ticks <-chan time.Time
+	if w.pingEvery > 0 {
+		ticker = time.NewTicker(w.pingEvery)
+		ticks = ticker.C
 		defer ticker.Stop()
-		for {
-			select {
-			case <-done:
+	}
+	for {
+		select {
+		case <-w.done:
+			return
+		case msg := <-w.sendCh:
+			if err := w.writeMessage(websocket.TextMessage, msg); err != nil {
+				_ = w.conn.Close()
 				return
-			case <-ticker.C:
-				if err := conn.SetWriteDeadline(time.Now().Add(workerWriteWait)); err != nil {
-					_ = conn.Close()
-					return
-				}
-				if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-					_ = conn.Close()
-					return
-				}
+			}
+		case <-ticks:
+			if err := w.writeMessage(websocket.PingMessage, nil); err != nil {
+				_ = w.conn.Close()
+				return
 			}
 		}
-	}()
-	return func() {
-		stopOnce.Do(func() {
-			close(done)
-		})
 	}
+}
+
+func (w *workerClientWriter) writeMessage(messageType int, value any) error {
+	var data []byte
+	var err error
+	if value != nil {
+		data, err = sonic.Marshal(value)
+		if err != nil {
+			return err
+		}
+	}
+	if err := w.conn.SetWriteDeadline(time.Now().Add(workerWriteWait)); err != nil {
+		return err
+	}
+	return w.conn.WriteMessage(messageType, data)
+}
+
+func startWorkerClientKeepalive(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) func() {
+	writer := newWorkerClientWriter(conn, pingInterval, pongWait)
+	return writer.Close
 }
 
 func acquireWorkerSessionLock(ctx context.Context, store zotigosession.Store, sessionID string) (func() error, error) {

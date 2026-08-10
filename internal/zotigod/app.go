@@ -20,6 +20,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -277,6 +278,7 @@ type handler struct {
 	sessionOps           *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
+	events               *displayEventBroker
 }
 
 type createSessionRequest struct {
@@ -387,6 +389,7 @@ type handlerOptions struct {
 	sessionOps           *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
+	events               *displayEventBroker
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -472,6 +475,15 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.titleTimeout == 0 {
 		options.titleTimeout = defaultTitleSuggestionTimeout
 	}
+	if options.events == nil {
+		options.events = newDisplayEventBroker()
+	}
+	eventingItems := eventingDisplayItemSource{source: items, events: options.events}
+	if offsetItems, ok := items.(offsetDisplayItemSource); ok {
+		items = eventingOffsetDisplayItemSource{eventingDisplayItemSource: eventingItems, offset: offsetItems}
+	} else {
+		items = eventingItems
+	}
 	handler := &handler{
 		registry:             registry,
 		approvals:            newApprovalRegistry(),
@@ -483,8 +495,18 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		sessionOps:           options.sessionOps,
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
+		events:               options.events,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
+	handler.workers.SetMessageHandler(func(sessionID string, msg workerMessage) {
+		if msg.Type != workerMessageDelta || msg.Delta == nil || msg.Delta.ItemID == "" || msg.Delta.Delta == "" {
+			return
+		}
+		switch msg.Delta.PartType {
+		case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
+			handler.events.PublishDelta(sessionID, *msg.Delta)
+		}
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
@@ -686,6 +708,8 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionGet(w, r, id)
 	case "items":
 		h.handleSessionItems(w, r, id)
+	case "events":
+		h.handleSessionEvents(w, r, id)
 	case "messages":
 		h.handleSessionMessage(w, r, id)
 	case "pause":
@@ -729,6 +753,8 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 		h.handleWorkerAttach(w, r, id)
 	case "worker/finish":
 		h.handleWorkerFinish(w, r, id)
+	case "events/wake":
+		h.handleWorkerDisplayWake(w, r, id)
 	case "approvals":
 		h.handleApprovalCreate(w, r, id)
 	default:
