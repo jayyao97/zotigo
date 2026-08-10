@@ -13,6 +13,7 @@ import (
 type workerDisplayLog struct {
 	sessionID string
 	items     displayItemSource
+	wake      func(context.Context)
 
 	mu          sync.Mutex
 	turnID      string
@@ -30,7 +31,7 @@ func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
 	l.turnStarted = time.Now()
 	l.turnID = fmt.Sprintf("turn_%d", l.turnStarted.UnixNano())
 	l.content = nil
-	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: l.turnID},
 	})
@@ -44,7 +45,7 @@ func (l *workerDisplayLog) CurrentTurnID() string {
 }
 
 func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
-	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemProfileChanged,
 		Profile: &zotigosession.DisplayProfileChange{
 			CommandID: commandID,
@@ -56,7 +57,7 @@ func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string,
 }
 
 func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, from string, to string, profileErr error) error {
-	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemProfileFailed,
 		Error: profileErr.Error(),
 		Profile: &zotigosession.DisplayProfileChange{
@@ -69,7 +70,7 @@ func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, 
 }
 
 func (l *workerDisplayLog) ApprovalPolicyChanged(ctx context.Context, commandID string, from string, to string) error {
-	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalPolicyChanged,
 		ApprovalPolicy: &zotigosession.DisplayApprovalPolicyChange{
 			CommandID: commandID,
@@ -102,7 +103,7 @@ func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string)
 	if reason == "" {
 		reason = workerRestartedReason
 	}
-	_, err = l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err = l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
 			ID:         turnID,
@@ -117,7 +118,7 @@ func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string)
 func (l *workerDisplayLog) MarkPaused() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.flushAssistantLocked(context.Background())
+	_ = l.flushAssistantLocked(context.Background())
 }
 
 func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
@@ -126,11 +127,13 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	if l.turnID == "" {
 		return nil
 	}
-	l.flushAssistantLocked(ctx)
+	if err := l.flushAssistantLocked(ctx); err != nil {
+		return err
+	}
 	if reason == "" {
 		reason = userPauseReason
 	}
-	_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
 			ID:         l.turnID,
@@ -146,15 +149,17 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 func (l *workerDisplayLog) Fail(ctx context.Context, err error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.flushAssistantLocked(ctx)
+	if flushErr := l.flushAssistantLocked(ctx); flushErr != nil {
+		return flushErr
+	}
 	errText := fmt.Sprintf("%v", err)
-	if _, appendErr := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	if _, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemError,
 		Error: errText,
 	}); appendErr != nil {
 		return appendErr
 	}
-	_, appendErr := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemTurnFailed,
 		Error: errText,
 		Turn: &zotigosession.DisplayTurn{
@@ -198,6 +203,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 					Arguments: event.ToolCall.Arguments,
 				},
 			})
+			return l.flushAssistantLocked(ctx)
 		}
 	case protocol.EventTypeToolResultDone:
 		if event.ToolResult != nil {
@@ -205,14 +211,16 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 				Type:       string(protocol.ContentTypeToolResult),
 				ToolResult: displayToolResultFromProtocol(event.ToolResult),
 			})
+			return l.flushAssistantLocked(ctx)
 		}
 	case protocol.EventTypeFinish:
 		if event.FinishReason == "need_approval" {
-			l.flushAssistantLocked(ctx)
-			return nil
+			return l.flushAssistantLocked(ctx)
 		}
-		l.flushAssistantLocked(ctx)
-		_, err := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+		if err := l.flushAssistantLocked(ctx); err != nil {
+			return err
+		}
+		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemTurnCompleted,
 			Turn: &zotigosession.DisplayTurn{
 				ID:                   l.turnID,
@@ -243,30 +251,35 @@ func (l *workerDisplayLog) appendContentLocked(partType string, text string) {
 	l.content = append(l.content, zotigosession.DisplayContentPart{Type: partType, Text: text})
 }
 
-func (l *workerDisplayLog) flushAssistantLocked(ctx context.Context) {
+func (l *workerDisplayLog) flushAssistantLocked(ctx context.Context) error {
 	if len(l.content) == 0 {
-		return
+		return nil
 	}
 	content := make([]zotigosession.DisplayContentPart, len(l.content))
 	copy(content, l.content)
-	_, _ = l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	if _, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:    zotigosession.DisplayItemAssistantMessage,
 		Role:    string(protocol.RoleAssistant),
 		Content: content,
-	})
+	}); err != nil {
+		return err
+	}
 	l.content = nil
+	return nil
 }
 
 func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
-	l.flushAssistantLocked(ctx)
+	if flushErr := l.flushAssistantLocked(ctx); flushErr != nil {
+		return flushErr
+	}
 	errText := fmt.Sprintf("%v", err)
-	if _, appendErr := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	if _, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemError,
 		Error: errText,
 	}); appendErr != nil {
 		return appendErr
 	}
-	_, appendErr := l.items.AppendItem(ctx, l.sessionID, zotigosession.DisplayItem{
+	_, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemTurnFailed,
 		Error: errText,
 		Turn: &zotigosession.DisplayTurn{
@@ -277,6 +290,14 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 	})
 	l.turnID = ""
 	return appendErr
+}
+
+func (l *workerDisplayLog) appendItem(ctx context.Context, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	stored, err := l.items.AppendItem(ctx, l.sessionID, item)
+	if err == nil && l.wake != nil {
+		l.wake(ctx)
+	}
+	return stored, err
 }
 
 func displayToolResultFromProtocol(result *protocol.ToolResult) *zotigosession.DisplayToolResult {

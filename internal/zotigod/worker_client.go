@@ -133,6 +133,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:  cfg.SessionID,
 		DaemonURL:  daemonURL,
+		Generation: generation,
 		Store:      store,
 		HTTPClient: httpClient,
 	})
@@ -197,6 +198,7 @@ type workerCommandCursor struct {
 type workerRuntimeConfig struct {
 	SessionID  string
 	DaemonURL  string
+	Generation string
 	Store      zotigosession.Store
 	HTTPClient *http.Client
 }
@@ -240,6 +242,7 @@ type workerRuntime struct {
 	runner           *runner.Runner
 	transport        *workerRuntimeTransport
 	display          *workerDisplayLog
+	displayWake      *displayWakeNotifier
 	observer         observability.Observer
 	cleanup          func()
 	storeMu          sync.Mutex
@@ -362,7 +365,15 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
+	var displayWake *displayWakeNotifier
+	if cfg.DaemonURL != "" && cfg.Generation != "" && cfg.HTTPClient != nil {
+		displayWake = newDisplayWakeNotifier(cfg.HTTPClient, cfg.DaemonURL, cfg.SessionID, cfg.Generation)
+		display.wake = displayWake.Wake
+	}
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -370,14 +381,15 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	transport := newWorkerRuntimeTransport(cfg.SessionID, cfg.DaemonURL, cfg.HTTPClient, display)
 	runtime := &workerRuntime{
-		sessionID: cfg.SessionID,
-		workDir:   cwd,
-		store:     cfg.Store,
-		agent:     ag,
-		transport: transport,
-		display:   display,
-		observer:  observer,
-		fatalCh:   make(chan error, 1),
+		sessionID:   cfg.SessionID,
+		workDir:     cwd,
+		store:       cfg.Store,
+		agent:       ag,
+		transport:   transport,
+		display:     display,
+		displayWake: displayWake,
+		observer:    observer,
+		fatalCh:     make(chan error, 1),
 	}
 	runtime.runner = runner.New(ag, transport, runner.WithListeners(runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
@@ -421,6 +433,9 @@ func (r *workerRuntime) Close() {
 	}
 	if r.agent != nil {
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
+	}
+	if r.displayWake != nil {
+		r.displayWake.Close()
 	}
 	if r.cleanup != nil {
 		r.cleanup()
@@ -998,6 +1013,10 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 
 func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", workerReadyRequest{Generation: generation})
+}
+
+func reportWorkerDisplayWake(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
+	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/events/wake", displayWakeRequest{Generation: generation})
 }
 
 func workerWebSocketDialError(dialErr error, resp *http.Response) error {

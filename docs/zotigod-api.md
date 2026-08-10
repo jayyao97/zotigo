@@ -15,6 +15,7 @@ state and display history.
 - `PUT /sessions/{id}/approval-policy`
 - `POST /sessions/{id}/start`
 - `GET /sessions/{id}/items`
+- `GET /sessions/{id}/events`
 - `POST /sessions/{id}/title-suggestion`
 - `POST /sessions/{id}/messages`
 - `POST /sessions/{id}/pause`
@@ -29,6 +30,7 @@ Current internal worker endpoints include:
 - `GET /internal/workers/connect?session_id={id}`
 - `POST /internal/sessions/{id}/worker/attach`
 - `POST /internal/sessions/{id}/worker/finish`
+- `POST /internal/sessions/{id}/events/wake`
 - `GET /internal/sessions/{id}/commands`
 - `POST /internal/sessions/{id}/turn/interrupted`
 - `POST /internal/sessions/{id}/approvals`
@@ -445,6 +447,11 @@ Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
 For structured parts such as `tool_call` and `tool_result`, desktop clients
 should use the structured `tool_call` and `tool_result` objects for rendering,
 state, filtering, and details. `text` is reserved for actual text content parts.
+Complete `tool_call` and `tool_result` parts are persisted as soon as their
+runtime events finish, rather than waiting for the whole turn. A single model
+turn may therefore produce multiple ordered `assistant_message` items. Text and
+reasoning remain coalesced between those boundaries instead of creating one
+durable item per token.
 
 Old sessions that do not have a per-session display log return an empty item
 list. zotigo may later add an explicit best-effort migration path, but this
@@ -456,6 +463,53 @@ Status codes:
 - `200`: items returned. A known session with no display log returns an empty
   `items` array.
 - `400`: invalid pagination parameters.
+- `404`: session not found.
+- `405`: method not allowed.
+
+## Stream session display events
+
+`GET /sessions/{id}/events` is a raw Server-Sent Events stream over the same
+durable display log returned by `/items`. The display log remains the only
+source of truth: zotigod first reads an item after it has been persisted and
+then sends it over SSE. Desktop must retain its sequence cursor and may use
+`/items` for explicit history pagination or recovery.
+
+Each persisted item is sent with its durable sequence as the SSE event ID and
+the same public item DTO used inside the `/items` response:
+
+```text
+id: 42
+event: item
+data: {"id":"item_sess_8f0e12ab34cd56ef_42","sequence":42,"type":"assistant_message","role":"assistant","content":[{"type":"tool_call","tool_call":{"id":"call_123","name":"shell","arguments":"{\"command\":\"git status\"}"}}],"created_at":"2026-01-02T03:04:06Z"}
+
+```
+
+Reconnect semantics:
+
+- `?after=42` replays durable items whose `sequence` is greater than `42`, then
+  continues streaming new items.
+- If `after` is omitted, a valid `Last-Event-ID` header is used instead.
+- If both are present, the `after` query parameter takes precedence.
+- If neither is present, the stream replays the complete durable display log.
+- Items are emitted in ascending sequence order. Clients should still dedupe by
+  sequence so reconnects remain idempotent.
+
+Worker notifications contain no display payload; they only wake active SSE
+handlers to read the durable log. Workers enqueue wake requests through a
+bounded, coalescing sender, so a slow daemon cannot block model event handling.
+Zotigod also performs low-frequency catch-up, so a lost notification delays an
+event briefly but cannot permanently omit it. Comment-only heartbeat frames
+keep idle connections alive and do not advance the event cursor.
+
+Unlike ordinary JSON endpoints, a successful SSE response is not wrapped in
+the `{ "code", "data" }` envelope. Validation failures before streaming use the
+normal structured error response.
+
+Status codes:
+
+- `200`: event stream opened for a known session, including sessions whose log
+  is currently empty.
+- `400`: invalid `after` or `Last-Event-ID` cursor.
 - `404`: session not found.
 - `405`: method not allowed.
 

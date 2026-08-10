@@ -31,6 +31,40 @@ type storedDisplayItemSource struct {
 	store zotigosession.Store
 }
 
+type eventingDisplayItemSource struct {
+	source displayItemSource
+	events *displayEventBroker
+}
+
+type eventingOffsetDisplayItemSource struct {
+	eventingDisplayItemSource
+	offset offsetDisplayItemSource
+}
+
+func (s eventingDisplayItemSource) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
+	return s.source.LoadItems(ctx, sessionID)
+}
+
+func (s eventingOffsetDisplayItemSource) LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error) {
+	return s.offset.LoadItemsFromOffset(ctx, sessionID, offset, maxLines)
+}
+
+func (s eventingDisplayItemSource) AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	stored, err := s.source.AppendItem(ctx, sessionID, item)
+	if err == nil {
+		s.events.Wake(sessionID)
+	}
+	return stored, err
+}
+
+func (s eventingDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
+	stored, err := s.source.AppendItemIf(ctx, sessionID, item, condition)
+	if err == nil {
+		s.events.Wake(sessionID)
+	}
+	return stored, err
+}
+
 func (s storedDisplayItemSource) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
 	return s.store.ListDisplayItems(ctx, sessionID)
 }
