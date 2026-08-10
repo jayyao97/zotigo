@@ -1439,10 +1439,11 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 		return tr
 	}
 	call := &ToolCall{
-		Tool:      tool,
-		Name:      action.Name,
-		Arguments: action.Arguments,
-		Executor:  exec,
+		ToolCallID: action.ToolCallID,
+		Tool:       tool,
+		Name:       action.Name,
+		Arguments:  action.Arguments,
+		Executor:   exec,
 	}
 	ctx = withToolEventSink(ctx, eventSink)
 	invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {

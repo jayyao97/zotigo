@@ -20,6 +20,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -497,6 +498,15 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		events:               options.events,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
+	handler.workers.SetMessageHandler(func(sessionID string, msg workerMessage) {
+		if msg.Type != workerMessageDelta || msg.Delta == nil || msg.Delta.ItemID == "" || msg.Delta.Delta == "" {
+			return
+		}
+		switch msg.Delta.PartType {
+		case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
+			handler.events.PublishDelta(sessionID, *msg.Delta)
+		}
+	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)

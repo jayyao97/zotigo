@@ -404,6 +404,7 @@ Current item types include:
 - `context_compacted`
 - `profile_changed`
 - `profile_change_failed`
+- `approval_policy_changed`
 
 Profile result items expose the command correlation and transition without
 provider credentials:
@@ -450,8 +451,35 @@ state, filtering, and details. `text` is reserved for actual text content parts.
 Complete `tool_call` and `tool_result` parts are persisted as soon as their
 runtime events finish, rather than waiting for the whole turn. A single model
 turn may therefore produce multiple ordered `assistant_message` items. Text and
-reasoning remain coalesced between those boundaries instead of creating one
-durable item per token.
+reasoning are persisted once per completed content block instead of creating
+one durable item per token.
+
+Immediately before invoking a registered tool, the worker appends an internal
+`tool_execution_started` journal item containing `turn_id`, `tool_call_id`, and
+`tool_name`. The worker waits until the corresponding complete `tool_call` is
+durable, then persists this marker, and only then invokes the tool. A durable
+`tool_result` completes that execution for recovery purposes. Internal journal
+items are intentionally filtered before `/items` pagination and are not sent as
+public SSE `item` events, so existing Desktop item parsers remain compatible.
+Once a new worker has written this journal type, downgrading that session to an
+older zotigod is not supported: an older daemon may expose the unknown item to
+clients. Display-log format upgrades are forward-only unless a release states
+otherwise.
+
+If a worker stops after `tool_execution_started` but before a matching durable
+result, the replacement worker treats the outcome as unknown. When a paused
+snapshot ends with the corresponding assistant tool-call batch, it appends
+matching synthetic error tool results; otherwise it appends an internal
+user-role reminder. Both forms tell the model that the operation may have
+produced side effects and must not be repeated automatically. The worker clears
+stale pending actions and does not replay the call. Repeated restarts do not
+duplicate the same turn-scoped reminder.
+
+This execution barrier covers worker-process failures and control-channel
+disconnects. The current append-only file store does not call `fsync` for each
+display item, so it does not claim exactly-once recovery across an OS crash,
+power loss, or storage failure. Tools that need that stronger guarantee still
+require their own idempotency key or externally queryable operation ID.
 
 Old sessions that do not have a per-session display log return an empty item
 list. zotigo may later add an explicit best-effort migration path, but this
@@ -468,11 +496,11 @@ Status codes:
 
 ## Stream session display events
 
-`GET /sessions/{id}/events` is a raw Server-Sent Events stream over the same
-durable display log returned by `/items`. The display log remains the only
-source of truth: zotigod first reads an item after it has been persisted and
-then sends it over SSE. Desktop must retain its sequence cursor and may use
-`/items` for explicit history pagination or recovery.
+`GET /sessions/{id}/events` is a raw Server-Sent Events stream carrying durable
+display items plus best-effort live text and reasoning deltas. The display log
+returned by `/items` remains the recovery source of truth. Desktop must retain
+its durable sequence cursor and may use `/items` for explicit history
+pagination or recovery.
 
 Each persisted item is sent with its durable sequence as the SSE event ID and
 the same public item DTO used inside the `/items` response:
@@ -484,6 +512,28 @@ data: {"id":"item_sess_8f0e12ab34cd56ef_42","sequence":42,"type":"assistant_mess
 
 ```
 
+While a text or reasoning block is being generated, the worker may also send
+volatile `delta` events:
+
+```text
+event: delta
+data: {"item_id":"item_550e8400-e29b-41d4-a716-446655440000","role":"assistant","part_type":"reasoning","delta":"Checking the repository"}
+
+```
+
+All deltas for one block use the same worker-generated UUID. When the block
+finishes, its complete durable `assistant_message` uses that UUID as its item
+ID and receives the next durable sequence. Desktop should append deltas to a
+temporary block keyed by `item_id`, then replace that block with the durable
+`item` event carrying the same ID.
+
+Delta events intentionally have no SSE `id` and never advance
+`Last-Event-ID`: they are not persisted, replayed, or included in `/items`.
+They may be dropped if a worker, daemon, connection, or slow client fails. On
+reconnect, Desktop should discard unresolved temporary blocks and rebuild from
+durable items. It should also ignore a late delta whose `item_id` is already
+durable.
+
 Reconnect semantics:
 
 - `?after=42` replays durable items whose `sequence` is greater than `42`, then
@@ -494,12 +544,17 @@ Reconnect semantics:
 - Items are emitted in ascending sequence order. Clients should still dedupe by
   sequence so reconnects remain idempotent.
 
-Worker notifications contain no display payload; they only wake active SSE
-handlers to read the durable log. Workers enqueue wake requests through a
-bounded, coalescing sender, so a slow daemon cannot block model event handling.
-Zotigod also performs low-frequency catch-up, so a lost notification delays an
-event briefly but cannot permanently omit it. Comment-only heartbeat frames
-keep idle connections alive and do not advance the event cursor.
+Durable-item notifications contain no display payload; they only wake active
+SSE handlers to read the durable log. Workers enqueue those wake requests
+through a bounded, coalescing sender, and zotigod also performs low-frequency
+durable catch-up, so a lost wake delays an item briefly but cannot permanently
+omit it.
+
+Volatile deltas travel from the worker over its existing internal control
+WebSocket and are fanned out directly to active SSE subscribers. Their bounded
+queues never block model generation; overload may drop preview data, while the
+complete durable block still repairs the UI. Comment-only heartbeat frames keep
+idle connections alive and do not advance the event cursor.
 
 Unlike ordinary JSON endpoints, a successful SSE response is not wrapped in
 the `{ "code", "data" }` envelope. Validation failures before streaming use the

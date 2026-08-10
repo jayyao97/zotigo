@@ -20,28 +20,40 @@ const (
 	displayEventHeartbeat       = 15 * time.Second
 	displayEventWriteTimeout    = 5 * time.Second
 	displayWakeTimeout          = 500 * time.Millisecond
+	displayEventSubscriberQueue = 32
 )
 
 type displayEventBroker struct {
 	mu          sync.Mutex
-	subscribers map[string]map[chan struct{}]struct{}
+	subscribers map[string]map[chan displayBrokerEvent]struct{}
 }
 
 func newDisplayEventBroker() *displayEventBroker {
-	return &displayEventBroker{subscribers: make(map[string]map[chan struct{}]struct{})}
+	return &displayEventBroker{subscribers: make(map[string]map[chan displayBrokerEvent]struct{})}
 }
 
-func (b *displayEventBroker) Subscribe(sessionID string) (<-chan struct{}, func()) {
-	wake := make(chan struct{}, 1)
+type displayDeltaEvent struct {
+	ItemID   string `json:"item_id"`
+	Role     string `json:"role"`
+	PartType string `json:"part_type"`
+	Delta    string `json:"delta"`
+}
+
+type displayBrokerEvent struct {
+	delta *displayDeltaEvent
+}
+
+func (b *displayEventBroker) Subscribe(sessionID string) (<-chan displayBrokerEvent, func()) {
+	events := make(chan displayBrokerEvent, displayEventSubscriberQueue)
 	b.mu.Lock()
 	if b.subscribers[sessionID] == nil {
-		b.subscribers[sessionID] = make(map[chan struct{}]struct{})
+		b.subscribers[sessionID] = make(map[chan displayBrokerEvent]struct{})
 	}
-	b.subscribers[sessionID][wake] = struct{}{}
+	b.subscribers[sessionID][events] = struct{}{}
 	b.mu.Unlock()
-	return wake, func() {
+	return events, func() {
 		b.mu.Lock()
-		delete(b.subscribers[sessionID], wake)
+		delete(b.subscribers[sessionID], events)
 		if len(b.subscribers[sessionID]) == 0 {
 			delete(b.subscribers, sessionID)
 		}
@@ -50,11 +62,19 @@ func (b *displayEventBroker) Subscribe(sessionID string) (<-chan struct{}, func(
 }
 
 func (b *displayEventBroker) Wake(sessionID string) {
+	b.publish(sessionID, displayBrokerEvent{})
+}
+
+func (b *displayEventBroker) PublishDelta(sessionID string, delta displayDeltaEvent) {
+	b.publish(sessionID, displayBrokerEvent{delta: &delta})
+}
+
+func (b *displayEventBroker) publish(sessionID string, event displayBrokerEvent) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for subscriber := range b.subscribers[sessionID] {
 		select {
-		case subscriber <- struct{}{}:
+		case subscriber <- event:
 		default:
 		}
 	}
@@ -82,7 +102,7 @@ func (h *handler) handleSessionEvents(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 
-	wake, unsubscribe := h.events.Subscribe(id)
+	events, unsubscribe := h.events.Subscribe(id)
 	defer unsubscribe()
 	_, inRegistry := h.registry.Get(id)
 	inStore, err := displayEventSessionExists(r.Context(), h.items, id)
@@ -119,8 +139,12 @@ func (h *handler) handleSessionEvents(w http.ResponseWriter, r *http.Request, id
 		select {
 		case <-r.Context().Done():
 			return
-		case <-wake:
-			if !catchUp() {
+		case event := <-events:
+			if event.delta != nil {
+				if err := writeDisplayEventDelta(w, flusher, *event.delta); err != nil {
+					return
+				}
+			} else if !catchUp() {
 				return
 			}
 		case <-catchUpTicker.C:
@@ -155,6 +179,10 @@ func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher ht
 				if item.Sequence <= cursor.sequence {
 					continue
 				}
+				if !isPublicDisplayItem(item) {
+					cursor.sequence = item.Sequence
+					continue
+				}
 				if err := writeDisplayEventItem(w, flusher, item); err != nil {
 					return true, err
 				}
@@ -174,6 +202,10 @@ func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher ht
 	}
 	for _, item := range items {
 		if item.Sequence <= cursor.sequence {
+			continue
+		}
+		if !isPublicDisplayItem(item) {
+			cursor.sequence = item.Sequence
 			continue
 		}
 		if err := writeDisplayEventItem(w, flusher, item); err != nil {
@@ -215,6 +247,21 @@ func writeDisplayEventItem(w http.ResponseWriter, flusher http.Flusher, item zot
 		return err
 	}
 	if _, err := fmt.Fprintf(w, "id: %d\nevent: item\ndata: %s\n\n", item.Sequence, data); err != nil {
+		return err
+	}
+	flusher.Flush()
+	return clearDisplayEventWriteDeadline(w)
+}
+
+func writeDisplayEventDelta(w http.ResponseWriter, flusher http.Flusher, delta displayDeltaEvent) error {
+	data, err := sonic.Marshal(delta)
+	if err != nil {
+		return err
+	}
+	if err := setDisplayEventWriteDeadline(w); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(w, "event: delta\ndata: %s\n\n", data); err != nil {
 		return err
 	}
 	flusher.Flush()

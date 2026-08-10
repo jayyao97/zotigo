@@ -20,11 +20,13 @@ type workerMessageType string
 
 const (
 	workerMessageCommand workerMessageType = "command"
+	workerMessageDelta   workerMessageType = "display_delta"
 )
 
 type workerMessage struct {
-	Type    workerMessageType `json:"type"`
-	Command *commandResponse  `json:"command,omitempty"`
+	Type    workerMessageType  `json:"type"`
+	Command *commandResponse   `json:"command,omitempty"`
+	Delta   *displayDeltaEvent `json:"delta,omitempty"`
 }
 
 type workerRegistry struct {
@@ -32,6 +34,7 @@ type workerRegistry struct {
 	workers      map[string]*workerConnection
 	waiters      map[string][]chan struct{}
 	onDisconnect func(string)
+	onMessage    func(string, workerMessage)
 	pingInterval time.Duration
 	pongWait     time.Duration
 }
@@ -49,6 +52,12 @@ func (r *workerRegistry) SetDisconnectHandler(handler func(string)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onDisconnect = handler
+}
+
+func (r *workerRegistry) SetMessageHandler(handler func(string, workerMessage)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onMessage = handler
 }
 
 func (r *workerRegistry) Register(sessionID string, generation string, conn *websocket.Conn) *workerConnection {
@@ -156,6 +165,16 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 	}
 }
 
+func (r *workerRegistry) receive(worker *workerConnection, msg workerMessage) {
+	r.mu.Lock()
+	active := r.workers[worker.sessionID] == worker
+	handler := r.onMessage
+	r.mu.Unlock()
+	if active && handler != nil {
+		handler(worker.sessionID, msg)
+	}
+}
+
 type workerConnection struct {
 	sessionID  string
 	generation string
@@ -221,9 +240,18 @@ func (c *workerConnection) readLoop() {
 		return c.conn.SetReadDeadline(time.Now().Add(c.registry.pongWait))
 	})
 	for {
-		if _, _, err := c.conn.ReadMessage(); err != nil {
+		messageType, data, err := c.conn.ReadMessage()
+		if err != nil {
 			return
 		}
+		if messageType != websocket.TextMessage {
+			continue
+		}
+		var msg workerMessage
+		if err := sonic.Unmarshal(data, &msg); err != nil {
+			return
+		}
+		c.registry.receive(c, msg)
 	}
 }
 

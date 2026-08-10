@@ -321,7 +321,13 @@ func parseDisplayCursor(raw string) (uint64, error) {
 }
 
 func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.DisplayPageQuery) itemsResponse {
-	page := zotigosession.PageDisplayItems(items, query)
+	publicItems := make([]zotigosession.DisplayItem, 0, len(items))
+	for _, item := range items {
+		if isPublicDisplayItem(item) {
+			publicItems = append(publicItems, item)
+		}
+	}
+	page := zotigosession.PageDisplayItems(publicItems, query)
 	resp := itemsResponse{
 		Items:      make([]itemResponse, 0, len(page.Items)),
 		NextCursor: page.NextCursor,
@@ -356,6 +362,10 @@ func publicDisplayProfile(profile *zotigosession.DisplayProfileChange) *itemProf
 		return nil
 	}
 	return &itemProfileResponse{CommandID: profile.CommandID, From: profile.From, To: profile.To}
+}
+
+func isPublicDisplayItem(item zotigosession.DisplayItem) bool {
+	return item.Type != zotigosession.DisplayItemToolExecutionStarted
 }
 
 func publicDisplayApprovalPolicy(change *zotigosession.DisplayApprovalPolicyChange) *itemApprovalPolicyResponse {

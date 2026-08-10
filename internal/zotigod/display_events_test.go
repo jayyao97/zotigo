@@ -17,8 +17,10 @@ import (
 )
 
 type receivedDisplayEvent struct {
-	id   string
-	item itemResponse
+	id        string
+	eventType string
+	item      itemResponse
+	delta     displayDeltaEvent
 }
 
 type deadlineResponseWriter struct {
@@ -77,6 +79,109 @@ func TestSessionEventsReplaysAndStreamsDurableItemsInOrder(t *testing.T) {
 
 	_ = resp.Body.Close()
 	waitForDisplayEventSubscribers(t, broker, sessionID, 0)
+}
+
+func TestSessionEventsStreamsVolatileDeltaWithoutDurableCursor(t *testing.T) {
+	store, broker, server, sessionID := newDisplayEventTestServer(t)
+	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
+	defer resp.Body.Close()
+
+	broker.PublishDelta(sessionID, displayDeltaEvent{
+		ItemID:   "item-volatile",
+		Role:     "assistant",
+		PartType: "text",
+		Delta:    "hello",
+	})
+	event := readDisplayEvent(t, reader)
+	if event.eventType != "delta" || event.id != "" {
+		t.Fatalf("volatile event cursor contract = %#v", event)
+	}
+	if event.delta.ItemID != "item-volatile" || event.delta.Delta != "hello" {
+		t.Fatalf("volatile delta = %#v", event.delta)
+	}
+	durable, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		ID:      "item-volatile",
+		Type:    zotigosession.DisplayItemAssistantMessage,
+		Role:    "assistant",
+		Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "hello"}},
+	})
+	if err != nil {
+		t.Fatalf("persist completed block: %v", err)
+	}
+	broker.Wake(sessionID)
+	itemEvent := readDisplayEvent(t, reader)
+	if itemEvent.eventType != "item" || itemEvent.id != fmt.Sprint(durable.Sequence) || itemEvent.item.ID != "item-volatile" {
+		t.Fatalf("durable reconciliation event = %#v", itemEvent)
+	}
+}
+
+func TestInternalToolExecutionMarkerIsHiddenFromPublicItemsAndEvents(t *testing.T) {
+	items := []zotigosession.DisplayItem{
+		{ID: "public-1", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage},
+		{ID: "internal-2", Sequence: 2, Type: zotigosession.DisplayItemToolExecutionStarted},
+		{ID: "public-3", Sequence: 3, Type: zotigosession.DisplayItemAssistantMessage},
+	}
+	page := buildItemsResponse(items, zotigosession.DisplayPageQuery{Limit: 2})
+	if len(page.Items) != 2 || page.Items[0].ID != "public-1" || page.Items[1].ID != "public-3" {
+		t.Fatalf("internal marker affected public pagination: %#v", page.Items)
+	}
+
+	store, _, server, sessionID := newDisplayEventTestServer(t)
+	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		Type:          zotigosession.DisplayItemToolExecutionStarted,
+		ToolExecution: &zotigosession.DisplayToolExecution{TurnID: "turn-1", ToolCallID: "call-1", ToolName: "shell"},
+	}); err != nil {
+		t.Fatalf("append internal marker: %v", err)
+	}
+	public, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{Type: zotigosession.DisplayItemAssistantMessage})
+	if err != nil {
+		t.Fatalf("append public item: %v", err)
+	}
+	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
+	defer resp.Body.Close()
+	event := readDisplayEvent(t, reader)
+	if event.item.ID != public.ID || event.item.Sequence != public.Sequence {
+		t.Fatalf("SSE exposed internal marker: %#v", event)
+	}
+}
+
+func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+	const sessionID = "sess-worker-delta"
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata:      zotigosession.Metadata{ID: sessionID, CreatedAt: now, UpdatedAt: now},
+		AgentSnapshot: agent.Snapshot{State: agent.StateIdle, CreatedAt: now},
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
+	broker := newDisplayEventBroker()
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store:   store,
+		workers: newWorkerRegistry(),
+		events:  broker,
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	workerConn, _ := connectWorker(t, server, sessionID)
+	defer workerConn.Close()
+	writer := newWorkerClientWriter(workerConn, 0, 0)
+	defer writer.Close()
+	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
+	defer resp.Body.Close()
+
+	writer.SendDelta(displayDeltaEvent{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", Delta: "thinking"})
+	event := readDisplayEvent(t, reader)
+	if event.eventType != "delta" || event.id != "" || event.delta.ItemID != "item-from-worker" || event.delta.Delta != "thinking" {
+		t.Fatalf("worker delta event = %#v", event)
+	}
 }
 
 func TestDisplayEventWriteClearsConnectionDeadline(t *testing.T) {
@@ -291,10 +396,16 @@ func readDisplayEvent(t *testing.T, reader *bufio.Reader) receivedDisplayEvent {
 			switch {
 			case strings.HasPrefix(line, "id: "):
 				event.id = strings.TrimPrefix(line, "id: ")
+			case strings.HasPrefix(line, "event: "):
+				event.eventType = strings.TrimPrefix(line, "event: ")
 			case strings.HasPrefix(line, "data: "):
 				data = strings.TrimPrefix(line, "data: ")
 			case line == "" && data != "":
-				if err := sonic.Unmarshal([]byte(data), &event.item); err != nil {
+				var target any = &event.item
+				if event.eventType == "delta" {
+					target = &event.delta
+				}
+				if err := sonic.Unmarshal([]byte(data), target); err != nil {
 					errCh <- err
 					return
 				}
