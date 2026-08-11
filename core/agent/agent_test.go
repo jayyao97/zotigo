@@ -3343,6 +3343,368 @@ func (p *BlockingCaptureProvider) StreamChat(ctx context.Context, messages []pro
 	return ch, nil
 }
 
+type steeringToolProvider struct {
+	mu      sync.Mutex
+	calls   [][]protocol.Message
+	started chan struct{}
+	release chan struct{}
+}
+
+func (p *steeringToolProvider) Name() string { return "steering-tool" }
+
+func (p *steeringToolProvider) StreamChat(_ context.Context, messages []protocol.Message, _ []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	p.mu.Lock()
+	p.calls = append(p.calls, append([]protocol.Message(nil), messages...))
+	call := len(p.calls)
+	p.mu.Unlock()
+	events := make(chan protocol.Event, 6)
+	go func() {
+		defer close(events)
+		if call == 1 {
+			events <- protocol.NewTextDeltaEvent("old ")
+			close(p.started)
+			<-p.release
+			events <- protocol.NewTextDeltaEvent("tail")
+			events <- protocol.Event{Type: protocol.EventTypeContentEnd, ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "old tail"}}
+			events <- protocol.Event{Type: protocol.EventTypeToolCallEnd, ToolCall: &protocol.ToolCall{ID: "call-steered", Name: "counting", Arguments: "{}"}}
+			events <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
+			return
+		}
+		events <- protocol.NewTextDeltaEvent("new response")
+		events <- protocol.Event{Type: protocol.EventTypeContentEnd, ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "new response"}}
+		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	}()
+	return events, nil
+}
+
+type countingSafeTool struct {
+	mu    sync.Mutex
+	calls int
+}
+
+type steeringSequentialTool struct {
+	name    string
+	started chan<- struct{}
+}
+
+type steeringIgnoresCancelTool struct {
+	started chan struct{}
+	release chan struct{}
+}
+
+func acknowledgeSteeringBoundary(event protocol.Event) {
+	if event.Type == protocol.EventTypeSteeringApplied && event.SteeringAck != nil {
+		event.SteeringAck <- nil
+	}
+}
+
+func (t *steeringSequentialTool) Name() string        { return t.name }
+func (t *steeringSequentialTool) Description() string { return t.name }
+func (t *steeringSequentialTool) Schema() any         { return nil }
+func (t *steeringSequentialTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelLow}
+}
+func (t *steeringSequentialTool) Execute(ctx context.Context, _ executor.Executor, _ string) (any, error) {
+	if t.started == nil {
+		return t.name + " done", nil
+	}
+	select {
+	case t.started <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+func (t *steeringIgnoresCancelTool) Name() string        { return "ignores_cancel" }
+func (t *steeringIgnoresCancelTool) Description() string { return "ignores cancellation" }
+func (t *steeringIgnoresCancelTool) Schema() any         { return nil }
+func (t *steeringIgnoresCancelTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
+func (t *steeringIgnoresCancelTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	close(t.started)
+	<-t.release
+	return "completed after steering", nil
+}
+
+func (t *countingSafeTool) Name() string        { return "counting" }
+func (t *countingSafeTool) Description() string { return "counts executions" }
+func (t *countingSafeTool) Schema() any         { return nil }
+func (t *countingSafeTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelSafe}
+}
+func (t *countingSafeTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.calls++
+	return "executed", nil
+}
+
+func TestAgentSteeringFinishesProviderStreamAndSkipsUnstartedTools(t *testing.T) {
+	const providerName = "steering-skips-unstarted-tools"
+	provider := &steeringToolProvider{started: make(chan struct{}), release: make(chan struct{})}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	tool := &countingSafeTool{}
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithTools(tool))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "original request")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	<-provider.started
+	if err := ag.QueueTurnUserMessage(protocol.Message{ID: "steering-command", Role: protocol.RoleUser, Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "steer now"}}}); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+	close(provider.release)
+
+	var order []string
+	var interrupted *protocol.ToolResult
+	var steeringIDs []string
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
+		switch event.Type {
+		case protocol.EventTypeContentDelta:
+			if event.ContentPartDelta != nil {
+				order = append(order, event.ContentPartDelta.Text)
+			}
+		case protocol.EventTypeToolResultDone:
+			order = append(order, "tool_result")
+			interrupted = event.ToolResult
+		case protocol.EventTypeSteeringApplied:
+			order = append(order, "steering_applied")
+			steeringIDs = append([]string(nil), event.SteeringIDs...)
+		}
+	}
+	if got := strings.Join(order, "|"); got != "old |tail|tool_result|steering_applied|new response" {
+		t.Fatalf("unexpected event order: %s", got)
+	}
+	if interrupted == nil || interrupted.ToolCallID != "call-steered" || interrupted.Reason != "interrupted_by_steering" || !interrupted.IsError {
+		t.Fatalf("unexpected interrupted result: %#v", interrupted)
+	}
+	if len(steeringIDs) != 1 || steeringIDs[0] != "steering-command" {
+		t.Fatalf("unexpected applied steering IDs: %#v", steeringIDs)
+	}
+	tool.mu.Lock()
+	toolCalls := tool.calls
+	tool.mu.Unlock()
+	if toolCalls != 0 {
+		t.Fatalf("tool executed %d times after steering", toolCalls)
+	}
+
+	provider.mu.Lock()
+	calls := append([][]protocol.Message(nil), provider.calls...)
+	provider.mu.Unlock()
+	if len(calls) != 2 {
+		t.Fatalf("expected two provider calls, got %d", len(calls))
+	}
+	second := calls[1]
+	if len(second) < 3 || second[len(second)-1].Role != protocol.RoleUser || second[len(second)-1].String() != "steer now" {
+		t.Fatalf("steering was not the final input to the next request: %#v", second)
+	}
+	toolMessage := second[len(second)-2]
+	if toolMessage.Role != protocol.RoleTool || len(toolMessage.Content) != 1 || toolMessage.Content[0].ToolResult == nil || toolMessage.Content[0].ToolResult.Reason != "interrupted_by_steering" {
+		t.Fatalf("missing protocol-valid interrupted tool result: %#v", toolMessage)
+	}
+}
+
+func TestAgentSteeringCancelsStartedTool(t *testing.T) {
+	const providerName = "steering-cancels-started-tool"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"blocking_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
+		agent.WithTools(&BlockingSafeTool{name: "blocking_tool", started: started, release: release}),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run tool")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	<-started
+	if err := ag.QueueTurnUserInput("stop that tool"); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+
+	var interrupted *protocol.ToolResult
+	var applied bool
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
+		if event.Type == protocol.EventTypeToolResultDone {
+			interrupted = event.ToolResult
+		}
+		if event.Type == protocol.EventTypeSteeringApplied {
+			applied = true
+		}
+	}
+	if interrupted == nil || interrupted.ToolCallID != "call_1" || interrupted.Reason != "interrupted_by_steering" {
+		t.Fatalf("unexpected interrupted result: %#v", interrupted)
+	}
+	if !applied {
+		t.Fatal("steering was not applied after canceling the tool")
+	}
+}
+
+func TestAgentSteeringPreservesToolCompletedBeforeLaterToolWasInterrupted(t *testing.T) {
+	const providerName = "steering-preserves-completed-tool"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"completed_tool", "blocking_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	started := make(chan struct{}, 1)
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
+		agent.WithTools(
+			&steeringSequentialTool{name: "completed_tool"},
+			&steeringSequentialTool{name: "blocking_tool", started: started},
+		),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run both tools")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	<-started
+	if err := ag.QueueTurnUserInput("stop the second tool"); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+
+	results := make(map[string]protocol.ToolResult)
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
+		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
+			results[event.ToolResult.ToolCallID] = *event.ToolResult
+		}
+	}
+	completed := results["call_1"]
+	if completed.IsError || completed.Reason != "" || completed.Text != "completed_tool done" {
+		t.Fatalf("completed tool result was not preserved: %#v", completed)
+	}
+	interrupted := results["call_2"]
+	if !interrupted.IsError || interrupted.Reason != "interrupted_by_steering" {
+		t.Fatalf("running tool was not interrupted: %#v", interrupted)
+	}
+}
+
+func TestAgentSteeringPreservesToolThatSucceedsAfterCancellation(t *testing.T) {
+	const providerName = "steering-tool-ignores-cancel"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"ignores_cancel"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	tool := &steeringIgnoresCancelTool{started: make(chan struct{}), release: make(chan struct{})}
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithTools(tool))
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run tool")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	<-tool.started
+	if err := ag.QueueTurnUserInput("change direction"); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+	close(tool.release)
+
+	var result *protocol.ToolResult
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
+		if event.Type == protocol.EventTypeToolResultDone {
+			result = event.ToolResult
+		}
+	}
+	if result == nil || result.IsError || result.Text != "completed after steering" || result.Reason != "" {
+		t.Fatalf("successful tool result was replaced after steering: %#v", result)
+	}
+}
+
+func TestAgentSteeringCancelsStartedApprovedTool(t *testing.T) {
+	const providerName = "steering-cancels-approved-tool"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &BatchToolProvider{Tools: []string{"approval_tool", "later_tool"}}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("create executor: %v", err)
+	}
+	defer exec.Close()
+	started := make(chan string, 1)
+	release := make(chan struct{})
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
+		agent.WithTools(
+			&BlockingApprovalTool{name: "approval_tool", started: started, release: release},
+			&BlockingApprovalTool{name: "later_tool", started: started, release: release},
+		),
+	)
+	if err != nil {
+		t.Fatalf("create agent: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "run approved tool")
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	for range events {
+	}
+	resumed, err := ag.ApproveAndExecutePendingActions(context.Background())
+	if err != nil {
+		t.Fatalf("approve: %v", err)
+	}
+	<-started
+	if err := ag.QueueTurnUserInput("stop approved tool"); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+
+	interrupted := make(map[string]*protocol.ToolResult)
+	var applied bool
+	for event := range resumed {
+		acknowledgeSteeringBoundary(event)
+		if event.Type == protocol.EventTypeToolResultDone {
+			interrupted[event.ToolResult.ToolCallID] = event.ToolResult
+		}
+		if event.Type == protocol.EventTypeSteeringApplied {
+			applied = true
+		}
+	}
+	if len(interrupted) != 2 || interrupted["call_1"].Reason != "interrupted_by_steering" || interrupted["call_2"].Reason != "interrupted_by_steering" {
+		t.Fatalf("unexpected interrupted results: %#v", interrupted)
+	}
+	if !applied {
+		t.Fatal("steering was not applied after canceling the approved tool")
+	}
+	select {
+	case name := <-started:
+		t.Fatalf("later tool started after steering: %s", name)
+	default:
+	}
+}
+
 func TestAgentPersistsUserContextBeforeRealUserMessage(t *testing.T) {
 	prov := &ContextCaptureProvider{}
 	providers.Register("context-capture", func(cfg config.ProfileConfig) (providers.Provider, error) {
@@ -3371,7 +3733,8 @@ func TestAgentPersistsUserContextBeforeRealUserMessage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	for range events {
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
 	}
 
 	if len(prov.Messages) < 3 {
@@ -3486,7 +3849,8 @@ func TestAgentAppendsChangedUserContextBeforeNextTurn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first run: %v", err)
 	}
-	for range events {
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
 	}
 	currentDate = "2026-07-29"
 	events, err = ag.Run(context.Background(), "second")
@@ -3666,7 +4030,8 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatalf("queue second input: %v", err)
 	}
 	close(prov.Release)
-	for range events {
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
 	}
 
 	prov.mu.Lock()
@@ -3749,7 +4114,8 @@ func TestAgentDrainsStructuredQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatalf("queue text input: %v", err)
 	}
 	close(prov.Release)
-	for range events {
+	for event := range events {
+		acknowledgeSteeringBoundary(event)
 	}
 
 	prov.mu.Lock()
@@ -3770,6 +4136,59 @@ func TestAgentDrainsStructuredQueuedTurnUserInputIntoHistory(t *testing.T) {
 	}
 	if got.Content[2].Type != protocol.ContentTypeText || got.Content[2].Text != "then use the simpler fix" {
 		t.Fatalf("unexpected final content part: %#v", got.Content[2])
+	}
+}
+
+func TestAgentDoesNotApplySteeringWhenDisplayBoundaryFails(t *testing.T) {
+	prov := &BlockingCaptureProvider{
+		Started: make(chan struct{}),
+		Release: make(chan struct{}),
+	}
+	providers.Register("steering-boundary-failure", func(config.ProfileConfig) (providers.Provider, error) {
+		return prov, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: "steering-boundary-failure"}, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	events, err := ag.Run(context.Background(), "real request")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	<-prov.Started
+	if err := ag.QueueTurnUserMessage(protocol.Message{
+		ID:      "steering-command",
+		Role:    protocol.RoleUser,
+		Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "invisible correction"}},
+	}); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+	close(prov.Release)
+	boundaryFailed := false
+	for event := range events {
+		if event.Type == protocol.EventTypeSteeringApplied && event.SteeringAck != nil {
+			boundaryFailed = true
+			event.SteeringAck <- errors.New("display boundary failed")
+		}
+	}
+	if !boundaryFailed {
+		t.Fatal("steering display boundary was not requested")
+	}
+	prov.mu.Lock()
+	calls := len(prov.Calls)
+	prov.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("provider continued after failed steering boundary: %d calls", calls)
+	}
+	for _, msg := range ag.Snapshot().History {
+		if strings.Contains(msg.String(), "invisible correction") {
+			t.Fatalf("failed steering boundary entered agent history: %#v", msg)
+		}
 	}
 }
 

@@ -15,8 +15,9 @@ const (
 	EventTypeToolResultDone EventType = "tool_result_done"
 
 	// Control
-	EventTypeFinish EventType = "finish"
-	EventTypeError  EventType = "error"
+	EventTypeSteeringApplied EventType = "steering_applied"
+	EventTypeFinish          EventType = "finish"
+	EventTypeError           EventType = "error"
 )
 
 type Event struct {
@@ -29,6 +30,10 @@ type Event struct {
 	ContentPart *ContentPart `json:"content_part,omitempty"`
 	ToolCall    *ToolCall    `json:"tool_call,omitempty"`
 	ToolResult  *ToolResult  `json:"tool_result,omitempty"`
+	SteeringIDs []string     `json:"steering_ids,omitempty"`
+	// SteeringAck keeps steering out of Agent history until the host has
+	// durably established its display boundary.
+	SteeringAck chan error `json:"-"`
 
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Error        error        `json:"error,omitempty"`

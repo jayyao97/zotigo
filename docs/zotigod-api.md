@@ -30,7 +30,6 @@ Current internal worker endpoints include:
 - `GET /internal/workers/connect?session_id={id}`
 - `POST /internal/sessions/{id}/worker/attach`
 - `POST /internal/sessions/{id}/worker/finish`
-- `POST /internal/sessions/{id}/events/wake`
 - `GET /internal/sessions/{id}/commands`
 - `POST /internal/sessions/{id}/turn/interrupted`
 
@@ -433,8 +432,9 @@ messages. Desktop clients render approval UI from these items, but submit the
 user's decision through the public approval endpoint below.
 
 `steering_message` is a user-visible correction sent while a turn is already
-running. It is separate from `user_message` so workers can consume steering
-commands without replaying ordinary history messages as new input.
+running. The worker writes it only when the correction is applied, after the
+current provider response and any interrupted tool results, and before the next
+provider response.
 
 `session_command` records durable control requests such as pause. It is a
 command request, not proof that the worker already applied the command.
@@ -608,19 +608,17 @@ Status codes:
 
 Desktop can submit a new user message, request a running session to pause the
 current turn, or add steering text for the worker to apply at the next provider
-interruption point. zotigod tries to make sure a worker is online before
-accepting these requests, records accepted requests as durable display-log
-items, and then sends a best-effort command frame over the internal worker
-WebSocket.
+interruption point. zotigod makes sure a worker is online before accepting these
+requests. Messages and pauses are durable commands. Steering is sent directly
+over the internal worker WebSocket and is intentionally best-effort until the
+worker applies and persists it.
 
 The display-log append and WebSocket write are not a single transaction. zotigod
-tries to start a missing worker before appending; after a command has been
-appended, the durable command log is the recovery source of truth. Public
-message, pause, and steering requests are conditionally appended against the
-current display-log state. If the target turn ends before the command is durably
-recorded, zotigod rejects the command instead of accepting a stale no-op. A
-successful public response means the command was accepted into the durable log,
-not that the worker has already applied it.
+tries to start a missing worker before appending durable commands; after such a
+command is appended, the command log is the recovery source of truth. Steering
+is the exception: a successful response means the live worker accepted the
+best-effort frame, not that steering is durable. If the worker exits before
+applying it, the correction can be lost.
 
 Starting a session launches an internal worker process from the current
 `zotigod` executable. The worker connects back over WebSocket; connecting a
@@ -868,8 +866,8 @@ Response data:
 
 ```json
 {
-  "id": "item_sess_8f0e12ab34cd56ef_5",
-  "sequence": 5,
+  "id": "cmd_8f0e12ab34cd56ef",
+  "sequence": 0,
   "type": "steering",
   "turn_id": "turn_123",
   "text": "Use the smaller fix and avoid changing the parser.",
@@ -886,7 +884,8 @@ Response data:
 }
 ```
 
-Workers poll commands with a display-log cursor. `after` is a sequence cursor
+Workers poll durable commands with a display-log cursor. Steering is not part of
+this replay stream. `after` is a sequence cursor
 kept for compatibility; workers should prefer the byte `offset` cursor because
 it avoids re-reading the full display log on long sessions.
 
@@ -921,35 +920,6 @@ Raw response:
       "created_at": "2026-01-02T03:04:08Z"
     },
     {
-      "id": "item_sess_8f0e12ab34cd56ef_6",
-      "sequence": 6,
-      "type": "steering",
-      "steering": {
-        "turn_id": "turn_123",
-        "text": "First correction"
-      },
-      "created_at": "2026-01-02T03:04:09Z"
-    },
-    {
-      "id": "item_sess_8f0e12ab34cd56ef_7",
-      "sequence": 7,
-      "type": "steering",
-      "steering": {
-        "turn_id": "turn_123",
-        "text": "Second correction",
-        "images": [
-          {
-            "mime_type": "image/png",
-            "size_bytes": 1024,
-            "width": 640,
-            "height": 480,
-            "data_base64": "..."
-          }
-        ]
-      },
-      "created_at": "2026-01-02T03:04:10Z"
-    },
-    {
       "id": "item_sess_8f0e12ab34cd56ef_8",
       "sequence": 8,
       "type": "profile",
@@ -978,13 +948,12 @@ does not execute later commands until that result is known. This keeps replay
 ordered when profile metadata and its display-log completion marker cannot be
 committed consistently.
 
-zotigod returns each accepted `steering_message` as its own command. The worker
-runtime owns semantic coalescing before injecting steering into the model
-context. Multiple steering commands received before the next provider request
-are merged into one normal `role=user` message, appended to runtime history, and
-then sent in the next provider request for that same active turn. Stale steering
-commands for a completed, paused, or different turn are ignored by the worker
-and are not carried into a later turn.
+The worker runtime owns steering coalescing. Multiple corrections received
+before the next provider request are merged into one normal `role=user` message.
+The current provider stream finishes first; tool calls that have not started are
+recorded as interrupted, and running tools are canceled when possible. The
+worker then persists each applied `steering_message` and starts the next provider
+request. Stale steering for a completed or different turn is ignored.
 
 After applying a pause command, the bundled worker writes `turn_interrupted`
 directly to the display log. The internal endpoint below exists for worker

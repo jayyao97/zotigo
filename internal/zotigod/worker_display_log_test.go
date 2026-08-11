@@ -3,7 +3,9 @@ package zotigod
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -180,5 +182,151 @@ func TestWorkerDisplayLogDropsUnfinishedVolatileBlockOnFailure(t *testing.T) {
 		if item.Type == zotigosession.DisplayItemAssistantMessage {
 			t.Fatalf("unfinished volatile block was persisted: %#v", item)
 		}
+	}
+}
+
+func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
+	ctx := context.Background()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("session-steering", source)
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	display.QueueSteering(commandResponse{
+		ID:        "steering-command",
+		Type:      sessionCommandSteering,
+		CreatedAt: time.Now().UTC(),
+		Steering:  &steeringCommandPayload{Text: "change direction"},
+	})
+	var deliveryOrder []string
+	display.delta = func(delta displayDeltaEvent) {
+		deliveryOrder = append(deliveryOrder, "delta:"+delta.Delta)
+	}
+	display.barrier = func(context.Context) error {
+		deliveryOrder = append(deliveryOrder, "barrier")
+		items, _, err := source.LoadItems(ctx, "session-steering")
+		if err != nil {
+			t.Fatalf("load items at barrier: %v", err)
+		}
+		for _, item := range items {
+			if item.Type == zotigosession.DisplayItemSteeringMessage {
+				t.Fatalf("steering became durable before barrier acknowledgement: %#v", item)
+			}
+		}
+		return nil
+	}
+	display.wakeSync = func(context.Context) error {
+		deliveryOrder = append(deliveryOrder, "wake")
+		return nil
+	}
+	interrupted := protocol.ToolResult{
+		ToolCallID: "call-1",
+		ToolName:   "shell",
+		Type:       protocol.ToolResultTypeExecutionDenied,
+		Reason:     "interrupted_by_steering",
+		IsError:    true,
+	}
+	for _, event := range []protocol.Event{
+		protocol.NewTextDeltaEvent("old tail"),
+		{Type: protocol.EventTypeContentEnd, ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "old tail"}},
+		{Type: protocol.EventTypeToolCallEnd, ToolCall: &protocol.ToolCall{ID: "call-1", Name: "shell", Arguments: "{}"}},
+		{Type: protocol.EventTypeToolResultDone, ToolResult: &interrupted},
+		{Type: protocol.EventTypeSteeringApplied, SteeringIDs: []string{"steering-command"}},
+		protocol.NewTextDeltaEvent("new response"),
+		{Type: protocol.EventTypeContentEnd, ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "new response"}},
+	} {
+		if err := display.HandleEvent(ctx, event); err != nil {
+			t.Fatalf("handle %s: %v", event.Type, err)
+		}
+	}
+	items, _, err := source.LoadItems(ctx, "session-steering")
+	if err != nil {
+		t.Fatalf("load items: %v", err)
+	}
+	if len(items) != 6 {
+		t.Fatalf("unexpected items: %#v", items)
+	}
+	steering := items[4]
+	if steering.ID != "steering-command" || steering.Type != zotigosession.DisplayItemSteeringMessage || len(steering.Content) != 1 || steering.Content[0].Text != "change direction" {
+		t.Fatalf("unexpected steering item: %#v", steering)
+	}
+	if items[1].Content[0].Text != "old tail" || items[5].Content[0].Text != "new response" {
+		t.Fatalf("generation content crossed steering item: %#v", items)
+	}
+	if got := strings.Join(deliveryOrder, "|"); got != "delta:old tail|barrier|wake|delta:new response" {
+		t.Fatalf("new generation delta crossed steering barrier: %s", got)
+	}
+}
+
+func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
+	ctx := context.Background()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("session-barrier-failure", source)
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	display.QueueSteering(commandResponse{
+		ID:        "steering-command",
+		Type:      sessionCommandSteering,
+		CreatedAt: time.Now().UTC(),
+		Steering:  &steeringCommandPayload{Text: "change direction"},
+	})
+	var deltas []displayDeltaEvent
+	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	display.barrier = func(context.Context) error { return errors.New("daemon unavailable") }
+	err := display.HandleEvent(ctx, protocol.Event{
+		Type:        protocol.EventTypeSteeringApplied,
+		SteeringIDs: []string{"steering-command"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "establish steering display boundary") {
+		t.Fatalf("barrier failure = %v", err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("volatile delta escaped after failed barrier: %#v", deltas)
+	}
+	items, _, err := source.LoadItems(ctx, "session-barrier-failure")
+	if err != nil {
+		t.Fatalf("load items: %v", err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemTurnStarted {
+		t.Fatalf("steering became durable after barrier failure: %#v", items)
+	}
+}
+
+func TestWorkerDisplayLogMutesPreviewAfterReliableSteeringWakeFailure(t *testing.T) {
+	ctx := context.Background()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("session-steering-wake-failure", source)
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatalf("start turn: %v", err)
+	}
+	display.QueueSteering(commandResponse{
+		ID:        "steering-command",
+		Type:      sessionCommandSteering,
+		CreatedAt: time.Now().UTC(),
+		Steering:  &steeringCommandPayload{Text: "change direction"},
+	})
+	display.barrier = func(context.Context) error { return nil }
+	display.wakeSync = func(context.Context) error { return errors.New("worker connection closed") }
+	var deltas []displayDeltaEvent
+	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	if err := display.HandleEvent(ctx, protocol.Event{
+		Type:        protocol.EventTypeSteeringApplied,
+		SteeringIDs: []string{"steering-command"},
+	}); err != nil {
+		t.Fatalf("apply steering: %v", err)
+	}
+	if err := display.HandleEvent(ctx, protocol.NewTextDeltaEvent("new response")); err != nil {
+		t.Fatalf("new response delta: %v", err)
+	}
+	if len(deltas) != 0 {
+		t.Fatalf("volatile delta escaped after reliable wake failure: %#v", deltas)
+	}
+	items, _, err := source.LoadItems(ctx, "session-steering-wake-failure")
+	if err != nil {
+		t.Fatalf("load items: %v", err)
+	}
+	if len(items) != 2 || items[1].Type != zotigosession.DisplayItemSteeringMessage {
+		t.Fatalf("durable steering was not preserved: %#v", items)
 	}
 }

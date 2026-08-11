@@ -11,9 +11,10 @@ import (
 )
 
 type workerRuntimeTransport struct {
-	sessionID      string
-	display        *workerDisplayLog
-	notifyApproval func(context.Context, approvalRequestResponse)
+	sessionID              string
+	display                *workerDisplayLog
+	notifyApproval         func(context.Context, approvalRequestResponse)
+	notifyApprovalResolved func(context.Context, approvalRequestResponse)
 
 	inputCh           chan zotigotransport.UserInput
 	closedCh          chan struct{}
@@ -25,6 +26,7 @@ type workerRuntimeTransport struct {
 	released          bool
 	interruptedTurnID string
 	interruptedReason string
+	steeringTurnID    string
 }
 
 type workerApprovalResolution struct {
@@ -119,6 +121,13 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 		t.approvalMu.Unlock()
 		return approvalRequest{}, nil, context.Canceled
 	}
+	if t.steeringTurnID == approval.TurnID {
+		t.steeringTurnID = ""
+		decisionCh := make(chan []zotigotransport.ApprovalResult, 1)
+		decisionCh <- interruptedApprovalResults(displayPending)
+		t.approvalMu.Unlock()
+		return approval, decisionCh, nil
+	}
 	if t.approval != nil {
 		sameApproval := t.approval.TurnID == approval.TurnID && samePendingApprovals(t.approval.Pending, displayPending)
 		if sameApproval && t.released && reuseReleased {
@@ -167,6 +176,55 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 	}
 	t.approvalMu.Unlock()
 	return approval, decisionCh, nil
+}
+
+func (t *workerRuntimeTransport) interruptApprovalForSteering(ctx context.Context, turnID string) error {
+	t.approvalMu.Lock()
+	defer t.approvalMu.Unlock()
+	if t.approval == nil || t.approval.TurnID != turnID {
+		t.steeringTurnID = turnID
+		return nil
+	}
+	if t.released {
+		return nil
+	}
+	approval := *t.approval
+	decisions := make([]zotigosession.DisplayApprovalDecision, 0, len(approval.Pending))
+	for _, pending := range approval.Pending {
+		decisions = append(decisions, zotigosession.DisplayApprovalDecision{
+			ToolCallID: pending.ToolCallID,
+			Approved:   false,
+			Reason:     "interrupted_by_steering",
+		})
+	}
+	resolved, err := t.display.ApprovalResolved(ctx, approval, decisions)
+	if err != nil {
+		return fmt.Errorf("record steering approval interruption: %w", err)
+	}
+	results := interruptedApprovalResults(approval.Pending)
+	select {
+	case t.decisionCh <- results:
+	default:
+		return fmt.Errorf("approval %s decision channel is unavailable", approval.ID)
+	}
+	t.resolved = true
+	t.released = true
+	if t.notifyApprovalResolved != nil {
+		t.notifyApprovalResolved(ctx, publicApprovalRequest(resolved))
+	}
+	return nil
+}
+
+func interruptedApprovalResults(pending []zotigosession.DisplayPendingApproval) []zotigotransport.ApprovalResult {
+	results := make([]zotigotransport.ApprovalResult, 0, len(pending))
+	for _, item := range pending {
+		results = append(results, zotigotransport.ApprovalResult{
+			ToolCallID: item.ToolCallID,
+			Approved:   false,
+			Reason:     "interrupted_by_steering",
+		})
+	}
+	return results
 }
 
 func samePendingApprovals(left []zotigosession.DisplayPendingApproval, right []zotigosession.DisplayPendingApproval) bool {

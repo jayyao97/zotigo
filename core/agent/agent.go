@@ -66,6 +66,7 @@ type Agent struct {
 	history          []protocol.Message
 	userContextState *prompt.UserContextState
 	pendingTurnUser  []protocol.Message
+	activeToolRun    *activeToolRun
 	pendingActions   []*PendingAction
 	deferredActions  []*PendingAction
 	turns            []TurnAudit
@@ -75,6 +76,12 @@ type Agent struct {
 	runActive        bool
 	runtimeIdle      chan struct{}
 	profileApplyMu   sync.Mutex
+}
+
+type activeToolRun struct {
+	cancel      context.CancelFunc
+	interrupted bool
+	completed   map[string]struct{}
 }
 
 // AgentOption configures an Agent during construction.
@@ -428,11 +435,20 @@ func (a *Agent) QueueTurnUserMessage(msg protocol.Message) error {
 		return err
 	}
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	if a.state != StateRunning && a.state != StatePaused {
+		a.mu.Unlock()
 		return fmt.Errorf("agent is not running")
 	}
 	a.pendingTurnUser = append(a.pendingTurnUser, msg)
+	var cancel context.CancelFunc
+	if a.activeToolRun != nil {
+		a.activeToolRun.interrupted = true
+		cancel = a.activeToolRun.cancel
+	}
+	a.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
 	return nil
 }
 
@@ -582,6 +598,15 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		// so a buggy compactor or persistent overflow can't loop.
 		reactiveRetries := 0
 		const maxReactiveRetries = 1
+		recordInterruptedToolCalls := func(calls []*protocol.ToolCall) {
+			results := interruptedToolResults(calls)
+			for i := range results {
+				outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
+			}
+			a.mu.Lock()
+			a.history = append(a.history, protocol.NewToolMessage(results))
+			a.mu.Unlock()
+		}
 
 		for {
 			a.mu.RLock()
@@ -595,19 +620,17 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			}
 
 			a.applyPendingRuntimeProfile(true)
-			a.mu.Lock()
-			if _, err := a.drainPendingTurnUserInputLocked(); err != nil {
-				a.mu.Unlock()
+			_, err := a.applyPendingTurnUserInput(ctx, outCh)
+			if err != nil {
 				turnErr = err
-				outCh <- protocol.NewErrorEvent(err)
 				return
 			}
+			a.mu.Lock()
 			msgs := a.buildContext()
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
 			a.mu.Unlock()
-
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
 			var toolList []tools.Tool
@@ -844,6 +867,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			a.mu.Lock()
 			a.history = append(a.history, asstMsg)
+			steeringPending := len(a.pendingTurnUser) > 0
 			a.mu.Unlock()
 
 			// Reset the empty-recovery budget on any legitimate output.
@@ -851,6 +875,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// limit total recoveries within a long multi-step turn.
 			if currentContent != "" || len(currentToolCalls) > 0 {
 				emptyRecoveryAttempts = 0
+			}
+
+			if steeringPending {
+				if len(currentToolCalls) > 0 {
+					recordInterruptedToolCalls(currentToolCalls)
+				}
+				continue
 			}
 
 			// Handle tool calls
@@ -899,6 +930,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 				if len(approvalCalls) > 0 {
 					a.mu.Lock()
+					if len(a.pendingTurnUser) > 0 {
+						a.mu.Unlock()
+						recordInterruptedToolCalls(currentToolCalls)
+						continue
+					}
 					a.state = StatePaused
 					a.pendingActions = append(a.pendingActions, approvalCalls...)
 					a.deferredActions = append(a.deferredActions, autoCalls...)
@@ -929,17 +965,14 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				continue
 			}
 
-			a.mu.Lock()
-			if drained, err := a.drainPendingTurnUserInputLocked(); err != nil {
-				a.mu.Unlock()
+			drained, err := a.applyPendingTurnUserInput(ctx, outCh)
+			if err != nil {
 				turnErr = err
-				outCh <- protocol.NewErrorEvent(err)
 				return
-			} else if drained {
-				a.mu.Unlock()
+			}
+			if drained {
 				continue
 			}
-			a.mu.Unlock()
 
 			// Recover from empty responses: the model emitted no text and no
 			// tool calls (all output_tokens went into reasoning). Without this
@@ -948,6 +981,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			// fall through to the normal end-of-turn.
 			if currentContent == "" && len(currentToolCalls) == 0 &&
 				emptyRecoveryAttempts < maxEmptyRecoveryAttempts {
+				a.mu.Lock()
+				if len(a.pendingTurnUser) > 0 {
+					a.mu.Unlock()
+					continue
+				}
 				emptyRecoveryAttempts++
 				debug.Logf(
 					"agent empty response recovery attempt=%d reasoning_chars=%d",
@@ -960,23 +998,21 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						"call. If the task is complete, reply with a short " +
 						"summary of what was done.\n</system-reminder>",
 				)
-				a.mu.Lock()
 				a.history = append(a.history, nudge)
 				a.mu.Unlock()
 				continue
 			}
 
 			// No tool calls -> turn finished
-			a.mu.Lock()
-			if drained, err := a.drainPendingTurnUserInputLocked(); err != nil {
-				a.mu.Unlock()
+			drained, err = a.applyPendingTurnUserInput(ctx, outCh)
+			if err != nil {
 				turnErr = err
-				outCh <- protocol.NewErrorEvent(err)
 				return
-			} else if drained {
-				a.mu.Unlock()
+			}
+			if drained {
 				continue
 			}
+			a.mu.Lock()
 			a.pendingTurnUser = nil
 			a.state = StateIdle
 			a.mu.Unlock()
@@ -987,6 +1023,93 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 	}()
 
 	return outCh, nil
+}
+
+func interruptedToolResult(callID string, toolName string) protocol.ToolResult {
+	return protocol.ToolResult{
+		ToolCallID: callID,
+		ToolName:   toolName,
+		Type:       protocol.ToolResultTypeExecutionDenied,
+		Reason:     "interrupted_by_steering",
+		IsError:    true,
+	}
+}
+
+func interruptedToolResults(calls []*protocol.ToolCall) []protocol.ToolResult {
+	results := make([]protocol.ToolResult, 0, len(calls))
+	for _, call := range calls {
+		if call == nil {
+			continue
+		}
+		results = append(results, interruptedToolResult(call.ID, call.Name))
+	}
+	return results
+}
+
+func interruptedActionResults(actions []*PendingAction) []protocol.ToolResult {
+	results := make([]protocol.ToolResult, 0, len(actions))
+	for _, action := range actions {
+		if action == nil {
+			continue
+		}
+		results = append(results, interruptedToolResult(action.ToolCallID, action.Name))
+	}
+	return results
+}
+
+func interruptedActionResultsPreservingCompleted(actions []*PendingAction, results []protocol.ToolResult, completed map[string]struct{}) []protocol.ToolResult {
+	interrupted := make([]protocol.ToolResult, 0, len(actions))
+	for i, action := range actions {
+		if action == nil {
+			continue
+		}
+		if _, ok := completed[action.ToolCallID]; ok && i < len(results) {
+			interrupted = append(interrupted, results[i])
+			continue
+		}
+		interrupted = append(interrupted, interruptedToolResult(action.ToolCallID, action.Name))
+	}
+	return interrupted
+}
+
+func (a *Agent) beginToolRun(ctx context.Context) (context.Context, *activeToolRun, bool) {
+	toolCtx, cancel := context.WithCancel(ctx)
+	run := &activeToolRun{cancel: cancel, completed: make(map[string]struct{})}
+	a.mu.Lock()
+	if len(a.pendingTurnUser) > 0 {
+		a.mu.Unlock()
+		cancel()
+		return toolCtx, run, false
+	}
+	a.activeToolRun = run
+	a.mu.Unlock()
+	return toolCtx, run, true
+}
+
+func (a *Agent) endToolRun(run *activeToolRun) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeToolRun == run {
+		a.activeToolRun = nil
+	}
+	return run.interrupted
+}
+
+func (a *Agent) canStartToolAction(run *activeToolRun) bool {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.activeToolRun == run && !run.interrupted
+}
+
+func (a *Agent) completeToolAction(run *activeToolRun, action *PendingAction, result protocol.ToolResult) {
+	if action == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.activeToolRun == run && (!run.interrupted || !result.IsError) {
+		run.completed[action.ToolCallID] = struct{}{}
+	}
 }
 
 // ApproveAndExecutePendingActions executes all pending tool calls and continues.
@@ -1185,7 +1308,21 @@ func (a *Agent) ResolvePendingActions(ctx context.Context, decisions map[string]
 	return a.executeResolvedPendingActions(ctx, orderedActions(append(deferred, approved...)), true)
 }
 
-func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) ([]protocol.ToolResult, error) {
+func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) (results []protocol.ToolResult, err error) {
+	toolCtx, toolRun, execute := a.beginToolRun(ctx)
+	if !execute {
+		return interruptedActionResults(actions), nil
+	}
+	defer func() {
+		interrupted := a.endToolRun(toolRun)
+		toolRun.cancel()
+		if interrupted {
+			results = interruptedActionResultsPreservingCompleted(actions, results, toolRun.completed)
+			err = nil
+		}
+	}()
+	ctx = toolCtx
+
 	a.mu.RLock()
 	exec := a.executor
 	a.mu.RUnlock()
@@ -1200,10 +1337,14 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 		return nil, err
 	}
 
-	results := make([]protocol.ToolResult, len(actions))
+	results = make([]protocol.ToolResult, len(actions))
 	for start := 0; start < len(actions); {
+		if !a.canStartToolAction(toolRun) {
+			break
+		}
 		if !canRunActionConcurrently(actions[start]) {
 			results[start] = a.executePendingAction(ctx, exec, actions[start], a.recordLoopWarning(actions[start]), eventSink)
+			a.completeToolAction(toolRun, actions[start], results[start])
 			start++
 			continue
 		}
@@ -1216,7 +1357,9 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 		for i, action := range actions[start:end] {
 			warnings[i] = a.recordLoopWarning(action)
 		}
-		a.executePendingActionGroup(ctx, exec, actions[start:end], warnings, results[start:end], eventSink)
+		a.executePendingActionGroup(ctx, exec, actions[start:end], warnings, results[start:end], eventSink, func(action *PendingAction, result protocol.ToolResult) {
+			a.completeToolAction(toolRun, action, result)
+		})
 		start = end
 	}
 	// Inject reminders into the last tool result
@@ -1328,8 +1471,12 @@ func orderedActions(actions []*PendingAction) []*PendingAction {
 
 func mergeDeferredSkippedResults(deferred []*PendingAction, outputs []protocol.ToolResult, reason string) []protocol.ToolResult {
 	results := make([]protocol.ToolResult, 0, len(deferred)+len(outputs))
-	for _, action := range deferred {
-		results = append(results, skippedToolResult(action, reason))
+	if reason == "interrupted_by_steering" {
+		results = append(results, interruptedActionResults(deferred)...)
+	} else {
+		for _, action := range deferred {
+			results = append(results, skippedToolResult(action, reason))
+		}
 	}
 	results = append(results, outputs...)
 
@@ -1383,7 +1530,7 @@ func commonDenialReason(reasons []string) string {
 	return "another tool call in the batch was denied"
 }
 
-func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink) {
+func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink, completed func(*PendingAction, protocol.ToolResult)) {
 	var wg sync.WaitGroup
 	for i, action := range actions {
 		i, action := i, action
@@ -1391,6 +1538,7 @@ func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Exe
 		go func() {
 			defer wg.Done()
 			results[i] = a.executePendingAction(ctx, exec, action, warnings[i], eventSink)
+			completed(action, results[i])
 		}()
 	}
 	wg.Wait()
@@ -2051,12 +2199,47 @@ func (a *Agent) buildContext() []protocol.Message {
 	return msgs
 }
 
-func (a *Agent) drainPendingTurnUserInputLocked() (bool, error) {
-	if len(a.pendingTurnUser) == 0 {
+func (a *Agent) applyPendingTurnUserInput(ctx context.Context, outCh chan<- protocol.Event) (bool, error) {
+	a.mu.RLock()
+	pendingCount := len(a.pendingTurnUser)
+	steeringIDs := make([]string, 0, pendingCount)
+	for _, msg := range a.pendingTurnUser {
+		if msg.ID != "" {
+			steeringIDs = append(steeringIDs, msg.ID)
+		}
+	}
+	a.mu.RUnlock()
+	if pendingCount == 0 {
 		return false, nil
 	}
-	content := make([]protocol.ContentPart, 0, len(a.pendingTurnUser))
-	texts := make([]string, 0, len(a.pendingTurnUser))
+
+	acknowledged := make(chan error, 1)
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case outCh <- protocol.Event{Type: protocol.EventTypeSteeringApplied, SteeringIDs: steeringIDs, SteeringAck: acknowledged}:
+	}
+	select {
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case err := <-acknowledged:
+		if err != nil {
+			return false, err
+		}
+	}
+
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.drainPendingTurnUserInputLocked(pendingCount)
+}
+
+func (a *Agent) drainPendingTurnUserInputLocked(pendingCount int) (bool, error) {
+	if pendingCount <= 0 || len(a.pendingTurnUser) < pendingCount {
+		return false, nil
+	}
+	pending := a.pendingTurnUser[:pendingCount]
+	content := make([]protocol.ContentPart, 0, pendingCount)
+	texts := make([]string, 0, pendingCount)
 	flushText := func() {
 		if len(texts) == 0 {
 			return
@@ -2067,7 +2250,7 @@ func (a *Agent) drainPendingTurnUserInputLocked() (bool, error) {
 		})
 		texts = texts[:0]
 	}
-	for _, msg := range a.pendingTurnUser {
+	for _, msg := range pending {
 		for _, part := range msg.Content {
 			if part.Type == protocol.ContentTypeText {
 				text := strings.TrimSpace(part.Text)
@@ -2089,7 +2272,7 @@ func (a *Agent) drainPendingTurnUserInputLocked() (bool, error) {
 	if err := a.appendUserInputLocked(msg); err != nil {
 		return false, err
 	}
-	a.pendingTurnUser = nil
+	a.pendingTurnUser = append([]protocol.Message(nil), a.pendingTurnUser[pendingCount:]...)
 	return true, nil
 }
 

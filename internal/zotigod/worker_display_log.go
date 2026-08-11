@@ -15,6 +15,8 @@ type workerDisplayLog struct {
 	sessionID string
 	items     displayItemSource
 	wake      func(context.Context)
+	wakeSync  func(context.Context) error
+	barrier   func(context.Context) error
 	delta     func(displayDeltaEvent)
 
 	mu          sync.Mutex
@@ -23,6 +25,8 @@ type workerDisplayLog struct {
 	block       *workerDisplayBlock
 	toolCalls   map[string]chan struct{}
 	toolCallErr map[string]error
+	steering    map[string]commandResponse
+	deltaMuted  bool
 }
 
 type workerDisplayBlock struct {
@@ -44,6 +48,8 @@ func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
 	l.block = nil
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
+	l.steering = make(map[string]commandResponse)
+	l.deltaMuted = false
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: l.turnID},
@@ -55,6 +61,21 @@ func (l *workerDisplayLog) CurrentTurnID() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.turnID
+}
+
+func (l *workerDisplayLog) QueueSteering(command commandResponse) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.steering == nil {
+		l.steering = make(map[string]commandResponse)
+	}
+	l.steering[command.ID] = command
+}
+
+func (l *workerDisplayLog) DiscardSteering(commandID string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.steering, commandID)
 }
 
 func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
@@ -298,7 +319,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			l.block = &workerDisplayBlock{id: "item_" + uuid.NewString(), index: event.Index, partType: partType}
 		}
 		l.block.text += event.ContentPartDelta.Text
-		if l.delta != nil {
+		if l.delta != nil && !l.deltaMuted {
 			l.delta(displayDeltaEvent{
 				ItemID:   l.block.id,
 				Role:     string(protocol.RoleAssistant),
@@ -357,6 +378,59 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			})
 			return err
 		}
+	case protocol.EventTypeSteeringApplied:
+		if err := l.flushBlockLocked(ctx); err != nil {
+			return err
+		}
+		if len(event.SteeringIDs) > 0 && l.barrier != nil {
+			if err := l.barrier(ctx); err != nil {
+				l.deltaMuted = true
+				for _, commandID := range event.SteeringIDs {
+					delete(l.steering, commandID)
+				}
+				return fmt.Errorf("establish steering display boundary: %w", err)
+			}
+		}
+		for _, commandID := range event.SteeringIDs {
+			command, ok := l.steering[commandID]
+			if !ok || command.Steering == nil {
+				return fmt.Errorf("applied steering command %q is unavailable", commandID)
+			}
+			images := make([]messageImage, 0, len(command.Steering.Images))
+			for _, image := range command.Steering.Images {
+				images = append(images, messageImage{
+					MimeType:  image.MimeType,
+					SizeBytes: image.SizeBytes,
+					Width:     image.Width,
+					Height:    image.Height,
+					BlobPath:  image.BlobPath,
+				})
+			}
+			item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
+			item.ID = command.ID
+			item.CreatedAt = command.CreatedAt
+			item.Turn = &zotigosession.DisplayTurn{ID: l.turnID}
+			item.Command = &zotigosession.DisplayCommand{
+				Type:   sessionCommandSteering,
+				Text:   command.Steering.Text,
+				Images: displayCommandImages(images),
+				TurnID: l.turnID,
+			}
+			if _, err := l.items.AppendItem(ctx, l.sessionID, item); err != nil {
+				return err
+			}
+			delete(l.steering, commandID)
+		}
+		if len(event.SteeringIDs) > 0 {
+			if l.wakeSync != nil {
+				if err := l.wakeSync(ctx); err != nil {
+					l.deltaMuted = true
+				}
+			} else if l.wake != nil {
+				l.wake(ctx)
+			}
+		}
+		return nil
 	case protocol.EventTypeFinish:
 		if event.FinishReason == "need_approval" {
 			return l.flushBlockLocked(ctx)

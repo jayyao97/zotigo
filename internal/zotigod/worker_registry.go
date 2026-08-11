@@ -24,6 +24,9 @@ type workerMessageType string
 const (
 	workerMessageCommand          workerMessageType = "command"
 	workerMessageDelta            workerMessageType = "display_delta"
+	workerMessageDisplayWake      workerMessageType = "display_wake"
+	workerMessageDisplayBarrier   workerMessageType = "display_barrier"
+	workerMessageDisplayBarrierOK workerMessageType = "display_barrier_ack"
 	workerMessageApprovalRequest  workerMessageType = "approval_request"
 	workerMessageApprovalDecision workerMessageType = "approval_decision"
 	workerMessageApprovalResult   workerMessageType = "approval_result"
@@ -33,9 +36,14 @@ type workerMessage struct {
 	Type             workerMessageType        `json:"type"`
 	Command          *commandResponse         `json:"command,omitempty"`
 	Delta            *displayDeltaEvent       `json:"delta,omitempty"`
+	DisplayBarrier   *workerDisplayBarrier    `json:"display_barrier,omitempty"`
 	ApprovalRequest  *approvalRequestResponse `json:"approval_request,omitempty"`
 	ApprovalDecision *workerApprovalDecision  `json:"approval_decision,omitempty"`
 	ApprovalResult   *workerApprovalResult    `json:"approval_result,omitempty"`
+}
+
+type workerDisplayBarrier struct {
+	ID string `json:"id"`
 }
 
 type workerApprovalDecision struct {
@@ -120,6 +128,19 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 		return false
 	}
 	return worker.send(command)
+}
+
+func (r *workerRegistry) acknowledgeDisplayBarrier(sessionID string, barrier workerDisplayBarrier) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	r.mu.Unlock()
+	if worker == nil {
+		return false
+	}
+	return worker.sendMessage(workerMessage{
+		Type:           workerMessageDisplayBarrierOK,
+		DisplayBarrier: &barrier,
+	})
 }
 
 func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision) (approvalRequestResponse, error) {
@@ -238,10 +259,13 @@ func newWorkerConnection(sessionID string, generation string, conn *websocket.Co
 }
 
 func (c *workerConnection) send(command commandResponse) bool {
-	msg := workerMessage{
+	return c.sendMessage(workerMessage{
 		Type:    workerMessageCommand,
 		Command: &command,
-	}
+	})
+}
+
+func (c *workerConnection) sendMessage(msg workerMessage) bool {
 	select {
 	case <-c.doneCh:
 		return false

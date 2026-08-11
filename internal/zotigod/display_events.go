@@ -19,7 +19,6 @@ const (
 	displayEventCatchUpInterval = 250 * time.Millisecond
 	displayEventHeartbeat       = 15 * time.Second
 	displayEventWriteTimeout    = 5 * time.Second
-	displayWakeTimeout          = 500 * time.Millisecond
 	displayEventSubscriberQueue = 32
 )
 
@@ -63,6 +62,22 @@ func (b *displayEventBroker) Subscribe(sessionID string) (<-chan displayBrokerEv
 
 func (b *displayEventBroker) Wake(sessionID string) {
 	b.publish(sessionID, displayBrokerEvent{})
+}
+
+func (b *displayEventBroker) WakeBarrier(sessionID string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for subscriber := range b.subscribers[sessionID] {
+	drainSubscriber:
+		for {
+			select {
+			case <-subscriber:
+			default:
+				break drainSubscriber
+			}
+		}
+		subscriber <- displayBrokerEvent{}
+	}
 }
 
 func (b *displayEventBroker) PublishDelta(sessionID string, delta displayDeltaEvent) {
@@ -293,98 +308,4 @@ func clearDisplayEventWriteDeadline(w http.ResponseWriter) error {
 		return nil
 	}
 	return err
-}
-
-type displayWakeRequest struct {
-	Generation string `json:"generation"`
-}
-
-type displayWakeNotifier struct {
-	client     *http.Client
-	daemonURL  string
-	sessionID  string
-	generation string
-	wake       chan struct{}
-	done       chan struct{}
-	closeOnce  sync.Once
-	wait       sync.WaitGroup
-}
-
-func newDisplayWakeNotifier(client *http.Client, daemonURL string, sessionID string, generation string) *displayWakeNotifier {
-	notifier := &displayWakeNotifier{
-		client:     client,
-		daemonURL:  daemonURL,
-		sessionID:  sessionID,
-		generation: generation,
-		wake:       make(chan struct{}, 1),
-		done:       make(chan struct{}),
-	}
-	notifier.wait.Add(1)
-	go notifier.run()
-	return notifier
-}
-
-func (n *displayWakeNotifier) Wake(context.Context) {
-	select {
-	case <-n.done:
-		return
-	default:
-	}
-	select {
-	case n.wake <- struct{}{}:
-	case <-n.done:
-	default:
-	}
-}
-
-func (n *displayWakeNotifier) Close() {
-	n.closeOnce.Do(func() { close(n.done) })
-	n.wait.Wait()
-}
-
-func (n *displayWakeNotifier) run() {
-	defer n.wait.Done()
-	for {
-		select {
-		case <-n.done:
-			return
-		case <-n.wake:
-			select {
-			case <-n.done:
-				return
-			default:
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), displayWakeTimeout)
-			_ = reportWorkerDisplayWake(ctx, n.client, n.daemonURL, n.sessionID, n.generation)
-			cancel()
-		}
-	}
-}
-
-func (h *handler) handleWorkerDisplayWake(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	var req displayWakeRequest
-	if err := readRequiredJSON(r, &req); err != nil {
-		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
-		return
-	}
-	req.Generation = strings.TrimSpace(req.Generation)
-	if req.Generation == "" {
-		writeAPIError(w, http.StatusBadRequest, "worker generation is required")
-		return
-	}
-	if _, ok := h.registry.Get(id); !ok {
-		writeAPIError(w, http.StatusNotFound, "session not found")
-		return
-	}
-	if !h.workers.Matches(id, req.Generation) {
-		writeAPIError(w, http.StatusConflict, "display wake does not match the active connection")
-		return
-	}
-	h.events.Wake(id)
-	w.WriteHeader(http.StatusNoContent)
 }

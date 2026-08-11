@@ -130,17 +130,21 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
 	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	stopKeepalive = clientWriter.Close
-	commandCh, approvalCh, readErrCh := readWorkerMessages(conn)
+	displayBarrier := newWorkerDisplayBarrierClient(clientWriter)
+	commandCh, approvalCh, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:      cfg.SessionID,
-		DaemonURL:      daemonURL,
-		Generation:     generation,
 		Store:          store,
-		HTTPClient:     httpClient,
 		SendDelta:      clientWriter.SendDelta,
+		NotifyDisplay:  clientWriter.SendDisplayWake,
+		SyncDisplay:    clientWriter.SendDisplayWakeReliable,
+		DisplayBarrier: displayBarrier.Wait,
 		NotifyApproval: clientWriter.SendApprovalRequest,
+		NotifyApprovalResolved: func(ctx context.Context, approval approvalRequestResponse) {
+			_ = clientWriter.SendApprovalResult(ctx, workerApprovalResult{Approval: &approval})
+		},
 	})
 	if err != nil {
 		return err
@@ -183,6 +187,13 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = <-readErrCh
 				return runErr
 			}
+			if command.Type == sessionCommandSteering && command.Sequence == 0 {
+				if err := runtime.HandleCommand(ctx, command); err != nil {
+					runErr = err
+					return err
+				}
+				continue
+			}
 			if command.Sequence <= cursor.Sequence {
 				continue
 			}
@@ -217,16 +228,17 @@ type workerCommandCursor struct {
 }
 
 type workerRuntimeConfig struct {
-	SessionID      string
-	DaemonURL      string
-	Generation     string
-	Store          zotigosession.Store
-	HTTPClient     *http.Client
-	SendDelta      func(displayDeltaEvent)
-	NotifyApproval func(context.Context, approvalRequestResponse)
+	SessionID              string
+	Store                  zotigosession.Store
+	SendDelta              func(displayDeltaEvent)
+	NotifyDisplay          func()
+	SyncDisplay            func(context.Context) error
+	DisplayBarrier         func(context.Context) error
+	NotifyApproval         func(context.Context, approvalRequestResponse)
+	NotifyApprovalResolved func(context.Context, approvalRequestResponse)
 }
 
-func readWorkerMessages(conn *websocket.Conn) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
+func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
 	commandCh := make(chan commandResponse, workerCommandBufferSize)
 	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
 	errCh := make(chan error, 1)
@@ -267,6 +279,13 @@ func readWorkerMessages(conn *websocket.Conn) (<-chan commandResponse, <-chan wo
 					_ = conn.Close()
 					return
 				}
+			case workerMessageDisplayBarrierOK:
+				if msg.DisplayBarrier == nil || msg.DisplayBarrier.ID == "" {
+					continue
+				}
+				if acknowledgeDisplayBarrier != nil {
+					acknowledgeDisplayBarrier(msg.DisplayBarrier.ID)
+				}
 			}
 		}
 	}()
@@ -281,7 +300,6 @@ type workerRuntime struct {
 	runner           *runner.Runner
 	transport        *workerRuntimeTransport
 	display          *workerDisplayLog
-	displayWake      *displayWakeNotifier
 	observer         observability.Observer
 	cleanup          func()
 	storeMu          sync.Mutex
@@ -357,24 +375,20 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	})
 	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
 	display.delta = cfg.SendDelta
-	var displayWake *displayWakeNotifier
-	if cfg.DaemonURL != "" && cfg.Generation != "" && cfg.HTTPClient != nil {
-		displayWake = newDisplayWakeNotifier(cfg.HTTPClient, cfg.DaemonURL, cfg.SessionID, cfg.Generation)
-		display.wake = displayWake.Wake
-	}
-	if err := recoverInterruptedToolExecutions(ctx, cfg.Store, sess); err != nil {
-		if displayWake != nil {
-			displayWake.Close()
+	display.wake = func(context.Context) {
+		if cfg.NotifyDisplay != nil {
+			cfg.NotifyDisplay()
 		}
+	}
+	display.barrier = cfg.DisplayBarrier
+	display.wakeSync = cfg.SyncDisplay
+	if err := recoverInterruptedToolExecutions(ctx, cfg.Store, sess); err != nil {
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover interrupted tool executions: %w", err)
 	}
 	_, err = display.ResolvePendingApprovalsForOpenTurn(ctx, approvalWorkerRestartedReason)
 	if err != nil {
-		if displayWake != nil {
-			displayWake.Close()
-		}
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover pending approval: %w", err)
@@ -383,9 +397,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		sess.AgentSnapshot = agent.InterruptPendingSnapshot(sess.AgentSnapshot, approvalWorkerRestartedReason)
 		sessionadapter.ApplySnapshot(sess, sess.AgentSnapshot, sessionadapter.LastUserPrompt(sess.AgentSnapshot.History))
 		if err := cfg.Store.Put(ctx, sess); err != nil {
-			if displayWake != nil {
-				displayWake.Close()
-			}
 			_ = observer.Close(context.Background())
 			_ = localExec.Close()
 			return nil, fmt.Errorf("persist recovered approval snapshot: %w", err)
@@ -416,9 +427,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		},
 	})
 	if err != nil {
-		if displayWake != nil {
-			displayWake.Close()
-		}
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
@@ -436,9 +444,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		LSPManager:  lspManager,
 		Spawn:       true,
 	}); err != nil {
-		if displayWake != nil {
-			displayWake.Close()
-		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -447,25 +452,22 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
-		if displayWake != nil {
-			displayWake.Close()
-		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
 		return nil, fmt.Errorf("repair open display turn: %w", err)
 	}
 	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
+	transport.notifyApprovalResolved = cfg.NotifyApprovalResolved
 	runtime := &workerRuntime{
-		sessionID:   cfg.SessionID,
-		workDir:     cwd,
-		store:       cfg.Store,
-		agent:       ag,
-		transport:   transport,
-		display:     display,
-		displayWake: displayWake,
-		observer:    observer,
-		fatalCh:     make(chan error, 1),
+		sessionID: cfg.SessionID,
+		workDir:   cwd,
+		store:     cfg.Store,
+		agent:     ag,
+		transport: transport,
+		display:   display,
+		observer:  observer,
+		fatalCh:   make(chan error, 1),
 	}
 	runtime.runner = runner.New(ag, transport, runner.WithListeners(runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
@@ -541,9 +543,6 @@ func (r *workerRuntime) Close() {
 	if r.agent != nil {
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
 	}
-	if r.displayWake != nil {
-		r.displayWake.Close()
-	}
 	if r.cleanup != nil {
 		r.cleanup()
 	}
@@ -589,7 +588,7 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command commandRespon
 	case sessionCommandPause:
 		return nil, r.pauseTurn(ctx, command.Pause)
 	case sessionCommandSteering:
-		return nil, r.queueTurnUserInput(ctx, command.Steering)
+		return nil, r.queueTurnUserInput(ctx, command)
 	case sessionCommandProfile:
 		return r.switchProfile(ctx, command.ID, command.Profile)
 	case sessionCommandApprovalPolicy:
@@ -910,8 +909,9 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayl
 	return err
 }
 
-func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steeringCommandPayload) error {
-	msg, err := userMessageFromCommand(command.Text, command.Images, "steering")
+func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandResponse) error {
+	payload := command.Steering
+	msg, err := userMessageFromCommand(payload.Text, payload.Images, "steering")
 	if err != nil {
 		return err
 	}
@@ -929,7 +929,7 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steerin
 	}
 
 	currentTurnID := r.display.CurrentTurnID()
-	if command.TurnID != "" && currentTurnID != "" && command.TurnID != currentTurnID {
+	if payload.TurnID != "" && currentTurnID != "" && payload.TurnID != currentTurnID {
 		return nil
 	}
 	select {
@@ -940,14 +940,23 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steerin
 		return ctx.Err()
 	}
 	currentTurnID = r.display.CurrentTurnID()
-	if currentTurnID == "" || (command.TurnID != "" && command.TurnID != currentTurnID) {
+	if currentTurnID == "" || (payload.TurnID != "" && payload.TurnID != currentTurnID) {
 		return nil
 	}
+	msg.ID = command.ID
+	r.display.QueueSteering(command)
 	if err := r.agent.QueueTurnUserMessage(msg); err != nil {
+		r.display.DiscardSteering(command.ID)
 		if isStaleTurnUserInputError(err) {
 			return nil
 		}
 		return err
+	}
+	snapshot := r.agent.Snapshot()
+	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
+		if err := r.transport.interruptApprovalForSteering(ctx, currentTurnID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1156,10 +1165,6 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 
 func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", workerReadyRequest{Generation: generation})
-}
-
-func reportWorkerDisplayWake(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
-	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/events/wake", displayWakeRequest{Generation: generation})
 }
 
 func workerWebSocketDialError(dialErr error, resp *http.Response) error {
@@ -1385,10 +1390,7 @@ func validateWorkerCommandCursor(ctx context.Context, store zotigosession.Store,
 func latestCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	var latest uint64
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type != "" {
-			latest = item.Sequence
-		}
-		if item.Type == zotigosession.DisplayItemSteeringMessage && commandText(item.Content) != "" {
+		if item.Command != nil && item.Command.Type != "" && item.Command.Type != sessionCommandSteering {
 			latest = item.Sequence
 		}
 	}
@@ -1415,14 +1417,12 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	pendingApprovalPolicies := make(map[string]uint64)
 
 	for _, item := range items {
-		recordedCommand := false
-		if item.Command != nil && item.Command.Type != "" {
+		if item.Command != nil && item.Command.Type != "" && item.Command.Type != sessionCommandSteering {
 			commandSeqs = append(commandSeqs, item.Sequence)
-			recordedCommand = true
 			switch item.Command.Type {
 			case sessionCommandMessage:
 				pendingMessages = append(pendingMessages, item.Sequence)
-			case sessionCommandPause, sessionCommandSteering:
+			case sessionCommandPause:
 				if item.Command.TurnID != "" {
 					pendingByTurn[item.Command.TurnID] = append(pendingByTurn[item.Command.TurnID], item.Sequence)
 				}
@@ -1434,13 +1434,6 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				safe[item.Sequence] = true
 			}
 		}
-		if !recordedCommand && item.Type == zotigosession.DisplayItemSteeringMessage && commandText(item.Content) != "" {
-			commandSeqs = append(commandSeqs, item.Sequence)
-			if item.Turn != nil && item.Turn.ID != "" {
-				pendingByTurn[item.Turn.ID] = append(pendingByTurn[item.Turn.ID], item.Sequence)
-			}
-		}
-
 		switch item.Type {
 		case zotigosession.DisplayItemTurnStarted:
 			if len(pendingMessages) > 0 {
@@ -1561,11 +1554,72 @@ func workerConnectURL(daemonURL string, sessionID string) (string, error) {
 }
 
 type workerClientWriter struct {
-	conn      *websocket.Conn
-	pingEvery time.Duration
-	sendCh    chan workerMessage
-	done      chan struct{}
-	closeOnce sync.Once
+	conn                  *websocket.Conn
+	pingEvery             time.Duration
+	displayControlTimeout time.Duration
+	sendCh                chan workerMessage
+	done                  chan struct{}
+	closeOnce             sync.Once
+}
+
+type workerDisplayBarrierClient struct {
+	writer  *workerClientWriter
+	timeout time.Duration
+	mu      sync.Mutex
+	waiters map[string]chan struct{}
+}
+
+func newWorkerDisplayBarrierClient(writer *workerClientWriter) *workerDisplayBarrierClient {
+	return &workerDisplayBarrierClient{
+		writer:  writer,
+		timeout: workerHTTPTimeout,
+		waiters: make(map[string]chan struct{}),
+	}
+}
+
+func (b *workerDisplayBarrierClient) Wait(ctx context.Context) error {
+	waitCtx, cancel := context.WithTimeout(ctx, b.timeout)
+	defer cancel()
+	barrier := workerDisplayBarrier{ID: newZotigodID("display_barrier")}
+	acknowledged := make(chan struct{})
+	b.mu.Lock()
+	b.waiters[barrier.ID] = acknowledged
+	b.mu.Unlock()
+	defer func() {
+		b.mu.Lock()
+		delete(b.waiters, barrier.ID)
+		b.mu.Unlock()
+	}()
+	if err := b.writer.SendDisplayBarrier(waitCtx, barrier); err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			return errors.New("display barrier acknowledgement timed out")
+		}
+		return err
+	}
+	select {
+	case <-waitCtx.Done():
+		if ctx.Err() == nil {
+			return errors.New("display barrier acknowledgement timed out")
+		}
+		return ctx.Err()
+	case <-b.writer.done:
+		return errors.New("worker connection is closed")
+	case <-acknowledged:
+		return nil
+	}
+}
+
+func (b *workerDisplayBarrierClient) Acknowledge(id string) {
+	b.mu.Lock()
+	acknowledged := b.waiters[id]
+	if acknowledged != nil {
+		delete(b.waiters, id)
+		close(acknowledged)
+	}
+	b.mu.Unlock()
 }
 
 func newWorkerClientWriter(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) *workerClientWriter {
@@ -1576,10 +1630,11 @@ func newWorkerClientWriter(conn *websocket.Conn, pingInterval time.Duration, pon
 		})
 	}
 	writer := &workerClientWriter{
-		conn:      conn,
-		pingEvery: pingInterval,
-		sendCh:    make(chan workerMessage, workerDeltaBufferSize),
-		done:      make(chan struct{}),
+		conn:                  conn,
+		pingEvery:             pingInterval,
+		displayControlTimeout: workerHTTPTimeout,
+		sendCh:                make(chan workerMessage, workerDeltaBufferSize),
+		done:                  make(chan struct{}),
 	}
 	go writer.run()
 	return writer
@@ -1598,6 +1653,51 @@ func (w *workerClientWriter) SendDelta(delta displayDeltaEvent) {
 	default:
 		// Deltas are previews. Never stall model generation; the completed
 		// durable item replaces any partial preview that was dropped here.
+	}
+}
+
+func (w *workerClientWriter) SendDisplayWake() {
+	msg := workerMessage{Type: workerMessageDisplayWake}
+	select {
+	case <-w.done:
+		return
+	default:
+	}
+	select {
+	case w.sendCh <- msg:
+	case <-w.done:
+	default:
+		// Periodic SSE catch-up makes ordinary display wakes optional.
+	}
+}
+
+func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error {
+	timeout := w.displayControlTimeout
+	if timeout <= 0 {
+		timeout = workerHTTPTimeout
+	}
+	wakeCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	msg := workerMessage{Type: workerMessageDisplayWake}
+	select {
+	case <-wakeCtx.Done():
+		return wakeCtx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier workerDisplayBarrier) error {
+	msg := workerMessage{Type: workerMessageDisplayBarrier, DisplayBarrier: &barrier}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
 	}
 }
 

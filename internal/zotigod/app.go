@@ -508,6 +508,13 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
 				handler.events.PublishDelta(sessionID, *msg.Delta)
 			}
+		case workerMessageDisplayWake:
+			handler.events.Wake(sessionID)
+		case workerMessageDisplayBarrier:
+			if msg.DisplayBarrier != nil && msg.DisplayBarrier.ID != "" {
+				handler.events.WakeBarrier(sessionID)
+				handler.workers.acknowledgeDisplayBarrier(sessionID, *msg.DisplayBarrier)
+			}
 		case workerMessageApprovalRequest:
 			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == approvalStatusPending {
 				unlock := handler.sessionOps.lock(sessionID)
@@ -768,8 +775,6 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 		h.handleWorkerAttach(w, r, id)
 	case "worker/finish":
 		h.handleWorkerFinish(w, r, id)
-	case "events/wake":
-		h.handleWorkerDisplayWake(w, r, id)
 	default:
 		writeAPIError(w, http.StatusNotFound, "not found")
 	}
@@ -1136,6 +1141,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 }
 
 func (h *handler) handleWorkerDisconnect(id string) {
+	h.events.WakeBarrier(id)
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
 	if session, ok := h.registry.Get(id); ok {

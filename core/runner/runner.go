@@ -336,9 +336,13 @@ func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event
 				return false, nil
 			}
 
-			if err := r.transport.Send(ctx, event); err != nil {
-				r.fireOnError(err)
-				return false, err
+			sendErr := r.transport.Send(ctx, event)
+			if event.Type == protocol.EventTypeSteeringApplied && event.SteeringAck != nil {
+				event.SteeringAck <- sendErr
+			}
+			if sendErr != nil {
+				r.fireOnError(sendErr)
+				return false, sendErr
 			}
 
 			if event.Type == protocol.EventTypeFinish {

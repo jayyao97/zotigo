@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -115,6 +116,64 @@ func TestSessionEventsStreamsVolatileDeltaWithoutDurableCursor(t *testing.T) {
 	}
 }
 
+func TestDisplayBarrierDropsQueuedPreviewsAndCannotBeOvertakenByLaterDelta(t *testing.T) {
+	broker := newDisplayEventBroker()
+	events, unsubscribe := broker.Subscribe("session-order")
+	defer unsubscribe()
+	for i := 0; i < cap(events); i++ {
+		broker.PublishDelta("session-order", displayDeltaEvent{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
+	}
+
+	broker.WakeBarrier("session-order")
+	if event := <-events; event.delta != nil {
+		t.Fatalf("barrier did not replace queued previews: %#v", event)
+	}
+	if len(events) != 0 {
+		t.Fatalf("queued previews remained behind barrier: %d", len(events))
+	}
+	broker.PublishDelta("session-order", displayDeltaEvent{ItemID: "new-generation", Delta: "new"})
+	if event := <-events; event.delta == nil || event.delta.ItemID != "new-generation" {
+		t.Fatalf("new generation delta was not queued after barrier: %#v", event)
+	}
+}
+
+func TestDisplayBarrierCoalescesExistingWakeAndFollowingPreview(t *testing.T) {
+	broker := newDisplayEventBroker()
+	events, unsubscribe := broker.Subscribe("session-existing-wake")
+	defer unsubscribe()
+	broker.Wake("session-existing-wake")
+	broker.PublishDelta("session-existing-wake", displayDeltaEvent{ItemID: "old-generation", Delta: "old"})
+	broker.WakeBarrier("session-existing-wake")
+	if event := <-events; event.delta != nil {
+		t.Fatalf("barrier event = %#v", event)
+	}
+	if len(events) != 0 {
+		t.Fatalf("old wake or preview remained after barrier: %d", len(events))
+	}
+}
+
+func TestOrderedDisplayWakeDoesNotAffectOtherSubscribers(t *testing.T) {
+	broker := newDisplayEventBroker()
+	full, unsubscribeFull := broker.Subscribe("full-session")
+	other, unsubscribeOther := broker.Subscribe("other-session")
+	for i := 0; i < cap(full); i++ {
+		broker.PublishDelta("full-session", displayDeltaEvent{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
+	}
+	second, unsubscribeSecond := broker.Subscribe("full-session")
+	broker.WakeBarrier("full-session")
+	if event := <-second; event.delta != nil {
+		t.Fatalf("second subscriber did not receive ordered wake: %#v", event)
+	}
+	broker.PublishDelta("other-session", displayDeltaEvent{ItemID: "other", Delta: "ready"})
+	if event := <-other; event.delta == nil || event.delta.ItemID != "other" {
+		t.Fatalf("unrelated subscriber was stalled: %#v", event)
+	}
+	unsubscribeFull()
+	broker.WakeBarrier("full-session")
+	unsubscribeSecond()
+	unsubscribeOther()
+}
+
 func TestInternalToolExecutionMarkerIsHiddenFromPublicItemsAndEvents(t *testing.T) {
 	items := []zotigosession.DisplayItem{
 		{ID: "public-1", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage},
@@ -181,6 +240,207 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 	event := readDisplayEvent(t, reader)
 	if event.eventType != "delta" || event.id != "" || event.delta.ItemID != "item-from-worker" || event.delta.Delta != "thinking" {
 		t.Fatalf("worker delta event = %#v", event)
+	}
+}
+
+func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+	const sessionID = "sess-worker-display-barrier"
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata:      zotigosession.Metadata{ID: sessionID, CreatedAt: now, UpdatedAt: now},
+		AgentSnapshot: agent.Snapshot{State: agent.StateIdle, CreatedAt: now},
+	}); err != nil {
+		t.Fatalf("create session: %v", err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
+	broker := newDisplayEventBroker()
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store:   store,
+		workers: newWorkerRegistry(),
+		events:  broker,
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	workerConn, _ := connectWorker(t, server, sessionID)
+	defer workerConn.Close()
+	events, unsubscribe := broker.Subscribe(sessionID)
+	defer unsubscribe()
+	writer := &workerClientWriter{
+		conn:   workerConn,
+		sendCh: make(chan workerMessage, workerDeltaBufferSize),
+		done:   make(chan struct{}),
+	}
+	barrierClient := newWorkerDisplayBarrierClient(writer)
+	_, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
+	writer.SendDelta(displayDeltaEvent{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
+	writer.SendDisplayWake()
+	barrierResult := make(chan error, 1)
+	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), time.Second)
+	defer cancelBarrier()
+	go func() { barrierResult <- barrierClient.Wait(barrierCtx) }()
+	deadline := time.Now().Add(time.Second)
+	for len(writer.sendCh) < 3 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if len(writer.sendCh) < 3 {
+		t.Fatal("display barrier was not buffered behind old events")
+	}
+	go writer.run()
+	defer writer.Close()
+	if err := <-barrierResult; err != nil {
+		t.Fatalf("wait for display barrier acknowledgement: %v", err)
+	}
+	writer.SendDelta(displayDeltaEvent{ItemID: "new", Role: "assistant", PartType: "text", Delta: "new"})
+
+	sawWake := false
+	eventDeadline := time.After(time.Second)
+	for {
+		select {
+		case event := <-events:
+			if event.delta == nil {
+				sawWake = true
+				continue
+			}
+			if event.delta.ItemID == "old" && sawWake {
+				t.Fatal("old generation delta arrived after display barrier")
+			}
+			if event.delta.ItemID == "new" {
+				if !sawWake {
+					t.Fatal("new generation delta arrived before display barrier")
+				}
+				return
+			}
+		case err := <-readErrCh:
+			t.Fatalf("read worker acknowledgement: %v", err)
+		case <-eventDeadline:
+			t.Fatal("timed out waiting for ordered display events")
+		}
+	}
+}
+
+func TestReliableDisplayWakeWaitsForQueueSpace(t *testing.T) {
+	writer := &workerClientWriter{
+		sendCh: make(chan workerMessage, 2),
+		done:   make(chan struct{}),
+	}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	result := make(chan error, 1)
+	go func() {
+		result <- writer.SendDisplayWakeReliable(context.Background())
+	}()
+	select {
+	case err := <-result:
+		t.Fatalf("reliable wake returned while queue was full: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	<-writer.sendCh
+	select {
+	case err := <-result:
+		if err != nil {
+			t.Fatalf("reliable wake: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reliable wake did not use released queue space")
+	}
+	<-writer.sendCh
+	if message := <-writer.sendCh; message.Type != workerMessageDisplayWake {
+		t.Fatalf("last queued message = %q, want reliable wake", message.Type)
+	}
+}
+
+func TestReliableDisplayWakeTimesOutWhileQueueIsFull(t *testing.T) {
+	writer := &workerClientWriter{
+		displayControlTimeout: 20 * time.Millisecond,
+		sendCh:                make(chan workerMessage, 1),
+		done:                  make(chan struct{}),
+	}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	err := writer.SendDisplayWakeReliable(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("reliable wake error = %v, want deadline exceeded", err)
+	}
+	if len(writer.sendCh) != 1 {
+		t.Fatalf("timed-out reliable wake altered full queue: %d", len(writer.sendCh))
+	}
+}
+
+func TestDisplayBarrierQueueWaitStopsOnCancel(t *testing.T) {
+	writer := &workerClientWriter{
+		sendCh: make(chan workerMessage, 1),
+		done:   make(chan struct{}),
+	}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	barrier := newWorkerDisplayBarrierClient(writer)
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() { result <- barrier.Wait(ctx) }()
+	select {
+	case err := <-result:
+		t.Fatalf("barrier returned before cancellation: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case err := <-result:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("barrier error = %v, want context canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("barrier remained blocked after context cancellation")
+	}
+	barrier.mu.Lock()
+	waiterCount := len(barrier.waiters)
+	barrier.mu.Unlock()
+	if waiterCount != 0 {
+		t.Fatalf("barrier waiters leaked after cancellation: %d", waiterCount)
+	}
+}
+
+func TestDisplayBarrierWaitTimesOutWithoutAcknowledgement(t *testing.T) {
+	writer := &workerClientWriter{
+		sendCh: make(chan workerMessage, 1),
+		done:   make(chan struct{}),
+	}
+	barrier := newWorkerDisplayBarrierClient(writer)
+	barrier.timeout = 20 * time.Millisecond
+	started := time.Now()
+	err := barrier.Wait(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "acknowledgement timed out") {
+		t.Fatalf("barrier error = %v, want acknowledgement timeout", err)
+	}
+	if time.Since(started) > time.Second {
+		t.Fatal("barrier acknowledgement timeout was not bounded")
+	}
+	barrier.mu.Lock()
+	waiterCount := len(barrier.waiters)
+	barrier.mu.Unlock()
+	if waiterCount != 0 {
+		t.Fatalf("barrier waiters leaked after timeout: %d", waiterCount)
+	}
+}
+
+func TestDisplayBarrierWaitTimesOutWhileQueueIsFull(t *testing.T) {
+	writer := &workerClientWriter{
+		sendCh: make(chan workerMessage, 1),
+		done:   make(chan struct{}),
+	}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	barrier := newWorkerDisplayBarrierClient(writer)
+	barrier.timeout = 20 * time.Millisecond
+	err := barrier.Wait(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "acknowledgement timed out") {
+		t.Fatalf("barrier error = %v, want full-handshake timeout", err)
+	}
+	if len(writer.sendCh) != 1 {
+		t.Fatalf("timed-out barrier altered full queue: %d", len(writer.sendCh))
 	}
 }
 
@@ -261,69 +521,6 @@ func TestSessionEventsRejectsInvalidRequests(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestWorkerDisplayWakeOnlySignalsDurableCatchUp(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
-	if err != nil {
-		t.Fatalf("create store: %v", err)
-	}
-	defer store.Close()
-	const sessionID = "sess-worker-wake"
-	registry := newSessionRegistry()
-	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
-	workers := newWorkerRegistry()
-	workers.workers[sessionID] = &workerConnection{generation: "generation-1"}
-	broker := newDisplayEventBroker()
-	wake, unsubscribe := broker.Subscribe(sessionID)
-	defer unsubscribe()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
-		store:   store,
-		workers: workers,
-		events:  broker,
-	})
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+sessionID+"/events/wake", strings.NewReader(`{"generation":"generation-1"}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusNoContent {
-		t.Fatalf("wake status = %d: %s", rec.Code, rec.Body.String())
-	}
-	select {
-	case <-wake:
-	case <-time.After(time.Second):
-		t.Fatal("worker wake did not signal SSE catch-up")
-	}
-}
-
-func TestDisplayWakeNotifierDoesNotBlockWorkerEventHandling(t *testing.T) {
-	requestStarted := make(chan struct{})
-	releaseRequest := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		close(requestStarted)
-		<-releaseRequest
-		w.WriteHeader(http.StatusNoContent)
-	}))
-	defer server.Close()
-
-	notifier := newDisplayWakeNotifier(server.Client(), server.URL, "sess-wake-notifier", "generation-1")
-	wakeReturned := make(chan struct{})
-	go func() {
-		notifier.Wake(context.Background())
-		close(wakeReturned)
-	}()
-	select {
-	case <-requestStarted:
-	case <-time.After(time.Second):
-		t.Fatal("wake sender did not issue request")
-	}
-	select {
-	case <-wakeReturned:
-	case <-time.After(time.Second):
-		t.Fatal("wake blocked while the HTTP notification was in flight")
-	}
-	close(releaseRequest)
-	notifier.Close()
 }
 
 func newDisplayEventTestServer(t *testing.T) (*zotigosession.FileStore, *displayEventBroker, *httptest.Server, string) {

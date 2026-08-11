@@ -89,6 +89,149 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 	}
 }
 
+func TestWorkerRuntimeSteeringWinsBeforeApprovalRegistration(t *testing.T) {
+	const sessionID = "sess-steering-before-approval"
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog(sessionID, source)
+	turnID, err := display.StartTurn(context.Background())
+	if err != nil {
+		t.Fatalf("start display turn: %v", err)
+	}
+	transport := newWorkerRuntimeTransport(sessionID, display, nil)
+	if err := transport.interruptApprovalForSteering(context.Background(), turnID); err != nil {
+		t.Fatalf("register steering interruption: %v", err)
+	}
+	results, err := transport.RequestApproval(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}})
+	if err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+	if len(results) != 1 || results[0].Approved || results[0].Reason != "interrupted_by_steering" {
+		t.Fatalf("approval was not interrupted by steering: %#v", results)
+	}
+	items, _, err := source.LoadItems(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if len(items) != 1 || hasPendingApproval(items) {
+		t.Fatalf("steering created a ghost approval: %#v", items)
+	}
+}
+
+func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testing.T) {
+	const (
+		sessionID    = "sess-steering-approval-window"
+		providerName = "zotigod-steering-approval-window-test"
+	)
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &noopProvider{}, nil
+	})
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog(sessionID, source)
+	turnID, err := display.StartTurn(context.Background())
+	if err != nil {
+		t.Fatalf("start display turn: %v", err)
+	}
+	localExec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("new executor: %v", err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, localExec)
+	if err != nil {
+		t.Fatalf("new agent: %v", err)
+	}
+	ag.Restore(agent.Snapshot{
+		State: agent.StatePaused,
+		PendingActions: []*agent.PendingAction{{
+			ToolCallID: "call-1",
+			Name:       "glob",
+			Arguments:  `{}`,
+		}},
+	})
+	transport := newWorkerRuntimeTransport(sessionID, display, nil)
+	ready := make(chan struct{})
+	close(ready)
+	runtime := &workerRuntime{
+		agent:      ag,
+		transport:  transport,
+		display:    display,
+		turnActive: true,
+		turnReady:  ready,
+		turnDone:   make(chan struct{}),
+		readyDone:  true,
+	}
+	if err := runtime.queueTurnUserInput(context.Background(), commandResponse{
+		ID:   "steering-1",
+		Type: sessionCommandSteering,
+		Steering: &steeringCommandPayload{
+			TurnID: turnID,
+			Text:   "skip this tool",
+		},
+	}); err != nil {
+		t.Fatalf("queue steering: %v", err)
+	}
+	results, err := transport.RequestApproval(context.Background(), []zotigotransport.PendingToolCall{{
+		ID:        "call-1",
+		Name:      "glob",
+		Arguments: `{}`,
+	}})
+	if err != nil {
+		t.Fatalf("request approval: %v", err)
+	}
+	if len(results) != 1 || results[0].Approved || results[0].Reason != "interrupted_by_steering" {
+		t.Fatalf("approval was not interrupted by queued steering: %#v", results)
+	}
+	items, _, err := source.LoadItems(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if hasPendingApproval(items) {
+		t.Fatalf("approval registration window left a pending approval: %#v", items)
+	}
+}
+
+func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
+	const sessionID = "sess-steering-resolves-approval"
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog(sessionID, source)
+	turnID, err := display.StartTurn(context.Background())
+	if err != nil {
+		t.Fatalf("start display turn: %v", err)
+	}
+	pendingNotification := make(chan approvalRequestResponse, 1)
+	resolvedNotification := make(chan approvalRequestResponse, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) {
+		pendingNotification <- approval
+	})
+	transport.notifyApprovalResolved = func(_ context.Context, approval approvalRequestResponse) {
+		resolvedNotification <- approval
+	}
+	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
+	go func() {
+		results, _ := transport.RequestApproval(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}})
+		resultCh <- results
+	}()
+	<-pendingNotification
+	if err := transport.interruptApprovalForSteering(context.Background(), turnID); err != nil {
+		t.Fatalf("interrupt registered approval: %v", err)
+	}
+	results := <-resultCh
+	if len(results) != 1 || results[0].Approved || results[0].Reason != "interrupted_by_steering" {
+		t.Fatalf("approval result = %#v", results)
+	}
+	resolved := <-resolvedNotification
+	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Reason != "interrupted_by_steering" {
+		t.Fatalf("resolved notification = %#v", resolved)
+	}
+	items, _, err := source.LoadItems(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load display items: %v", err)
+	}
+	if hasPendingApproval(items) {
+		t.Fatalf("registered approval remained pending: %#v", items)
+	}
+}
+
 func TestWorkerRuntimeApprovalDecisionIsAppliedOnce(t *testing.T) {
 	const sessionID = "sess-single-decision"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
