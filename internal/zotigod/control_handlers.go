@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -545,58 +546,56 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	item, err := h.appendSteeringCommand(r.Context(), id, turnID, text, images)
+	command, storedImages, refs, err := h.prepareSteeringCommand(r.Context(), id, turnID, text, images)
 	if err != nil {
-		if errors.Is(err, errSessionBusy) {
-			writeAPIError(w, http.StatusConflict, "steering requires an active turn")
-			return
-		}
-		if errors.Is(err, errApprovalPending) {
-			writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
-			return
-		}
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append steering command: %v", err))
+		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("prepare steering command: %v", err))
 		return
 	}
-
-	command, err := steeringCommandFromItem(item, h.sessionStoreRoot())
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("build steering command: %v", err))
+	if !h.workers.Send(id, command) {
+		_ = h.deleteMessageImageRefs(r.Context(), id, imageRefNames(refs))
+		cleanupMessageImageBlobs(storedImages)
+		writeAPIError(w, http.StatusServiceUnavailable, "steering requires an online worker")
 		return
 	}
-	h.sendCommand(r.Context(), id, command)
 	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
-func (h *handler) appendSteeringCommand(ctx context.Context, id string, turnID string, text string, images []messageImage) (zotigosession.DisplayItem, error) {
+func (h *handler) prepareSteeringCommand(ctx context.Context, id string, turnID string, text string, images []messageImage) (commandResponse, []messageImage, []zotigosession.ImageRef, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
 	refs, err := messageImageRefs(id, images)
 	if err != nil {
 		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
 	if err := h.putMessageImageRefs(ctx, refs); err != nil {
 		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
-	item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, text, images)
-	item.Turn = &zotigosession.DisplayTurn{ID: turnID}
-	item.Command = &zotigosession.DisplayCommand{
-		Type:   sessionCommandSteering,
-		Text:   text,
-		Images: displayCommandImages(images),
-		TurnID: turnID,
+	commandImages := make([]commandImageData, 0, len(images))
+	for _, image := range images {
+		commandImages = append(commandImages, commandImageData{
+			MimeType:   image.MimeType,
+			SizeBytes:  image.SizeBytes,
+			Width:      image.Width,
+			Height:     image.Height,
+			DataBase64: base64.StdEncoding.EncodeToString(image.Data),
+			BlobPath:   image.BlobPath,
+		})
 	}
-	item, err = h.items.AppendItemIf(ctx, id, item, requireOpenTurnWithoutPendingApproval(turnID))
-	if err != nil {
-		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
-		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
+	command := commandResponse{
+		ID:        "item_" + uuid.NewString(),
+		Type:      sessionCommandSteering,
+		CreatedAt: time.Now().UTC(),
+		Steering: &steeringCommandPayload{
+			Text:   text,
+			Images: commandImages,
+			TurnID: turnID,
+		},
 	}
-	return item, nil
+	return command, images, refs, nil
 }
 
 func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx context.Context, id string, message string) {
@@ -781,23 +780,6 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 		}
 		lastScanned = item.Sequence
 
-		if item.Type == zotigosession.DisplayItemSteeringMessage {
-			command, err := steeringCommandFromItem(item, rootDir)
-			if err != nil {
-				if errors.Is(err, errCommandImageUnavailable) {
-					continue
-				}
-				return commandsResponse{}, err
-			}
-			if command.Steering != nil && (command.Steering.Text != "" || len(command.Steering.Images) > 0) {
-				resp.Commands = append(resp.Commands, command)
-				if len(resp.Commands) >= query.Limit {
-					break
-				}
-			}
-			continue
-		}
-
 		if item.Command != nil {
 			appended := false
 			switch item.Command.Type {
@@ -896,16 +878,6 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 }
 
 func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, bool, error) {
-	if item.Type == zotigosession.DisplayItemSteeringMessage {
-		command, err := steeringCommandFromItem(item, rootDir)
-		if err != nil {
-			return commandResponse{}, false, err
-		}
-		if command.Steering == nil || (command.Steering.Text == "" && len(command.Steering.Images) == 0) {
-			return commandResponse{}, false, nil
-		}
-		return command, true, nil
-	}
 	if item.Command == nil {
 		return commandResponse{}, false, nil
 	}
@@ -1073,35 +1045,6 @@ func publicCommandImages(images []commandImageData) []publicCommandImageResponse
 	return resp
 }
 
-func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
-	command := commandResponse{
-		ID:        item.ID,
-		Sequence:  item.Sequence,
-		Type:      sessionCommandSteering,
-		CreatedAt: item.CreatedAt,
-		Steering: &steeringCommandPayload{
-			Text: commandText(item.Content),
-		},
-	}
-	if item.Turn != nil {
-		command.Steering.TurnID = item.Turn.ID
-	}
-	if item.Command != nil {
-		if item.Command.Text != "" {
-			command.Steering.Text = item.Command.Text
-		}
-		if item.Command.TurnID != "" {
-			command.Steering.TurnID = item.Command.TurnID
-		}
-		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
-		if err != nil {
-			return commandResponse{}, err
-		}
-		command.Steering.Images = images
-	}
-	return command, nil
-}
-
 func pauseCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	command := commandResponse{
 		ID:        item.ID,
@@ -1143,16 +1086,6 @@ func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) commandRespon
 		command.ApprovalPolicy.Policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
 	}
 	return command
-}
-
-func commandText(content []zotigosession.DisplayContentPart) string {
-	parts := make([]string, 0, len(content))
-	for _, part := range content {
-		if part.Type == string(protocol.ContentTypeText) && strings.TrimSpace(part.Text) != "" {
-			parts = append(parts, strings.TrimSpace(part.Text))
-		}
-	}
-	return strings.Join(parts, "\n")
 }
 
 func lastOpenTurnID(items []zotigosession.DisplayItem) string {

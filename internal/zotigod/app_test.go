@@ -2564,7 +2564,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, _, errCh := readWorkerMessages(clientConn)
+	_, _, errCh := readWorkerMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
 		msg := workerMessage{
 			Type: workerMessageCommand,
@@ -2800,7 +2800,7 @@ func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 	}
 }
 
-func TestLoadWorkerCommandCursorDoesNotSkipPendingSteering(t *testing.T) {
+func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -2852,11 +2852,11 @@ func TestLoadWorkerCommandCursorDoesNotSkipPendingSteering(t *testing.T) {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
 	if cursor.Sequence != 0 || cursor.Offset != 0 {
-		t.Fatalf("expected pending steering to remain replayable, got %#v", cursor)
+		t.Fatalf("expected steering display item to be ignored, got %#v", cursor)
 	}
 }
 
-func TestLoadWorkerCommandCursorRecoversAppliedImageOnlySteering(t *testing.T) {
+func TestLoadWorkerCommandCursorDoesNotTreatAppliedImageSteeringAsCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -2880,7 +2880,7 @@ func TestLoadWorkerCommandCursorRecoversAppliedImageOnlySteering(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append turn started: %v", err)
 	}
-	item, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+	_, err = store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSteeringMessage,
 		Role: string(protocol.RoleUser),
 		Content: []zotigosession.DisplayContentPart{{
@@ -2924,8 +2924,8 @@ func TestLoadWorkerCommandCursorRecoversAppliedImageOnlySteering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
-	if cursor.Sequence != item.Sequence || cursor.Offset != 0 {
-		t.Fatalf("expected applied image steering sequence %d, got %#v", item.Sequence, cursor)
+	if cursor.Sequence != 0 || cursor.Offset != 0 {
+		t.Fatalf("expected applied image steering to stay outside the command cursor, got %#v", cursor)
 	}
 }
 
@@ -4863,27 +4863,17 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 2 {
-		t.Fatalf("expected turn and steering display items, got %#v", items.Items)
-	}
-	item := items.Items[1]
-	if len(item.Content) != 1 || item.Content[0].Image == nil || item.Content[0].Image.URL == "" {
-		t.Fatalf("expected image-only steering display item, got %#v", item.Content)
-	}
-	if item.Command == nil || len(item.Command.Images) != 1 || item.Command.Images[0].URL == "" {
-		t.Fatalf("expected steering command image URL, got %#v", item.Command)
+	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
+		t.Fatalf("steering was persisted before the worker applied it: %#v", items.Items)
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Steering == nil || len(commands.Commands[0].Steering.Images) != 1 {
-		t.Fatalf("expected replayable steering image command, got %#v", commands)
-	}
-	if commands.Commands[0].Steering.Images[0].DataBase64 == "" {
-		t.Fatalf("replayed steering command did not hydrate image payload")
+	if len(commands.Commands) != 0 {
+		t.Fatalf("steering must not enter the durable command queue: %#v", commands)
 	}
 
 	imageRec := httptest.NewRecorder()
-	handler.ServeHTTP(imageRec, httptest.NewRequest(http.MethodGet, item.Content[0].Image.URL, nil))
+	handler.ServeHTTP(imageRec, httptest.NewRequest(http.MethodGet, publicCommand.Images[0].URL, nil))
 	if imageRec.Code != http.StatusOK {
 		t.Fatalf("expected image status %d, got %d: %s", http.StatusOK, imageRec.Code, imageRec.Body.String())
 	}
@@ -5267,9 +5257,13 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- runtime.queueTurnUserInput(context.Background(), &steeringCommandPayload{
-			TurnID: turnID,
-			Text:   "use the smaller fix",
+		result <- runtime.queueTurnUserInput(context.Background(), commandResponse{
+			ID:   "steering-1",
+			Type: sessionCommandSteering,
+			Steering: &steeringCommandPayload{
+				TurnID: turnID,
+				Text:   "use the smaller fix",
+			},
 		})
 	}()
 
@@ -5320,9 +5314,13 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		readyDone:  true,
 	}
 
-	err = runtime.queueTurnUserInput(context.Background(), &steeringCommandPayload{
-		TurnID: turnID,
-		Text:   "too late",
+	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
+		ID:   "steering-1",
+		Type: sessionCommandSteering,
+		Steering: &steeringCommandPayload{
+			TurnID: turnID,
+			Text:   "too late",
+		},
 	})
 	if err != nil {
 		t.Fatalf("expected stale steering to be ignored, got %v", err)
@@ -5604,7 +5602,7 @@ func TestWorkerTurnInterruptedRejectsMissingOrStaleTurn(t *testing.T) {
 	}
 }
 
-func TestSessionSteeringCreatesDisplayItemAndWorkerCommand(t *testing.T) {
+func TestSessionSteeringForwardsWithoutPersistingCommand(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
@@ -5629,52 +5627,19 @@ func TestSessionSteeringCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	if command.Type != sessionCommandSteering || command.Text != "use the smaller fix" || command.TurnID != "turn-1" {
 		t.Fatalf("unexpected steering command: %#v", command)
 	}
+	msg := readWorkerMessage(t, worker)
+	if msg.Command == nil || msg.Command.ID != command.ID || msg.Command.Sequence != 0 || msg.Command.Steering == nil || msg.Command.Steering.Text != "use the smaller fix" {
+		t.Fatalf("unexpected worker steering command: %#v", msg)
+	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 2 || items.Items[1].Type != string(zotigosession.DisplayItemSteeringMessage) || items.Items[1].Turn == nil || items.Items[1].Turn.ID != "turn-1" {
-		t.Fatalf("expected steering display item, got %#v", items.Items)
+	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
+		t.Fatalf("steering was persisted before the worker applied it: %#v", items.Items)
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Steering == nil ||
-		commands.Commands[0].Steering.Text != "use the smaller fix" || commands.Commands[0].Steering.TurnID != "turn-1" {
-		t.Fatalf("expected one steering command, got %#v", commands)
-	}
-}
-
-func TestSessionSteeringRejectsTurnCompletedDuringAdmission(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	var completed atomic.Bool
-	source.appendErr = func(sessionID string, item zotigosession.DisplayItem) error {
-		if item.Type != zotigosession.DisplayItemSteeringMessage || !completed.CompareAndSwap(false, true) {
-			return nil
-		}
-		_, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{
-			Type: zotigosession.DisplayItemTurnCompleted,
-			Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
-		})
-		return err
-	}
-	handler := newHandler(newSessionRegistry(), source)
-	server := httptest.NewServer(handler)
-	defer server.Close()
-
-	created := createSession(t, handler)
-	startSession(t, handler, created.ID)
-	worker := dialWorker(t, server, created.ID)
-	defer worker.Close()
-	appendTurnStarted(t, source, created.ID, "turn-1")
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(`{"text":"too late"}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
-	}
-
-	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 2 || items.Items[1].Type != string(zotigosession.DisplayItemTurnCompleted) {
-		t.Fatalf("expected only lifecycle completion to be appended, got %#v", items.Items)
+	if len(commands.Commands) != 0 {
+		t.Fatalf("steering entered the durable command queue: %#v", commands)
 	}
 }
 
@@ -5706,7 +5671,7 @@ func TestSessionSteeringRejectsPendingApprovalBeforeRegistryPause(t *testing.T) 
 	}
 }
 
-func TestWorkerCommandsReturnSteeringItemsUnmerged(t *testing.T) {
+func TestWorkerCommandsDoNotReplayAppliedSteeringItems(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
@@ -5718,43 +5683,20 @@ func TestWorkerCommandsReturnSteeringItemsUnmerged(t *testing.T) {
 	defer worker.Close()
 	appendTurnStarted(t, source, created.ID, "turn-1")
 
-	postSteering(t, handler, created.ID, "first correction")
-	postSteering(t, handler, created.ID, "second correction")
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemAssistantMessage,
-		Role: string(protocol.RoleAssistant),
-		Content: []zotigosession.DisplayContentPart{{
-			Type: string(protocol.ContentTypeToolResult),
-			ToolResult: &zotigosession.DisplayToolResult{
-				ToolCallID: "call-1",
-				ToolName:   "shell",
-				ResultType: string(protocol.ToolResultTypeText),
-				Text:       "done",
-			},
-		}},
+		ID:      "applied-steering",
+		Type:    zotigosession.DisplayItemSteeringMessage,
+		Role:    string(protocol.RoleUser),
+		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "correction"}},
+		Turn:    &zotigosession.DisplayTurn{ID: "turn-1"},
+		Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "correction", TurnID: "turn-1"},
 	}); err != nil {
-		t.Fatalf("append tool result boundary: %v", err)
+		t.Fatalf("append applied steering: %v", err)
 	}
-	postSteering(t, handler, created.ID, "third correction")
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 3 {
-		t.Fatalf("expected three commands, got %#v", commands)
-	}
-	if commands.Commands[0].Steering == nil || commands.Commands[0].Steering.Text != "first correction" {
-		t.Fatalf("unexpected first steering command: %#v", commands.Commands[0])
-	}
-	if commands.Commands[1].Steering == nil || commands.Commands[1].Steering.Text != "second correction" {
-		t.Fatalf("unexpected second steering command: %#v", commands.Commands[1])
-	}
-	if commands.Commands[2].Steering == nil || commands.Commands[2].Steering.Text != "third correction" {
-		t.Fatalf("unexpected third steering command: %#v", commands.Commands[2])
-	}
-
-	afterFirst := getCommands(t, handler, fmt.Sprintf("/internal/sessions/%s/commands?after=%d", created.ID, commands.Commands[0].Sequence))
-	if len(afterFirst.Commands) != 2 || afterFirst.Commands[0].Steering == nil || afterFirst.Commands[0].Steering.Text != "second correction" ||
-		afterFirst.Commands[1].Steering == nil || afterFirst.Commands[1].Steering.Text != "third correction" {
-		t.Fatalf("expected later steering after cursor, got %#v", afterFirst)
+	if len(commands.Commands) != 0 {
+		t.Fatalf("applied steering item was replayed as a command: %#v", commands)
 	}
 }
 
