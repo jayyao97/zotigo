@@ -62,6 +62,283 @@ func TestParseSkillContent_Invalid(t *testing.T) {
 	}
 }
 
+func TestDiscoverSkills_FollowsDirectorySymlink(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "linked-skill")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatalf("create skill target: %v", err)
+	}
+	content := "---\nname: linked-skill\ndescription: Linked skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(target, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write linked skill: %v", err)
+	}
+	link := filepath.Join(root, "linked-skill")
+	relativeTarget, err := filepath.Rel(root, target)
+	if err != nil {
+		t.Fatalf("make relative skill target: %v", err)
+	}
+	if err := os.Symlink(relativeTarget, link); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover linked skill: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "linked-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+	if want := filepath.Join(link, SkillFileName); discovered[0].Path != want {
+		t.Fatalf("skill path = %q, want logical path %q", discovered[0].Path, want)
+	}
+}
+
+func TestDiscoverSkills_SkipsBrokenDirectorySymlink(t *testing.T) {
+	root := t.TempDir()
+	validDir := filepath.Join(root, "valid-skill")
+	if err := os.MkdirAll(validDir, 0755); err != nil {
+		t.Fatalf("create valid skill: %v", err)
+	}
+	content := "---\nname: valid-skill\ndescription: Valid skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(validDir, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write valid skill: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing"), filepath.Join(root, "broken")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover alongside broken symlink: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "valid-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+}
+
+func TestDiscoverSkills_SkipsSymlinkResolutionCycles(t *testing.T) {
+	root := t.TempDir()
+	validDir := filepath.Join(root, "valid-skill")
+	if err := os.MkdirAll(validDir, 0755); err != nil {
+		t.Fatalf("create valid skill: %v", err)
+	}
+	content := "---\nname: valid-skill\ndescription: Valid skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(validDir, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write valid skill: %v", err)
+	}
+	if err := os.Symlink("self-loop", filepath.Join(root, "self-loop")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("loop-b", filepath.Join(root, "loop-a")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink("loop-a", filepath.Join(root, "loop-b")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover alongside symlink cycles: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "valid-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+}
+
+func TestDiscoverSkills_SkipsUnreadableSymlinkTree(t *testing.T) {
+	root := t.TempDir()
+	validDir := filepath.Join(root, "valid-skill")
+	if err := os.MkdirAll(validDir, 0755); err != nil {
+		t.Fatalf("create valid skill: %v", err)
+	}
+	content := "---\nname: valid-skill\ndescription: Valid skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(validDir, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write valid skill: %v", err)
+	}
+	unreadableTarget := filepath.Join(t.TempDir(), "unreadable")
+	if err := os.MkdirAll(unreadableTarget, 0755); err != nil {
+		t.Fatalf("create unreadable target: %v", err)
+	}
+	if err := os.Symlink(unreadableTarget, filepath.Join(root, "unreadable")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Chmod(unreadableTarget, 0); err != nil {
+		t.Skipf("cannot make symlink target unreadable: %v", err)
+	}
+	defer func() { _ = os.Chmod(unreadableTarget, 0755) }()
+	if _, err := os.ReadDir(unreadableTarget); err == nil {
+		t.Skip("current user can read mode-000 directories")
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover alongside unreadable symlink tree: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "valid-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+}
+
+func TestDiscoverSkills_RealDirectoryErrorWinsOverOptionalAlias(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "z-real")
+	if err := os.MkdirAll(realDir, 0755); err != nil {
+		t.Fatalf("create real directory: %v", err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "a-link")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Chmod(realDir, 0); err != nil {
+		t.Skipf("cannot make directory unreadable: %v", err)
+	}
+	defer func() { _ = os.Chmod(realDir, 0755) }()
+	if _, err := os.ReadDir(realDir); err == nil {
+		t.Skip("current user can read mode-000 directories")
+	}
+
+	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+		t.Fatal("expected unreadable real directory to remain an error")
+	}
+}
+
+func TestDiscoverSkills_RequiredSubtreeErrorWinsOverOptionalAlias(t *testing.T) {
+	root := t.TempDir()
+	realDir := filepath.Join(root, "z-real")
+	unreadableChild := filepath.Join(realDir, "child")
+	if err := os.MkdirAll(unreadableChild, 0755); err != nil {
+		t.Fatalf("create real subtree: %v", err)
+	}
+	if err := os.Symlink(realDir, filepath.Join(root, "a-link")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Chmod(unreadableChild, 0); err != nil {
+		t.Skipf("cannot make child directory unreadable: %v", err)
+	}
+	defer func() { _ = os.Chmod(unreadableChild, 0755) }()
+	if _, err := os.ReadDir(unreadableChild); err == nil {
+		t.Skip("current user can read mode-000 directories")
+	}
+
+	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+		t.Fatal("expected unreadable required subtree to remain an error")
+	}
+}
+
+func TestDiscoverSkills_RequiredEntryInfoErrorIsReported(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "entry"), []byte("test"), 0644); err != nil {
+		t.Fatalf("write directory entry: %v", err)
+	}
+	if err := os.Chmod(root, 0400); err != nil {
+		t.Skipf("cannot remove directory search permission: %v", err)
+	}
+	defer func() { _ = os.Chmod(root, 0755) }()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Skipf("current filesystem cannot list non-searchable directory: %v", err)
+	}
+	if _, err := entries[0].Info(); err == nil {
+		t.Skip("current user can inspect entries in a non-searchable directory")
+	}
+
+	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+		t.Fatal("expected required entry inspection error")
+	}
+}
+
+func TestWalkSkillsDir_MissingRequiredRootReturnsError(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing")
+	if err := walkSkillsDir(missing, func(string) error { return nil }); err == nil {
+		t.Fatal("expected missing required directory to return an error")
+	}
+}
+
+func TestDiscoverSkills_DeduplicatesSymlinkCycle(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "cycle-skill")
+	if err := os.MkdirAll(target, 0755); err != nil {
+		t.Fatalf("create cycle skill: %v", err)
+	}
+	content := "---\nname: cycle-skill\ndescription: Cycle skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(target, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write cycle skill: %v", err)
+	}
+	if err := os.Symlink(root, filepath.Join(target, "back")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover symlink cycle: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "cycle-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+}
+
+func TestDiscoverSkills_PrefersShallowPathToSharedSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(t.TempDir(), "shared-target")
+	nestedSkill := filepath.Join(target, "nested-skill")
+	if err := os.MkdirAll(nestedSkill, 0755); err != nil {
+		t.Fatalf("create nested skill: %v", err)
+	}
+	content := "---\nname: nested-skill\ndescription: Nested skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(nestedSkill, SkillFileName), []byte(content), 0644); err != nil {
+		t.Fatalf("write nested skill: %v", err)
+	}
+	deepParent := filepath.Join(root, "a", "x", "y")
+	shallowParent := filepath.Join(root, "z")
+	if err := os.MkdirAll(deepParent, 0755); err != nil {
+		t.Fatalf("create deep parent: %v", err)
+	}
+	if err := os.MkdirAll(shallowParent, 0755); err != nil {
+		t.Fatalf("create shallow parent: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(deepParent, "link")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+	if err := os.Symlink(target, filepath.Join(shallowParent, "link")); err != nil {
+		t.Skipf("directory symlinks unavailable: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover shared symlink target: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "nested-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+	if want := filepath.Join(shallowParent, "link", "nested-skill", SkillFileName); discovered[0].Path != want {
+		t.Fatalf("skill path = %q, want shallow logical path %q", discovered[0].Path, want)
+	}
+}
+
+func TestDiscoverSkills_PreservesDepthBoundary(t *testing.T) {
+	root := t.TempDir()
+	boundaryDir := filepath.Join(root, "one", "two", "three", "four")
+	beyondDir := filepath.Join(boundaryDir, "five")
+	if err := os.MkdirAll(beyondDir, 0755); err != nil {
+		t.Fatalf("create nested skills: %v", err)
+	}
+	boundaryContent := "---\nname: boundary-skill\ndescription: Boundary skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(boundaryDir, SkillFileName), []byte(boundaryContent), 0644); err != nil {
+		t.Fatalf("write boundary skill: %v", err)
+	}
+	beyondContent := "---\nname: beyond-skill\ndescription: Beyond skill\n---\nInstructions.\n"
+	if err := os.WriteFile(filepath.Join(beyondDir, SkillFileName), []byte(beyondContent), 0644); err != nil {
+		t.Fatalf("write beyond-boundary skill: %v", err)
+	}
+
+	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	if err != nil {
+		t.Fatalf("discover depth boundary: %v", err)
+	}
+	if len(discovered) != 1 || discovered[0].Name != "boundary-skill" {
+		t.Fatalf("unexpected discovered skills: %#v", discovered)
+	}
+}
+
 func TestSkillManager_Load(t *testing.T) {
 	// Create temp directory for test skills
 	tmpDir := t.TempDir()

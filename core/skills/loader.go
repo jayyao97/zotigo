@@ -72,8 +72,9 @@ func DiscoverSkills(dir string, source SkillSource) ([]*SkillDefinition, error) 
 		return nil, fmt.Errorf("not a directory: %s", dir)
 	}
 
-	// BFS traversal with depth limit
-	err = walkSkillsDir(dir, 0, func(skillPath string) error {
+	// Traverse with a depth limit and canonical-directory deduplication so
+	// directory symlinks work without allowing cycles.
+	err = walkSkillsDir(dir, func(skillPath string) error {
 		skill, err := ParseSkillFile(skillPath)
 		if err != nil {
 			// Log warning but continue
@@ -92,39 +93,92 @@ func DiscoverSkills(dir string, source SkillSource) ([]*SkillDefinition, error) 
 }
 
 // walkSkillsDir walks the directory looking for SKILL.md files
-func walkSkillsDir(dir string, depth int, fn func(string) error) error {
-	if depth > MaxScanDepth {
-		return nil
+func walkSkillsDir(root string, fn func(string) error) error {
+	type pendingDir struct {
+		path     string
+		depth    int
+		optional bool
 	}
 
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return fmt.Errorf("failed to read directory: %w", err)
-	}
+	queue := []pendingDir{{path: root}}
+	visited := make(map[string]bool)
+	seenSkillFiles := make(map[string]struct{})
+	for len(queue) > 0 {
+		current := queue[0]
+		queue = queue[1:]
 
-	for _, entry := range entries {
-		path := filepath.Join(dir, entry.Name())
+		resolvedDir, err := filepath.EvalSymlinks(current.path)
+		if err != nil {
+			if current.optional {
+				continue
+			}
+			return fmt.Errorf("failed to resolve directory: %w", err)
+		}
+		resolvedDir, err = filepath.Abs(resolvedDir)
+		if err != nil {
+			if current.optional {
+				continue
+			}
+			return fmt.Errorf("failed to resolve absolute directory path: %w", err)
+		}
+		visitedRequired, seen := visited[resolvedDir]
+		if seen && (visitedRequired || current.optional) {
+			continue
+		}
 
-		if entry.IsDir() {
-			// Check if this directory contains SKILL.md
-			skillPath := filepath.Join(path, SkillFileName)
-			if _, err := os.Stat(skillPath); err == nil {
-				if err := fn(skillPath); err != nil {
+		entries, err := os.ReadDir(current.path)
+		if err != nil {
+			if current.optional {
+				continue
+			}
+			return fmt.Errorf("failed to read directory: %w", err)
+		}
+		if current.optional {
+			if !seen {
+				visited[resolvedDir] = false
+			}
+		} else {
+			visited[resolvedDir] = true
+		}
+		for _, entry := range entries {
+			path := filepath.Join(current.path, entry.Name())
+			entryInfo, err := entry.Info()
+			if err != nil {
+				if current.optional {
+					continue
+				}
+				return fmt.Errorf("failed to inspect directory entry %s: %w", path, err)
+			}
+			isSymlink := entryInfo.Mode()&os.ModeSymlink != 0
+			isDir := entryInfo.IsDir()
+			if isSymlink {
+				info, err := os.Stat(path)
+				if err != nil {
+					continue
+				}
+				isDir = info.IsDir()
+			}
+
+			if isDir {
+				if current.depth < MaxScanDepth+1 {
+					queue = append(queue, pendingDir{
+						path:     path,
+						depth:    current.depth + 1,
+						optional: current.optional || isSymlink,
+					})
+				}
+			} else if entry.Name() == SkillFileName {
+				skillKey := filepath.Join(resolvedDir, SkillFileName)
+				if _, seen := seenSkillFiles[skillKey]; seen {
+					continue
+				}
+				seenSkillFiles[skillKey] = struct{}{}
+				if err := fn(path); err != nil {
 					return err
 				}
 			}
-			// Continue scanning subdirectories
-			if err := walkSkillsDir(path, depth+1, fn); err != nil {
-				return err
-			}
-		} else if entry.Name() == SkillFileName {
-			// SKILL.md directly in this directory
-			if err := fn(path); err != nil {
-				return err
-			}
 		}
 	}
-
 	return nil
 }
 
