@@ -33,8 +33,6 @@ Current internal worker endpoints include:
 - `POST /internal/sessions/{id}/events/wake`
 - `GET /internal/sessions/{id}/commands`
 - `POST /internal/sessions/{id}/turn/interrupted`
-- `POST /internal/sessions/{id}/approvals`
-- `GET /internal/sessions/{id}/approvals/{approval_id}`
 
 ## Response envelope
 
@@ -1042,15 +1040,15 @@ Status codes:
 
 ## Human approval flow
 
-When a worker needs human approval, it creates an approval request through the
-internal worker API. zotigod appends an `approval_request` display item as the
-durable approval record, best-effort appends `turn_paused` with
-`reason: "need_approval"` for display replay, and transitions the daemon session
-state to `paused` when it is still running.
+When a worker needs human approval, the worker appends the `approval_request`
+display item as the durable record and best-effort appends `turn_paused` with
+`reason: "need_approval"`. It then notifies zotigod over the worker WebSocket,
+which transitions the daemon session state to `paused`. zotigod does not write
+either display item.
 
 The persisted approval read model is the display log. zotigod reconstructs
 pending and resolved approval requests from `approval_request` and
-`approval_decision` items for display and worker reads. Public approval
+`approval_decision` items for display and request validation. Public approval
 submission still requires the session to be live in the current daemon. If the
 daemon has restarted and the session is only present on disk, desktop can still
 display the pending approval from `/items`, but
@@ -1059,52 +1057,6 @@ display the pending approval from `/items`, but
 
 Desktop clients using this flow must support the `paused` session state and the
 `approval_request` / `approval_decision` item payloads before enabling HITL UI.
-
-Worker create request:
-
-`POST /internal/sessions/{id}/approvals`
-
-```json
-{
-  "turn_id": "turn_123",
-  "pending": [
-    {
-      "tool_call_id": "call_123",
-      "tool_name": "shell",
-      "arguments": "{\"command\":\"git status\"}",
-      "description": "Run shell command",
-      "reason": "requires user approval",
-      "risk_level": "medium",
-      "source": "classifier",
-      "requires_snapshot": true
-    }
-  ]
-}
-```
-
-Response data:
-
-```json
-{
-  "id": "apr_8f0e12ab34cd56ef",
-  "session_id": "sess_8f0e12ab34cd56ef",
-  "turn_id": "turn_123",
-  "status": "pending",
-  "pending": [
-    {
-      "tool_call_id": "call_123",
-      "tool_name": "shell",
-      "arguments": "{\"command\":\"git status\"}",
-      "description": "Run shell command",
-      "reason": "requires user approval",
-      "risk_level": "medium",
-      "source": "classifier",
-      "requires_snapshot": true
-    }
-  ],
-  "created_at": "2026-01-02T03:04:05Z"
-}
-```
 
 Desktop submit decision:
 
@@ -1137,21 +1089,28 @@ Denied decisions can include a reason:
 
 The decision request must include exactly one decision for each pending tool
 call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected.
-After a valid decision, zotigod appends an `approval_decision` item. If the
-current daemon registry still has the session in `paused`, zotigod moves it back
-to `running`.
+zotigod forwards a valid decision to the live worker over its WebSocket. The
+worker appends the `approval_decision` display item, queues an acknowledgement
+of the durable result, and only then resumes the pending Agent actions. After
+zotigod receives that acknowledgement it moves the daemon session back to
+`running` and returns `200` to the Desktop client. On worker disconnect or
+reconnect, zotigod reconciles a paused session from the durable display log.
+There is no approval polling endpoint.
 
-Workers can poll the internal read endpoint until the request is resolved:
-
-`GET /internal/sessions/{id}/approvals/{approval_id}`
+If a worker disconnects while approval is still pending, the session remains
+paused and may be started again. The replacement worker records denied
+decisions for the abandoned approval, interrupts the old turn, and restores the
+Agent snapshot to an idle state before accepting new work. It never executes an
+approval that was not acknowledged by the user.
 
 Status codes:
 
-- `201`: approval request created.
-- `200`: approval request returned or decision accepted.
+- `200`: public decision accepted and durably acknowledged by the worker.
 - `400`: invalid request body or decision set.
 - `404`: session or approval request not found.
-- `409`: approval creation on a non-running session, or an already resolved
-  approval request. Public decisions for offline sessions use
-  `code: "session_not_live"`.
+- `409`: already resolved approval request. Public decisions for offline
+  sessions use `code: "session_not_live"`.
+- `503`: the live worker disconnected, timed out, or failed to durably apply the
+  decision. Because a timeout can race with a late durable decision, clients
+  should refresh `/sessions/{id}/items` before retrying.
 - `405`: method not allowed.

@@ -4,7 +4,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -17,10 +16,6 @@ const (
 
 var errInvalidApprovalRequest = errors.New("invalid approval request")
 
-type approvalRegistry struct {
-	mu sync.Mutex
-}
-
 type approvalRequest struct {
 	ID         string
 	SessionID  string
@@ -32,11 +27,7 @@ type approvalRequest struct {
 	ResolvedAt *time.Time
 }
 
-func newApprovalRegistry() *approvalRegistry {
-	return &approvalRegistry{}
-}
-
-func (r *approvalRegistry) Create(sessionID string, turnID string, pending []zotigosession.DisplayPendingApproval) (approvalRequest, error) {
+func newApprovalRequest(sessionID string, turnID string, pending []zotigosession.DisplayPendingApproval) (approvalRequest, error) {
 	if err := validatePendingApprovals(turnID, pending); err != nil {
 		return approvalRequest{}, err
 	}
@@ -49,6 +40,11 @@ func (r *approvalRegistry) Create(sessionID string, turnID string, pending []zot
 		Pending:   copyPendingApprovals(pending),
 		CreatedAt: time.Now().UTC(),
 	}, nil
+}
+
+func hasPendingApproval(items []zotigosession.DisplayItem) bool {
+	turnID := lastOpenTurnID(items)
+	return turnID != "" && hasPendingApprovalForTurn(items, turnID)
 }
 
 func approvalFromDisplayItems(sessionID string, approvalID string, items []zotigosession.DisplayItem) (approvalRequest, bool) {

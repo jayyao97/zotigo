@@ -9,22 +9,6 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
-type createApprovalRequest struct {
-	TurnID  string                      `json:"turn_id"`
-	Pending []pendingApprovalRequestDTO `json:"pending"`
-}
-
-type pendingApprovalRequestDTO struct {
-	ToolCallID       string `json:"tool_call_id"`
-	ToolName         string `json:"tool_name"`
-	Arguments        string `json:"arguments,omitempty"`
-	Description      string `json:"description,omitempty"`
-	Reason           string `json:"reason,omitempty"`
-	RiskLevel        string `json:"risk_level,omitempty"`
-	Source           string `json:"source,omitempty"`
-	RequiresSnapshot bool   `json:"requires_snapshot,omitempty"`
-}
-
 type submitApprovalDecisionRequest struct {
 	Decisions []approvalDecisionRequestDTO `json:"decisions"`
 }
@@ -47,85 +31,6 @@ type approvalRequestResponse struct {
 	ResolvedAt *time.Time                     `json:"resolved_at,omitempty"`
 }
 
-func (h *handler) handleApprovalCreate(w http.ResponseWriter, r *http.Request, id string) {
-	if r.Method != http.MethodPost {
-		w.Header().Set("Allow", http.MethodPost)
-		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	h.approvals.mu.Lock()
-	defer h.approvals.mu.Unlock()
-
-	session, ok := h.registry.Get(id)
-	if !ok {
-		writeAPIError(w, http.StatusNotFound, "approval request not found")
-		return
-	}
-	if session.State != SessionStateRunning {
-		writeAPIError(w, http.StatusConflict, "approval request requires a running session")
-		return
-	}
-
-	var req createApprovalRequest
-	if err := readRequiredJSON(r, &req); err != nil {
-		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
-		return
-	}
-
-	approval, err := h.approvals.Create(id, req.TurnID, pendingApprovalRequests(req.Pending))
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
-		return
-	}
-
-	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemApprovalRequest,
-		Approval: &zotigosession.DisplayApproval{
-			ID:      approval.ID,
-			TurnID:  approval.TurnID,
-			Pending: approval.Pending,
-		},
-	})
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval request item: %v", err))
-		return
-	}
-	approval.CreatedAt = item.CreatedAt
-
-	// The approval_request item is the durable commit record. turn_paused is a
-	// replay hint for clients, so a write failure should not strand the worker.
-	_, _ = h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemTurnPaused,
-		Turn: &zotigosession.DisplayTurn{
-			ID:     approval.TurnID,
-			Reason: "need_approval",
-		},
-	})
-
-	_, _ = h.registry.Pause(id)
-	writeAPIJSON(w, http.StatusCreated, publicApprovalRequest(approval))
-}
-
-func (h *handler) handleApprovalGet(w http.ResponseWriter, r *http.Request, id string, approvalID string) {
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", http.MethodGet)
-		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-
-	approval, ok, err := h.loadApproval(r, id, approvalID)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load approval: %v", err))
-		return
-	}
-	if !ok {
-		writeAPIError(w, http.StatusNotFound, "approval request not found")
-		return
-	}
-	writeAPIJSON(w, http.StatusOK, publicApprovalRequest(approval))
-}
-
 func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request, id string, approvalID string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
@@ -144,8 +49,8 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	h.approvals.mu.Lock()
-	defer h.approvals.mu.Unlock()
+	unlock := h.approvalOps.lock(id)
+	defer unlock()
 
 	approval, ok, err := h.loadApproval(r, id, approvalID)
 	if err != nil {
@@ -169,41 +74,13 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemApprovalDecision,
-		Approval: &zotigosession.DisplayApproval{
-			ID:        approval.ID,
-			TurnID:    approval.TurnID,
-			Decisions: decisions,
-		},
-	})
+	resolved, err := h.workers.SubmitApproval(r.Context(), id, approval.ID, decisions)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval decision item: %v", err))
+		writeAPIError(w, http.StatusServiceUnavailable, fmt.Sprintf("submit approval decision: %v", err))
 		return
 	}
-	approval = resolvedApprovalFromDecision(approval, decisions, item.CreatedAt)
 
-	if session, inRegistry := h.registry.Get(id); inRegistry && session.State == SessionStatePaused {
-		_, _ = h.registry.ResumeAfterApproval(id)
-	}
-	writeAPIJSON(w, http.StatusOK, publicApprovalRequest(approval))
-}
-
-func pendingApprovalRequests(items []pendingApprovalRequestDTO) []zotigosession.DisplayPendingApproval {
-	pending := make([]zotigosession.DisplayPendingApproval, 0, len(items))
-	for _, item := range items {
-		pending = append(pending, zotigosession.DisplayPendingApproval{
-			ToolCallID:       strings.TrimSpace(item.ToolCallID),
-			ToolName:         strings.TrimSpace(item.ToolName),
-			Arguments:        item.Arguments,
-			Description:      item.Description,
-			Reason:           item.Reason,
-			RiskLevel:        item.RiskLevel,
-			Source:           item.Source,
-			RequiresSnapshot: item.RequiresSnapshot,
-		})
-	}
-	return pending
+	writeAPIJSON(w, http.StatusOK, resolved)
 }
 
 func approvalDecisionRequests(items []approvalDecisionRequestDTO) ([]zotigosession.DisplayApprovalDecision, error) {

@@ -18,17 +18,18 @@ import (
 )
 
 const (
-	sessionCommandMessage        = "message"
-	sessionCommandPause          = "pause"
-	sessionCommandSteering       = "steering"
-	sessionCommandProfile        = "profile"
-	sessionCommandApprovalPolicy = "approval_policy"
-	userPauseReason              = "user_pause"
-	controlChannelClosedReason   = "control_channel_closed"
-	workerRestartedReason        = "worker_restarted"
-	defaultCommandsLimit         = 200
-	maxCommandsLimit             = 200
-	commandOffsetScanLines       = maxCommandsLimit
+	sessionCommandMessage         = "message"
+	sessionCommandPause           = "pause"
+	sessionCommandSteering        = "steering"
+	sessionCommandProfile         = "profile"
+	sessionCommandApprovalPolicy  = "approval_policy"
+	userPauseReason               = "user_pause"
+	controlChannelClosedReason    = "control_channel_closed"
+	workerRestartedReason         = "worker_restarted"
+	approvalWorkerRestartedReason = "worker restarted before approval completed"
+	defaultCommandsLimit          = 200
+	maxCommandsLimit              = 200
+	commandOffsetScanLines        = maxCommandsLimit
 )
 
 var errCommandImageUnavailable = errors.New("command image payload unavailable")

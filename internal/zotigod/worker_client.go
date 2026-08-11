@@ -130,16 +130,17 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
 	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	stopKeepalive = clientWriter.Close
-	commandCh, readErrCh := readWorkerCommands(conn)
+	commandCh, approvalCh, readErrCh := readWorkerMessages(conn)
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
-		SessionID:  cfg.SessionID,
-		DaemonURL:  daemonURL,
-		Generation: generation,
-		Store:      store,
-		HTTPClient: httpClient,
-		SendDelta:  clientWriter.SendDelta,
+		SessionID:      cfg.SessionID,
+		DaemonURL:      daemonURL,
+		Generation:     generation,
+		Store:          store,
+		HTTPClient:     httpClient,
+		SendDelta:      clientWriter.SendDelta,
+		NotifyApproval: clientWriter.SendApprovalRequest,
 	})
 	if err != nil {
 		return err
@@ -190,6 +191,22 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = err
 				return err
 			}
+		case decision, ok := <-approvalCh:
+			if !ok {
+				runErr = <-readErrCh
+				return runErr
+			}
+			result, resolution := runtime.resolveApproval(ctx, decision)
+			if !clientWriter.SendApprovalResult(ctx, result) {
+				runErr = fmt.Errorf("send approval result: worker websocket closed")
+				return runErr
+			}
+			if resolution != nil {
+				if err := runtime.releaseApproval(ctx, *resolution); err != nil {
+					runErr = fmt.Errorf("release approval: %w", err)
+					return runErr
+				}
+			}
 		}
 	}
 }
@@ -200,19 +217,22 @@ type workerCommandCursor struct {
 }
 
 type workerRuntimeConfig struct {
-	SessionID  string
-	DaemonURL  string
-	Generation string
-	Store      zotigosession.Store
-	HTTPClient *http.Client
-	SendDelta  func(displayDeltaEvent)
+	SessionID      string
+	DaemonURL      string
+	Generation     string
+	Store          zotigosession.Store
+	HTTPClient     *http.Client
+	SendDelta      func(displayDeltaEvent)
+	NotifyApproval func(context.Context, approvalRequestResponse)
 }
 
-func readWorkerCommands(conn *websocket.Conn) (<-chan commandResponse, <-chan error) {
+func readWorkerMessages(conn *websocket.Conn) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
 	commandCh := make(chan commandResponse, workerCommandBufferSize)
+	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
+		defer close(approvalCh)
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -224,19 +244,33 @@ func readWorkerCommands(conn *websocket.Conn) (<-chan commandResponse, <-chan er
 				errCh <- fmt.Errorf("decode worker message: %w", err)
 				return
 			}
-			if msg.Type != workerMessageCommand || msg.Command == nil {
-				continue
-			}
-			select {
-			case commandCh <- *msg.Command:
-			default:
-				errCh <- fmt.Errorf("worker command buffer full")
-				_ = conn.Close()
-				return
+			switch msg.Type {
+			case workerMessageCommand:
+				if msg.Command == nil {
+					continue
+				}
+				select {
+				case commandCh <- *msg.Command:
+				default:
+					errCh <- fmt.Errorf("worker command buffer full")
+					_ = conn.Close()
+					return
+				}
+			case workerMessageApprovalDecision:
+				if msg.ApprovalDecision == nil {
+					continue
+				}
+				select {
+				case approvalCh <- *msg.ApprovalDecision:
+				default:
+					errCh <- fmt.Errorf("worker approval buffer full")
+					_ = conn.Close()
+					return
+				}
 			}
 		}
 	}()
-	return commandCh, errCh
+	return commandCh, approvalCh, errCh
 }
 
 type workerRuntime struct {
@@ -336,6 +370,27 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover interrupted tool executions: %w", err)
 	}
+	_, err = display.ResolvePendingApprovalsForOpenTurn(ctx, approvalWorkerRestartedReason)
+	if err != nil {
+		if displayWake != nil {
+			displayWake.Close()
+		}
+		_ = observer.Close(context.Background())
+		_ = localExec.Close()
+		return nil, fmt.Errorf("recover pending approval: %w", err)
+	}
+	if sess.AgentSnapshot.State == agent.StatePaused {
+		sess.AgentSnapshot = agent.InterruptPendingSnapshot(sess.AgentSnapshot, approvalWorkerRestartedReason)
+		sessionadapter.ApplySnapshot(sess, sess.AgentSnapshot, sessionadapter.LastUserPrompt(sess.AgentSnapshot.History))
+		if err := cfg.Store.Put(ctx, sess); err != nil {
+			if displayWake != nil {
+				displayWake.Close()
+			}
+			_ = observer.Close(context.Background())
+			_ = localExec.Close()
+			return nil, fmt.Errorf("persist recovered approval snapshot: %w", err)
+		}
+	}
 
 	stepStarted = time.Now()
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
@@ -400,7 +455,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("repair open display turn: %w", err)
 	}
-	transport := newWorkerRuntimeTransport(cfg.SessionID, cfg.DaemonURL, cfg.HTTPClient, display)
+	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
 	runtime := &workerRuntime{
 		sessionID:   cfg.SessionID,
 		workDir:     cwd,
@@ -439,11 +494,42 @@ func (r *workerRuntime) Close() {
 	r.mu.Lock()
 	active := r.turnActive
 	done := r.turnDone
-	if r.turnCancel != nil {
-		r.turnCancel()
-	}
+	cancelTurn := r.turnCancel
 	r.mu.Unlock()
-	if active && r.display != nil {
+	approvalRegistration := r.transport != nil && r.transport.hasApprovalRegistration()
+	snapshot := agent.Snapshot{}
+	if r.agent != nil {
+		snapshot = r.agent.Snapshot()
+	}
+	if active && snapshot.State == agent.StatePaused && r.transport != nil {
+		if len(snapshot.PendingActions) > 0 {
+			pending := make([]zotigotransport.PendingToolCall, 0, len(snapshot.PendingActions))
+			for _, action := range snapshot.PendingActions {
+				pending = append(pending, zotigotransport.PendingToolCall{
+					ID:          action.ToolCallID,
+					Name:        action.Name,
+					Arguments:   action.Arguments,
+					Description: action.Decision.Reason,
+				})
+			}
+			_, _, _ = r.transport.ensureApproval(context.Background(), pending)
+			approvalRegistration = r.transport.hasApprovalRegistration()
+		}
+	}
+	preserveApprovalTurn := approvalRegistration && snapshot.State == agent.StatePaused
+	interruptedThroughTransport := false
+	if active && !preserveApprovalTurn && r.transport != nil && r.display != nil {
+		turnID := r.display.CurrentTurnID()
+		if turnID != "" {
+			interrupted, _ := r.transport.interruptTurn(context.Background(), turnID, controlChannelClosedReason, cancelTurn)
+			interruptedThroughTransport = interrupted
+			preserveApprovalTurn = !interrupted
+		}
+	}
+	if cancelTurn != nil && !interruptedThroughTransport {
+		cancelTurn()
+	}
+	if active && !preserveApprovalTurn && !interruptedThroughTransport && r.display != nil {
 		_ = r.display.Interrupt(context.Background(), controlChannelClosedReason)
 	}
 	if r.transport != nil {
@@ -466,6 +552,28 @@ func (r *workerRuntime) Close() {
 func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
 	_, err := r.handleCommand(ctx, command)
 	return err
+}
+
+func (r *workerRuntime) resolveApproval(ctx context.Context, decision workerApprovalDecision) (workerApprovalResult, *workerApprovalResolution) {
+	result := workerApprovalResult{RequestID: decision.RequestID}
+	if r.transport == nil {
+		result.Error = "approval transport is not configured"
+		return result, nil
+	}
+	resolution, err := r.transport.resolveApproval(ctx, decision.ApprovalID, decision.Decisions)
+	if err != nil {
+		result.Error = err.Error()
+		return result, nil
+	}
+	result.Approval = &resolution.approval
+	return result, &resolution
+}
+
+func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerApprovalResolution) error {
+	if r.transport == nil {
+		return fmt.Errorf("approval transport is not configured")
+	}
+	return r.transport.releaseApproval(ctx, resolution)
 }
 
 func (r *workerRuntime) handleCommand(ctx context.Context, command commandResponse) (<-chan error, error) {
@@ -798,8 +906,8 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayl
 	if command.TurnID != "" && command.TurnID != currentTurnID {
 		return nil
 	}
-	r.cancelCurrentTurn()
-	return r.display.Interrupt(ctx, command.Reason)
+	_, err := r.transport.interruptTurn(ctx, currentTurnID, command.Reason, r.cancelCurrentTurn)
+	return err
 }
 
 func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command *steeringCommandPayload) error {
@@ -868,7 +976,8 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.doneDone = false
 	r.mu.Unlock()
 
-	if _, err := r.display.StartTurn(ctx); err != nil {
+	turnID, err := r.display.StartTurn(ctx)
+	if err != nil {
 		r.finishTurn()
 		return err
 	}
@@ -878,10 +987,23 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 			_ = r.display.Fail(context.Background(), err)
 		}
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
-		_ = r.saveSnapshot(context.Background(), r.agent.Snapshot())
+		snapshot := r.snapshotAfterTurn(turnID)
+		_ = r.saveSnapshot(context.Background(), snapshot)
 		r.finishTurn()
 	}()
 	return nil
+}
+
+func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
+	snapshot := r.agent.Snapshot()
+	if r.transport == nil {
+		return snapshot
+	}
+	if reason, interrupted := r.transport.interruptedTurn(turnID); interrupted && snapshot.State == agent.StatePaused {
+		snapshot = agent.InterruptPendingSnapshot(snapshot, reason)
+		r.agent.Restore(snapshot)
+	}
+	return snapshot
 }
 
 func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
@@ -1479,11 +1601,36 @@ func (w *workerClientWriter) SendDelta(delta displayDeltaEvent) {
 	}
 }
 
+func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result workerApprovalResult) bool {
+	msg := workerMessage{Type: workerMessageApprovalResult, ApprovalResult: &result}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-w.done:
+		return false
+	case w.sendCh <- msg:
+		return true
+	}
+}
+
+func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval approvalRequestResponse) {
+	msg := workerMessage{Type: workerMessageApprovalRequest, ApprovalRequest: &approval}
+	select {
+	case <-ctx.Done():
+		return
+	case <-w.done:
+		return
+	case w.sendCh <- msg:
+		return
+	}
+}
+
 func (w *workerClientWriter) Close() {
 	w.closeOnce.Do(func() { close(w.done) })
 }
 
 func (w *workerClientWriter) run() {
+	defer w.Close()
 	var ticker *time.Ticker
 	var ticks <-chan time.Time
 	if w.pingEvery > 0 {

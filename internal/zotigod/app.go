@@ -172,7 +172,7 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateStarting
 	})
 }
@@ -184,7 +184,7 @@ func (r *sessionRegistry) ResumeAfterApproval(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) Pause(id string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning}, func(session *Session) {
 		session.State = SessionStatePaused
 	})
 }
@@ -269,13 +269,13 @@ func canTransition(state SessionState, from []SessionState) bool {
 
 type handler struct {
 	registry             *sessionRegistry
-	approvals            *approvalRegistry
 	items                displayItemSource
 	store                zotigosession.Store
 	workers              *workerRegistry
 	launcher             workerLauncher
 	workerConnectTimeout time.Duration
 	sessionOps           *sessionOperationLocks
+	approvalOps          *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
 	events               *displayEventBroker
@@ -486,25 +486,40 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	}
 	handler := &handler{
 		registry:             registry,
-		approvals:            newApprovalRegistry(),
 		items:                items,
 		store:                options.store,
 		workers:              options.workers,
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
 		sessionOps:           options.sessionOps,
+		approvalOps:          newSessionOperationLocks(),
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 		events:               options.events,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	handler.workers.SetMessageHandler(func(sessionID string, msg workerMessage) {
-		if msg.Type != workerMessageDelta || msg.Delta == nil || msg.Delta.ItemID == "" || msg.Delta.Delta == "" {
-			return
-		}
-		switch msg.Delta.PartType {
-		case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
-			handler.events.PublishDelta(sessionID, *msg.Delta)
+		switch msg.Type {
+		case workerMessageDelta:
+			if msg.Delta == nil || msg.Delta.ItemID == "" || msg.Delta.Delta == "" {
+				return
+			}
+			switch msg.Delta.PartType {
+			case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
+				handler.events.PublishDelta(sessionID, *msg.Delta)
+			}
+		case workerMessageApprovalRequest:
+			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == approvalStatusPending {
+				unlock := handler.sessionOps.lock(sessionID)
+				_, _ = handler.registry.Pause(sessionID)
+				unlock()
+			}
+		case workerMessageApprovalResult:
+			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == approvalStatusResolved {
+				unlock := handler.sessionOps.lock(sessionID)
+				_, _ = handler.registry.ResumeAfterApproval(sessionID)
+				unlock()
+			}
 		}
 	})
 	mux := http.NewServeMux()
@@ -755,13 +770,7 @@ func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) 
 		h.handleWorkerFinish(w, r, id)
 	case "events/wake":
 		h.handleWorkerDisplayWake(w, r, id)
-	case "approvals":
-		h.handleApprovalCreate(w, r, id)
 	default:
-		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
-			h.handleApprovalGet(w, r, id, approvalID)
-			return
-		}
 		writeAPIError(w, http.StatusNotFound, "not found")
 	}
 }
@@ -831,7 +840,7 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 	if err := h.waitForRunningWorker(ctx, id); err != nil {
 		return Session{}, err
 	}
-	if running, ok := h.registry.Get(id); ok && running.State == SessionStateRunning {
+	if running, ok := h.registry.Get(id); ok && (running.State == SessionStateRunning || running.State == SessionStatePaused) && h.workers.Has(id) {
 		running.Live = true
 		return h.sessionWithStoredMetadata(ctx, running)
 	}
@@ -883,6 +892,10 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 				return nil
 			}
 			return errWorkerDisconnectedBeforeReady
+		case SessionStatePaused:
+			if h.workers.Has(id) {
+				return nil
+			}
 		case SessionStateFailed:
 			if session.Error == errWorkerConnectTimeout.Error() {
 				return errWorkerConnectTimeout
@@ -932,6 +945,24 @@ func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Se
 				return Session{}, false, errInvalidSessionTransition
 			}
 			return session, false, nil
+		case SessionStatePaused:
+			if h.workers.Has(id) {
+				return session, false, nil
+			}
+			if h.launcher == nil {
+				return Session{}, false, errInvalidSessionTransition
+			}
+			if err := h.validateSessionProfile(ctx, session); err != nil {
+				return Session{}, false, err
+			}
+			session, err = h.registry.RestartWorker(id)
+			if errors.Is(err, errInvalidSessionTransition) {
+				continue
+			}
+			if err != nil {
+				return Session{}, false, err
+			}
+			return session, true, nil
 		case SessionStateCreated:
 			if err := h.validateSessionProfile(ctx, session); err != nil {
 				return Session{}, false, err
@@ -1083,11 +1114,21 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusConflict, "worker ready does not match the active connection")
 		return
 	}
+	if session.State == SessionStatePaused {
+		var err error
+		session, err = h.reconcileApprovalState(r.Context(), id, session)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("reconcile approval state: %v", err))
+			return
+		}
+	}
 	switch session.State {
 	case SessionStateStarting:
 		session, err := h.registry.MarkRunning(id)
 		h.writeTransition(w, session, err)
 	case SessionStateRunning:
+		writeAPIJSON(w, http.StatusOK, session)
+	case SessionStatePaused:
 		writeAPIJSON(w, http.StatusOK, session)
 	default:
 		h.writeTransition(w, Session{}, errInvalidSessionTransition)
@@ -1097,7 +1138,30 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 func (h *handler) handleWorkerDisconnect(id string) {
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
+	if session, ok := h.registry.Get(id); ok {
+		_, _ = h.reconcileApprovalState(context.Background(), id, session)
+	}
 	_, _ = h.registry.ResetStarting(id)
+}
+
+func (h *handler) reconcileApprovalState(ctx context.Context, id string, session Session) (Session, error) {
+	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused {
+		return session, nil
+	}
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return Session{}, err
+	}
+	if hasPendingApproval(items) {
+		if session.State == SessionStatePaused {
+			return session, nil
+		}
+		return h.registry.Pause(id)
+	}
+	if session.State == SessionStatePaused {
+		return h.registry.ResumeAfterApproval(id)
+	}
+	return session, nil
 }
 
 func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id string) {
@@ -1117,8 +1181,8 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	h.approvals.mu.Lock()
-	defer h.approvals.mu.Unlock()
+	unlock := h.approvalOps.lock(id)
+	defer unlock()
 
 	if req.Error != "" {
 		session, err := h.registry.Fail(id, req.Error)

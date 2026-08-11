@@ -134,6 +134,98 @@ func (l *workerDisplayLog) MarkPaused() {
 	l.block = nil
 }
 
+func (l *workerDisplayLog) ApprovalRequested(ctx context.Context, approval approvalRequest) (approvalRequest, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	item, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest,
+		Approval: &zotigosession.DisplayApproval{
+			ID:      approval.ID,
+			TurnID:  approval.TurnID,
+			Pending: copyPendingApprovals(approval.Pending),
+		},
+	})
+	if err != nil {
+		return approvalRequest{}, err
+	}
+	approval.CreatedAt = item.CreatedAt
+	_, _ = l.appendItem(ctx, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnPaused,
+		Turn: &zotigosession.DisplayTurn{
+			ID:     approval.TurnID,
+			Reason: "need_approval",
+		},
+	})
+	l.block = nil
+	return approval, nil
+}
+
+func (l *workerDisplayLog) ApprovalResolved(ctx context.Context, approval approvalRequest, decisions []zotigosession.DisplayApprovalDecision) (approvalRequest, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	item, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalDecision,
+		Approval: &zotigosession.DisplayApproval{
+			ID:        approval.ID,
+			TurnID:    approval.TurnID,
+			Decisions: copyApprovalDecisions(decisions),
+		},
+	})
+	if err != nil {
+		return approvalRequest{}, err
+	}
+	return resolvedApprovalFromDecision(approval, decisions, item.CreatedAt), nil
+}
+
+func (l *workerDisplayLog) ResolvePendingApprovalsForOpenTurn(ctx context.Context, reason string) (bool, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	items, _, err := l.items.LoadItems(ctx, l.sessionID)
+	if err != nil {
+		return false, err
+	}
+	turnID := lastOpenTurnID(items)
+	if turnID == "" {
+		return false, nil
+	}
+	resolved := make(map[string]struct{})
+	for _, item := range items {
+		if item.Type == zotigosession.DisplayItemApprovalDecision && item.Approval != nil && item.Approval.TurnID == turnID {
+			resolved[item.Approval.ID] = struct{}{}
+		}
+	}
+	recovered := false
+	for _, item := range items {
+		if item.Type != zotigosession.DisplayItemApprovalRequest || item.Approval == nil || item.Approval.TurnID != turnID {
+			continue
+		}
+		if _, ok := resolved[item.Approval.ID]; ok {
+			continue
+		}
+		decisions := make([]zotigosession.DisplayApprovalDecision, 0, len(item.Approval.Pending))
+		for _, pending := range item.Approval.Pending {
+			decisions = append(decisions, zotigosession.DisplayApprovalDecision{
+				ToolCallID: pending.ToolCallID,
+				Approved:   false,
+				Reason:     reason,
+			})
+		}
+		if _, err := l.appendItem(ctx, zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemApprovalDecision,
+			Approval: &zotigosession.DisplayApproval{
+				ID:        item.Approval.ID,
+				TurnID:    turnID,
+				Decisions: decisions,
+			},
+		}); err != nil {
+			return false, err
+		}
+		resolved[item.Approval.ID] = struct{}{}
+		recovered = true
+	}
+	return recovered, nil
+}
+
 func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
