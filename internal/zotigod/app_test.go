@@ -2497,6 +2497,49 @@ func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
 	}
 }
 
+func TestWorkerClientWriterFailureClosesDoneAndUnblocksApproval(t *testing.T) {
+	releaseServerConn := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := workerUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		<-releaseServerConn
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	defer close(releaseServerConn)
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial worker websocket: %v", err)
+	}
+	writer := newWorkerClientWriter(clientConn, 0, 0)
+	if err := clientConn.Close(); err != nil {
+		t.Fatalf("close worker websocket: %v", err)
+	}
+	writer.sendCh <- workerMessage{Type: workerMessageDelta, Delta: &displayDeltaEvent{}}
+	select {
+	case <-writer.done:
+	case <-time.After(time.Second):
+		t.Fatal("writer failure did not close done")
+	}
+	for len(writer.sendCh) < cap(writer.sendCh) {
+		writer.sendCh <- workerMessage{Type: workerMessageDelta, Delta: &displayDeltaEvent{}}
+	}
+	notified := make(chan struct{})
+	go func() {
+		writer.SendApprovalRequest(context.Background(), approvalRequestResponse{})
+		close(notified)
+	}()
+	select {
+	case <-notified:
+	case <-time.After(time.Second):
+		t.Fatal("approval notification remained blocked after writer failure")
+	}
+}
+
 func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConnReady := make(chan *websocket.Conn, 1)
 	releaseServerConn := make(chan struct{})
@@ -2521,7 +2564,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, errCh := readWorkerCommands(clientConn)
+	_, _, errCh := readWorkerMessages(clientConn)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
 		msg := workerMessage{
 			Type: workerMessageCommand,
@@ -5396,9 +5439,12 @@ func TestSessionPauseRejectsTurnCompletedDuringAdmission(t *testing.T) {
 func TestSessionPauseRejectsPendingApprovalBeforeRegistryPause(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
 	appendTurnStarted(t, source, created.ID, "turn-1")
 	appendPendingApprovalTurn(t, source, created.ID, "turn-1", "approval-1")
 
@@ -5635,9 +5681,12 @@ func TestSessionSteeringRejectsTurnCompletedDuringAdmission(t *testing.T) {
 func TestSessionSteeringRejectsPendingApprovalBeforeRegistryPause(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
 	appendTurnStarted(t, source, created.ID, "turn-1")
 	appendPendingApprovalTurn(t, source, created.ID, "turn-1", "approval-1")
 
@@ -5856,13 +5905,21 @@ func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
 }
 
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	handler := newHandler(newSessionRegistry(), source)
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("new file store: %v", err)
+	}
+	source := storedDisplayItemSource{store: store}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
 
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 	if approval.Status != approvalStatusPending {
 		t.Fatalf("expected status %q, got %q", approvalStatusPending, approval.Status)
 	}
@@ -5894,6 +5951,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	}
 
 	approved := true
+	workerDone := respondToApprovalDecision(worker, source, created.ID, approval)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
 		"decisions": [{"tool_call_id":"call-1","approved":true}]
@@ -5901,6 +5959,9 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if err := <-workerDone; err != nil {
+		t.Fatalf("worker approval response: %v", err)
 	}
 	var resolved approvalRequestResponse
 	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
@@ -5911,11 +5972,6 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
 		t.Fatalf("expected state %q, got %q", SessionStateRunning, got.State)
-	}
-
-	workerView := getApprovalRequest(t, handler, created.ID, approval.ID)
-	if workerView.Status != approvalStatusResolved || len(workerView.Decisions) != 1 {
-		t.Fatalf("worker did not observe resolved approval: %#v", workerView)
 	}
 
 	items = getItems(t, handler, "/sessions/"+created.ID+"/items")
@@ -5932,11 +5988,12 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 
 func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	handler := newHandler(newSessionRegistry(), source)
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	attachWorker(t, handler, created.ID)
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
@@ -5947,17 +6004,280 @@ func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
 	}
 
-	rec = httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
-		"decisions": [{"tool_call_id":"call-1","approved":true}]
-	}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	_ = approval
+}
+
+func TestWorkerApprovalRequestMessagePausesSession(t *testing.T) {
+	registry := newSessionRegistry()
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	if err := worker.WriteJSON(workerMessage{
+		Type: workerMessageApprovalRequest,
+		ApprovalRequest: &approvalRequestResponse{
+			ID:     "apr-worker-owned",
+			Status: approvalStatusPending,
+		},
+	}); err != nil {
+		t.Fatalf("send approval request message: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := getSession(t, handler, created.ID); got.State == SessionStatePaused {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected state %q, got %q", SessionStatePaused, getSession(t, handler, created.ID).State)
+}
+
+func TestWorkerApprovalRequestBeforeReadyKeepsSessionPaused(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker, generation := connectWorker(t, server, created.ID)
+	defer worker.Close()
+	approval := publicApprovalRequest(approvalRequest{
+		ID:        "apr-before-ready",
+		SessionID: created.ID,
+		TurnID:    "turn-1",
+		Status:    approvalStatusPending,
+		Pending:   []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
+	})
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest,
+		Approval: &zotigosession.DisplayApproval{
+			ID:      approval.ID,
+			TurnID:  approval.TurnID,
+			Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
+		},
+	}); err != nil {
+		t.Fatalf("append approval request before ready: %v", err)
+	}
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnPaused,
+		Turn: &zotigosession.DisplayTurn{ID: approval.TurnID, Reason: "need_approval"},
+	}); err != nil {
+		t.Fatalf("append turn paused before ready: %v", err)
+	}
+	if err := worker.WriteJSON(workerMessage{
+		Type:            workerMessageApprovalRequest,
+		ApprovalRequest: &approval,
+	}); err != nil {
+		t.Fatalf("send approval request before ready: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := getSession(t, handler, created.ID); got.State == SessionStatePaused {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	resp, err := postWorkerReady(server, created.ID, generation)
+	if err != nil {
+		t.Fatalf("report worker ready: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("worker ready status = %d", resp.StatusCode)
+	}
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
+		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
 	}
 }
 
-func TestApprovalCreateStillPausesWhenTurnPausedItemAppendFails(t *testing.T) {
+func TestWorkerDisconnectReconcilesDurablePendingApproval(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest,
+		Approval: &zotigosession.DisplayApproval{
+			ID:      "apr-notification-lost",
+			TurnID:  "turn-1",
+			Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
+		},
+	}); err != nil {
+		t.Fatalf("append durable approval request: %v", err)
+	}
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnPaused,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Reason: "need_approval"},
+	}); err != nil {
+		t.Fatalf("append turn paused: %v", err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatalf("close worker before pause notification: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := getSession(t, handler, created.ID); got.State == SessionStatePaused {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected state %q, got %q", SessionStatePaused, getSession(t, handler, created.ID).State)
+}
+
+func TestWorkerDisconnectReconcilesResolvedApproval(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	for _, item := range []zotigosession.DisplayItem{
+		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-historical"}},
+		{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{
+			ID:      "apr-historical",
+			TurnID:  "turn-historical",
+			Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-historical", ToolName: "shell"}},
+		}},
+		{Type: zotigosession.DisplayItemTurnInterrupted, Turn: &zotigosession.DisplayTurn{ID: "turn-historical", Reason: workerRestartedReason}},
+	} {
+		if _, err := source.AppendItem(context.Background(), created.ID, item); err != nil {
+			t.Fatalf("append historical display item: %v", err)
+		}
+	}
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalDecision,
+		Approval: &zotigosession.DisplayApproval{
+			ID:        approval.ID,
+			TurnID:    approval.TurnID,
+			Decisions: []zotigosession.DisplayApprovalDecision{{ToolCallID: "call-1", Approved: true}},
+		},
+	}); err != nil {
+		t.Fatalf("append durable approval decision: %v", err)
+	}
+	if err := worker.Close(); err != nil {
+		t.Fatalf("close worker before acknowledgement: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := getSession(t, handler, created.ID); got.State == SessionStateRunning {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("expected state %q, got %q", SessionStateRunning, getSession(t, handler, created.ID).State)
+}
+
+func TestWorkerDisconnectKeepsPendingApprovalPaused(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	createApprovalRequestForTest(t, registry, source, created.ID)
+	if err := worker.Close(); err != nil {
+		t.Fatalf("close worker with pending approval: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
+		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
+	}
+}
+
+func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	workDir := t.TempDir()
+	projectConfig := "default_profile: test\nprofiles:\n  test:\n    provider: openai\n    model: test\n"
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatalf("write project config: %v", err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	var server *httptest.Server
+	var launches atomic.Int32
+	connections := make(chan *websocket.Conn, 2)
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		if launches.Add(1) == 2 {
+			display := newWorkerDisplayLog(sessionID, source)
+			if _, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), approvalWorkerRestartedReason); err != nil {
+				return err
+			}
+			if err := display.InterruptOpenTurn(context.Background(), workerRestartedReason); err != nil {
+				return err
+			}
+		}
+		worker, err := connectReadyWorker(server, sessionID)
+		if err != nil {
+			return err
+		}
+		connections <- worker
+		return nil
+	})
+	handler := newHandler(registry, source, handlerOptions{workers: workers, launcher: launcher, workerConnectTimeout: time.Second})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+	created := createSessionWithWorkingDirectory(t, handler, workDir)
+	started := startSession(t, handler, created.ID)
+	if started.State != SessionStateRunning {
+		t.Fatalf("initial start state = %q", started.State)
+	}
+	firstWorker := <-connections
+	createApprovalRequestForTest(t, registry, source, created.ID)
+	if err := firstWorker.Close(); err != nil {
+		t.Fatalf("close first worker: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		if got := getSession(t, handler, created.ID); got.State == SessionStatePaused && !workers.Has(created.ID) {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/start", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("restart paused session: status %d: %s", rec.Code, rec.Body.String())
+	}
+	var restarted Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &restarted); err != nil {
+		t.Fatalf("decode restarted session: %v", err)
+	}
+	if restarted.State != SessionStateRunning {
+		t.Fatalf("replacement start state = %q", restarted.State)
+	}
+	secondWorker := <-connections
+	defer secondWorker.Close()
+	items, _, err := source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load recovered display items: %v", err)
+	}
+	if hasPendingApproval(items) {
+		t.Fatal("replacement worker left approval pending")
+	}
+}
+
+func TestWorkerApprovalRequestSurvivesTurnPausedHintAppendFailure(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	source.appendErr = func(_ string, item zotigosession.DisplayItem) error {
 		if item.Type == zotigosession.DisplayItemTurnPaused {
@@ -5965,23 +6285,102 @@ func TestApprovalCreateStillPausesWhenTurnPausedItemAppendFails(t *testing.T) {
 		}
 		return nil
 	}
-	handler := newHandler(newSessionRegistry(), source)
+	display := newWorkerDisplayLog("sess-approval-write-failure", source)
+	approval := approvalRequest{
+		ID:        "apr-write-failure",
+		SessionID: "sess-approval-write-failure",
+		TurnID:    "turn-1",
+		Status:    approvalStatusPending,
+		Pending: []zotigosession.DisplayPendingApproval{{
+			ToolCallID: "call-1",
+			ToolName:   "shell",
+		}},
+	}
+	if _, err := display.ApprovalRequested(context.Background(), approval); err != nil {
+		t.Fatalf("approval request should remain committed: %v", err)
+	}
+}
+
+func TestApprovalWaitDoesNotBlockAnotherSessionFinish(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	handler := newHandler(registry, source, handlerOptions{workers: workers})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	first := createSession(t, handler)
+	startSession(t, handler, first.ID)
+	firstWorker := dialWorker(t, server, first.ID)
+	defer firstWorker.Close()
+	approval := createApprovalRequestForTest(t, registry, source, first.ID)
+
+	second := createSession(t, handler)
+	startSession(t, handler, second.ID)
+	attachWorker(t, handler, second.ID)
+
+	decisionCtx, cancelDecision := context.WithCancel(context.Background())
+	decisionDone := make(chan struct{})
+	go func() {
+		defer close(decisionDone)
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+first.ID+"/approvals/"+approval.ID, strings.NewReader(`{
+			"decisions": [{"tool_call_id":"call-1","approved":true}]
+		}`)).WithContext(decisionCtx)
+		handler.ServeHTTP(rec, req)
+	}()
+	var decision workerMessage
+	if err := firstWorker.ReadJSON(&decision); err != nil {
+		t.Fatalf("read first session approval decision: %v", err)
+	}
+	if decision.Type != workerMessageApprovalDecision {
+		t.Fatalf("unexpected first worker message: %#v", decision)
+	}
+
+	finishDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+second.ID+"/worker/finish", nil))
+		finishDone <- rec
+	}()
+	select {
+	case rec := <-finishDone:
+		if rec.Code != http.StatusOK {
+			t.Fatalf("finish second session: status %d: %s", rec.Code, rec.Body.String())
+		}
+	case <-time.After(time.Second):
+		t.Fatal("second session finish blocked behind first session approval")
+	}
+
+	cancelDecision()
+	select {
+	case <-decisionDone:
+	case <-time.After(time.Second):
+		t.Fatal("canceled approval request did not return")
+	}
+}
+
+func TestApprovalDecisionTimesOutWaitingForWorkerAcknowledgement(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	workers.approvalWait = 20 * time.Millisecond
+	handler := newHandler(registry, source, handlerOptions{workers: workers})
+	server := httptest.NewServer(handler)
+	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
-
-	approval := createApprovalRequestForTest(t, handler, created.ID)
-	if got := getSession(t, handler, created.ID); got.State != SessionStatePaused {
-		t.Fatalf("expected state %q, got %q", SessionStatePaused, got.State)
-	}
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
 		"decisions": [{"tool_call_id":"call-1","approved":true}]
 	}`))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	}
 }
 
@@ -5989,10 +6388,13 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	registry := newSessionRegistry()
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalDecision {
@@ -6000,6 +6402,7 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 		}
 	}
 
+	workerDone := respondToApprovalDecision(worker, source, created.ID, approval)
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
 		"decisions": [{"tool_call_id":"call-1","approved":true}]
@@ -6007,6 +6410,9 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	handler.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if err := <-workerDone; err != nil {
+		t.Fatalf("worker approval response: %v", err)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
@@ -6015,37 +6421,39 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	}
 }
 
-func TestApprovalDecisionSucceedsWhenSessionEndsBeforePause(t *testing.T) {
+func TestPersistedApprovalRemainsReadableWhenSessionEnds(t *testing.T) {
 	registry := newSessionRegistry()
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	attachWorker(t, handler, created.ID)
-
+	approvalID := newZotigodID("apr")
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalRequest {
 			_, _ = registry.End(created.ID)
 		}
 	}
-
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest,
+		Approval: &zotigosession.DisplayApproval{
+			ID:      approvalID,
+			TurnID:  "turn-1",
+			Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
+		},
+	}); err != nil {
+		t.Fatalf("append approval request: %v", err)
+	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateEnded {
 		t.Fatalf("expected state %q, got %q", SessionStateEnded, got.State)
 	}
 
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/approvals/"+approval.ID, strings.NewReader(`{
-		"decisions": [{"tool_call_id":"call-1","approved":false,"reason":"session ended"}]
-	}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	items, _, err := source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load approval: %v", err)
 	}
-
-	resolved := getApprovalRequest(t, handler, created.ID, approval.ID)
-	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 {
-		t.Fatalf("expected resolved approval, got %#v", resolved)
+	approval, ok := approvalFromDisplayItems(created.ID, approvalID, items)
+	if !ok || approval.Status != approvalStatusPending {
+		t.Fatalf("expected pending persisted approval, got %#v", approval)
 	}
 }
 
@@ -6054,12 +6462,14 @@ func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	source := storedDisplayItemSource{store: store}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	attachWorker(t, handler, created.ID)
 
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	items, ok, err := store.ListDisplayItems(context.Background(), created.ID)
 	if err != nil {
@@ -6084,11 +6494,13 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	source := storedDisplayItemSource{store: store}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	attachWorker(t, handler, created.ID)
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
 	newSession := createSession(t, restarted)
@@ -6096,8 +6508,12 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 		t.Fatalf("expected restart-created session id not to reuse %q", created.ID)
 	}
 
-	workerView := getApprovalRequest(t, restarted, created.ID, approval.ID)
-	if workerView.Status != approvalStatusPending || len(workerView.Pending) != 1 {
+	items, _, err := store.ListDisplayItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatalf("load persisted approval: %v", err)
+	}
+	workerView, ok := approvalFromDisplayItems(created.ID, approval.ID, items)
+	if !ok || workerView.Status != approvalStatusPending || len(workerView.Pending) != 1 {
 		t.Fatalf("expected pending approval after restart, got %#v", workerView)
 	}
 
@@ -6111,11 +6527,12 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 
 func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	handler := newHandler(newSessionRegistry(), source)
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	attachWorker(t, handler, created.ID)
-	approval := createApprovalRequestForTest(t, handler, created.ID)
+	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	tests := []struct {
 		name string
@@ -6135,22 +6552,6 @@ func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
 				t.Fatalf("expected status %d, got %d: %s", http.StatusBadRequest, rec.Code, rec.Body.String())
 			}
 		})
-	}
-}
-
-func TestApprovalCreateRejectsNonRunningSession(t *testing.T) {
-	handler := NewHandler()
-	created := createSession(t, handler)
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/approvals", strings.NewReader(`{
-		"turn_id":"turn-1",
-		"pending":[{"tool_call_id":"call-1","tool_name":"shell"}]
-	}`))
-	handler.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
 	}
 }
 
@@ -6631,47 +7032,91 @@ func getSession(t *testing.T, handler http.Handler, id string) Session {
 	return session
 }
 
-func createApprovalRequestForTest(t *testing.T, handler http.Handler, id string) approvalRequestResponse {
+func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source displayItemSource, id string) approvalRequestResponse {
 	t.Helper()
-
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+id+"/approvals", strings.NewReader(`{
-		"turn_id": "turn-1",
-		"pending": [{
-			"tool_call_id": "call-1",
-			"tool_name": "shell",
-			"arguments": "{\"command\":\"touch file\"}",
-			"description": "Run shell command",
-			"reason": "writes files",
-			"risk_level": "medium",
-			"source": "classifier",
-			"requires_snapshot": true
-		}]
-	}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	approval := approvalRequest{
+		ID:        newZotigodID("apr"),
+		SessionID: id,
+		TurnID:    "turn-1",
+		Status:    approvalStatusPending,
+		Pending: []zotigosession.DisplayPendingApproval{{
+			ToolCallID:       "call-1",
+			ToolName:         "shell",
+			Arguments:        `{"command":"touch file"}`,
+			Description:      "Run shell command",
+			Reason:           "writes files",
+			RiskLevel:        "medium",
+			Source:           "classifier",
+			RequiresSnapshot: true,
+		}},
 	}
-	var approval approvalRequestResponse
-	if err := decodeAPIData(t, rec.Body.Bytes(), &approval); err != nil {
-		t.Fatalf("decode approval response: %v", err)
+	item, err := source.AppendItem(context.Background(), id, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest,
+		Approval: &zotigosession.DisplayApproval{
+			ID:      approval.ID,
+			TurnID:  approval.TurnID,
+			Pending: approval.Pending,
+		},
+	})
+	if err != nil {
+		t.Fatalf("append worker approval request: %v", err)
 	}
-	return approval
+	approval.CreatedAt = item.CreatedAt
+	if _, err := source.AppendItem(context.Background(), id, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnPaused,
+		Turn: &zotigosession.DisplayTurn{ID: approval.TurnID, Reason: "need_approval"},
+	}); err != nil {
+		t.Fatalf("append worker turn paused: %v", err)
+	}
+	if _, err := registry.Pause(id); err != nil {
+		t.Fatalf("apply worker display wake: %v", err)
+	}
+	return publicApprovalRequest(approval)
 }
 
-func getApprovalRequest(t *testing.T, handler http.Handler, sessionID string, approvalID string) approvalRequestResponse {
-	t.Helper()
-
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/internal/sessions/"+sessionID+"/approvals/"+approvalID, nil))
-	if rec.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
-	}
-	var approval approvalRequestResponse
-	if err := decodeAPIData(t, rec.Body.Bytes(), &approval); err != nil {
-		t.Fatalf("decode approval response: %v", err)
-	}
-	return approval
+func respondToApprovalDecision(conn *websocket.Conn, source displayItemSource, sessionID string, approval approvalRequestResponse) <-chan error {
+	done := make(chan error, 1)
+	go func() {
+		var msg workerMessage
+		if err := conn.ReadJSON(&msg); err != nil {
+			done <- err
+			return
+		}
+		if msg.Type != workerMessageApprovalDecision || msg.ApprovalDecision == nil {
+			done <- fmt.Errorf("unexpected worker message: %#v", msg)
+			return
+		}
+		decision := msg.ApprovalDecision
+		item, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemApprovalDecision,
+			Approval: &zotigosession.DisplayApproval{
+				ID:        approval.ID,
+				TurnID:    approval.TurnID,
+				Decisions: decision.Decisions,
+			},
+		})
+		if err != nil {
+			done <- err
+			return
+		}
+		resolvedAt := item.CreatedAt
+		resolved := approval
+		resolved.Status = approvalStatusResolved
+		resolved.Decisions = publicDisplayApprovalDecisions(decision.Decisions)
+		resolved.ResolvedAt = &resolvedAt
+		if err := conn.WriteJSON(workerMessage{
+			Type: workerMessageApprovalResult,
+			ApprovalResult: &workerApprovalResult{
+				RequestID: decision.RequestID,
+				Approval:  &resolved,
+			},
+		}); err != nil {
+			done <- err
+			return
+		}
+		done <- nil
+	}()
+	return done
 }
 
 func dialWorker(t *testing.T, server *httptest.Server, sessionID string) *websocket.Conn {

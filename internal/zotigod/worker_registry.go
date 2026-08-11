@@ -1,15 +1,18 @@
 package zotigod
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 const workerWriteWait = 10 * time.Second
+const defaultWorkerApprovalWait = 30 * time.Second
 
 const (
 	defaultWorkerPingInterval = 15 * time.Second
@@ -19,14 +22,32 @@ const (
 type workerMessageType string
 
 const (
-	workerMessageCommand workerMessageType = "command"
-	workerMessageDelta   workerMessageType = "display_delta"
+	workerMessageCommand          workerMessageType = "command"
+	workerMessageDelta            workerMessageType = "display_delta"
+	workerMessageApprovalRequest  workerMessageType = "approval_request"
+	workerMessageApprovalDecision workerMessageType = "approval_decision"
+	workerMessageApprovalResult   workerMessageType = "approval_result"
 )
 
 type workerMessage struct {
-	Type    workerMessageType  `json:"type"`
-	Command *commandResponse   `json:"command,omitempty"`
-	Delta   *displayDeltaEvent `json:"delta,omitempty"`
+	Type             workerMessageType        `json:"type"`
+	Command          *commandResponse         `json:"command,omitempty"`
+	Delta            *displayDeltaEvent       `json:"delta,omitempty"`
+	ApprovalRequest  *approvalRequestResponse `json:"approval_request,omitempty"`
+	ApprovalDecision *workerApprovalDecision  `json:"approval_decision,omitempty"`
+	ApprovalResult   *workerApprovalResult    `json:"approval_result,omitempty"`
+}
+
+type workerApprovalDecision struct {
+	RequestID  string                                  `json:"request_id"`
+	ApprovalID string                                  `json:"approval_id"`
+	Decisions  []zotigosession.DisplayApprovalDecision `json:"decisions"`
+}
+
+type workerApprovalResult struct {
+	RequestID string                   `json:"request_id"`
+	Approval  *approvalRequestResponse `json:"approval,omitempty"`
+	Error     string                   `json:"error,omitempty"`
 }
 
 type workerRegistry struct {
@@ -37,6 +58,7 @@ type workerRegistry struct {
 	onMessage    func(string, workerMessage)
 	pingInterval time.Duration
 	pongWait     time.Duration
+	approvalWait time.Duration
 }
 
 func newWorkerRegistry() *workerRegistry {
@@ -45,6 +67,7 @@ func newWorkerRegistry() *workerRegistry {
 		waiters:      make(map[string][]chan struct{}),
 		pingInterval: defaultWorkerPingInterval,
 		pongWait:     defaultWorkerPongWait,
+		approvalWait: defaultWorkerApprovalWait,
 	}
 }
 
@@ -97,6 +120,21 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 		return false
 	}
 	return worker.send(command)
+}
+
+func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision) (approvalRequestResponse, error) {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	r.mu.Unlock()
+	if worker == nil {
+		return approvalRequestResponse{}, fmt.Errorf("approval decision requires an online worker")
+	}
+	if r.approvalWait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.approvalWait)
+		defer cancel()
+	}
+	return worker.submitApproval(ctx, approvalID, decisions)
 }
 
 func (r *workerRegistry) Has(sessionID string) bool {
@@ -183,6 +221,8 @@ type workerConnection struct {
 	sendCh     chan workerMessage
 	doneCh     chan struct{}
 	closeOnce  sync.Once
+	waitersMu  sync.Mutex
+	waiters    map[string]chan workerApprovalResult
 }
 
 func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
@@ -193,6 +233,7 @@ func newWorkerConnection(sessionID string, generation string, conn *websocket.Co
 		registry:   registry,
 		sendCh:     make(chan workerMessage, 32),
 		doneCh:     make(chan struct{}),
+		waiters:    make(map[string]chan workerApprovalResult),
 	}
 }
 
@@ -209,6 +250,63 @@ func (c *workerConnection) send(command commandResponse) bool {
 	default:
 		c.close()
 		return false
+	}
+}
+
+func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision) (approvalRequestResponse, error) {
+	requestID := newZotigodID("approval_submit")
+	waiter := make(chan workerApprovalResult, 1)
+	c.waitersMu.Lock()
+	c.waiters[requestID] = waiter
+	c.waitersMu.Unlock()
+	defer func() {
+		c.waitersMu.Lock()
+		delete(c.waiters, requestID)
+		c.waitersMu.Unlock()
+	}()
+
+	msg := workerMessage{
+		Type: workerMessageApprovalDecision,
+		ApprovalDecision: &workerApprovalDecision{
+			RequestID:  requestID,
+			ApprovalID: approvalID,
+			Decisions:  copyApprovalDecisions(decisions),
+		},
+	}
+	select {
+	case <-ctx.Done():
+		return approvalRequestResponse{}, ctx.Err()
+	case <-c.doneCh:
+		return approvalRequestResponse{}, fmt.Errorf("worker disconnected")
+	case c.sendCh <- msg:
+	}
+
+	select {
+	case <-ctx.Done():
+		return approvalRequestResponse{}, ctx.Err()
+	case <-c.doneCh:
+		return approvalRequestResponse{}, fmt.Errorf("worker disconnected")
+	case result := <-waiter:
+		if result.Error != "" {
+			return approvalRequestResponse{}, fmt.Errorf("worker rejected approval decision: %s", result.Error)
+		}
+		if result.Approval == nil {
+			return approvalRequestResponse{}, fmt.Errorf("worker returned an empty approval result")
+		}
+		return *result.Approval, nil
+	}
+}
+
+func (c *workerConnection) resolveApproval(result workerApprovalResult) {
+	c.waitersMu.Lock()
+	waiter := c.waiters[result.RequestID]
+	c.waitersMu.Unlock()
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter <- result:
+	default:
 	}
 }
 
@@ -250,6 +348,11 @@ func (c *workerConnection) readLoop() {
 		var msg workerMessage
 		if err := sonic.Unmarshal(data, &msg); err != nil {
 			return
+		}
+		if msg.Type == workerMessageApprovalResult && msg.ApprovalResult != nil {
+			c.registry.receive(c, msg)
+			c.resolveApproval(*msg.ApprovalResult)
+			continue
 		}
 		c.registry.receive(c, msg)
 	}
