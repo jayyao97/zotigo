@@ -13,6 +13,9 @@ const (
 	StateIdle    State = "idle"
 	StateRunning State = "running"
 	StatePaused  State = "paused" // Waiting for user input/tool approval
+	// StateDurabilityFailed prevents a tool with an uncertain durable result
+	// from being executed again in the same process.
+	StateDurabilityFailed State = "durability_failed"
 )
 
 // Snapshot represents the serializable state of the agent.

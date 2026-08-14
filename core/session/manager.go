@@ -22,8 +22,11 @@ type Metadata struct {
 // Session represents the full state on disk.
 type Session struct {
 	Metadata
-	AgentSnapshot agent.Snapshot `json:"agent_snapshot"`
-	Turns         []Turn         `json:"turns,omitempty"`
+	AgentSnapshot          agent.Snapshot `json:"agent_snapshot"`
+	SnapshotVersion        uint64         `json:"snapshot_version,omitempty"`
+	CommittedRuntimeWALID  string         `json:"committed_runtime_wal_id,omitempty"`
+	CommittedRuntimeWALSeq uint64         `json:"committed_runtime_wal_seq,omitempty"`
+	Turns                  []Turn         `json:"turns,omitempty"`
 }
 
 // Manager handles session storage, retrieval, and locking.

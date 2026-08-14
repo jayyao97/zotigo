@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent/prompt"
@@ -59,23 +60,23 @@ type Agent struct {
 	// original Run's deadline. Cleared at end-of-turn.
 	activeTraceCtx context.Context
 
-	middlewares []Middleware
+	middlewares           []Middleware
+	toolExecutionRecorder ToolExecutionRecorder
 
-	mu               sync.RWMutex
-	state            State
-	history          []protocol.Message
-	userContextState *prompt.UserContextState
-	pendingTurnUser  []protocol.Message
-	activeToolRun    *activeToolRun
-	pendingActions   []*PendingAction
-	deferredActions  []*PendingAction
-	turns            []TurnAudit
-	pendingProfile   *runtimeProfileRequest
-	runtimeActivity  int
-	profileActivity  int
-	runActive        bool
-	runtimeIdle      chan struct{}
-	profileApplyMu   sync.Mutex
+	mu              sync.RWMutex
+	state           State
+	conversation    conversationState
+	pendingTurnUser []protocol.Message
+	activeToolRun   *activeToolRun
+	pendingActions  []*PendingAction
+	deferredActions []*PendingAction
+	turns           []TurnAudit
+	pendingProfile  *runtimeProfileRequest
+	runtimeActivity int
+	profileActivity int
+	runActive       bool
+	runtimeIdle     chan struct{}
+	profileApplyMu  sync.Mutex
 }
 
 type activeToolRun struct {
@@ -210,7 +211,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		policy:          ApprovalPolicyAuto,
 		requestedPolicy: ApprovalPolicyAuto,
 		state:           StateIdle,
-		history:         make([]protocol.Message, 0),
+		conversation:    newConversationState(),
 		turns:           make([]TurnAudit, 0),
 		loopDetector:    services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
 		compressor:      services.NewCompressor(compressorCfg),
@@ -345,9 +346,10 @@ func (a *Agent) GetContextStats() map[string]int {
 	defer a.mu.RUnlock()
 
 	stats := make(map[string]int)
-	stats["message_count"] = len(a.history)
+	history := a.conversation.history
+	stats["message_count"] = len(history)
 	if a.compressor != nil {
-		stats["estimated_tokens"] = a.compressor.CountTokens(a.history)
+		stats["estimated_tokens"] = a.compressor.CountTokens(history)
 	}
 	if a.loopDetector != nil {
 		for k, v := range a.loopDetector.Stats() {
@@ -379,8 +381,7 @@ func (a *Agent) ForceCompress(ctx context.Context) (*services.CompressionResult,
 func (a *Agent) Snapshot() Snapshot {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	hist := make([]protocol.Message, len(a.history))
-	copy(hist, a.history)
+	hist, userContextState := a.conversation.snapshot()
 	pending := make([]*PendingAction, len(a.pendingActions))
 	copy(pending, a.pendingActions)
 	deferred := make([]*PendingAction, len(a.deferredActions))
@@ -394,7 +395,7 @@ func (a *Agent) Snapshot() Snapshot {
 		DeferredActions:  deferred,
 		TurnSafety:       a.turnSafety,
 		Turns:            turns,
-		UserContextState: a.userContextState.Clone(),
+		UserContextState: userContextState,
 		CreatedAt:        time.Now(),
 	}
 }
@@ -404,12 +405,11 @@ func (a *Agent) Restore(s Snapshot) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.state = s.State
-	a.history = s.History
+	a.conversation.restore(s.History, s.UserContextState)
 	a.pendingTurnUser = nil
 	a.pendingActions = s.PendingActions
 	a.deferredActions = s.DeferredActions
 	a.turnSafety = s.TurnSafety
-	a.userContextState = s.UserContextState.Clone()
 	if s.Turns == nil {
 		a.turns = make([]TurnAudit, 0)
 	} else {
@@ -504,6 +504,10 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		a.mu.Unlock()
 		return nil, errors.New("agent is already running")
 	}
+	if a.state == StateDurabilityFailed {
+		a.mu.Unlock()
+		return nil, errors.New("agent cannot continue after a durability failure; restore from durable state")
+	}
 
 	if msg.Role != "" {
 		if a.state == StatePaused {
@@ -518,7 +522,10 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			}
 			a.startNewTurn(msg.String())
 		} else {
-			a.history = append(a.history, msg)
+			if err := a.conversation.appendMessages(msg); err != nil {
+				a.mu.Unlock()
+				return nil, fmt.Errorf("record history: %w", err)
+			}
 		}
 	}
 
@@ -598,14 +605,18 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		// so a buggy compactor or persistent overflow can't loop.
 		reactiveRetries := 0
 		const maxReactiveRetries = 1
-		recordInterruptedToolCalls := func(calls []*protocol.ToolCall) {
+		recordInterruptedToolCalls := func(calls []*protocol.ToolCall) error {
 			results := interruptedToolResults(calls)
+			a.mu.Lock()
+			err := a.conversation.appendMessages(protocol.NewToolMessage(results))
+			a.mu.Unlock()
+			if err != nil {
+				return err
+			}
 			for i := range results {
 				outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
 			}
-			a.mu.Lock()
-			a.history = append(a.history, protocol.NewToolMessage(results))
-			a.mu.Unlock()
+			return nil
 		}
 
 		for {
@@ -626,11 +637,16 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 			a.mu.Lock()
-			msgs := a.buildContext()
+			msgs, err := a.buildContext()
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
 			a.mu.Unlock()
+			if err != nil {
+				turnErr = fmt.Errorf("build context: %w", err)
+				outCh <- protocol.NewErrorEvent(turnErr)
+				return
+			}
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
 			var toolList []tools.Tool
@@ -791,7 +807,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				asstMsg.AddToolCall(*tc)
 			}
 			a.mu.RLock()
-			toolUsage := usageFromLastToolMessage(a.history)
+			toolUsage := usageFromLastToolMessage(a.conversation.history)
 			a.mu.RUnlock()
 			if providerUsage != nil {
 				// Normalize before persisting so consumers (cost cmd, TUI
@@ -866,9 +882,14 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			)
 
 			a.mu.Lock()
-			a.history = append(a.history, asstMsg)
+			err = a.conversation.appendMessages(asstMsg)
 			steeringPending := len(a.pendingTurnUser) > 0
 			a.mu.Unlock()
+			if err != nil {
+				turnErr = fmt.Errorf("record assistant history: %w", err)
+				outCh <- protocol.NewErrorEvent(turnErr)
+				return
+			}
 
 			// Reset the empty-recovery budget on any legitimate output.
 			// The cap is meant to stop consecutive empty responses, not to
@@ -879,7 +900,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			if steeringPending {
 				if len(currentToolCalls) > 0 {
-					recordInterruptedToolCalls(currentToolCalls)
+					if err := recordInterruptedToolCalls(currentToolCalls); err != nil {
+						turnErr = fmt.Errorf("record interrupted tool results: %w", err)
+						outCh <- protocol.NewErrorEvent(turnErr)
+						return
+					}
 				}
 				continue
 			}
@@ -932,7 +957,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					a.mu.Lock()
 					if len(a.pendingTurnUser) > 0 {
 						a.mu.Unlock()
-						recordInterruptedToolCalls(currentToolCalls)
+						if err := recordInterruptedToolCalls(currentToolCalls); err != nil {
+							turnErr = fmt.Errorf("record interrupted tool results: %w", err)
+							outCh <- protocol.NewErrorEvent(turnErr)
+							return
+						}
 						continue
 					}
 					a.state = StatePaused
@@ -945,7 +974,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 				executableCalls := orderedActions(append(autoCalls, blockedCalls...))
 				if len(executableCalls) > 0 {
-					results, err := a.executeActions(ctx, executableCalls, func(event protocol.Event) {
+					results, mayHaveExecuted, err := a.executeActions(ctx, executableCalls, func(event protocol.Event) {
 						outCh <- event
 					}, true)
 					if err != nil {
@@ -953,13 +982,21 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						outCh <- protocol.NewErrorEvent(err)
 						return
 					}
+					toolMsg := protocol.NewToolMessage(results)
+					a.mu.Lock()
+					err = a.conversation.appendMessages(toolMsg)
+					if err != nil && mayHaveExecuted {
+						a.markDurabilityFailedLocked()
+					}
+					a.mu.Unlock()
+					if err != nil {
+						turnErr = fmt.Errorf("record tool results: %w", err)
+						outCh <- protocol.NewErrorEvent(turnErr)
+						return
+					}
 					for i := range results {
 						outCh <- protocol.Event{Type: protocol.EventTypeToolResultDone, ToolResult: &results[i]}
 					}
-					toolMsg := protocol.NewToolMessage(results)
-					a.mu.Lock()
-					a.history = append(a.history, toolMsg)
-					a.mu.Unlock()
 				}
 
 				continue
@@ -998,8 +1035,13 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						"call. If the task is complete, reply with a short " +
 						"summary of what was done.\n</system-reminder>",
 				)
-				a.history = append(a.history, nudge)
+				err = a.conversation.appendMessages(nudge)
 				a.mu.Unlock()
+				if err != nil {
+					turnErr = fmt.Errorf("record recovery nudge: %w", err)
+					outCh <- protocol.NewErrorEvent(turnErr)
+					return
+				}
 				continue
 			}
 
@@ -1119,6 +1161,10 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	// under the original trace, while keeping the caller's
 	// cancellation/deadline (the approval ctx, not the original Run ctx).
 	a.mu.RLock()
+	if a.state != StatePaused || len(a.pendingActions) == 0 {
+		a.mu.RUnlock()
+		return nil, fmt.Errorf("agent is not paused")
+	}
 	saved := a.activeTraceCtx
 	actions := make([]*PendingAction, len(a.pendingActions))
 	copy(actions, a.pendingActions)
@@ -1214,10 +1260,10 @@ func (a *Agent) ExecuteBypassedPendingActions(ctx context.Context) (<-chan proto
 
 // SubmitToolOutputs submits tool results and resumes the agent loop.
 func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolResult) (<-chan protocol.Event, error) {
-	return a.submitToolOutputs(ctx, outputs, true)
+	return a.submitToolOutputs(ctx, outputs, true, false)
 }
 
-func (a *Agent) submitToolOutputs(ctx context.Context, outputs []protocol.ToolResult, mergeDeferred bool) (<-chan protocol.Event, error) {
+func (a *Agent) submitToolOutputs(ctx context.Context, outputs []protocol.ToolResult, mergeDeferred bool, toolsExecuted bool) (<-chan protocol.Event, error) {
 	a.mu.Lock()
 	if a.state != StatePaused {
 		a.mu.Unlock()
@@ -1229,14 +1275,20 @@ func (a *Agent) submitToolOutputs(ctx context.Context, outputs []protocol.ToolRe
 	saved := a.activeTraceCtx
 	deferred := make([]*PendingAction, len(a.deferredActions))
 	copy(deferred, a.deferredActions)
-	a.pendingActions = nil
-	a.deferredActions = nil
-	a.state = StateRunning
 	if mergeDeferred && len(deferred) > 0 {
 		outputs = mergeDeferredSkippedResults(deferred, outputs, "another tool call in the batch was denied")
 	}
 	msg := protocol.NewToolMessage(outputs)
-	a.history = append(a.history, msg)
+	if err := a.conversation.appendMessages(msg); err != nil {
+		if toolsExecuted {
+			a.markDurabilityFailedLocked()
+		}
+		a.mu.Unlock()
+		return nil, fmt.Errorf("record tool outputs: %w", err)
+	}
+	a.pendingActions = nil
+	a.deferredActions = nil
+	a.state = StateRunning
 	a.mu.Unlock()
 	if saved != nil {
 		ctx = a.observer.ResumeTrace(ctx, saved)
@@ -1298,7 +1350,7 @@ func (a *Agent) ResolvePendingActions(ctx context.Context, decisions map[string]
 		}
 		outputs := mergeDeferredSkippedResults(deferred, denied, reason)
 		outputs = sortToolResultsByActionOrder(outputs, append(deferred, pending...))
-		innerCh, err := a.submitToolOutputs(ctx, outputs, false)
+		innerCh, err := a.submitToolOutputs(ctx, outputs, false, false)
 		if err != nil {
 			return nil, err
 		}
@@ -1308,12 +1360,14 @@ func (a *Agent) ResolvePendingActions(ctx context.Context, decisions map[string]
 	return a.executeResolvedPendingActions(ctx, orderedActions(append(deferred, approved...)), true)
 }
 
-func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) (results []protocol.ToolResult, err error) {
+func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) (results []protocol.ToolResult, mayHaveExecuted bool, err error) {
+	var executionStarted atomic.Bool
 	toolCtx, toolRun, execute := a.beginToolRun(ctx)
 	if !execute {
-		return interruptedActionResults(actions), nil
+		return interruptedActionResults(actions), false, nil
 	}
 	defer func() {
+		mayHaveExecuted = executionStarted.Load()
 		interrupted := a.endToolRun(toolRun)
 		toolRun.cancel()
 		if interrupted {
@@ -1329,12 +1383,12 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 
 	if ensureSnapshot {
 		if err := a.ensureSnapshotForActions(ctx, exec, actions); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 
 	results = make([]protocol.ToolResult, len(actions))
@@ -1343,7 +1397,7 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 			break
 		}
 		if !canRunActionConcurrently(actions[start]) {
-			results[start] = a.executePendingAction(ctx, exec, actions[start], a.recordLoopWarning(actions[start]), eventSink)
+			results[start] = a.executePendingAction(ctx, exec, actions[start], a.recordLoopWarning(actions[start]), eventSink, func() { executionStarted.Store(true) })
 			a.completeToolAction(toolRun, actions[start], results[start])
 			start++
 			continue
@@ -1357,7 +1411,7 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 		for i, action := range actions[start:end] {
 			warnings[i] = a.recordLoopWarning(action)
 		}
-		a.executePendingActionGroup(ctx, exec, actions[start:end], warnings, results[start:end], eventSink, func(action *PendingAction, result protocol.ToolResult) {
+		a.executePendingActionGroup(ctx, exec, actions[start:end], warnings, results[start:end], eventSink, func() { executionStarted.Store(true) }, func(action *PendingAction, result protocol.ToolResult) {
 			a.completeToolAction(toolRun, action, result)
 		})
 		start = end
@@ -1382,11 +1436,7 @@ func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, ev
 		}
 	}
 
-	a.mu.Lock()
-	a.pendingActions = nil
-	a.deferredActions = nil
-	a.mu.Unlock()
-	return results, nil
+	return results, executionStarted.Load(), nil
 }
 
 func (a *Agent) executeResolvedPendingActions(ctx context.Context, actions []*PendingAction, ensureSnapshot bool) (<-chan protocol.Event, error) {
@@ -1397,14 +1447,14 @@ func (a *Agent) executeResolvedPendingActions(ctx context.Context, actions []*Pe
 	go func() {
 		defer close(outCh)
 		defer a.endRuntimeActivity()
-		results, err := a.executeActions(ctx, actions, func(event protocol.Event) {
+		results, mayHaveExecuted, err := a.executeActions(ctx, actions, func(event protocol.Event) {
 			outCh <- event
 		}, ensureSnapshot)
 		if err != nil {
 			outCh <- protocol.NewErrorEvent(err)
 			return
 		}
-		innerCh, err := a.SubmitToolOutputs(ctx, results)
+		innerCh, err := a.submitToolOutputs(ctx, results, true, mayHaveExecuted)
 		if err != nil {
 			outCh <- protocol.NewErrorEvent(err)
 			return
@@ -1530,14 +1580,14 @@ func commonDenialReason(reasons []string) string {
 	return "another tool call in the batch was denied"
 }
 
-func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink, completed func(*PendingAction, protocol.ToolResult)) {
+func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink, started func(), completed func(*PendingAction, protocol.ToolResult)) {
 	var wg sync.WaitGroup
 	for i, action := range actions {
 		i, action := i, action
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			results[i] = a.executePendingAction(ctx, exec, action, warnings[i], eventSink)
+			results[i] = a.executePendingAction(ctx, exec, action, warnings[i], eventSink, started)
 			completed(action, results[i])
 		}()
 	}
@@ -1562,7 +1612,7 @@ func (a *Agent) recordLoopWarning(action *PendingAction) string {
 	)
 }
 
-func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor, action *PendingAction, loopWarning string, eventSink ToolEventSink) protocol.ToolResult {
+func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor, action *PendingAction, loopWarning string, eventSink ToolEventSink, started func()) protocol.ToolResult {
 	prefixed := func(text string) string {
 		if loopWarning == "" {
 			return text
@@ -1593,6 +1643,14 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 		Arguments:  action.Arguments,
 		Executor:   exec,
 	}
+	if a.toolExecutionRecorder != nil {
+		if err := a.toolExecutionRecorder.RecordToolExecutionStarted(ctx, call); err != nil {
+			tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: record durable tool execution start: %v", err)), true)
+			tr.ToolName = action.Name
+			return tr
+		}
+	}
+	started()
 	ctx = withToolEventSink(ctx, eventSink)
 	invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {
 		return c.Tool.Execute(ctx, c.Executor, c.Arguments)
@@ -1607,6 +1665,12 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 	tr.ToolName = action.Name
 	tr.Metadata = toolResultMetadata(res)
 	return tr
+}
+
+func (a *Agent) markDurabilityFailedLocked() {
+	a.pendingActions = nil
+	a.deferredActions = nil
+	a.state = StateDurabilityFailed
 }
 
 func (a *Agent) startNewTurn(userPrompt string) {
@@ -1932,8 +1996,9 @@ func (a *Agent) recentActionsForClassifier() []RecentAction {
 	defer a.mu.RUnlock()
 
 	var actions []RecentAction
-	for i := len(a.history) - 1; i >= 0 && len(actions) < 6; i-- {
-		msg := a.history[i]
+	history := a.conversation.history
+	for i := len(history) - 1; i >= 0 && len(actions) < 6; i-- {
+		msg := history[i]
 		for _, cp := range msg.Content {
 			if cp.Type == protocol.ContentTypeToolResult && cp.ToolResult != nil {
 				actions = append(actions, RecentAction{
@@ -2161,7 +2226,7 @@ func isZeroUsage(usage protocol.Usage) bool {
 		usage.CacheReadInputTokens == 0
 }
 
-func (a *Agent) buildContext() []protocol.Message {
+func (a *Agent) buildContext() ([]protocol.Message, error) {
 	var msgs []protocol.Message
 
 	pctx := prompt.PromptContext{
@@ -2180,13 +2245,19 @@ func (a *Agent) buildContext() []protocol.Message {
 		}
 	}
 
-	history := a.history
+	history := a.conversation.history
 
 	// Check if compression is needed
 	if a.compressor != nil && a.compressor.NeedsCompression(history) {
 		result, err := a.compressHistoryLocked(context.Background(), false)
+		if err != nil {
+			if errors.Is(err, ErrHistoryRecord) {
+				return nil, err
+			}
+			debug.Logf("agent proactive compression failed, continuing uncompressed: %v", err)
+		}
 		if err == nil && result.Compressed {
-			history = a.history
+			history = a.conversation.history
 		}
 	}
 
@@ -2196,7 +2267,7 @@ func (a *Agent) buildContext() []protocol.Message {
 	}
 
 	msgs = append(msgs, history...)
-	return msgs
+	return msgs, nil
 }
 
 func (a *Agent) applyPendingTurnUserInput(ctx context.Context, outCh chan<- protocol.Event) (bool, error) {
@@ -2277,17 +2348,22 @@ func (a *Agent) drainPendingTurnUserInputLocked(pendingCount int) (bool, error) 
 }
 
 func (a *Agent) appendUserInputLocked(msg protocol.Message) error {
+	messages := make([]protocol.Message, 0, 2)
+	var nextState *prompt.UserContextState
 	if a.userContext != nil {
-		contextText, state, err := a.userContext.BuildUpdate(a.promptContext(), a.userContextState)
+		contextText, state, err := a.userContext.BuildUpdate(a.promptContext(), a.conversation.userContextState)
 		if err != nil {
 			return fmt.Errorf("build user context: %w", err)
 		}
 		if contextText != "" {
-			a.history = append(a.history, protocol.NewContextualUserMessage(contextText))
+			messages = append(messages, protocol.NewContextualUserMessage(contextText))
 		}
-		a.userContextState = state.Clone()
+		nextState = state.Clone()
 	}
-	a.history = append(a.history, msg)
+	messages = append(messages, msg)
+	if err := a.conversation.append(messages, nextState, a.userContext != nil); err != nil {
+		return fmt.Errorf("record user history: %w", err)
+	}
 	return nil
 }
 
@@ -2309,9 +2385,9 @@ func (a *Agent) compressHistoryLocked(
 		err        error
 	)
 	if force {
-		compressed, result, err = a.compressor.ForceCompress(ctx, a.history)
+		compressed, result, err = a.compressor.ForceCompress(ctx, a.conversation.history)
 	} else {
-		compressed, result, err = a.compressor.Compress(ctx, a.history)
+		compressed, result, err = a.compressor.Compress(ctx, a.conversation.history)
 	}
 	if err != nil || !result.Compressed {
 		return result, err
@@ -2321,8 +2397,9 @@ func (a *Agent) compressHistoryLocked(
 	if err != nil {
 		return services.CompressionResult{}, err
 	}
-	a.history = rebased
-	a.userContextState = state
+	if err := a.conversation.replace(rebased, state); err != nil {
+		return services.CompressionResult{}, fmt.Errorf("record compressed history: %w", err)
+	}
 	result.MessagesAfter = len(rebased)
 	result.CompressedTokens = a.compressor.CountTokens(rebased)
 	return result, nil
@@ -2332,7 +2409,7 @@ func (a *Agent) rebaseUserContext(
 	history []protocol.Message,
 ) ([]protocol.Message, *prompt.UserContextState, error) {
 	if a.userContext == nil {
-		return history, a.userContextState, nil
+		return history, a.conversation.userContextState, nil
 	}
 	contextText, state, err := a.userContext.BuildFull(a.promptContext())
 	if err != nil {

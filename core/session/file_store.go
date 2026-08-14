@@ -265,7 +265,20 @@ func writeFileAtomic(path string, data []byte, mode os.FileMode) error {
 	if err := file.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tempPath, path)
+	if err := os.Rename(tempPath, path); err != nil {
+		return err
+	}
+	return syncDirectory(filepath.Dir(path))
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	syncErr := dir.Sync()
+	closeErr := dir.Close()
+	return errors.Join(syncErr, closeErr)
 }
 
 func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item DisplayItem) (DisplayItem, error) {
@@ -393,6 +406,7 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	_ = os.Remove(lockPath)
 	_ = os.Remove(s.displayLogPath(id))
 	_ = os.Remove(s.displayLogAppendLockPath(id))
+	_ = os.Remove(s.runtimeWALPath(id))
 	if err := os.RemoveAll(s.imageBlobDir(id)); err != nil {
 		return fmt.Errorf("failed to delete session image blobs: %w", err)
 	}

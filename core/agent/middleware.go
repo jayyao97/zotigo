@@ -38,6 +38,17 @@ type ToolCall struct {
 	Executor   executor.Executor
 }
 
+// ToolExecutionRecorder durably marks a tool call before any middleware or
+// tool implementation can produce side effects.
+type ToolExecutionRecorder interface {
+	RecordToolExecutionStarted(context.Context, *ToolCall) error
+}
+
+// WithToolExecutionRecorder installs the tool-side-effect durability boundary.
+func WithToolExecutionRecorder(recorder ToolExecutionRecorder) AgentOption {
+	return func(a *Agent) { a.toolExecutionRecorder = recorder }
+}
+
 // Next is the next link in the middleware chain. The innermost Next
 // invokes the tool itself; every middleware between wraps its outer
 // neighbor.
