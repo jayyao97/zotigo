@@ -13,15 +13,26 @@ import (
 
 const recoveryToolArgumentsLimit = 2048
 
-func workerToolExecutionMiddleware(display *workerDisplayLog) agent.Middleware {
-	return func(next agent.Next) agent.Next {
-		return func(ctx context.Context, call *agent.ToolCall) (any, error) {
-			if err := display.ToolExecutionStarted(ctx, call.ToolCallID, call.Name); err != nil {
-				return nil, fmt.Errorf("record tool execution start: %w", err)
-			}
-			return next(ctx, call)
-		}
+type workerDurabilityRecorder struct {
+	display *workerDisplayLog
+	wal     *workerRuntimeWAL
+}
+
+func (r *workerDurabilityRecorder) RecordHistory(mutation agent.HistoryMutation) error {
+	if r.wal == nil {
+		return fmt.Errorf("runtime WAL is unavailable")
 	}
+	return r.wal.RecordHistory(mutation)
+}
+
+func (r *workerDurabilityRecorder) RecordToolExecutionStarted(ctx context.Context, call *agent.ToolCall) error {
+	if err := r.display.ToolExecutionStarted(ctx, call.ToolCallID, call.Name); err != nil {
+		return fmt.Errorf("record display tool execution start: %w", err)
+	}
+	if r.wal == nil {
+		return nil
+	}
+	return r.wal.RecordToolExecutionStarted(ctx, call)
 }
 
 func recoverInterruptedToolExecutions(ctx context.Context, store zotigosession.Store, sess *zotigosession.Session) error {
@@ -47,6 +58,50 @@ func recoverInterruptedToolExecutions(ctx context.Context, store zotigosession.S
 	recovery.unknown = newUnknown
 	recoveryMessage := toolRecoveryMessage(sess.AgentSnapshot, recovery)
 	sess.AgentSnapshot.History = append(sess.AgentSnapshot.History, recoveryMessage)
+	sess.AgentSnapshot.State = agent.StateIdle
+	sess.AgentSnapshot.PendingActions = nil
+	sess.AgentSnapshot.DeferredActions = nil
+	return store.Put(ctx, sess)
+}
+
+func recoverUnansweredToolCalls(ctx context.Context, store zotigosession.Store, sess *zotigosession.Session) error {
+	if len(sess.AgentSnapshot.History) == 0 {
+		return nil
+	}
+	message := sess.AgentSnapshot.History[len(sess.AgentSnapshot.History)-1]
+	if message.Role != protocol.RoleAssistant {
+		return nil
+	}
+	items, _, err := store.ListDisplayItems(ctx, sess.ID)
+	if err != nil {
+		return err
+	}
+	recovery := latestUnknownToolExecutions(items)
+	unknown := make(map[string]unknownToolExecution, len(recovery.unknown))
+	for _, execution := range recovery.unknown {
+		unknown[execution.call.ID] = execution
+	}
+	results := make([]protocol.ToolResult, 0)
+	for _, part := range message.Content {
+		if part.ToolCall == nil {
+			continue
+		}
+		if result, ok := recovery.results[part.ToolCall.ID]; ok {
+			results = append(results, result)
+			continue
+		}
+		text := "The previous worker stopped before this tool execution was durably started. The tool was not executed."
+		if execution, ok := unknown[part.ToolCall.ID]; ok {
+			text = unknownToolResultText(execution)
+		}
+		result := protocol.NewTextToolResult(part.ToolCall.ID, text, true)
+		result.ToolName = part.ToolCall.Name
+		results = append(results, result)
+	}
+	if len(results) == 0 {
+		return nil
+	}
+	sess.AgentSnapshot.History = append(sess.AgentSnapshot.History, protocol.NewToolMessage(results))
 	sess.AgentSnapshot.State = agent.StateIdle
 	sess.AgentSnapshot.PendingActions = nil
 	sess.AgentSnapshot.DeferredActions = nil
@@ -98,7 +153,7 @@ func latestUnknownToolExecutions(items []zotigosession.DisplayItem) toolExecutio
 			}
 			unknown = append(unknown, unknownToolExecution{execution: execution, call: call})
 		}
-		if len(unknown) == 0 {
+		if len(unknown) == 0 && len(turn.results) == 0 {
 			return toolExecutionRecovery{}
 		}
 		return toolExecutionRecovery{turnID: turn.id, unknown: unknown, results: turn.results}

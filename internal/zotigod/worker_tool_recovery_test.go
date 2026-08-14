@@ -22,7 +22,11 @@ func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) 
 
 	executed := make(chan struct{})
 	completed := make(chan error, 1)
-	invoke := workerToolExecutionMiddleware(display)(func(context.Context, *agent.ToolCall) (any, error) {
+	recorder := &workerDurabilityRecorder{display: display}
+	invoke := func(ctx context.Context, call *agent.ToolCall) (any, error) {
+		if err := recorder.RecordToolExecutionStarted(ctx, call); err != nil {
+			return nil, err
+		}
 		items, _, err := source.LoadItems(ctx, "sess-tool-order")
 		if err != nil {
 			return nil, err
@@ -32,7 +36,7 @@ func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) 
 		}
 		close(executed)
 		return "ok", nil
-	})
+	}
 	go func() {
 		_, err := invoke(ctx, &agent.ToolCall{ToolCallID: "call-1", Name: "shell"})
 		completed <- err
@@ -75,10 +79,14 @@ func TestWorkerToolExecutionDoesNotInvokeWhenStartedMarkerFails(t *testing.T) {
 	}
 	display.items = failingDisplayItemSource{err: errors.New("disk full")}
 	executed := false
-	invoke := workerToolExecutionMiddleware(display)(func(context.Context, *agent.ToolCall) (any, error) {
+	recorder := &workerDurabilityRecorder{display: display}
+	invoke := func(ctx context.Context, call *agent.ToolCall) (any, error) {
+		if err := recorder.RecordToolExecutionStarted(ctx, call); err != nil {
+			return nil, err
+		}
 		executed = true
 		return nil, nil
-	})
+	}
 	if _, err := invoke(ctx, &agent.ToolCall{ToolCallID: "call-1", Name: "shell"}); err == nil {
 		t.Fatal("expected durable marker failure")
 	}
@@ -162,6 +170,39 @@ func TestRecoverInterruptedToolExecutionIgnoresDurableResult(t *testing.T) {
 	}
 	if len(sess.AgentSnapshot.History) != 0 {
 		t.Fatalf("completed tool received recovery hint: %#v", sess.AgentSnapshot.History)
+	}
+}
+
+func TestRecoverUnansweredToolCallUsesDurableDisplayResult(t *testing.T) {
+	store, sessionID := newToolRecoveryStore(t)
+	assistant := protocol.NewAssistantMessage("")
+	assistant.AddToolCall(protocol.ToolCall{ID: "call-1", Name: "read_file", Arguments: `{}`})
+	sess, err := store.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess.AgentSnapshot.History = []protocol.Message{protocol.NewUserMessage("read"), assistant}
+	if err := store.Put(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	appendToolRecoveryItem(t, store, sessionID, zotigosession.DisplayItem{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}})
+	appendToolRecoveryItem(t, store, sessionID, zotigosession.DisplayItem{
+		Type:          zotigosession.DisplayItemToolExecutionStarted,
+		ToolExecution: &zotigosession.DisplayToolExecution{TurnID: "turn-1", ToolCallID: "call-1", ToolName: "read_file"},
+	})
+	appendToolRecoveryItem(t, store, sessionID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemAssistantMessage,
+		Content: []zotigosession.DisplayContentPart{{
+			Type:       string(protocol.ContentTypeToolResult),
+			ToolResult: &zotigosession.DisplayToolResult{ToolCallID: "call-1", ToolName: "read_file", Text: "durable result"},
+		}},
+	})
+	if err := recoverUnansweredToolCalls(context.Background(), store, sess); err != nil {
+		t.Fatal(err)
+	}
+	last := sess.AgentSnapshot.History[len(sess.AgentSnapshot.History)-1]
+	if last.Content[0].ToolResult == nil || last.Content[0].ToolResult.Text != "durable result" {
+		t.Fatalf("display result was not restored: %#v", last)
 	}
 }
 

@@ -301,6 +301,7 @@ type workerRuntime struct {
 	transport        *workerRuntimeTransport
 	display          *workerDisplayLog
 	observer         observability.Observer
+	runtimeWAL       *workerRuntimeWAL
 	cleanup          func()
 	storeMu          sync.Mutex
 	profileMu        sync.Mutex
@@ -382,10 +383,25 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	display.barrier = cfg.DisplayBarrier
 	display.wakeSync = cfg.SyncDisplay
-	if err := recoverInterruptedToolExecutions(ctx, cfg.Store, sess); err != nil {
+	runtimeWAL := newWorkerRuntimeWAL(cfg.Store, cfg.SessionID)
+	recoveredRuntimeWAL, err := recoverRuntimeWAL(ctx, cfg.Store, sess)
+	if err != nil {
+		_ = observer.Close(context.Background())
+		_ = localExec.Close()
+		return nil, fmt.Errorf("recover runtime WAL: %w", err)
+	}
+	if !recoveredRuntimeWAL {
+		err = recoverInterruptedToolExecutions(ctx, cfg.Store, sess)
+	}
+	if err != nil {
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover interrupted tool executions: %w", err)
+	}
+	if err := recoverUnansweredToolCalls(ctx, cfg.Store, sess); err != nil {
+		_ = observer.Close(context.Background())
+		_ = localExec.Close()
+		return nil, fmt.Errorf("recover unanswered tool calls: %w", err)
 	}
 	_, err = display.ResolvePendingApprovalsForOpenTurn(ctx, approvalWorkerRestartedReason)
 	if err != nil {
@@ -423,7 +439,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		ConfigureClassifier: true,
 		Middleware: []agent.Middleware{
 			middleware.ReadTracker(readTracker),
-			workerToolExecutionMiddleware(display),
 		},
 	})
 	if err != nil {
@@ -433,6 +448,12 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "agent", stepStarted)
 	agent.WithSkillManager(skills)(ag)
+	durabilityRecorder := &workerDurabilityRecorder{display: display, wal: runtimeWAL}
+	if runtimeWAL != nil {
+		agent.WithDurabilityRecorder(durabilityRecorder)(ag)
+	} else {
+		agent.WithToolExecutionRecorder(durabilityRecorder)(ag)
+	}
 	ag.Restore(sess.AgentSnapshot)
 
 	stepStarted = time.Now()
@@ -460,21 +481,34 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
 	transport.notifyApprovalResolved = cfg.NotifyApprovalResolved
 	runtime := &workerRuntime{
-		sessionID: cfg.SessionID,
-		workDir:   cwd,
-		store:     cfg.Store,
-		agent:     ag,
-		transport: transport,
-		display:   display,
-		observer:  observer,
-		fatalCh:   make(chan error, 1),
+		sessionID:  cfg.SessionID,
+		workDir:    cwd,
+		store:      cfg.Store,
+		agent:      ag,
+		transport:  transport,
+		display:    display,
+		observer:   observer,
+		runtimeWAL: runtimeWAL,
+		fatalCh:    make(chan error, 1),
+	}
+	if runtimeWAL != nil {
+		runtimeWAL.onError = func(err error) {
+			runtime.fail(err)
+			runtime.cancelCurrentTurn()
+		}
 	}
 	runtime.runner = runner.New(ag, transport, runner.WithListeners(runner.Listeners{
 		AfterTurn: func(snap agent.Snapshot) {
-			_ = runtime.saveSnapshot(context.Background(), snap)
+			if err := runtime.saveSnapshot(context.Background(), snap); err != nil {
+				runtime.fail(fmt.Errorf("persist completed turn: %w", err))
+				runtime.cancelCurrentTurn()
+			}
 		},
 		OnPause: func(snap agent.Snapshot) {
-			_ = runtime.saveSnapshot(context.Background(), snap)
+			if err := runtime.saveSnapshot(context.Background(), snap); err != nil {
+				runtime.fail(fmt.Errorf("persist approval checkpoint: %w", err))
+				runtime.cancelCurrentTurn()
+			}
 		},
 	}))
 
@@ -571,6 +605,9 @@ func (r *workerRuntime) resolveApproval(ctx context.Context, decision workerAppr
 func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerApprovalResolution) error {
 	if r.transport == nil {
 		return fmt.Errorf("approval transport is not configured")
+	}
+	if err := r.beginRuntimeWAL(ctx); err != nil {
+		return err
 	}
 	return r.transport.releaseApproval(ctx, resolution)
 }
@@ -954,7 +991,11 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandR
 	}
 	snapshot := r.agent.Snapshot()
 	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
+		if err := r.beginRuntimeWAL(ctx); err != nil {
+			return err
+		}
 		if err := r.transport.interruptApprovalForSteering(ctx, currentTurnID); err != nil {
+			_ = r.saveSnapshot(context.Background(), snapshot)
 			return err
 		}
 	}
@@ -990,6 +1031,10 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		r.finishTurn()
 		return err
 	}
+	if err := r.beginRuntimeWAL(ctx); err != nil {
+		r.finishTurn()
+		return fmt.Errorf("begin runtime WAL: %w", err)
+	}
 	go func() {
 		err := r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
 		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, zotigotransport.ErrTransportClosed) {
@@ -997,7 +1042,9 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		}
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
 		snapshot := r.snapshotAfterTurn(turnID)
-		_ = r.saveSnapshot(context.Background(), snapshot)
+		if err := r.saveSnapshot(context.Background(), snapshot); err != nil {
+			r.fail(fmt.Errorf("persist terminal turn state: %w", err))
+		}
 		r.finishTurn()
 	}()
 	return nil
@@ -1100,7 +1147,24 @@ func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot) e
 		return err
 	}
 	sessionadapter.ApplySnapshot(sess, snap, sessionadapter.LastUserPrompt(snap.History))
+	if r.runtimeWAL != nil {
+		return r.runtimeWAL.Commit(ctx, sess, r.store.Put)
+	}
+	sess.SnapshotVersion++
 	return r.store.Put(ctx, sess)
+}
+
+func (r *workerRuntime) beginRuntimeWAL(ctx context.Context) error {
+	if r.runtimeWAL == nil {
+		return nil
+	}
+	r.storeMu.Lock()
+	defer r.storeMu.Unlock()
+	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, "")
+	if err != nil {
+		return err
+	}
+	return r.runtimeWAL.Begin(ctx, sess, r.agent.Snapshot(), r.display.CurrentTurnID())
 }
 
 func ensureWorkerSession(ctx context.Context, store zotigosession.Store, sessionID string, cwd string) (*zotigosession.Session, error) {
