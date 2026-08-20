@@ -360,6 +360,9 @@ func TestHealth(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Fatalf("unexpected health response: %#v", body)
 	}
+	if body["protocol_version"] != apiProtocolVersion {
+		t.Fatalf("protocol_version = %q, want %q", body["protocol_version"], apiProtocolVersion)
+	}
 }
 
 func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
@@ -3146,11 +3149,18 @@ func TestWorkerClientInitializationFailurePreservesError(t *testing.T) {
 
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateStarting, WorkingDirectory: workDir})
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+		store:           store,
+		workerAuthToken: "worker-secret",
+	})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	runErr := runWorkerClient(context.Background(), workerClientConfig{DaemonURL: server.URL, SessionID: sessionID})
+	runErr := runWorkerClient(context.Background(), workerClientConfig{
+		DaemonURL: server.URL,
+		SessionID: sessionID,
+		AuthToken: "worker-secret",
+	})
 	if runErr == nil {
 		t.Fatal("expected worker initialization failure")
 	}

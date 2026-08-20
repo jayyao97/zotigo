@@ -53,6 +53,7 @@ const (
 type workerClientConfig struct {
 	DaemonURL string
 	SessionID string
+	AuthToken string
 }
 
 func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr error) {
@@ -84,7 +85,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	stopKeepalive := func() {}
 	var clientWriter *workerClientWriter
 	var runErr error
-	httpClient := &http.Client{Timeout: workerHTTPTimeout}
+	httpClient := newWorkerHTTPClient(cfg.AuthToken)
 	defer func() {
 		if runErr == nil {
 			runErr = returnErr
@@ -117,7 +118,11 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	}
 	stepStarted = time.Now()
 	var resp *http.Response
-	conn, resp, err = websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
+	requestHeader := http.Header{}
+	if cfg.AuthToken != "" {
+		requestHeader.Set("Authorization", "Bearer "+cfg.AuthToken)
+	}
+	conn, resp, err = websocket.DefaultDialer.DialContext(ctx, wsURL, requestHeader)
 	if err != nil {
 		return fmt.Errorf("connect worker websocket: %w", workerWebSocketDialError(err, resp))
 	}

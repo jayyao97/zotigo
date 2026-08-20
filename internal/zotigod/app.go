@@ -28,6 +28,8 @@ const defaultAddr = "127.0.0.1:8765"
 
 const defaultWorkerConnectTimeout = 3 * time.Second
 
+const apiProtocolVersion = "1"
+
 type SessionState string
 
 const (
@@ -302,6 +304,8 @@ func Run(args []string) int {
 	fs.SetOutput(os.Stderr)
 
 	addr := fs.String("addr", defaultAddr, "Address to listen on")
+	authTokenFile := fs.String("auth-token-file", "", "File containing the bearer token required by public APIs")
+	workerCallbackURL := fs.String("worker-daemon-url", "", "Daemon URL used by locally spawned workers")
 	workerMode := fs.Bool("worker", false, "Run an internal zotigod worker")
 	workerDaemonURL := fs.String("daemon-url", "", "zotigod daemon URL for internal worker mode")
 	workerSessionID := fs.String("session-id", "", "zotigod session id for internal worker mode")
@@ -313,9 +317,12 @@ func Run(args []string) int {
 		if daemonURL == "" {
 			daemonURL = "http://" + defaultAddr
 		}
+		workerAuthToken := os.Getenv(workerAuthTokenEnv)
+		_ = os.Unsetenv(workerAuthTokenEnv)
 		if err := runWorkerClient(context.Background(), workerClientConfig{
 			DaemonURL: daemonURL,
 			SessionID: *workerSessionID,
+			AuthToken: workerAuthToken,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "zotigod worker failed: %v\n", err)
 			return 1
@@ -324,6 +331,29 @@ func Run(args []string) int {
 	}
 
 	logger := log.New(os.Stderr, "[zotigod] ", log.LstdFlags)
+	var publicAuthToken string
+	if strings.TrimSpace(*authTokenFile) != "" {
+		var err error
+		publicAuthToken, err = loadAuthToken(*authTokenFile)
+		if err != nil {
+			logger.Printf("Authentication configuration failed: %v", err)
+			return 1
+		}
+	}
+	if listenAddressNeedsAuth(*addr) && publicAuthToken == "" {
+		logger.Printf("Authentication configuration failed: non-loopback listen address requires --auth-token-file")
+		return 1
+	}
+	workerAuthToken, err := generateAuthToken()
+	if err != nil {
+		logger.Printf("Worker authentication initialization failed: %v", err)
+		return 1
+	}
+	workerCallback, err := resolveWorkerDaemonURL(*addr, *workerCallbackURL)
+	if err != nil {
+		logger.Printf("Worker daemon URL configuration failed: %v", err)
+		return 1
+	}
 	configPath, created, err := config.NewManager().EnsureGlobalConfig()
 	if err != nil {
 		logger.Printf("Config initialization failed: %v", err)
@@ -332,13 +362,17 @@ func Run(args []string) int {
 	if created {
 		logger.Printf("Created default config template at %s. Add a profile, set default_profile, and configure its API key before creating sessions.", configPath)
 	}
-	launcher, err := newProcessWorkerLauncher("http://"+*addr, logger)
+	launcher, err := newProcessWorkerLauncher(workerCallback, workerAuthToken, logger)
 	if err != nil {
 		logger.Printf("Worker launcher disabled: %v", err)
 	}
 	server := &http.Server{
-		Addr:              *addr,
-		Handler:           newDefaultHandler(handlerOptions{launcher: launcher}),
+		Addr: *addr,
+		Handler: newDefaultHandler(handlerOptions{
+			launcher:        launcher,
+			publicAuthToken: publicAuthToken,
+			workerAuthToken: workerAuthToken,
+		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -390,6 +424,8 @@ type handlerOptions struct {
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
 	events               *displayEventBroker
+	publicAuthToken      string
+	workerAuthToken      string
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -536,7 +572,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/", handler.handleSession)
 	mux.HandleFunc("/internal/sessions/", handler.handleInternalSession)
 	mux.HandleFunc("/internal/workers/connect", handler.handleWorkerConnect)
-	return mux
+	return authenticatedHandler(mux, options.publicAuthToken, options.workerAuthToken)
 }
 
 func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -546,7 +582,10 @@ func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeAPIJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+	writeAPIJSON(w, http.StatusOK, map[string]string{
+		"status":           "ok",
+		"protocol_version": apiProtocolVersion,
+	})
 }
 
 func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -1300,6 +1339,8 @@ func writeAPIErrorCode(w http.ResponseWriter, status int, code string, message s
 
 func apiErrorCode(status int) string {
 	switch status {
+	case http.StatusUnauthorized:
+		return "unauthorized"
 	case http.StatusBadRequest:
 		return "invalid_request"
 	case http.StatusNotFound:

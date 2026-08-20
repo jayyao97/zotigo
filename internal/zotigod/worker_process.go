@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"strings"
 )
 
 type workerLauncher interface {
@@ -22,13 +23,14 @@ func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string, workin
 type processWorkerLauncher struct {
 	executable string
 	daemonURL  string
+	authToken  string
 	workDir    string
 	env        []string
 	output     io.Writer
 	logger     *log.Logger
 }
 
-func newProcessWorkerLauncher(daemonURL string, logger *log.Logger) (*processWorkerLauncher, error) {
+func newProcessWorkerLauncher(daemonURL string, authToken string, logger *log.Logger) (*processWorkerLauncher, error) {
 	executable, err := os.Executable()
 	if err != nil {
 		return nil, fmt.Errorf("resolve executable: %w", err)
@@ -40,6 +42,7 @@ func newProcessWorkerLauncher(daemonURL string, logger *log.Logger) (*processWor
 	return &processWorkerLauncher{
 		executable: executable,
 		daemonURL:  daemonURL,
+		authToken:  authToken,
 		workDir:    workDir,
 		env:        os.Environ(),
 		output:     os.Stderr,
@@ -60,7 +63,7 @@ func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, worki
 	if workingDirectory != "" {
 		cmd.Dir = workingDirectory
 	}
-	cmd.Env = l.env
+	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output
 	if err := cmd.Start(); err != nil {
@@ -76,4 +79,18 @@ func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, worki
 		}
 	}()
 	return nil
+}
+
+func workerProcessEnv(env []string, authToken string) []string {
+	result := make([]string, 0, len(env)+1)
+	prefix := workerAuthTokenEnv + "="
+	for _, value := range env {
+		if !strings.HasPrefix(value, prefix) {
+			result = append(result, value)
+		}
+	}
+	if authToken != "" {
+		result = append(result, prefix+authToken)
+	}
+	return result
 }

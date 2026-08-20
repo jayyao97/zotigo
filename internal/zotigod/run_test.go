@@ -31,6 +31,18 @@ func TestRunCreatesMissingConfigAndContinuesStartup(t *testing.T) {
 	}
 }
 
+func TestRunRejectsNonLoopbackAddressWithoutAuthToken(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	output := captureStderr(t, func() {
+		if code := Run([]string{"--addr", "0.0.0.0:8765"}); code != 1 {
+			t.Fatalf("Run exit code = %d, want authentication failure code 1", code)
+		}
+	})
+	if !strings.Contains(output, "non-loopback listen address requires --auth-token-file") {
+		t.Fatalf("startup output = %q", output)
+	}
+}
+
 func captureStderr(t *testing.T, run func()) string {
 	t.Helper()
 	reader, writer, err := os.Pipe()
