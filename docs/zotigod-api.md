@@ -1,8 +1,53 @@
 # zotigod HTTP API
 
-`zotigod` exposes a small localhost HTTP API for desktop clients. Desktop may
-cache responses locally, but zotigo remains the source of truth for session
-state and display history.
+`zotigod` exposes a small HTTP API for desktop clients. It listens on
+`127.0.0.1:8765` by default. Desktop may cache responses locally, but zotigo
+remains the source of truth for session state and display history.
+
+## Remote access and authentication
+
+A non-loopback listen address requires a bearer token file. Generate a token on
+the daemon host and start zotigod on a concrete private address:
+
+```sh
+umask 077
+openssl rand -base64 32 > ~/.zotigo/daemon.token
+zotigod \
+  --addr 10.20.30.40:8765 \
+  --auth-token-file ~/.zotigo/daemon.token
+```
+
+Desktop sends the token on every public request, including the SSE event
+stream:
+
+```http
+Authorization: Bearer <token>
+```
+
+`GET /health` is intentionally unauthenticated so clients can distinguish an
+unreachable daemon from an authentication failure. Its data includes
+`status: "ok"` and `protocol_version: "1"`. All other public endpoints return
+`401` with code `unauthorized` when the token is missing or incorrect.
+
+Plain HTTP authenticates the caller but does not hide tokens, prompts, or
+results from the network. Use a trusted private network, a VPN, or an HTTPS
+reverse proxy when the network is not trusted. Do not put the token in a query
+parameter.
+
+The daemon generates a separate worker token for each daemon process and passes
+it only to workers that it launches. `/internal/*` HTTP endpoints and the
+internal worker WebSocket accept that worker token, not the desktop token.
+
+When `--addr` uses a wildcard host, locally spawned workers dial loopback by
+default. `--worker-daemon-url` can override that callback independently of the
+listen address, for example:
+
+```sh
+zotigod \
+  --addr 0.0.0.0:8765 \
+  --auth-token-file ~/.zotigo/daemon.token \
+  --worker-daemon-url http://127.0.0.1:8765
+```
 
 ## Public endpoints
 
@@ -58,7 +103,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 }
 ```
 
-Current error codes include `invalid_request`, `not_found`,
+Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
 `service_unavailable`, and `internal_error`.
