@@ -91,6 +91,19 @@ func (m *Manager) ListByDir(workDir string) ([]Metadata, error) {
 	})
 }
 
+// ListAll returns all sessions sorted by UpdatedAt descending.
+func (m *Manager) ListAll() ([]Metadata, error) {
+	return m.store.List(context.Background(), ListFilter{OrderBy: OrderByUpdatedDesc})
+}
+
+// RootDir returns the backing store root when the manager uses a FileStore.
+func (m *Manager) RootDir() string {
+	if store, ok := m.store.(*FileStore); ok {
+		return store.RootDir()
+	}
+	return ""
+}
+
 // Load reads a session from the store.
 func (m *Manager) Load(id string) (*Session, error) {
 	sess, err := m.store.Get(context.Background(), id)

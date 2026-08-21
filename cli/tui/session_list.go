@@ -31,6 +31,17 @@ type SessionSelectionModel struct {
 	statusMsg     string
 	ChosenID      string
 	quitting      bool
+	descriptions  map[string]string
+	disabled      map[string]string
+	readOnly      bool
+}
+
+func NewGlobalSessionSelectionModel(sessions []session.Metadata, mgr *session.Manager, descriptions, disabled map[string]string) SessionSelectionModel {
+	model := NewSessionSelectionModel(sessions, mgr)
+	model.descriptions = descriptions
+	model.disabled = disabled
+	model.readOnly = true
+	return model
 }
 
 func NewSessionSelectionModel(sessions []session.Metadata, mgr *session.Manager) SessionSelectionModel {
@@ -133,7 +144,7 @@ func (m SessionSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "d":
-			if len(m.sessions) == 0 {
+			if len(m.sessions) == 0 || m.readOnly {
 				return m, nil
 			}
 			if m.manager.IsLocked(m.sessions[m.cursor].ID) {
@@ -183,6 +194,10 @@ func (m SessionSelectionModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			selected := m.sessions[m.cursor]
+			if reason := m.disabled[selected.ID]; reason != "" {
+				m.statusMsg = reason
+				return m, nil
+			}
 			// Check lock again just in case
 			if m.manager.IsLocked(selected.ID) {
 				// Flash message or ignore? For now ignore.
@@ -238,6 +253,9 @@ func (m SessionSelectionModel) viewString() string {
 		}
 
 		prompt := sessionPromptPreview(sess.LastPrompt, m.previewWidth())
+		if description := m.descriptions[sess.ID]; description != "" {
+			prompt = description + " · " + prompt
+		}
 
 		line := fmt.Sprintf("%s [%s] %s", ts, sess.ID[5:13], prompt)
 
@@ -249,6 +267,10 @@ func (m SessionSelectionModel) viewString() string {
 			} else {
 				style = style.Foreground(lipgloss.Color("240")) // Dim locked items
 			}
+		}
+		if reason := m.disabled[sess.ID]; reason != "" {
+			line += " [UNAVAILABLE: " + reason + "]"
+			style = style.Foreground(lipgloss.Color("240"))
 		}
 
 		s += style.Render(fmt.Sprintf("%s%s", cursor, line)) + "\n"
