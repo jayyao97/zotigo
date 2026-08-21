@@ -22,6 +22,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
 
 const defaultAddr = "127.0.0.1:8765"
@@ -277,16 +278,20 @@ type handler struct {
 	launcher             workerLauncher
 	workerConnectTimeout time.Duration
 	sessionOps           *sessionOperationLocks
+	workspaceOps         *sessionOperationLocks
 	approvalOps          *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
 	events               *displayEventBroker
+	catalog              *zotigoworkspace.Store
+	catalogErr           error
 }
 
 type createSessionRequest struct {
 	WorkingDirectory string               `json:"working_directory,omitempty"`
 	Profile          string               `json:"profile,omitempty"`
 	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy,omitempty"`
+	WorkspaceID      string               `json:"workspace_id,omitempty"`
 }
 
 type finishSessionRequest struct {
@@ -421,11 +426,14 @@ type handlerOptions struct {
 	workerConnectTimeout time.Duration
 	store                zotigosession.Store
 	sessionOps           *sessionOperationLocks
+	workspaceOps         *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
 	events               *displayEventBroker
 	publicAuthToken      string
 	workerAuthToken      string
+	catalog              *zotigoworkspace.Store
+	catalogErr           error
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -435,6 +443,9 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 		return newHandler(newSessionRegistry(), failingDisplayItemSource{err: err}, opts)
 	}
 	opts.store = store
+	catalog, catalogErr := zotigoworkspace.Open(store.RootDir())
+	opts.catalog = catalog
+	opts.catalogErr = catalogErr
 	items := storedDisplayItemSource{store: store}
 	return newHandler(newSessionRegistry(), items, opts)
 }
@@ -505,6 +516,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.sessionOps == nil {
 		options.sessionOps = newSessionOperationLocks()
 	}
+	if options.workspaceOps == nil {
+		options.workspaceOps = newSessionOperationLocks()
+	}
 	if options.titleSuggestion == nil {
 		options.titleSuggestion = generateTitleSuggestion
 	}
@@ -528,10 +542,13 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		launcher:             options.launcher,
 		workerConnectTimeout: options.workerConnectTimeout,
 		sessionOps:           options.sessionOps,
+		workspaceOps:         options.workspaceOps,
 		approvalOps:          newSessionOperationLocks(),
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 		events:               options.events,
+		catalog:              options.catalog,
+		catalogErr:           options.catalogErr,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	handler.workers.SetMessageHandler(func(sessionID string, msg workerMessage) {
@@ -568,6 +585,11 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
+	mux.HandleFunc("/projects", handler.handleProjects)
+	mux.HandleFunc("/projects/", handler.handleProject)
+	mux.HandleFunc("/workspaces/", handler.handleWorkspace)
+	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
+	mux.HandleFunc("/catalog/sessions/", handler.handleCatalogSession)
 	mux.HandleFunc("/sessions", handler.handleSessions)
 	mux.HandleFunc("/sessions/", handler.handleSession)
 	mux.HandleFunc("/internal/sessions/", handler.handleInternalSession)
@@ -603,10 +625,36 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 			return
 		}
-		workingDirectory, err := resolveWorkingDirectory(req.WorkingDirectory)
-		if err != nil {
-			writeAPIError(w, http.StatusBadRequest, err.Error())
-			return
+		workingDirectory := ""
+		var assignedWorkspaceID string
+		if req.WorkspaceID != "" {
+			if !h.requireCatalog(w) {
+				return
+			}
+			unlockWorkspace := h.workspaceOps.lock(req.WorkspaceID)
+			defer unlockWorkspace()
+			workspace, workspaceErr := h.catalog.GetWorkspace(r.Context(), req.WorkspaceID)
+			if workspaceErr != nil {
+				h.writeCatalogError(w, workspaceErr)
+				return
+			}
+			if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
+				writeAPIError(w, http.StatusConflict, "workspace is not ready")
+				return
+			}
+			if req.WorkingDirectory != "" && filepath.Clean(req.WorkingDirectory) != filepath.Clean(workspace.RootPath) {
+				writeAPIError(w, http.StatusBadRequest, "working_directory must match the selected workspace")
+				return
+			}
+			workingDirectory = workspace.RootPath
+			assignedWorkspaceID = workspace.ID
+		} else {
+			var err error
+			workingDirectory, err = resolveWorkingDirectory(req.WorkingDirectory)
+			if err != nil {
+				writeAPIError(w, http.StatusBadRequest, err.Error())
+				return
+			}
 		}
 		approvalPolicy, err := normalizeSessionApprovalPolicy(req.ApprovalPolicy, true)
 		if err != nil {
@@ -632,6 +680,15 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 		if err := h.persistSession(r.Context(), session); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
+		}
+		if assignedWorkspaceID != "" {
+			if _, err := h.catalog.AssignSession(r.Context(), session.ID, assignedWorkspaceID); err != nil {
+				if h.store != nil {
+					_ = h.store.Delete(r.Context(), session.ID)
+				}
+				h.writeCatalogError(w, err)
+				return
+			}
 		}
 		session = h.registry.Add(session)
 		writeAPIJSON(w, http.StatusCreated, session)
@@ -785,6 +842,16 @@ func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
 		h.handleSessionSteering(w, r, id)
 	case "title-suggestion":
 		h.handleSessionTitleSuggestion(w, r, id)
+	case "title":
+		h.handleSessionOrganizationTitle(w, r, id)
+	case "pinned":
+		h.handleSessionOrganizationPinned(w, r, id)
+	case "position":
+		h.handleSessionOrganizationPosition(w, r, id)
+	case "archive":
+		h.handleSessionOrganizationArchive(w, r, id, true)
+	case "unarchive":
+		h.handleSessionOrganizationArchive(w, r, id, false)
 	default:
 		if imageName, ok := strings.CutPrefix(action, "images/"); ok {
 			h.handleSessionImage(w, r, id, imageName)
@@ -865,10 +932,30 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 	writeAPIJSON(w, http.StatusOK, session)
 }
 
-var errWorkerConnectTimeout = errors.New("worker did not connect before timeout")
+var (
+	errWorkerConnectTimeout = errors.New("worker did not connect before timeout")
+	errSessionUnavailable   = errors.New("session is unavailable")
+)
 
 func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session, error) {
+	unlockWorkspace := func() {}
+	if h.catalog != nil {
+		organization, err := h.catalog.GetSessionOrganization(ctx, id)
+		if err == nil && organization.WorkspaceID != nil {
+			unlockWorkspace = h.workspaceOps.lock(*organization.WorkspaceID)
+		} else if err != nil && !errors.Is(err, zotigoworkspace.ErrNotFound) {
+			return Session{}, fmt.Errorf("load session organization: %w", err)
+		}
+	}
+	defer unlockWorkspace()
 	unlock := h.sessionOps.lock(id)
+	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
+		unlock()
+		return Session{}, fmt.Errorf("check session availability: %w", err)
+	} else if unavailable != "" {
+		unlock()
+		return Session{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
+	}
 	session, launched, err := h.ensureSessionStartedLocked(ctx, id)
 	unlock()
 	if err != nil {
@@ -1061,6 +1148,8 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, errInvalidSessionTransition):
 		writeAPIError(w, http.StatusConflict, "invalid session state transition")
+	case errors.Is(err, errSessionUnavailable):
+		writeAPIError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errWorkerConnectTimeout):
 		writeAPIError(w, http.StatusServiceUnavailable, errWorkerConnectTimeout.Error())
 	case errors.Is(err, errWorkerDisconnectedBeforeReady):

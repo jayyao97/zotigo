@@ -53,6 +53,7 @@ func Run(args []string) int {
 
 	resumeFlag := fs.Bool("resume", false, "Resume a previous session")
 	rFlag := fs.Bool("r", false, "Resume a previous session (shorthand)")
+	resumeAllFlag := fs.Bool("resume-all", false, "Resume a session across all projects")
 	bypassPermissions := fs.Bool(
 		"dangerously-skip-permissions",
 		false,
@@ -61,7 +62,7 @@ func Run(args []string) int {
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
-	doResume := *resumeFlag || *rFlag
+	doResume := *resumeFlag || *rFlag || *resumeAllFlag
 	approvalPolicy := agent.ApprovalPolicyAuto
 	if *bypassPermissions {
 		approvalPolicy = agent.ApprovalPolicyBypass
@@ -79,18 +80,6 @@ func Run(args []string) int {
 		return 0
 	}
 
-	cfg, err := cm.Load()
-	if err != nil {
-		fmt.Println("Error loading config:", err)
-		return 1
-	}
-
-	profileName, profile, err := cfg.ResolveProfile("")
-	if err != nil {
-		fmt.Println("Error resolving profile:", err)
-		return 1
-	}
-
 	sessMgr, err := session.NewManager()
 	if err != nil {
 		fmt.Printf("Error initializing session manager: %v\n", err)
@@ -101,13 +90,22 @@ func Run(args []string) int {
 	var currentSession *session.Session
 
 	if doResume {
-		sessions, err := sessMgr.ListByDir(cwd)
+		var sessions []session.Metadata
+		var descriptions, disabled map[string]string
+		if *resumeAllFlag {
+			sessions, descriptions, disabled, err = loadGlobalResumeSessions(sessMgr)
+		} else {
+			sessions, err = sessMgr.ListByDir(cwd)
+		}
 		if err != nil {
 			fmt.Printf("Error listing sessions: %v\n", err)
 			return 1
 		}
 
 		selModel := tui.NewSessionSelectionModel(sessions, sessMgr)
+		if *resumeAllFlag {
+			selModel = tui.NewGlobalSessionSelectionModel(sessions, sessMgr, descriptions, disabled)
+		}
 		p := tea.NewProgram(selModel)
 		m, err := p.Run()
 		if err != nil {
@@ -126,12 +124,24 @@ func Run(args []string) int {
 			fmt.Printf("Error loading session: %v\n", err)
 			return 1
 		}
+		cwd = currentSession.WorkingDirectory
 	} else {
 		currentSession, err = sessMgr.CreateNew(cwd)
 		if err != nil {
 			fmt.Printf("Error creating session: %v\n", err)
 			return 1
 		}
+	}
+
+	cfg, err := cm.LoadForDir(cwd)
+	if err != nil {
+		fmt.Println("Error loading config:", err)
+		return 1
+	}
+	profileName, profile, err := cfg.ResolveProfile(currentSession.ProfileName)
+	if err != nil {
+		fmt.Println("Error resolving profile:", err)
+		return 1
 	}
 
 	if err := sessMgr.Lock(currentSession.ID); err != nil {
