@@ -51,6 +51,40 @@ func TestStorePersistsCatalogIndependentlyFromSessionIndex(t *testing.T) {
 	}
 }
 
+func TestRenameProject(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, "Original")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renamed, err := store.RenameProject(ctx, project.ID, "  Renamed  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.ID != project.ID || renamed.Name != "Renamed" {
+		t.Fatalf("renamed project = %+v", renamed)
+	}
+	if _, err := store.RenameProject(ctx, project.ID, "  "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("blank name error = %v", err)
+	}
+	if _, err := store.RenameProject(ctx, "missing", "Renamed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing project error = %v", err)
+	}
+	got, err := store.GetProject(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Name != "Renamed" {
+		t.Fatalf("stored project name = %q", got.Name)
+	}
+}
+
 func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {

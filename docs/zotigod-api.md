@@ -53,6 +53,8 @@ zotigod \
 
 - `GET /health`
 - `GET /config/profiles`
+- `POST /sources/inspect`
+- `PUT /projects/{id}`
 - `POST /sessions`
 - `GET /sessions`
 - `GET /sessions/{id}`

@@ -66,6 +66,15 @@ func (h *handler) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (h *handler) handleSourceInspection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	h.inspectSource(w, r)
+}
+
 func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 	if !h.requireCatalog(w) {
 		return
@@ -77,6 +86,18 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 	}
 	projectID := parts[0]
 	switch {
+	case len(parts) == 1 && r.Method == http.MethodPut:
+		var request createProjectRequest
+		if err := readRequiredJSON(r, &request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid project rename request")
+			return
+		}
+		project, err := h.catalog.RenameProject(r.Context(), projectID, request.Name)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, project)
 	case len(parts) == 1 && r.Method == http.MethodGet:
 		project, err := h.catalog.GetProject(r.Context(), projectID)
 		if err != nil {
@@ -269,6 +290,10 @@ func (h *handler) inspectProjectSource(w http.ResponseWriter, r *http.Request, p
 		h.writeCatalogError(w, err)
 		return
 	}
+	h.inspectSource(w, r)
+}
+
+func (h *handler) inspectSource(w http.ResponseWriter, r *http.Request) {
 	var request inspectSourceRequest
 	if err := readRequiredJSON(r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid source inspection request")
