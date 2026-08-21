@@ -134,6 +134,9 @@ func (s *Store) UnarchiveWorkspace(ctx context.Context, workspaceID string) (Wor
 	if err != nil {
 		return Workspace{}, err
 	}
+	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
+		return Workspace{}, err
+	}
 	if workspace.Status == WorkspaceStatusReady {
 		return workspace, nil
 	}

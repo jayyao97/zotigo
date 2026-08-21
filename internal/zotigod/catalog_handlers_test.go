@@ -1,7 +1,10 @@
 package zotigod
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -116,6 +119,62 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	if workspaceDetailRec.Code != http.StatusOK {
 		t.Fatalf("workspace detail status = %d: %s", workspaceDetailRec.Code, workspaceDetailRec.Body.String())
 	}
+
+	archivePreview := requestCatalog(t, handler, http.MethodGet, "/projects/"+project.ID+"/archive-preview", "")
+	if archivePreview.Code != http.StatusOK {
+		t.Fatalf("project archive preview status = %d: %s", archivePreview.Code, archivePreview.Body.String())
+	}
+	archiveProject := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/archive", "")
+	if archiveProject.Code != http.StatusOK {
+		t.Fatalf("project archive status = %d: %s", archiveProject.Code, archiveProject.Body.String())
+	}
+	activeProjects := requestCatalog(t, handler, http.MethodGet, "/projects", "")
+	var activeList struct {
+		Projects []zotigoworkspace.Project `json:"projects"`
+	}
+	decodeCatalogData(t, activeProjects, &activeList)
+	if len(activeList.Projects) != 0 {
+		t.Fatalf("active projects = %+v", activeList.Projects)
+	}
+	allProjects := requestCatalog(t, handler, http.MethodGet, "/projects?include_archived=true", "")
+	var allList struct {
+		Projects []zotigoworkspace.Project `json:"projects"`
+	}
+	decodeCatalogData(t, allProjects, &allList)
+	if len(allList.Projects) != 1 || allList.Projects[0].Status != zotigoworkspace.ProjectStatusArchived {
+		t.Fatalf("all projects = %+v", allList.Projects)
+	}
+	blockedWorkspaceRestore := requestCatalog(t, handler, http.MethodPost, "/workspaces/"+workspace.ID+"/unarchive", "")
+	if blockedWorkspaceRestore.Code != http.StatusConflict {
+		t.Fatalf("workspace restore under archived project = %d: %s", blockedWorkspaceRestore.Code, blockedWorkspaceRestore.Body.String())
+	}
+	restoreProject := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/unarchive", "")
+	if restoreProject.Code != http.StatusOK {
+		t.Fatalf("project unarchive status = %d: %s", restoreProject.Code, restoreProject.Body.String())
+	}
+	restoreWorkspace := requestCatalog(t, handler, http.MethodPost, "/workspaces/"+workspace.ID+"/unarchive", "")
+	if restoreWorkspace.Code != http.StatusOK {
+		t.Fatalf("workspace unarchive status = %d: %s", restoreWorkspace.Code, restoreWorkspace.Body.String())
+	}
+	deletePreview := requestCatalog(t, handler, http.MethodGet, "/projects/"+project.ID+"/delete-preview", "")
+	if deletePreview.Code != http.StatusOK {
+		t.Fatalf("project delete preview status = %d: %s", deletePreview.Code, deletePreview.Body.String())
+	}
+	wrongDelete := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/delete", `{"confirmation":"wrong"}`)
+	if wrongDelete.Code != http.StatusBadRequest {
+		t.Fatalf("project delete confirmation status = %d: %s", wrongDelete.Code, wrongDelete.Body.String())
+	}
+	deleteProject := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/delete", `{"confirmation":"Renamed Project"}`)
+	if deleteProject.Code != http.StatusOK {
+		t.Fatalf("project delete status = %d: %s", deleteProject.Code, deleteProject.Body.String())
+	}
+	deletedDetail := requestCatalog(t, handler, http.MethodGet, "/projects/"+project.ID, "")
+	if deletedDetail.Code != http.StatusNotFound {
+		t.Fatalf("deleted project detail status = %d: %s", deletedDetail.Code, deletedDetail.Body.String())
+	}
+	if _, err := os.Stat(folder); err != nil {
+		t.Fatalf("external source directory was removed: %v", err)
+	}
 }
 
 func TestSourceInspectionDoesNotRequireProject(t *testing.T) {
@@ -216,6 +275,23 @@ func TestCatalogRoutesUsePublicAuthentication(t *testing.T) {
 	handler.ServeHTTP(authorized, request)
 	if authorized.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
+func TestCatalogInternalErrorIsLoggedWithoutExposingDetails(t *testing.T) {
+	var logs bytes.Buffer
+	handler := &handler{logger: log.New(&logs, "", 0)}
+	recorder := httptest.NewRecorder()
+	handler.writeCatalogError(recorder, errors.New("database detail"))
+
+	if recorder.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusInternalServerError)
+	}
+	if strings.Contains(recorder.Body.String(), "database detail") {
+		t.Fatalf("response exposed internal error: %s", recorder.Body.String())
+	}
+	if !strings.Contains(logs.String(), "database detail") {
+		t.Fatalf("log omitted internal error: %q", logs.String())
 	}
 }
 

@@ -28,12 +28,13 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 	project := Project{
 		ID:        "project_" + uuid.NewString(),
 		Name:      name,
+		Status:    ProjectStatusActive,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO projects(id, name, created_at, updated_at) VALUES(?, ?, ?, ?)
-	`, project.ID, project.Name, unixMillis(now), unixMillis(now))
+		INSERT INTO projects(id, name, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?)
+	`, project.ID, project.Name, project.Status, unixMillis(now), unixMillis(now))
 	if err != nil {
 		return Project{}, fmt.Errorf("create project: %w", err)
 	}
@@ -44,6 +45,13 @@ func (s *Store) RenameProject(ctx context.Context, id string, name string) (Proj
 	name, err := normalizeProjectName(name)
 	if err != nil {
 		return Project{}, err
+	}
+	project, err := s.GetProject(ctx, id)
+	if err != nil {
+		return Project{}, err
+	}
+	if project.Status == ProjectStatusDeleting {
+		return Project{}, fmt.Errorf("%w: project is deleting", ErrConflict)
 	}
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `
@@ -72,15 +80,23 @@ func normalizeProjectName(name string) (string, error) {
 
 func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {
 	return scanProject(s.db.QueryRowContext(ctx, `
-		SELECT id, name, created_at, updated_at FROM projects WHERE id = ?
+		SELECT id, name, status, archived_at, created_at, updated_at FROM projects WHERE id = ?
 	`, id))
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, name, created_at, updated_at
-		FROM projects ORDER BY updated_at DESC, id ASC
-	`)
+	return s.ListProjectsIncludingArchived(ctx, false)
+}
+
+func (s *Store) ListProjectsIncludingArchived(ctx context.Context, includeArchived bool) ([]Project, error) {
+	query := `
+		SELECT id, name, status, archived_at, created_at, updated_at
+		FROM projects`
+	if !includeArchived {
+		query += ` WHERE status = 'active'`
+	}
+	query += ` ORDER BY updated_at DESC, id ASC`
+	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}
@@ -102,6 +118,9 @@ func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
 
 func (s *Store) AddSource(ctx context.Context, projectID string, input SourceInput) (Source, error) {
 	if err := validateSourceInput(input); err != nil {
+		return Source{}, err
+	}
+	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return Source{}, err
 	}
 	now := time.Now().UTC()
@@ -168,6 +187,9 @@ func (s *Store) ListSources(ctx context.Context, projectID string) ([]Source, er
 }
 
 func (s *Store) DeleteSource(ctx context.Context, projectID string, sourceID string) error {
+	if err := s.requireActiveProject(ctx, projectID); err != nil {
+		return err
+	}
 	var references int
 	if err := s.db.QueryRowContext(ctx, `
 		SELECT
@@ -201,6 +223,9 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > 200 {
 		return Workspace{}, ErrInvalid
+	}
+	if err := s.requireActiveProject(ctx, projectID); err != nil {
+		return Workspace{}, err
 	}
 	id := "workspace_" + uuid.NewString()
 	rootPath := filepath.Join(s.rootDir, "projects", projectID, "workspaces", id)
@@ -505,13 +530,26 @@ type scanner interface {
 
 func scanProject(row scanner) (Project, error) {
 	var project Project
+	var archivedAt sql.NullInt64
 	var createdAt, updatedAt int64
-	if err := row.Scan(&project.ID, &project.Name, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&project.ID, &project.Name, &project.Status, &archivedAt, &createdAt, &updatedAt); err != nil {
 		return Project{}, scanError("project", err)
 	}
+	project.ArchivedAt = nullableTime(archivedAt)
 	project.CreatedAt = fromUnixMillis(createdAt)
 	project.UpdatedAt = fromUnixMillis(updatedAt)
 	return project, nil
+}
+
+func (s *Store) requireActiveProject(ctx context.Context, projectID string) error {
+	project, err := s.GetProject(ctx, projectID)
+	if err != nil {
+		return err
+	}
+	if project.Status != ProjectStatusActive {
+		return fmt.Errorf("%w: project is %s", ErrConflict, project.Status)
+	}
+	return nil
 }
 
 func scanSource(row scanner) (Source, error) {

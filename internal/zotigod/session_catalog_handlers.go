@@ -351,6 +351,16 @@ func (h *handler) sessionAvailability(ctx context.Context, runtime *Session, org
 			}
 			return "", err
 		}
+		project, err := h.catalog.GetProject(ctx, workspace.ProjectID)
+		if err != nil {
+			if errors.Is(err, zotigoworkspace.ErrNotFound) {
+				return "workspace_not_ready", nil
+			}
+			return "", err
+		}
+		if project.Status != zotigoworkspace.ProjectStatusActive {
+			return "workspace_not_ready", nil
+		}
 		if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
 			return "workspace_not_ready", nil
 		}

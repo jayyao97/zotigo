@@ -33,6 +33,9 @@ func (s *Store) ProvisionWorkspace(ctx context.Context, workspaceID string) (Wor
 	if err != nil {
 		return Workspace{}, err
 	}
+	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
+		return Workspace{}, err
+	}
 	if workspace.Status == WorkspaceStatusReady {
 		if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
 			return Workspace{}, err

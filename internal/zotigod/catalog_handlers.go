@@ -3,7 +3,9 @@ package zotigod
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
@@ -27,7 +29,7 @@ type createWorkspaceRequest struct {
 	Sources []zotigoworkspace.WorkspaceSourceInput `json:"sources,omitempty"`
 }
 
-type deleteWorkspaceRequest struct {
+type deleteCatalogRequest struct {
 	Confirmation string `json:"confirmation"`
 }
 
@@ -42,7 +44,7 @@ func (h *handler) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		projects, err := h.catalog.ListProjects(r.Context())
+		projects, err := h.catalog.ListProjectsIncludingArchived(r.Context(), r.URL.Query().Get("include_archived") == "true")
 		if err != nil {
 			h.writeCatalogError(w, err)
 			return
@@ -87,6 +89,8 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 	projectID := parts[0]
 	switch {
 	case len(parts) == 1 && r.Method == http.MethodPut:
+		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+		defer unlockProject()
 		var request createProjectRequest
 		if err := readRequiredJSON(r, &request); err != nil {
 			writeAPIError(w, http.StatusBadRequest, "invalid project rename request")
@@ -110,11 +114,76 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPIJSON(w, http.StatusOK, projectDetail{Project: project, Sources: sources})
+	case len(parts) == 2 && parts[1] == "archive-preview" && r.Method == http.MethodGet:
+		impact, err := h.catalog.PreviewProjectArchive(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, impact)
+	case len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost:
+		release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		defer release()
+		if blocked {
+			writeAPIError(w, http.StatusConflict, "project has active sessions")
+			return
+		}
+		project, err := h.catalog.ArchiveProject(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, project)
+	case len(parts) == 2 && parts[1] == "unarchive" && r.Method == http.MethodPost:
+		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+		defer unlockProject()
+		project, err := h.catalog.UnarchiveProject(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, project)
+	case len(parts) == 2 && parts[1] == "delete-preview" && r.Method == http.MethodGet:
+		impact, err := h.catalog.PreviewProjectDelete(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, impact)
+	case len(parts) == 2 && parts[1] == "delete" && r.Method == http.MethodPost:
+		release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		defer release()
+		if blocked {
+			writeAPIError(w, http.StatusConflict, "project has active sessions")
+			return
+		}
+		var request deleteCatalogRequest
+		if err := readRequiredJSON(r, &request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid project delete request")
+			return
+		}
+		if err := h.catalog.DeleteProject(r.Context(), projectID, request.Confirmation); err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, map[string]string{"project_id": projectID, "status": "deleted"})
 	case len(parts) == 3 && parts[1] == "sources" && parts[2] == "inspect" && r.Method == http.MethodPost:
 		h.inspectProjectSource(w, r, projectID)
 	case len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodPost:
+		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+		defer unlockProject()
 		h.addProjectSource(w, r, projectID)
 	case len(parts) == 3 && parts[1] == "sources" && r.Method == http.MethodDelete:
+		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+		defer unlockProject()
 		if err := h.catalog.DeleteSource(r.Context(), projectID, parts[2]); err != nil {
 			h.writeCatalogError(w, err)
 			return
@@ -129,6 +198,8 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 		}
 		writeAPIJSON(w, http.StatusOK, map[string][]zotigoworkspace.Workspace{"workspaces": workspaces})
 	case len(parts) == 2 && parts[1] == "workspaces" && r.Method == http.MethodPost:
+		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+		defer unlockProject()
 		var request createWorkspaceRequest
 		if err := readRequiredJSON(r, &request); err != nil {
 			writeAPIError(w, http.StatusBadRequest, "invalid workspace request")
@@ -186,8 +257,12 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "unarchive" && r.Method == http.MethodPost {
-		unlockWorkspace := h.workspaceOps.lock(parts[0])
-		defer unlockWorkspace()
+		_, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		defer release()
 		workspace, err := h.catalog.UnarchiveWorkspace(r.Context(), parts[0])
 		if err != nil {
 			h.writeCatalogError(w, err)
@@ -218,7 +293,7 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusConflict, "workspace has active sessions")
 			return
 		}
-		var request deleteWorkspaceRequest
+		var request deleteCatalogRequest
 		if err := readRequiredJSON(r, &request); err != nil {
 			writeAPIError(w, http.StatusBadRequest, "invalid workspace delete request")
 			return
@@ -231,8 +306,12 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
-		unlockWorkspace := h.workspaceOps.lock(parts[0])
-		defer unlockWorkspace()
+		_, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		defer release()
 		workspace, err := h.catalog.ProvisionWorkspace(r.Context(), parts[0])
 		if err != nil {
 			h.writeCatalogError(w, err)
@@ -251,6 +330,88 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, workspace)
+}
+
+func projectOperationLockKey(projectID string) string {
+	return "project:" + projectID
+}
+
+func (h *handler) lockWorkspaceForUse(ctx context.Context, workspaceID string) (zotigoworkspace.Workspace, func(), error) {
+	workspace, err := h.catalog.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return zotigoworkspace.Workspace{}, func() {}, err
+	}
+	unlocks := []func(){
+		h.workspaceOps.lock(projectOperationLockKey(workspace.ProjectID)),
+		h.workspaceOps.lock(workspace.ID),
+	}
+	release := func() {
+		for index := len(unlocks) - 1; index >= 0; index-- {
+			unlocks[index]()
+		}
+	}
+	workspace, err = h.catalog.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		release()
+		return zotigoworkspace.Workspace{}, func() {}, err
+	}
+	project, err := h.catalog.GetProject(ctx, workspace.ProjectID)
+	if err != nil {
+		release()
+		return zotigoworkspace.Workspace{}, func() {}, err
+	}
+	if project.Status != zotigoworkspace.ProjectStatusActive {
+		release()
+		return zotigoworkspace.Workspace{}, func() {}, fmt.Errorf("%w: project is %s", zotigoworkspace.ErrConflict, project.Status)
+	}
+	return workspace, release, nil
+}
+
+func (h *handler) lockProjectLifecycle(ctx context.Context, projectID string) (func(), bool, error) {
+	unlocks := []func(){h.workspaceOps.lock(projectOperationLockKey(projectID))}
+	release := func() {
+		for index := len(unlocks) - 1; index >= 0; index-- {
+			unlocks[index]()
+		}
+	}
+	workspaces, err := h.catalog.ListWorkspaces(ctx, projectID, true)
+	if err != nil {
+		release()
+		return func() {}, false, err
+	}
+	sort.Slice(workspaces, func(left int, right int) bool { return workspaces[left].ID < workspaces[right].ID })
+	for _, workspace := range workspaces {
+		unlocks = append(unlocks, h.workspaceOps.lock(workspace.ID))
+	}
+	sessionIDs := make([]string, 0)
+	for _, workspace := range workspaces {
+		ids, err := h.catalog.WorkspaceSessionIDs(ctx, workspace.ID)
+		if err != nil {
+			release()
+			return func() {}, false, err
+		}
+		sessionIDs = append(sessionIDs, ids...)
+	}
+	sort.Strings(sessionIDs)
+	for _, sessionID := range sessionIDs {
+		unlocks = append(unlocks, h.sessionOps.lock(sessionID))
+	}
+	for _, sessionID := range sessionIDs {
+		if session, ok := h.registry.Get(sessionID); ok && sessionIsActive(session) {
+			return release, true, nil
+		}
+		if h.store != nil {
+			locked, err := h.store.IsLocked(ctx, sessionID)
+			if err != nil {
+				release()
+				return func() {}, false, err
+			}
+			if locked {
+				return release, true, nil
+			}
+		}
+	}
+	return release, false, nil
 }
 
 func (h *handler) lockWorkspaceSessions(ctx context.Context, workspaceID string) (func(), bool, error) {
@@ -360,6 +521,9 @@ func (h *handler) writeCatalogError(w http.ResponseWriter, err error) {
 	case errors.Is(err, zotigoworkspace.ErrConflict), errors.Is(err, zotigoworkspace.ErrSourceInUse):
 		writeAPIError(w, http.StatusConflict, err.Error())
 	default:
+		if h.logger != nil {
+			h.logger.Printf("Workspace catalog operation failed: %v", err)
+		}
 		writeAPIError(w, http.StatusInternalServerError, "workspace catalog operation failed")
 	}
 }

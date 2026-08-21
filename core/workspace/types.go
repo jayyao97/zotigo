@@ -29,11 +29,22 @@ const (
 	WorkspaceStatusDeleted      WorkspaceStatus = "deleted"
 )
 
+type ProjectStatus string
+
+const (
+	ProjectStatusActive    ProjectStatus = "active"
+	ProjectStatusArchiving ProjectStatus = "archiving"
+	ProjectStatusArchived  ProjectStatus = "archived"
+	ProjectStatusDeleting  ProjectStatus = "deleting"
+)
+
 type Project struct {
-	ID        string    `json:"id"`
-	Name      string    `json:"name"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID         string        `json:"id"`
+	Name       string        `json:"name"`
+	Status     ProjectStatus `json:"status"`
+	ArchivedAt *time.Time    `json:"archived_at,omitempty"`
+	CreatedAt  time.Time     `json:"created_at"`
+	UpdatedAt  time.Time     `json:"updated_at"`
 }
 
 type Source struct {
@@ -118,6 +129,28 @@ type DeleteImpact struct {
 	PreservesSources    bool     `json:"preserves_sources"`
 	PreservesSessions   bool     `json:"preserves_runtime_sessions"`
 	PreservesRemoteRefs bool     `json:"preserves_remote_refs"`
+}
+
+type ProjectArchiveImpact struct {
+	ProjectID          string   `json:"project_id"`
+	WorkspaceIDs       []string `json:"workspace_ids"`
+	SessionIDs         []string `json:"session_ids"`
+	WorktreePaths      []string `json:"worktree_paths"`
+	DirtyWorktreePaths []string `json:"dirty_worktree_paths"`
+	RetainedBranches   []string `json:"retained_branches"`
+}
+
+type ProjectDeleteImpact struct {
+	ProjectID                  string   `json:"project_id"`
+	WorkspaceIDs               []string `json:"workspace_ids"`
+	SessionIDs                 []string `json:"session_ids"`
+	WorkspaceRoots             []string `json:"workspace_roots"`
+	WorktreePaths              []string `json:"worktree_paths"`
+	DirtyWorktreePaths         []string `json:"dirty_worktree_paths"`
+	LocalBranches              []string `json:"local_branches"`
+	PreservesSourceDirectories bool     `json:"preserves_source_directories"`
+	PreservesSessions          bool     `json:"preserves_runtime_sessions"`
+	PreservesRemoteRefs        bool     `json:"preserves_remote_refs"`
 }
 
 type SessionOrganization struct {
