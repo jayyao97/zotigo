@@ -1,6 +1,6 @@
 # Project / Workspace Catalog 设计与交付记录
 
-Status: implemented, PR open
+Status: catalog implemented; Project lifecycle extension in progress
 Branch: `feat/project-workspace-catalog`
 Repository: `zotigo`
 Pull request: [#53 feat: add daemon-owned project and workspace catalog](https://github.com/jayyao97/zotigo/pull/53)
@@ -52,6 +52,10 @@ core/session (runtime history)     core/workspace (catalog + filesystem/Git)
 - SQL、Git、目录创建、复制、归档和删除由 `core/workspace` 负责。
 - handler 使用按 Workspace ID 和 Session ID 的进程内锁，避免 lifecycle 与活跃 Session
   操作并发。
+- Project lifecycle 使用 Project-scoped mutation lock。锁顺序固定为 Project ID、排序后的
+  Workspace ID、排序后的 Session ID；Source/Workspace 创建、Workspace retry/unarchive 和
+  assigned Session 创建也必须经过对应 Project/Workspace 锁，避免 archived/deleting Project
+  出现新的可用子资源。
 - `core/workspace.Store` 使用一个 `operationMu` 串行化 provision/archive/unarchive/delete
   的文件和 Git 副作用。v1 操作量较小，优先选择简单、保守的全局串行，而不是 keyed lock。
 - catalog 写入使用 SQLite 事务；`zotigod` 是唯一 writer，CLI 仅以只读模式打开。
@@ -64,9 +68,13 @@ catalog 位于 `<zotigo-root>/catalog.sqlite`，不复用可重建的
 
 ### Project
 
-- 字段为 `id`, `name`, `created_at`, `updated_at`。
+- 字段为 `id`, `name`, `status`, `archived_at`, `created_at`, `updated_at`。
+- 状态为 `active / archiving / archived / deleting`；Project permanent delete 成功后物理
+  删除记录，不保留 `deleted` tombstone。
 - 受管目录固定为 `<zotigo-root>/projects/<project-id>`，名称不进入路径。
 - 一个 Project 可有零到多个 Source 和 Workspace。
+- 默认列表和 `status=active` 只返回 active Project；`status=archived` 只返回 archived
+  Project；`status=all` 返回全部状态，供失败恢复界面处理 archiving/deleting Project。
 
 ### Source
 
@@ -116,10 +124,19 @@ runtime Session，但删除组织关系；如果 runtime cwd 命中 deleted Work
 
 ## 5. 持久化与恢复
 
-`core/workspace` 使用独立 SQLite，启用 WAL、foreign keys 和 busy timeout。schema v1 包含：
+`core/workspace` 使用独立 SQLite，启用 WAL、foreign keys 和 busy timeout。Project lifecycle
+把 schema 从 v1 逐步升级到 v3：daemon writer 在同一事务中执行
+`ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+CHECK(status IN ('active', 'archiving', 'archived', 'deleting'))` 与
+`ALTER TABLE projects ADD COLUMN archived_at INTEGER`。v2 → v3 会检查
+`workspace_checkouts.owned_head`；缺列时在事务内重建该表，并用每行的 `base_commit` 回填，
+最后更新 `schema_meta.version`。新建库直接创建 v3 schema；迁移测试覆盖已有 v1 数据、完整 v2
+与缺少 `owned_head` 的 v2 数据。只读 CLI 不执行迁移，因此部署顺序为先启动一次新版 zotigod
+完成升级，再使用新版 CLI 读取；旧 CLI 遇到 v3 会按现有策略明确拒绝，而不尝试降级读取。
+v3 包含：
 
 - `schema_meta(version)`
-- `projects`
+- `projects(name, status, archived_at)`
 - `sources(project_id, kind, canonical_path, git_common_dir, git_object_format,
   folder_mode, source_key)`
 - `workspaces(project_id, title, root_path, owner_nonce, status, error,
@@ -201,14 +218,42 @@ Workspace/Source 匹配的 staging，不覆盖未知 final path。
   并把 Workspace 标记为 deleted tombstone。
 - 中断后只向前恢复，不尝试重建已经删除的内容。
 
+### Project lifecycle
+
+Project archive 先对当前未归档的 Workspace 执行与单 Workspace 相同的 archive preflight。
+dirty worktree、active/locked Session 或不允许归档的 Workspace 状态会在副作用开始前阻止
+操作。preflight 通过后先把 Project 标记为 `archiving`，从默认列表隐藏并禁止创建 Source、
+Workspace 或启动 assigned Session，再依次归档 Workspace。全部成功后写入 `archived_at`
+并切到 `archived`。如果进程中途退出，重试会跳过已归档 Workspace 并继续。
+
+Project unarchive 只把 Project 恢复为 `active` 并清除 `archived_at`，不会批量 unarchive
+Workspace。这样不会把 Project archive 之前已经归档的历史 Workspace 意外恢复；调用方在
+Project 重新可见后，通过现有 `POST /workspaces/{id}/unarchive` 按需逐个恢复 Workspace。
+
+Project permanent delete 使用独立 preview，并要求 `confirmation` 与当前 Project name 完全
+一致。preflight 通过后先把 Project 标记为 `deleting`，阻止一切新建和恢复操作，再对所有
+非 deleted Workspace 调用现有 permanent delete。接着只用非递归删除清理预期的空
+`workspaces/` 与 Project 目录；如果目录中存在未知文件则返回 conflict，不扩大删除范围，
+Project 继续保持 `deleting` 作为重试入口。只有文件系统检查和清理全部成功后，才在最后一个
+SQLite 事务中物理删除 Workspace tombstone、Source metadata 和 Project record。
+
+Project delete 保留外部 Git/folder Source 原目录、runtime Session 和 remote refs；Workspace
+organization 会随 Workspace delete 移除。删除不是跨文件系统和 SQLite 的原子事务，中断后
+`deleting` Project record 保持不可写，调用方用同一确认值重试并继续向前完成。
+
 ## 8. 公共 HTTP API
 
 API 复用现有 envelope、error 和 auth 约定。Project/Source/Workspace 路由：
 
 ```text
 POST   /projects
-GET    /projects
+GET    /projects?status=active|archived|all
 GET    /projects/{id}
+GET    /projects/{id}/archive-preview
+POST   /projects/{id}/archive
+POST   /projects/{id}/unarchive
+GET    /projects/{id}/delete-preview
+POST   /projects/{id}/delete
 POST   /projects/{id}/sources/inspect
 POST   /projects/{id}/sources
 DELETE /projects/{id}/sources/{source-id}

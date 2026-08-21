@@ -2,10 +2,12 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"testing"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -234,7 +236,7 @@ func TestCatalogPermissionsAndUnknownVersion(t *testing.T) {
 			t.Fatalf("catalog mode = %o, want 600", info.Mode().Perm())
 		}
 	}
-	if _, err := store.db.Exec(`UPDATE schema_meta SET version = 2 WHERE singleton = 1`); err != nil {
+	if _, err := store.db.Exec(`UPDATE schema_meta SET version = ? WHERE singleton = 1`, schemaVersion+1); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -242,6 +244,160 @@ func TestCatalogPermissionsAndUnknownVersion(t *testing.T) {
 	}
 	if _, err := Open(root); err == nil {
 		t.Fatal("opening a newer catalog version succeeded")
+	}
+}
+
+func TestMigratesV1ProjectLifecycleSchema(t *testing.T) {
+	root := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL CHECK(version > 0))`,
+		`INSERT INTO schema_meta(singleton, version) VALUES(1, 1)`,
+		`CREATE TABLE projects (id TEXT PRIMARY KEY, name TEXT NOT NULL, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL)`,
+		`INSERT INTO projects(id, name, created_at, updated_at) VALUES('project_v1', 'Existing', 0, 0)`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	project, err := store.GetProject(context.Background(), "project_v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.Status != ProjectStatusActive || project.ArchivedAt != nil {
+		t.Fatalf("migrated project = %+v", project)
+	}
+	if _, err := store.db.Exec(`UPDATE projects SET status = 'invalid' WHERE id = 'project_v1'`); err == nil {
+		t.Fatal("migrated schema accepted an invalid project status")
+	}
+}
+
+func TestMigratesV2CheckoutOwnershipSchema(t *testing.T) {
+	root := t.TempDir()
+	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_meta (singleton INTEGER PRIMARY KEY CHECK(singleton = 1), version INTEGER NOT NULL CHECK(version > 0))`,
+		`INSERT INTO schema_meta(singleton, version) VALUES(1, 2)`,
+		`CREATE TABLE projects (
+			id TEXT PRIMARY KEY, name TEXT NOT NULL, status TEXT NOT NULL,
+			archived_at INTEGER, created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE sources (
+			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+			canonical_path TEXT NOT NULL, git_common_dir TEXT, git_object_format TEXT,
+			folder_mode TEXT, source_key TEXT NOT NULL, created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL, UNIQUE(project_id, canonical_path),
+			UNIQUE(project_id, source_key)
+		)`,
+		`CREATE TABLE workspaces (
+			id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+			root_path TEXT NOT NULL UNIQUE, owner_nonce TEXT NOT NULL, status TEXT NOT NULL,
+			error TEXT, archived_at INTEGER, deleted_at INTEGER, created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE workspace_checkouts (
+			workspace_id TEXT NOT NULL, source_id TEXT NOT NULL, worktree_path TEXT NOT NULL UNIQUE,
+			base_ref TEXT NOT NULL, base_commit TEXT NOT NULL, branch_name TEXT NOT NULL,
+			status TEXT NOT NULL, error TEXT, PRIMARY KEY(workspace_id, source_id)
+		)`,
+		`INSERT INTO projects(id, name, status, created_at, updated_at)
+			VALUES('project_v2', 'Existing', 'active', 0, 0)`,
+		`INSERT INTO sources(
+			id, project_id, kind, canonical_path, git_common_dir, git_object_format,
+			source_key, created_at, updated_at
+		) VALUES('source_v2', 'project_v2', 'git', '/tmp/existing', '/tmp/existing/.git', 'sha1', 'existing', 0, 0)`,
+		`INSERT INTO workspaces(
+			id, project_id, title, root_path, owner_nonce, status, created_at, updated_at
+		) VALUES('workspace_v2', 'project_v2', 'Existing', '/tmp/workspace', 'nonce', 'ready', 0, 0)`,
+		`INSERT INTO workspace_checkouts(
+			workspace_id, source_id, worktree_path, base_ref, base_commit, branch_name, status
+		) VALUES('workspace_v2', 'source_v2', '/tmp/worktree', 'main', 'abc123', 'zotigo/existing', 'ready')`,
+	} {
+		if _, err := db.Exec(statement); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	var version int
+	var ownedHead string
+	if err := store.db.QueryRow(`SELECT version FROM schema_meta WHERE singleton = 1`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != schemaVersion {
+		t.Fatalf("schema version = %d, want %d", version, schemaVersion)
+	}
+	if err := store.db.QueryRow(`
+		SELECT owned_head FROM workspace_checkouts
+		WHERE workspace_id = 'workspace_v2' AND source_id = 'source_v2'
+	`).Scan(&ownedHead); err != nil {
+		t.Fatal(err)
+	}
+	if ownedHead != "abc123" {
+		t.Fatalf("owned_head = %q, want base commit", ownedHead)
+	}
+
+	repository := t.TempDir()
+	runGitProvisionCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "add", "README.md")
+	runGitProvisionCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	inspection, err := InspectSource(context.Background(), repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(context.Background(), "Migrated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.AddSource(context.Background(), project.ID, SourceInput{
+		Kind:            SourceKindGit,
+		CanonicalPath:   inspection.CanonicalPath,
+		GitCommonDir:    inspection.GitCommonDir,
+		GitObjectFormat: inspection.GitObjectFormat,
+		SourceKey:       inspection.SourceKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := store.CreateWorkspacePlan(context.Background(), project.ID, "After migration", []WorkspaceSourceInput{{
+		SourceID:   source.ID,
+		BaseRef:    "HEAD",
+		BranchName: "zotigo/after-migration",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout, _, err := store.workspaceBindings(context.Background(), workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(checkout) != 1 || checkout[0].OwnedHead == "" || checkout[0].OwnedHead != strings.TrimSpace(checkout[0].BaseCommit) {
+		t.Fatalf("checkout after migration = %+v", checkout)
 	}
 }
 

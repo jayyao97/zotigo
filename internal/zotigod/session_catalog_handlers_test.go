@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -62,6 +63,10 @@ func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	if archiveBlocked.Code != http.StatusConflict {
 		t.Fatalf("active workspace archive status = %d: %s", archiveBlocked.Code, archiveBlocked.Body.String())
 	}
+	projectArchiveBlocked := requestCatalog(t, handler, http.MethodPost, "/projects/"+workspace.ProjectID+"/archive", "")
+	if projectArchiveBlocked.Code != http.StatusConflict {
+		t.Fatalf("active project archive status = %d: %s", projectArchiveBlocked.Code, projectArchiveBlocked.Body.String())
+	}
 }
 
 func TestAssignedSessionCreationUsesWorkspaceLifecycleLock(t *testing.T) {
@@ -86,6 +91,28 @@ func TestAssignedSessionCreationUsesWorkspaceLifecycleLock(t *testing.T) {
 	}
 }
 
+func TestAssignedSessionCreationUsesProjectLifecycleLock(t *testing.T) {
+	workspaceOps := newSessionOperationLocks()
+	handler, _, _, workspace := newCatalogSessionFixtureWithWorkspaceOps(t, workspaceOps)
+	writeTestProfileConfig(t, workspace.RootPath)
+	unlock := workspaceOps.lock(projectOperationLockKey(workspace.ProjectID))
+	done := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		done <- requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+	}()
+	select {
+	case response := <-done:
+		unlock()
+		t.Fatalf("assigned creation bypassed project lock: %d", response.Code)
+	case <-time.After(50 * time.Millisecond):
+	}
+	unlock()
+	response := <-done
+	if response.Code != http.StatusCreated {
+		t.Fatalf("assigned creation status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestArchivedWorkspaceBlocksSessionActivation(t *testing.T) {
 	handler, _, catalog, workspace := newCatalogSessionFixture(t)
 	writeTestProfileConfig(t, workspace.RootPath)
@@ -99,6 +126,27 @@ func TestArchivedWorkspaceBlocksSessionActivation(t *testing.T) {
 	start := requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/start", "")
 	if start.Code != http.StatusConflict {
 		t.Fatalf("archived session start status = %d: %s", start.Code, start.Body.String())
+	}
+}
+
+func TestProjectDeletePreservesRuntimeSessionAndRemovesOrganization(t *testing.T) {
+	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
+	writeTestProfileConfig(t, workspace.RootPath)
+	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+	if create.Code != http.StatusCreated {
+		t.Fatalf("create assigned session status = %d: %s", create.Code, create.Body.String())
+	}
+	var session Session
+	decodeCatalogData(t, create, &session)
+	deleted := requestCatalog(t, handler, http.MethodPost, "/projects/"+workspace.ProjectID+"/delete", `{"confirmation":"Catalog"}`)
+	if deleted.Code != http.StatusOK {
+		t.Fatalf("delete project status = %d: %s", deleted.Code, deleted.Body.String())
+	}
+	if _, ok := registry.Get(session.ID); !ok {
+		t.Fatal("runtime session was removed")
+	}
+	if _, err := catalog.GetSessionOrganization(context.Background(), session.ID); !errors.Is(err, zotigoworkspace.ErrNotFound) {
+		t.Fatalf("session organization error = %v, want not found", err)
 	}
 }
 

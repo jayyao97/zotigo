@@ -285,6 +285,7 @@ type handler struct {
 	events               *displayEventBroker
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
+	logger               *log.Logger
 }
 
 type createSessionRequest struct {
@@ -377,6 +378,7 @@ func Run(args []string) int {
 			launcher:        launcher,
 			publicAuthToken: publicAuthToken,
 			workerAuthToken: workerAuthToken,
+			logger:          logger,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -434,6 +436,7 @@ type handlerOptions struct {
 	workerAuthToken      string
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
+	logger               *log.Logger
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -549,6 +552,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		events:               options.events,
 		catalog:              options.catalog,
 		catalogErr:           options.catalogErr,
+		logger:               options.logger,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	handler.workers.SetMessageHandler(func(sessionID string, msg workerMessage) {
@@ -632,13 +636,12 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			if !h.requireCatalog(w) {
 				return
 			}
-			unlockWorkspace := h.workspaceOps.lock(req.WorkspaceID)
-			defer unlockWorkspace()
-			workspace, workspaceErr := h.catalog.GetWorkspace(r.Context(), req.WorkspaceID)
+			workspace, releaseWorkspace, workspaceErr := h.lockWorkspaceForUse(r.Context(), req.WorkspaceID)
 			if workspaceErr != nil {
 				h.writeCatalogError(w, workspaceErr)
 				return
 			}
+			defer releaseWorkspace()
 			if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
 				writeAPIError(w, http.StatusConflict, "workspace is not ready")
 				return
@@ -940,16 +943,19 @@ var (
 )
 
 func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session, error) {
-	unlockWorkspace := func() {}
+	releaseWorkspace := func() {}
 	if h.catalog != nil {
 		organization, err := h.catalog.GetSessionOrganization(ctx, id)
 		if err == nil && organization.WorkspaceID != nil {
-			unlockWorkspace = h.workspaceOps.lock(*organization.WorkspaceID)
+			_, releaseWorkspace, err = h.lockWorkspaceForUse(ctx, *organization.WorkspaceID)
+			if err != nil {
+				return Session{}, fmt.Errorf("lock session workspace: %w", err)
+			}
 		} else if err != nil && !errors.Is(err, zotigoworkspace.ErrNotFound) {
 			return Session{}, fmt.Errorf("load session organization: %w", err)
 		}
 	}
-	defer unlockWorkspace()
+	defer releaseWorkspace()
 	unlock := h.sessionOps.lock(id)
 	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
 		unlock()

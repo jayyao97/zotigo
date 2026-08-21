@@ -54,7 +54,26 @@ zotigod \
 - `GET /health`
 - `GET /config/profiles`
 - `POST /sources/inspect`
+- `POST /projects`
+- `GET /projects?status=active|archived|all` (`active` is the default)
+- `GET /projects/{id}`
 - `PUT /projects/{id}`
+- `GET /projects/{id}/archive-preview`
+- `POST /projects/{id}/archive`
+- `POST /projects/{id}/unarchive`
+- `GET /projects/{id}/delete-preview`
+- `POST /projects/{id}/delete`
+- `POST /projects/{id}/sources`
+- `DELETE /projects/{id}/sources/{source_id}`
+- `POST /projects/{id}/workspaces`
+- `GET /projects/{id}/workspaces?include_archived=true`
+- `GET /workspaces/{id}`
+- `POST /workspaces/{id}/retry`
+- `GET /workspaces/{id}/archive-preview`
+- `POST /workspaces/{id}/archive`
+- `POST /workspaces/{id}/unarchive`
+- `GET /workspaces/{id}/delete-preview`
+- `POST /workspaces/{id}/delete`
 - `POST /sessions`
 - `GET /sessions`
 - `GET /sessions/{id}`

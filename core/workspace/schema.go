@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 1
+const schemaVersion = 3
 
 type Store struct {
 	db          *sql.DB
@@ -116,6 +116,9 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
+			status TEXT NOT NULL DEFAULT 'active'
+				CHECK(status IN ('active', 'archiving', 'archived', 'deleting')),
+			archived_at INTEGER,
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
 		)`,
@@ -218,8 +221,64 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, `SELECT version FROM schema_meta WHERE singleton = 1`).Scan(&version); err != nil {
 		return fmt.Errorf("read workspace catalog version: %w", err)
 	}
+	if version == 1 {
+		if _, err := tx.ExecContext(ctx, `
+			ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
+			CHECK(status IN ('active', 'archiving', 'archived', 'deleting'))
+		`); err != nil {
+			return fmt.Errorf("migrate projects status: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN archived_at INTEGER`); err != nil {
+			return fmt.Errorf("migrate projects archived_at: %w", err)
+		}
+		version = 2
+	}
+	if version == 2 {
+		var hasOwnedHead bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM pragma_table_info('workspace_checkouts') WHERE name = 'owned_head'
+			)
+		`).Scan(&hasOwnedHead); err != nil {
+			return fmt.Errorf("inspect workspace checkout ownership schema: %w", err)
+		}
+		if !hasOwnedHead {
+			for _, statement := range []string{
+				`ALTER TABLE workspace_checkouts RENAME TO workspace_checkouts_v2`,
+				`CREATE TABLE workspace_checkouts (
+					workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+					source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+					worktree_path TEXT NOT NULL UNIQUE,
+					base_ref TEXT NOT NULL,
+					base_commit TEXT NOT NULL,
+					branch_name TEXT NOT NULL,
+					owned_head TEXT NOT NULL,
+					status TEXT NOT NULL CHECK(status IN ('planned', 'ready', 'error', 'archived')),
+					error TEXT,
+					PRIMARY KEY(workspace_id, source_id),
+					CHECK((status = 'error') = (error IS NOT NULL))
+				)`,
+				`INSERT INTO workspace_checkouts(
+					workspace_id, source_id, worktree_path, base_ref, base_commit,
+					branch_name, owned_head, status, error
+				) SELECT
+					workspace_id, source_id, worktree_path, base_ref, base_commit,
+					branch_name, base_commit, status, error
+				FROM workspace_checkouts_v2`,
+				`DROP TABLE workspace_checkouts_v2`,
+			} {
+				if _, err := tx.ExecContext(ctx, statement); err != nil {
+					return fmt.Errorf("migrate workspace checkout ownership: %w", err)
+				}
+			}
+		}
+		version = 3
+	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET version = ? WHERE singleton = 1`, version); err != nil {
+		return fmt.Errorf("update workspace catalog version: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit workspace catalog migration: %w", err)
