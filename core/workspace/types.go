@@ -90,6 +90,18 @@ type WorkspaceSourceInput struct {
 	BranchName     string     `json:"branch_name,omitempty"`
 }
 
+type WorkspaceSource struct {
+	Source       Source     `json:"source"`
+	Mode         FolderMode `json:"mode,omitempty"`
+	TargetPath   string     `json:"target_path"`
+	BaseRef      string     `json:"base_ref,omitempty"`
+	BaseCommit   string     `json:"base_commit,omitempty"`
+	BranchName   string     `json:"branch_name,omitempty"`
+	WorktreePath string     `json:"worktree_path,omitempty"`
+	Status       string     `json:"status"`
+	Error        string     `json:"error,omitempty"`
+}
+
 type Checkout struct {
 	WorkspaceID  string
 	SourceID     string

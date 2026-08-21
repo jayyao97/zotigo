@@ -119,6 +119,36 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	if workspaceDetailRec.Code != http.StatusOK {
 		t.Fatalf("workspace detail status = %d: %s", workspaceDetailRec.Code, workspaceDetailRec.Body.String())
 	}
+	workspaceSourcesRec := requestCatalog(t, handler, http.MethodGet, "/workspaces/"+workspace.ID+"/sources", "")
+	if workspaceSourcesRec.Code != http.StatusOK {
+		t.Fatalf("workspace sources status = %d: %s", workspaceSourcesRec.Code, workspaceSourcesRec.Body.String())
+	}
+	var workspaceSources struct {
+		Sources []zotigoworkspace.WorkspaceSource `json:"sources"`
+	}
+	decodeCatalogData(t, workspaceSourcesRec, &workspaceSources)
+	if len(workspaceSources.Sources) != 1 || workspaceSources.Sources[0].Source.ID != source.ID {
+		t.Fatalf("workspace sources = %+v", workspaceSources.Sources)
+	}
+
+	additionalFolder := filepath.Join(root, "additional-source")
+	if err := os.Mkdir(additionalFolder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	additionalSourceRec := requestCatalog(t, handler, http.MethodPost,
+		"/projects/"+project.ID+"/sources", `{"path":`+quotedJSON(t, additionalFolder)+`,"folder_mode":"copy"}`)
+	var additionalSource zotigoworkspace.Source
+	decodeCatalogData(t, additionalSourceRec, &additionalSource)
+	addWorkspaceSourceRec := requestCatalog(t, handler, http.MethodPost, "/workspaces/"+workspace.ID+"/sources",
+		`{"source_id":`+quotedJSON(t, additionalSource.ID)+`,"mode":"copy"}`)
+	if addWorkspaceSourceRec.Code != http.StatusCreated {
+		t.Fatalf("add workspace source status = %d: %s", addWorkspaceSourceRec.Code, addWorkspaceSourceRec.Body.String())
+	}
+	var addedWorkspaceSource zotigoworkspace.WorkspaceSource
+	decodeCatalogData(t, addWorkspaceSourceRec, &addedWorkspaceSource)
+	if addedWorkspaceSource.Source.ID != additionalSource.ID || addedWorkspaceSource.Status != "ready" {
+		t.Fatalf("added workspace source = %+v", addedWorkspaceSource)
+	}
 
 	archivePreview := requestCatalog(t, handler, http.MethodGet, "/projects/"+project.ID+"/archive-preview", "")
 	if archivePreview.Code != http.StatusOK {

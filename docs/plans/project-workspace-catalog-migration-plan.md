@@ -109,6 +109,13 @@ owner marker 包含 version、Project ID、Workspace ID 和随机 nonce；catalo
 递归删除前必须验证 ID 派生路径、canonical containment、无 symlink 祖先和 marker 完全匹配。
 `deleted` 行作为 idempotency/audit tombstone，不出现在 Workspace 列表和详情中。
 
+已就绪 Workspace 可以继续绑定同一 Project 内已登记的 Source。Git binding 可指定统一或
+逐 Source 的 `branch_name`；未指定时由 daemon 基于 opaque Workspace/Source ID 生成，
+Workspace title（包括中文 title）不参与 branch/path。新增 binding 独立记录 provision
+状态；失败不会把既有 ready Workspace 降级。尚未产生 owned 副作用的失败会撤销 binding，
+已经产生 owned state 的失败则保留 error binding，可通过 Workspace retry 恢复。增量
+provision 在副作用前重新验证 managed root 与 `code`/`notes` parent 均为非 symlink 目录。
+
 ### Session organization
 
 catalog 单独保存：
@@ -261,6 +268,8 @@ DELETE /projects/{id}/sources/{source-id}
 POST   /projects/{id}/workspaces
 GET    /projects/{id}/workspaces?include_archived=true
 GET    /workspaces/{id}
+GET    /workspaces/{id}/sources
+POST   /workspaces/{id}/sources
 POST   /workspaces/{id}/retry
 GET    /workspaces/{id}/archive-preview
 POST   /workspaces/{id}/archive

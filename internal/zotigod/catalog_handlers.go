@@ -242,6 +242,39 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parts := splitCatalogPath(r.URL.Path, "/workspaces/")
+	if len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodGet {
+		sources, err := h.catalog.ListWorkspaceSources(r.Context(), parts[0])
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, map[string][]zotigoworkspace.WorkspaceSource{"sources": sources})
+		return
+	}
+	if len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodPost {
+		workspace, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		defer release()
+		if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
+			h.writeCatalogError(w, fmt.Errorf("%w: workspace is %s", zotigoworkspace.ErrConflict, workspace.Status))
+			return
+		}
+		var request zotigoworkspace.WorkspaceSourceInput
+		if err := readRequiredJSON(r, &request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid workspace source request")
+			return
+		}
+		source, err := h.catalog.AddWorkspaceSource(r.Context(), parts[0], request)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusCreated, source)
+		return
+	}
 	if len(parts) == 2 && parts[1] == "archive-preview" && r.Method == http.MethodGet {
 		impact, err := h.catalog.PreviewArchive(r.Context(), parts[0])
 		if err != nil {

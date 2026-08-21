@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -46,11 +47,25 @@ func (s *Store) ProvisionWorkspace(ctx context.Context, workspaceID string) (Wor
 		}
 		for _, checkout := range checkouts {
 			if err := s.provisionCheckout(ctx, workspace, checkout); err != nil {
+				_ = s.setCheckoutStatus(ctx, workspace.ID, checkout.SourceID, "error", err.Error())
+				if cleanupErr := s.cancelUnownedCheckout(ctx, workspace, checkout); cleanupErr != nil {
+					return Workspace{}, errors.Join(err, cleanupErr)
+				}
+				return Workspace{}, err
+			}
+			if err := s.setCheckoutStatus(ctx, workspace.ID, checkout.SourceID, "ready", ""); err != nil {
 				return Workspace{}, err
 			}
 		}
 		for _, folder := range folders {
 			if err := s.provisionFolder(ctx, workspace, folder); err != nil {
+				_ = s.setFolderStatus(ctx, workspace.ID, folder.SourceID, "error", err.Error())
+				if cleanupErr := s.cancelFailedFolderBinding(ctx, workspace, folder); cleanupErr != nil {
+					return Workspace{}, errors.Join(err, cleanupErr)
+				}
+				return Workspace{}, err
+			}
+			if err := s.setFolderStatus(ctx, workspace.ID, folder.SourceID, "ready", ""); err != nil {
 				return Workspace{}, err
 			}
 		}
@@ -103,6 +118,9 @@ func (s *Store) failWorkspaceProvision(ctx context.Context, workspaceID string, 
 }
 
 func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, checkout Checkout) error {
+	if err := s.validateWorkspaceBindingTarget(workspace, checkout.WorktreePath); err != nil {
+		return err
+	}
 	source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
 	if err != nil {
 		return err
@@ -162,7 +180,7 @@ func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, chec
 	reason := "zotigo workspace " + workspace.ID
 	if ownershipErr == nil {
 		if branchErr != nil || strings.TrimSpace(ownershipHead) != checkout.BaseCommit ||
-			(workspace.Status != WorkspaceStatusReady && strings.TrimSpace(branchHead) != checkout.BaseCommit) {
+			(checkout.Status != "ready" && strings.TrimSpace(branchHead) != checkout.BaseCommit) {
 			return fmt.Errorf("%w: workspace branch ownership does not match", ErrConflict)
 		}
 	} else {
@@ -234,6 +252,9 @@ func samePath(left string, right string) bool {
 }
 
 func (s *Store) provisionFolder(ctx context.Context, workspace Workspace, binding FolderBinding) error {
+	if err := s.validateWorkspaceBindingTarget(workspace, binding.TargetPath); err != nil {
+		return err
+	}
 	source, err := s.GetSource(ctx, workspace.ProjectID, binding.SourceID)
 	if err != nil {
 		return err
@@ -270,7 +291,18 @@ func ensureDirectBinding(target string, source string) error {
 }
 
 func ensureCopiedBinding(workspace Workspace, binding FolderBinding, source string) error {
-	if _, err := os.Lstat(binding.TargetPath); err == nil {
+	if info, err := os.Lstat(binding.TargetPath); err == nil {
+		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: copied folder binding target is not a managed directory", ErrConflict)
+		}
+		resolvedTarget, resolveErr := filepath.EvalSymlinks(binding.TargetPath)
+		if resolveErr != nil {
+			return fmt.Errorf("%w: resolve copied folder binding target: %v", ErrConflict, resolveErr)
+		}
+		resolvedParent, resolveErr := filepath.EvalSymlinks(filepath.Dir(binding.TargetPath))
+		if resolveErr != nil || filepath.Dir(resolvedTarget) != resolvedParent {
+			return fmt.Errorf("%w: copied folder binding target escapes its managed parent", ErrConflict)
+		}
 		return validateBindingMarker(binding.TargetPath, workspace.ID, binding.SourceID)
 	} else if !os.IsNotExist(err) {
 		return err
@@ -294,6 +326,12 @@ func ensureCopiedBinding(workspace Workspace, binding FolderBinding, source stri
 	if err := os.Mkdir(staging, 0o700); err != nil {
 		return err
 	}
+	published := false
+	defer func() {
+		if !published {
+			_ = os.RemoveAll(staging)
+		}
+	}()
 	if err := writeBindingMarker(staging, workspace.ID, binding.SourceID); err != nil {
 		return err
 	}
@@ -303,6 +341,7 @@ func ensureCopiedBinding(workspace Workspace, binding FolderBinding, source stri
 	if err := os.Rename(staging, binding.TargetPath); err != nil {
 		return fmt.Errorf("publish folder binding: %w", err)
 	}
+	published = true
 	return nil
 }
 
