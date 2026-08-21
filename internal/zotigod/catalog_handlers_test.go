@@ -33,6 +33,23 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	}
 	var project zotigoworkspace.Project
 	decodeCatalogData(t, projectRec, &project)
+	renameRec := requestCatalog(t, handler, http.MethodPut, "/projects/"+project.ID, `{"name":"  Renamed Project  "}`)
+	if renameRec.Code != http.StatusOK {
+		t.Fatalf("rename project status = %d: %s", renameRec.Code, renameRec.Body.String())
+	}
+	var renamed zotigoworkspace.Project
+	decodeCatalogData(t, renameRec, &renamed)
+	if renamed.ID != project.ID || renamed.Name != "Renamed Project" {
+		t.Fatalf("renamed project = %+v", renamed)
+	}
+	invalidRename := requestCatalog(t, handler, http.MethodPut, "/projects/"+project.ID, `{"name":" "}`)
+	if invalidRename.Code != http.StatusBadRequest {
+		t.Fatalf("invalid rename status = %d: %s", invalidRename.Code, invalidRename.Body.String())
+	}
+	missingRename := requestCatalog(t, handler, http.MethodPut, "/projects/missing", `{"name":"Renamed"}`)
+	if missingRename.Code != http.StatusNotFound {
+		t.Fatalf("missing rename status = %d: %s", missingRename.Code, missingRename.Body.String())
+	}
 
 	folder := filepath.Join(root, "plain-source")
 	if err := os.Mkdir(folder, 0o755); err != nil {
@@ -91,13 +108,41 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	}
 	var detail projectDetail
 	decodeCatalogData(t, detailRec, &detail)
-	if len(detail.Sources) != 1 || detail.Sources[0].ID != source.ID {
+	if detail.Name != "Renamed Project" || len(detail.Sources) != 1 || detail.Sources[0].ID != source.ID {
 		t.Fatalf("project detail = %+v", detail)
 	}
 
 	workspaceDetailRec := requestCatalog(t, handler, http.MethodGet, "/workspaces/"+workspace.ID, "")
 	if workspaceDetailRec.Code != http.StatusOK {
 		t.Fatalf("workspace detail status = %d: %s", workspaceDetailRec.Code, workspaceDetailRec.Body.String())
+	}
+}
+
+func TestSourceInspectionDoesNotRequireProject(t *testing.T) {
+	handler := newHandler(
+		newSessionRegistry(),
+		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		handlerOptions{},
+	)
+	folder := t.TempDir()
+
+	recorder := requestCatalog(t, handler, http.MethodPost, "/sources/inspect", `{"path":`+quotedJSON(t, folder)+`}`)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("inspect source status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var inspection zotigoworkspace.SourceInspection
+	decodeCatalogData(t, recorder, &inspection)
+	canonicalFolder, err := filepath.EvalSymlinks(folder)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inspection.Kind != zotigoworkspace.SourceKindFolder || inspection.CanonicalPath != canonicalFolder {
+		t.Fatalf("inspection = %+v", inspection)
+	}
+
+	wrongMethod := requestCatalog(t, handler, http.MethodGet, "/sources/inspect", "")
+	if wrongMethod.Code != http.StatusMethodNotAllowed || wrongMethod.Header().Get("Allow") != http.MethodPost {
+		t.Fatalf("wrong method response = %d allow=%q", wrongMethod.Code, wrongMethod.Header().Get("Allow"))
 	}
 }
 

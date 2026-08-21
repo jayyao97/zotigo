@@ -585,6 +585,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
+	mux.HandleFunc("/sources/inspect", handler.handleSourceInspection)
 	mux.HandleFunc("/projects", handler.handleProjects)
 	mux.HandleFunc("/projects/", handler.handleProject)
 	mux.HandleFunc("/workspaces/", handler.handleWorkspace)
@@ -758,7 +759,8 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	if err != nil {
 		return nil, err
 	}
-	sessions := append([]Session(nil), registrySessions...)
+	sessions := make([]Session, len(registrySessions))
+	copy(sessions, registrySessions)
 	for _, meta := range metadata {
 		if _, ok := seen[meta.ID]; ok {
 			sessions[registryIndex[meta.ID]].ProfileName = meta.ProfileName

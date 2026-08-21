@@ -20,9 +20,9 @@ var (
 )
 
 func (s *Store) CreateProject(ctx context.Context, name string) (Project, error) {
-	name = strings.TrimSpace(name)
-	if name == "" || len(name) > 200 {
-		return Project{}, ErrInvalid
+	name, err := normalizeProjectName(name)
+	if err != nil {
+		return Project{}, err
 	}
 	now := time.Now().UTC()
 	project := Project{
@@ -31,13 +31,43 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	_, err := s.db.ExecContext(ctx, `
+	_, err = s.db.ExecContext(ctx, `
 		INSERT INTO projects(id, name, created_at, updated_at) VALUES(?, ?, ?, ?)
 	`, project.ID, project.Name, unixMillis(now), unixMillis(now))
 	if err != nil {
 		return Project{}, fmt.Errorf("create project: %w", err)
 	}
 	return project, nil
+}
+
+func (s *Store) RenameProject(ctx context.Context, id string, name string) (Project, error) {
+	name, err := normalizeProjectName(name)
+	if err != nil {
+		return Project{}, err
+	}
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE projects SET name = ?, updated_at = ? WHERE id = ?
+	`, name, unixMillis(now), id)
+	if err != nil {
+		return Project{}, fmt.Errorf("rename project: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Project{}, fmt.Errorf("rename project affected rows: %w", err)
+	}
+	if affected == 0 {
+		return Project{}, ErrNotFound
+	}
+	return s.GetProject(ctx, id)
+}
+
+func normalizeProjectName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" || len(name) > 200 {
+		return "", ErrInvalid
+	}
+	return name, nil
 }
 
 func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {

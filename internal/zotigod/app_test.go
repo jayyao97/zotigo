@@ -6750,6 +6750,26 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 	}
 }
 
+func TestSessionsListSerializesEmptyArray(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
+	}
+	var payload map[string]json.RawMessage
+	if err := decodeAPIData(t, rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if got := string(payload["sessions"]); got != "[]" {
+		t.Fatalf("expected empty sessions array, got %s", got)
+	}
+}
+
 func TestSessionRegistryLifecycleTransitions(t *testing.T) {
 	registry := newSessionRegistry()
 
