@@ -30,7 +30,7 @@ func TestProjectArchiveHidesProjectAndLeavesWorkspacesArchivedOnRestore(t *testi
 	if err != nil || len(projects) != 0 {
 		t.Fatalf("active projects = %+v, err=%v", projects, err)
 	}
-	projects, err = store.ListProjectsIncludingArchived(ctx, true)
+	projects, err = store.ListAllProjects(ctx)
 	if err != nil || len(projects) != 1 || projects[0].ID != project.ID {
 		t.Fatalf("all projects = %+v, err=%v", projects, err)
 	}

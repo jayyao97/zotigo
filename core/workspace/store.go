@@ -85,18 +85,30 @@ func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {
 }
 
 func (s *Store) ListProjects(ctx context.Context) ([]Project, error) {
-	return s.ListProjectsIncludingArchived(ctx, false)
+	status := ProjectStatusActive
+	return s.listProjects(ctx, &status)
 }
 
-func (s *Store) ListProjectsIncludingArchived(ctx context.Context, includeArchived bool) ([]Project, error) {
+func (s *Store) ListArchivedProjects(ctx context.Context) ([]Project, error) {
+	status := ProjectStatusArchived
+	return s.listProjects(ctx, &status)
+}
+
+func (s *Store) ListAllProjects(ctx context.Context) ([]Project, error) {
+	return s.listProjects(ctx, nil)
+}
+
+func (s *Store) listProjects(ctx context.Context, status *ProjectStatus) ([]Project, error) {
 	query := `
 		SELECT id, name, status, archived_at, created_at, updated_at
 		FROM projects`
-	if !includeArchived {
-		query += ` WHERE status = 'active'`
+	args := make([]any, 0, 1)
+	if status != nil {
+		query += ` WHERE status = ?`
+		args = append(args, *status)
 	}
 	query += ` ORDER BY updated_at DESC, id ASC`
-	rows, err := s.db.QueryContext(ctx, query)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("list projects: %w", err)
 	}

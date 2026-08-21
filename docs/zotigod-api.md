@@ -55,7 +55,7 @@ zotigod \
 - `GET /config/profiles`
 - `POST /sources/inspect`
 - `POST /projects`
-- `GET /projects?include_archived=true`
+- `GET /projects?status=active|archived|all` (`active` is the default)
 - `GET /projects/{id}`
 - `PUT /projects/{id}`
 - `GET /projects/{id}/archive-preview`

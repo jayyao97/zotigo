@@ -73,8 +73,8 @@ catalog 位于 `<zotigo-root>/catalog.sqlite`，不复用可重建的
   删除记录，不保留 `deleted` tombstone。
 - 受管目录固定为 `<zotigo-root>/projects/<project-id>`，名称不进入路径。
 - 一个 Project 可有零到多个 Source 和 Workspace。
-- 默认列表只返回 active Project；`include_archived=true` 额外返回 archiving、archived 和
-  deleting Project，供归档管理和失败恢复界面使用。
+- 默认列表和 `status=active` 只返回 active Project；`status=archived` 只返回 archived
+  Project；`status=all` 返回全部状态，供失败恢复界面处理 archiving/deleting Project。
 
 ### Source
 
@@ -247,7 +247,7 @@ API 复用现有 envelope、error 和 auth 约定。Project/Source/Workspace 路
 
 ```text
 POST   /projects
-GET    /projects?include_archived=true
+GET    /projects?status=active|archived|all
 GET    /projects/{id}
 GET    /projects/{id}/archive-preview
 POST   /projects/{id}/archive

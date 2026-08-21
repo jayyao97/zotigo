@@ -44,7 +44,23 @@ func (h *handler) handleProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		projects, err := h.catalog.ListProjectsIncludingArchived(r.Context(), r.URL.Query().Get("include_archived") == "true")
+		if r.URL.Query().Has("include_archived") {
+			writeAPIError(w, http.StatusBadRequest, "include_archived is not supported; use status=active, status=archived, or status=all")
+			return
+		}
+		var projects []zotigoworkspace.Project
+		var err error
+		switch r.URL.Query().Get("status") {
+		case "", "active":
+			projects, err = h.catalog.ListProjects(r.Context())
+		case "archived":
+			projects, err = h.catalog.ListArchivedProjects(r.Context())
+		case "all":
+			projects, err = h.catalog.ListAllProjects(r.Context())
+		default:
+			writeAPIError(w, http.StatusBadRequest, "status must be active, archived, or all")
+			return
+		}
 		if err != nil {
 			h.writeCatalogError(w, err)
 			return

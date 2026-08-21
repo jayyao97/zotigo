@@ -136,13 +136,40 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	if len(activeList.Projects) != 0 {
 		t.Fatalf("active projects = %+v", activeList.Projects)
 	}
-	allProjects := requestCatalog(t, handler, http.MethodGet, "/projects?include_archived=true", "")
+	activeProjectRec := requestCatalog(t, handler, http.MethodPost, "/projects", `{"name":"Active Project"}`)
+	if activeProjectRec.Code != http.StatusCreated {
+		t.Fatalf("create active project status = %d: %s", activeProjectRec.Code, activeProjectRec.Body.String())
+	}
+	var activeProject zotigoworkspace.Project
+	decodeCatalogData(t, activeProjectRec, &activeProject)
+	activeProjects = requestCatalog(t, handler, http.MethodGet, "/projects?status=active", "")
+	decodeCatalogData(t, activeProjects, &activeList)
+	if len(activeList.Projects) != 1 || activeList.Projects[0].ID != activeProject.ID {
+		t.Fatalf("filtered active projects = %+v", activeList.Projects)
+	}
+	archivedProjects := requestCatalog(t, handler, http.MethodGet, "/projects?status=archived", "")
+	var archivedList struct {
+		Projects []zotigoworkspace.Project `json:"projects"`
+	}
+	decodeCatalogData(t, archivedProjects, &archivedList)
+	if len(archivedList.Projects) != 1 || archivedList.Projects[0].ID != project.ID {
+		t.Fatalf("archived projects = %+v", archivedList.Projects)
+	}
+	allProjects := requestCatalog(t, handler, http.MethodGet, "/projects?status=all", "")
 	var allList struct {
 		Projects []zotigoworkspace.Project `json:"projects"`
 	}
 	decodeCatalogData(t, allProjects, &allList)
-	if len(allList.Projects) != 1 || allList.Projects[0].Status != zotigoworkspace.ProjectStatusArchived {
+	if len(allList.Projects) != 2 {
 		t.Fatalf("all projects = %+v", allList.Projects)
+	}
+	invalidStatus := requestCatalog(t, handler, http.MethodGet, "/projects?status=deleting", "")
+	if invalidStatus.Code != http.StatusBadRequest {
+		t.Fatalf("invalid project status filter = %d: %s", invalidStatus.Code, invalidStatus.Body.String())
+	}
+	deprecatedFilter := requestCatalog(t, handler, http.MethodGet, "/projects?include_archived=true", "")
+	if deprecatedFilter.Code != http.StatusBadRequest {
+		t.Fatalf("deprecated project filter = %d: %s", deprecatedFilter.Code, deprecatedFilter.Body.String())
 	}
 	blockedWorkspaceRestore := requestCatalog(t, handler, http.MethodPost, "/workspaces/"+workspace.ID+"/unarchive", "")
 	if blockedWorkspaceRestore.Code != http.StatusConflict {
@@ -275,6 +302,56 @@ func TestCatalogRoutesUsePublicAuthentication(t *testing.T) {
 	handler.ServeHTTP(authorized, request)
 	if authorized.Code != http.StatusOK {
 		t.Fatalf("authorized status = %d: %s", authorized.Code, authorized.Body.String())
+	}
+}
+
+func TestCatalogProjectStatusAllIncludesDeletingProject(t *testing.T) {
+	root := t.TempDir()
+	catalog, err := zotigoworkspace.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	handler := newHandler(
+		newSessionRegistry(),
+		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		handlerOptions{catalog: catalog},
+	)
+	projectRec := requestCatalog(t, handler, http.MethodPost, "/projects", `{"name":"Deleting Project"}`)
+	if projectRec.Code != http.StatusCreated {
+		t.Fatalf("create project status = %d: %s", projectRec.Code, projectRec.Body.String())
+	}
+	var project zotigoworkspace.Project
+	decodeCatalogData(t, projectRec, &project)
+	projectDir := filepath.Join(root, "projects", project.ID)
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "unknown.txt"), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	deleteRec := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/delete", `{"confirmation":"Deleting Project"}`)
+	if deleteRec.Code != http.StatusConflict {
+		t.Fatalf("partial delete status = %d: %s", deleteRec.Code, deleteRec.Body.String())
+	}
+
+	for _, path := range []string{"/projects", "/projects?status=archived"} {
+		recorder := requestCatalog(t, handler, http.MethodGet, path, "")
+		var response struct {
+			Projects []zotigoworkspace.Project `json:"projects"`
+		}
+		decodeCatalogData(t, recorder, &response)
+		if len(response.Projects) != 0 {
+			t.Fatalf("%s projects = %+v, want none", path, response.Projects)
+		}
+	}
+	allRec := requestCatalog(t, handler, http.MethodGet, "/projects?status=all", "")
+	var all struct {
+		Projects []zotigoworkspace.Project `json:"projects"`
+	}
+	decodeCatalogData(t, allRec, &all)
+	if len(all.Projects) != 1 || all.Projects[0].ID != project.ID || all.Projects[0].Status != zotigoworkspace.ProjectStatusDeleting {
+		t.Fatalf("all projects = %+v, want deleting project", all.Projects)
 	}
 }
 
