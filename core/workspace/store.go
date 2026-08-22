@@ -276,75 +276,8 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 			return Workspace{}, fmt.Errorf("%w: duplicate workspace source", ErrInvalid)
 		}
 		seen[selection.SourceID] = struct{}{}
-		source, err := scanSource(tx.QueryRowContext(ctx, `
-			SELECT id, project_id, kind, canonical_path, git_common_dir,
-			       git_object_format, folder_mode, source_key, created_at, updated_at
-			FROM sources WHERE id = ? AND project_id = ?
-		`, selection.SourceID, projectID))
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return Workspace{}, fmt.Errorf("%w: workspace source not found", ErrInvalid)
-			}
+		if err := s.planWorkspaceSource(ctx, tx, workspace, selection); err != nil {
 			return Workspace{}, err
-		}
-		switch source.Kind {
-		case SourceKindGit:
-			if selection.Mode != "" {
-				return Workspace{}, ErrInvalid
-			}
-			baseRef := strings.TrimSpace(selection.BaseRef)
-			if baseRef == "" {
-				baseRef = "HEAD"
-			}
-			if err := verifySourceIdentity(ctx, source); err != nil {
-				return Workspace{}, err
-			}
-			resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", baseRef+"^{commit}")
-			if err != nil {
-				return Workspace{}, fmt.Errorf("%w: base ref is unavailable", ErrConflict)
-			}
-			baseCommit := strings.TrimSpace(resolved)
-			if selection.ExpectedCommit != "" && strings.TrimSpace(selection.ExpectedCommit) != baseCommit {
-				return Workspace{}, fmt.Errorf("%w: expected base commit changed", ErrConflict)
-			}
-			branchName := selection.BranchName
-			if branchName == "" {
-				branchName = "zotigo/" + workspace.ID + "/" + source.SourceKey
-			}
-			target := filepath.Join(workspace.RootPath, "code", source.SourceKey)
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO workspace_checkouts(
-					workspace_id, source_id, worktree_path, base_ref,
-					base_commit, branch_name, owned_head, status
-				) VALUES(?, ?, ?, ?, ?, ?, ?, 'planned')
-			`, workspace.ID, source.ID, target, baseRef, baseCommit, branchName, baseCommit); err != nil {
-				return Workspace{}, fmt.Errorf("plan workspace checkout: %w", err)
-			}
-		case SourceKindFolder:
-			if selection.BaseRef != "" || selection.ExpectedCommit != "" || selection.BranchName != "" ||
-				(selection.Mode != FolderModeDirect && selection.Mode != FolderModeReference && selection.Mode != FolderModeCopy) {
-				return Workspace{}, ErrInvalid
-			}
-			parent := "code"
-			if selection.Mode == FolderModeReference {
-				parent = "notes"
-			}
-			target := filepath.Join(workspace.RootPath, parent, source.SourceKey)
-			directPath := ""
-			if selection.Mode == FolderModeDirect {
-				directPath = source.CanonicalPath
-			}
-			if _, err := tx.ExecContext(ctx, `
-				INSERT INTO workspace_folders(
-					workspace_id, source_id, mode, target_path,
-					direct_canonical_path, status
-				) VALUES(?, ?, ?, ?, NULLIF(?, ''), 'planned')
-			`, workspace.ID, source.ID, selection.Mode, target, directPath); err != nil {
-				if isConstraintError(err) {
-					return Workspace{}, fmt.Errorf("%w: folder source is already directly bound", ErrConflict)
-				}
-				return Workspace{}, fmt.Errorf("plan workspace folder: %w", err)
-			}
 		}
 	}
 	if err := tx.Commit(); err != nil {

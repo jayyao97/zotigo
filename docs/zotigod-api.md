@@ -68,6 +68,8 @@ zotigod \
 - `POST /projects/{id}/workspaces`
 - `GET /projects/{id}/workspaces?include_archived=true`
 - `GET /workspaces/{id}`
+- `GET /workspaces/{id}/sources`
+- `POST /workspaces/{id}/sources`
 - `POST /workspaces/{id}/retry`
 - `GET /workspaces/{id}/archive-preview`
 - `POST /workspaces/{id}/archive`
@@ -90,6 +92,37 @@ zotigod \
 
 Internal worker endpoints under `/internal/sessions/...` are not public desktop
 API and may change without compatibility guarantees.
+
+### Workspace Sources
+
+`GET /workspaces/{id}/sources` returns the Sources currently bound to a
+Workspace together with their binding mode, target path, status, and Git
+checkout configuration when applicable.
+
+`POST /workspaces/{id}/sources` adds one Source to an existing `ready`
+Workspace. The request uses the same Source selection shape as Workspace
+creation:
+
+```json
+{
+  "source_id": "source_...",
+  "base_ref": "main",
+  "branch_name": "feature/oncall"
+}
+```
+
+For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when
+omitted, zotigod generates a branch from opaque Workspace and Source IDs, never
+from the Workspace title. Folder Sources require an explicit `mode` of
+`direct`, `reference`, or `copy`.
+
+The Source must already belong to the Workspace's Project. A Source registered
+under another Project is rejected with `400`; register that path as a new Source
+under the target Project before binding it. Duplicate bindings and Workspaces
+that are not `ready` return `409`. Failures before Zotigo creates any owned Git
+ref or folder target roll back the planned binding, so the request can be
+corrected and submitted again. Failures after owned state exists remain visible
+on the binding and can be retried through `POST /workspaces/{id}/retry`.
 
 Current internal worker endpoints include:
 
