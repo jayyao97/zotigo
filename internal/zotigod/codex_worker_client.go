@@ -17,14 +17,12 @@ import (
 
 type codexWorkerConfig struct {
 	workerClientConfig
-	SocketPath        string
-	ProjectID         string
-	WorkingDirectory  string
-	Model             string
-	ReasoningEffort   string
-	ThreadID          string
-	WorkspaceRevision uint64
-	SessionStoreRoot  string
+	SocketPath       string
+	WorkingDirectory string
+	Model            string
+	ReasoningEffort  string
+	ThreadID         string
+	SessionStoreRoot string
 }
 
 type codexWorkerChannels struct {
@@ -34,8 +32,8 @@ type codexWorkerChannels struct {
 }
 
 func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr error) {
-	if cfg.SocketPath == "" || cfg.ProjectID == "" || cfg.WorkingDirectory == "" {
-		return fmt.Errorf("codex worker requires socket, project, and working directory")
+	if cfg.SocketPath == "" || cfg.WorkingDirectory == "" {
+		return fmt.Errorf("codex worker requires socket and working directory")
 	}
 	store, err := zotigosession.NewFileStore(cfg.SessionStoreRoot)
 	if err != nil {
@@ -60,6 +58,14 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		if runErr == nil {
 			runErr = returnErr
 		}
+		// Preserve structured startup failures before closing the worker socket.
+		// Otherwise the daemon can observe the disconnect first and replace the
+		// useful error with "worker disconnected before becoming ready".
+		if runErr != nil && !isExpectedWorkerClose(runErr) {
+			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
+			_ = reportWorkerFinish(finishCtx, httpClient, strings.TrimRight(cfg.DaemonURL, "/"), cfg.SessionID, generation, runErr)
+			cancel()
+		}
 		if writer != nil {
 			writer.Close()
 		}
@@ -71,11 +77,6 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		}
 		if unlockErr := unlock(); unlockErr != nil {
 			returnErr = errors.Join(returnErr, unlockErr)
-		}
-		if runErr != nil && !isExpectedWorkerClose(runErr) {
-			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-			_ = reportWorkerFinish(finishCtx, httpClient, strings.TrimRight(cfg.DaemonURL, "/"), cfg.SessionID, generation, runErr)
-			cancel()
 		}
 		_ = store.Close()
 	}()
@@ -89,7 +90,6 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	if cfg.AuthToken != "" {
 		headers.Set("Authorization", "Bearer "+cfg.AuthToken)
 	}
-	headers.Set(workerWorkspaceBindingRevisionHeader, fmt.Sprintf("%d", cfg.WorkspaceRevision))
 	var response *http.Response
 	workerConn, response, err = websocket.DefaultDialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
@@ -132,6 +132,9 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		select {
 		case err := <-channels.errors:
 			runErr = err
+			if isExpectedWorkerClose(err) {
+				return nil
+			}
 			return err
 		case command, ok := <-channels.commands:
 			if !ok {
@@ -160,45 +163,30 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 }
 
 func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) error {
-	var resumed struct {
-		Thread struct {
-			ProjectID string `json:"projectId"`
-		} `json:"thread"`
-	}
+	var resumed any
 	if err := app.Call(ctx, "thread/resume", map[string]any{
 		"threadId": cfg.ThreadID, "cwd": cfg.WorkingDirectory, "model": cfg.Model, "approvalPolicy": "never",
 	}, &resumed); err != nil {
+		var rpcErr *codexapp.RPCError
+		if errors.As(err, &rpcErr) && rpcErr.Code == -32600 && strings.Contains(strings.ToLower(rpcErr.Message), "active writer") {
+			return fmt.Errorf("%w: %s", errRuntimeOccupied, rpcErr.Message)
+		}
 		return fmt.Errorf("resume codex thread: %w", err)
-	}
-	if resumed.Thread.ProjectID == cfg.ProjectID {
-		return nil
-	}
-	var updated struct {
-		Thread struct {
-			ProjectID string `json:"projectId"`
-		} `json:"thread"`
-	}
-	if err := app.Call(ctx, "thread/metadata/update", map[string]any{
-		"threadId": cfg.ThreadID, "projectId": cfg.ProjectID,
-	}, &updated); err != nil {
-		return fmt.Errorf("assign resumed codex thread to project: %w", err)
-	}
-	if updated.Thread.ProjectID != cfg.ProjectID {
-		return fmt.Errorf("assign resumed codex thread to project: response did not confirm assignment")
 	}
 	return nil
 }
 
 type codexWorkerRuntime struct {
-	cfg          codexWorkerConfig
-	store        zotigosession.Store
-	writer       *workerClientWriter
-	app          codexapp.RPC
-	threadID     string
-	activeTurnID string
-	turnStarted  time.Time
-	messages     map[string]string
-	messageOrder []string
+	cfg             codexWorkerConfig
+	store           zotigosession.Store
+	writer          *workerClientWriter
+	app             codexapp.RPC
+	threadID        string
+	activeTurnID    string
+	commandSequence uint64
+	turnStarted     time.Time
+	messages        map[string]string
+	messageOrder    []string
 }
 
 func (r *codexWorkerRuntime) Close() error {
@@ -233,6 +221,9 @@ func (r *codexWorkerRuntime) Close() error {
 }
 
 func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) error {
+	if command.Sequence > r.commandSequence {
+		r.commandSequence = command.Sequence
+	}
 	switch command.Type {
 	case sessionCommandMessage:
 		if r.activeTurnID != "" {
@@ -293,21 +284,17 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-chan workerConversationBoundResult) error {
 	var response struct {
 		Thread struct {
-			ID        string `json:"id"`
-			ProjectID string `json:"projectId"`
+			ID string `json:"id"`
 		} `json:"thread"`
 	}
 	if err := r.app.Call(ctx, "thread/start", map[string]any{
 		"cwd": r.cfg.WorkingDirectory, "model": r.cfg.Model,
-		"projectId": r.cfg.ProjectID, "approvalPolicy": "never",
+		"approvalPolicy": "never",
 	}, &response); err != nil {
 		return fmt.Errorf("start codex thread: %w", err)
 	}
 	if response.Thread.ID == "" {
 		return fmt.Errorf("start codex thread: missing thread id")
-	}
-	if response.Thread.ProjectID != r.cfg.ProjectID {
-		return fmt.Errorf("start codex thread: response did not confirm project assignment")
 	}
 	if err := r.writer.SendConversationBound(ctx, response.Thread.ID); err != nil {
 		return err
@@ -399,9 +386,15 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			return err
 		}
 		r.activeTurnID = ""
+		commandSequence := r.commandSequence
 		r.turnStarted = time.Time{}
 		r.messages = make(map[string]string)
 		r.messageOrder = nil
+		if r.writer != nil {
+			if err := r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence}); err != nil {
+				return err
+			}
+		}
 	}
 	return nil
 }

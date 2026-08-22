@@ -59,6 +59,7 @@ type Session struct {
 	StartedAt        *time.Time           `json:"started_at,omitempty"`
 	EndedAt          *time.Time           `json:"ended_at,omitempty"`
 	Error            string               `json:"error,omitempty"`
+	ErrorCode        string               `json:"error_code,omitempty"`
 	seq              uint64
 }
 
@@ -67,7 +68,10 @@ var (
 	errInvalidSessionTransition      = errors.New("invalid session state transition")
 	errSessionProfileNotFound        = errors.New("session profile not found")
 	errWorkerDisconnectedBeforeReady = errors.New("worker disconnected before becoming ready")
+	errRuntimeOccupied               = errors.New("runtime session is open in another application")
 )
+
+const runtimeOccupiedErrorPrefix = "runtime_occupied: "
 
 type sessionRegistry struct {
 	mu       sync.Mutex
@@ -226,11 +230,16 @@ func (r *sessionRegistry) End(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) Fail(id string, message string) (Session, error) {
+	return r.FailWithCode(id, "", message)
+}
+
+func (r *sessionRegistry) FailWithCode(id string, code string, message string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateFailed
 		session.EndedAt = &now
 		session.Error = message
+		session.ErrorCode = code
 	})
 }
 
@@ -243,13 +252,33 @@ func (r *sessionRegistry) FailStarting(id string, message string) (Session, erro
 	})
 }
 
+func (r *sessionRegistry) RetryOccupiedWorker(id string) (Session, error) {
+	now := time.Now().UTC()
+	return r.transition(id, []SessionState{SessionStateFailed}, func(session *Session) {
+		session.State = SessionStateStarting
+		session.StartedAt = &now
+		session.EndedAt = nil
+		session.Error = ""
+		session.ErrorCode = ""
+	})
+}
+
 func (r *sessionRegistry) ResetStarting(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
 		session.State = SessionStateCreated
 		session.StartedAt = nil
 		session.EndedAt = nil
 		session.Error = ""
+		session.ErrorCode = ""
 	})
+}
+
+func isRuntimeOccupiedSession(session Session) bool {
+	return session.ErrorCode == "runtime_occupied" || strings.HasPrefix(session.Error, runtimeOccupiedErrorPrefix)
+}
+
+func runtimeOccupiedMessage(session Session) string {
+	return strings.TrimPrefix(session.Error, runtimeOccupiedErrorPrefix)
 }
 
 func (r *sessionRegistry) transition(id string, from []SessionState, apply func(*Session)) (Session, error) {
@@ -314,6 +343,7 @@ type createSessionRequest struct {
 
 type finishSessionRequest struct {
 	Error      string `json:"error,omitempty"`
+	ErrorCode  string `json:"error_code,omitempty"`
 	Generation string `json:"generation,omitempty"`
 }
 
@@ -335,12 +365,10 @@ func Run(args []string) int {
 	sessionStoreRoot := fs.String("session-store-root", "", "Session store root for internal worker mode")
 	codexWorkerMode := fs.Bool("codex-worker", false, "Run an internal Codex bridge worker")
 	codexSocket := fs.String("codex-socket", "", "Codex app-server Unix socket")
-	codexProjectID := fs.String("codex-project-id", "", "Codex Project id")
 	codexWorkingDirectory := fs.String("codex-working-directory", "", "Codex worker working directory")
 	codexModel := fs.String("codex-model", "", "Codex model")
 	codexReasoningEffort := fs.String("codex-reasoning-effort", "", "Codex reasoning effort")
 	codexThreadID := fs.String("codex-thread-id", "", "Existing Codex thread id")
-	workspaceBindingRevision := fs.Uint64("workspace-binding-revision", 0, "Workspace binding revision")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -370,11 +398,10 @@ func Run(args []string) int {
 		_ = os.Unsetenv(workerAuthTokenEnv)
 		if err := runCodexWorkerClient(context.Background(), codexWorkerConfig{
 			workerClientConfig: workerClientConfig{DaemonURL: daemonURL, SessionID: *workerSessionID, AuthToken: workerAuthToken},
-			SocketPath:         *codexSocket, ProjectID: *codexProjectID,
-			WorkingDirectory: *codexWorkingDirectory, Model: *codexModel,
+			SocketPath:         *codexSocket,
+			WorkingDirectory:   *codexWorkingDirectory, Model: *codexModel,
 			ReasoningEffort: *codexReasoningEffort, ThreadID: *codexThreadID,
-			WorkspaceRevision: *workspaceBindingRevision,
-			SessionStoreRoot:  *sessionStoreRoot,
+			SessionStoreRoot: *sessionStoreRoot,
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "zotigod Codex worker failed: %v\n", err)
 			return 1
@@ -426,7 +453,7 @@ func Run(args []string) int {
 	if binaryPath, _, discoverErr := codexapp.Discover(); discoverErr == nil && launcher != nil {
 		cacheDir, cacheErr := os.UserCacheDir()
 		if cacheErr == nil {
-			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), os.Stderr)
+			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), os.Stderr, codexapp.HostOptions{StopWhenIdle: true})
 		}
 		if cacheErr != nil {
 			logger.Printf("Codex runtime disabled: %v", cacheErr)
@@ -658,6 +685,10 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageConversationBound:
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
+		case workerMessageIdle:
+			if msg.Idle != nil {
+				handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle)
+			}
 		}
 	})
 	mux := http.NewServeMux()
@@ -789,7 +820,6 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 		}
 		workingDirectory := ""
 		var assignedWorkspaceID string
-		var assignedWorkspace *zotigoworkspace.Workspace
 		if req.WorkspaceID != "" {
 			if !h.requireCatalog(w) {
 				return
@@ -810,7 +840,6 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			}
 			workingDirectory = workspace.RootPath
 			assignedWorkspaceID = workspace.ID
-			assignedWorkspace = &workspace
 		} else {
 			var err error
 			workingDirectory, err = resolveWorkingDirectory(req.WorkingDirectory)
@@ -877,19 +906,6 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			approvalPolicy = agent.ApprovalPolicyBypass
 			if err := h.validateCodexSettings(r.Context(), strings.TrimSpace(req.Model), strings.TrimSpace(req.ReasoningEffort)); err != nil {
 				writeAPIError(w, http.StatusBadRequest, err.Error())
-				return
-			}
-			binding, err := h.prepareRuntimeWorkspace(r.Context(), *assignedWorkspace, agentKind)
-			if err != nil {
-				if errors.Is(err, zotigoruntime.ErrWorkspaceConflict) {
-					writeAPIErrorCode(w, http.StatusConflict, "runtime_workspace_conflict", err.Error())
-					return
-				}
-				writeAPIError(w, http.StatusServiceUnavailable, fmt.Sprintf("prepare codex project: %v", err))
-				return
-			}
-			if err := h.fenceRuntimeWorkspaceWorkers(r.Context(), assignedWorkspace.ID, binding.Revision); err != nil {
-				writeAPIError(w, http.StatusInternalServerError, err.Error())
 				return
 			}
 			profileName = ""
@@ -1127,37 +1143,20 @@ var (
 
 func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session, error) {
 	releaseWorkspace := func() {}
-	var assignedWorkspace *zotigoworkspace.Workspace
 	if h.catalog != nil {
 		organization, err := h.catalog.GetSessionOrganization(ctx, id)
 		if err == nil && organization.WorkspaceID != nil {
-			workspace, release, lockErr := h.lockWorkspaceForUse(ctx, *organization.WorkspaceID)
+			_, release, lockErr := h.lockWorkspaceForUse(ctx, *organization.WorkspaceID)
 			err = lockErr
 			releaseWorkspace = release
 			if err != nil {
 				return Session{}, fmt.Errorf("lock session workspace: %w", err)
 			}
-			assignedWorkspace = &workspace
 		} else if err != nil && !errors.Is(err, zotigoworkspace.ErrNotFound) {
 			return Session{}, fmt.Errorf("load session organization: %w", err)
 		}
 	}
 	defer releaseWorkspace()
-	if assignedWorkspace != nil {
-		stored, found, err := h.storedSession(ctx, id)
-		if err != nil {
-			return Session{}, fmt.Errorf("load session runtime: %w", err)
-		}
-		if found && zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentCodex {
-			binding, err := h.prepareRuntimeWorkspace(ctx, *assignedWorkspace, zotigoruntime.AgentCodex)
-			if err != nil {
-				return Session{}, fmt.Errorf("prepare codex project: %w", err)
-			}
-			if err := h.fenceRuntimeWorkspaceWorkers(ctx, assignedWorkspace.ID, binding.Revision); err != nil {
-				return Session{}, err
-			}
-		}
-	}
 	unlock := h.sessionOps.lock(id)
 	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
 		unlock()
@@ -1241,6 +1240,9 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 			if session.Error == errWorkerConnectTimeout.Error() {
 				return errWorkerConnectTimeout
 			}
+			if isRuntimeOccupiedSession(session) {
+				return fmt.Errorf("%w: %s", errRuntimeOccupied, runtimeOccupiedMessage(session))
+			}
 			if session.Error != "" {
 				return errors.New(session.Error)
 			}
@@ -1316,6 +1318,18 @@ func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Se
 				return Session{}, false, err
 			}
 			return session, true, nil
+		case SessionStateFailed:
+			if !isRuntimeOccupiedSession(session) {
+				return Session{}, false, errInvalidSessionTransition
+			}
+			session, err = h.registry.RetryOccupiedWorker(id)
+			if errors.Is(err, errInvalidSessionTransition) {
+				continue
+			}
+			if err != nil {
+				return Session{}, false, err
+			}
+			return session, true, nil
 		default:
 			return Session{}, false, errInvalidSessionTransition
 		}
@@ -1376,8 +1390,8 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errSessionProfileNotFound):
 		writeAPIErrorCode(w, http.StatusConflict, "profile_not_found", err.Error())
-	case errors.Is(err, zotigoruntime.ErrWorkspaceConflict):
-		writeAPIErrorCode(w, http.StatusConflict, "runtime_workspace_conflict", err.Error())
+	case errors.Is(err, errRuntimeOccupied):
+		writeAPIErrorCode(w, http.StatusConflict, "runtime_occupied", err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start session: %v", err))
 	}
@@ -1496,13 +1510,41 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	case SessionStateStarting:
 		session, err := h.registry.MarkRunning(id)
 		h.writeTransition(w, session, err)
+		if err == nil {
+			h.closeReadyWorkerWhenIdle(r.Context(), session, req.Generation)
+		}
 	case SessionStateRunning:
 		writeAPIJSON(w, http.StatusOK, session)
+		h.closeReadyWorkerWhenIdle(r.Context(), session, req.Generation)
 	case SessionStatePaused:
 		writeAPIJSON(w, http.StatusOK, session)
 	default:
 		h.writeTransition(w, Session{}, errInvalidSessionTransition)
 	}
+}
+
+func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session, generation string) {
+	items, _, err := h.items.LoadItems(ctx, session.ID)
+	if err != nil || lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items) {
+		return
+	}
+	h.closeWorkerWhenIdle(session.ID, generation, workerIdle{CommandSequence: latestCommandSequence(items)})
+}
+
+func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle workerIdle) {
+	session, ok := h.registry.Get(sessionID)
+	if !ok {
+		return
+	}
+	kind := zotigoruntime.AgentKind(session.Agent)
+	if kind == "" {
+		kind = zotigoruntime.AgentZotigo
+	}
+	adapter, err := h.runtimes.adapter(kind)
+	if err != nil {
+		return
+	}
+	h.workers.CloseWhenIdle(sessionID, generation, idle, adapter.WorkerLifecycle().IdleTimeout)
 }
 
 func (h *handler) handleWorkerDisconnect(id string) {
@@ -1556,7 +1598,7 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 	defer unlock()
 
 	if req.Error != "" {
-		session, err := h.registry.Fail(id, req.Error)
+		session, err := h.registry.FailWithCode(id, req.ErrorCode, req.Error)
 		if err == nil {
 			h.workers.Close(id)
 		}

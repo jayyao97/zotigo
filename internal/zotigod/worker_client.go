@@ -150,6 +150,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		NotifyApprovalResolved: func(ctx context.Context, approval approvalRequestResponse) {
 			_ = clientWriter.SendApprovalResult(ctx, workerApprovalResult{Approval: &approval})
 		},
+		NotifyIdle: clientWriter.SendIdle,
 	})
 	if err != nil {
 		return err
@@ -178,6 +179,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		return fmt.Errorf("report worker ready: %w", err)
 	}
 	logWorkerBootStep(cfg.SessionID, "ready", stepStarted, bootStarted)
+	_ = runtime.NotifyIdleIfIdle(context.Background(), cursor.Sequence)
 
 	for {
 		select {
@@ -186,6 +188,9 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 			return err
 		case err := <-readErrCh:
 			runErr = err
+			if isExpectedWorkerClose(err) {
+				return nil
+			}
 			return runErr
 		case command, ok := <-commandCh:
 			if !ok {
@@ -204,6 +209,10 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 			}
 			cursor, err = replayWorkerCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
 			if err != nil {
+				runErr = err
+				return err
+			}
+			if err := runtime.NotifyIdleIfIdle(context.Background(), cursor.Sequence); err != nil {
 				runErr = err
 				return err
 			}
@@ -241,6 +250,7 @@ type workerRuntimeConfig struct {
 	DisplayBarrier         func(context.Context) error
 	NotifyApproval         func(context.Context, approvalRequestResponse)
 	NotifyApprovalResolved func(context.Context, approvalRequestResponse)
+	NotifyIdle             func(context.Context, workerIdle) error
 }
 
 func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
@@ -316,14 +326,16 @@ type workerRuntime struct {
 	fatalCh          chan error
 	fatalMu          sync.Mutex
 	fatalErr         error
+	notifyIdle       func(context.Context, workerIdle) error
 
-	mu         sync.Mutex
-	turnCancel context.CancelFunc
-	turnActive bool
-	turnReady  chan struct{}
-	turnDone   chan struct{}
-	readyDone  bool
-	doneDone   bool
+	mu                  sync.Mutex
+	turnCancel          context.CancelFunc
+	turnActive          bool
+	turnReady           chan struct{}
+	turnDone            chan struct{}
+	readyDone           bool
+	doneDone            bool
+	turnCommandSequence uint64
 }
 
 func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRuntime, error) {
@@ -495,6 +507,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		observer:   observer,
 		runtimeWAL: runtimeWAL,
 		fatalCh:    make(chan error, 1),
+		notifyIdle: cfg.NotifyIdle,
 	}
 	if runtimeWAL != nil {
 		runtimeWAL.onError = func(err error) {
@@ -626,10 +639,12 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command commandRespon
 	}
 	switch command.Type {
 	case sessionCommandMessage:
-		return nil, r.startMessageTurn(ctx, command.ID, command.Message)
+		return nil, r.startMessageTurn(ctx, command.ID, command.Sequence, command.Message)
 	case sessionCommandPause:
+		r.noteTurnCommandSequence(command.Sequence)
 		return nil, r.pauseTurn(ctx, command.Pause)
 	case sessionCommandSteering:
+		r.noteTurnCommandSequence(command.Sequence)
 		return nil, r.queueTurnUserInput(ctx, command)
 	case sessionCommandProfile:
 		return r.switchProfile(ctx, command.ID, command.Profile)
@@ -1011,7 +1026,7 @@ func isStaleTurnUserInputError(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "agent is not running")
 }
 
-func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, command *messageCommandPayload) error {
+func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *messageCommandPayload) error {
 	msg, err := messageFromCommand(commandID, command)
 	if err != nil {
 		return err
@@ -1029,6 +1044,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.turnDone = make(chan struct{})
 	r.readyDone = false
 	r.doneDone = false
+	r.turnCommandSequence = commandSequence
 	r.mu.Unlock()
 
 	turnID, err := r.display.StartTurn(ctx)
@@ -1047,12 +1063,41 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		}
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
 		snapshot := r.snapshotAfterTurn(turnID)
-		if err := r.saveSnapshot(context.Background(), snapshot); err != nil {
-			r.fail(fmt.Errorf("persist terminal turn state: %w", err))
+		saveErr := r.saveSnapshot(context.Background(), snapshot)
+		if saveErr != nil {
+			r.fail(fmt.Errorf("persist terminal turn state: %w", saveErr))
 		}
+		sequence := r.turnSequence()
 		r.finishTurn()
+		if saveErr == nil && snapshot.State != agent.StatePaused && r.notifyIdle != nil {
+			_ = r.notifyIdle(context.Background(), workerIdle{CommandSequence: sequence})
+		}
 	}()
 	return nil
+}
+
+func (r *workerRuntime) noteTurnCommandSequence(sequence uint64) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.turnActive && sequence > r.turnCommandSequence {
+		r.turnCommandSequence = sequence
+	}
+}
+
+func (r *workerRuntime) turnSequence() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.turnCommandSequence
+}
+
+func (r *workerRuntime) NotifyIdleIfIdle(ctx context.Context, commandSequence uint64) error {
+	r.mu.Lock()
+	active := r.turnActive
+	r.mu.Unlock()
+	if active || r.notifyIdle == nil || r.agent.Snapshot().State == agent.StatePaused {
+		return nil
+	}
+	return r.notifyIdle(ctx, workerIdle{CommandSequence: commandSequence})
 }
 
 func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
@@ -1228,6 +1273,10 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 	body := finishSessionRequest{Generation: generation}
 	if err != nil && !isExpectedWorkerClose(err) {
 		body.Error = err.Error()
+		if errors.Is(err, errRuntimeOccupied) {
+			body.ErrorCode = "runtime_occupied"
+			body.Error = strings.TrimPrefix(body.Error, errRuntimeOccupied.Error()+": ")
+		}
 	}
 	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/finish", body)
 }
@@ -1751,6 +1800,20 @@ func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error 
 	select {
 	case <-wakeCtx.Done():
 		return wakeCtx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendIdle(ctx context.Context, idle workerIdle) error {
+	idleCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+	defer cancel()
+	msg := workerMessage{Type: workerMessageIdle, Idle: &idle}
+	select {
+	case <-idleCtx.Done():
+		return idleCtx.Err()
 	case <-w.done:
 		return errors.New("worker connection is closed")
 	case w.sendCh <- msg:

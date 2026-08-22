@@ -2,17 +2,19 @@ package zotigod
 
 import (
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/codexapp"
 )
 
 type codexWorkerRPC struct {
 	methods        []string
 	resumeApproval string
+	err            error
 }
 
 func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
@@ -54,25 +56,30 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 	if method == "thread/resume" {
 		r.resumeApproval, _ = request["approvalPolicy"].(string)
 	}
-	projectID := "old-project"
-	if method == "thread/metadata/update" {
-		projectID, _ = request["projectId"].(string)
+	return r.err
+}
+
+func TestResumeCodexThreadClassifiesAnotherAppOwnership(t *testing.T) {
+	rpc := &codexWorkerRPC{err: &codexapp.RPCError{Code: -32600, Message: "thread thread-1 already has an active writer"}}
+	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
+		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
+	})
+	if !errors.Is(err, errRuntimeOccupied) {
+		t.Fatalf("resume error = %v, want runtime occupied", err)
 	}
-	payload, _ := json.Marshal(map[string]any{"thread": map[string]any{"projectId": projectID}})
-	return json.Unmarshal(payload, result)
 }
 
 func (*codexWorkerRPC) Notify(string, any) error { return nil }
 
-func TestResumeCodexThreadReassignsAndConfirmsProject(t *testing.T) {
+func TestResumeCodexThreadUsesCWDWithoutUpdatingProject(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
-		ThreadID: "thread-1", ProjectID: "project-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
+		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := fmt.Sprint(rpc.methods); got != "[thread/resume thread/metadata/update]" {
+	if got := fmt.Sprint(rpc.methods); got != "[thread/resume]" {
 		t.Fatalf("methods = %s", got)
 	}
 	if rpc.resumeApproval != "never" {

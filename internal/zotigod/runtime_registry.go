@@ -3,9 +3,12 @@ package zotigod
 import (
 	"context"
 	"fmt"
+	"time"
 
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
+
+const nativeWorkerIdleTimeout = 5 * time.Minute
 
 type runtimeRegistry struct {
 	adapters map[zotigoruntime.AgentKind]zotigoruntime.Adapter
@@ -49,4 +52,8 @@ func (a nativeRuntimeAdapter) StartWorker(ctx context.Context, spec zotigoruntim
 		return nil
 	}
 	return a.launcher.Start(ctx, spec.SessionID, spec.WorkingDirectory)
+}
+
+func (a nativeRuntimeAdapter) WorkerLifecycle() zotigoruntime.WorkerLifecycle {
+	return zotigoruntime.WorkerLifecycle{IdleTimeout: nativeWorkerIdleTimeout}
 }

@@ -32,6 +32,7 @@ const (
 	workerMessageApprovalResult          workerMessageType = "approval_result"
 	workerMessageConversationBound       workerMessageType = "conversation_bound"
 	workerMessageConversationBoundResult workerMessageType = "conversation_bound_result"
+	workerMessageIdle                    workerMessageType = "idle"
 )
 
 type workerMessage struct {
@@ -44,6 +45,11 @@ type workerMessage struct {
 	ApprovalResult          *workerApprovalResult          `json:"approval_result,omitempty"`
 	ConversationBound       *workerConversationBound       `json:"conversation_bound,omitempty"`
 	ConversationBoundResult *workerConversationBoundResult `json:"conversation_bound_result,omitempty"`
+	Idle                    *workerIdle                    `json:"idle,omitempty"`
+}
+
+type workerIdle struct {
+	CommandSequence uint64 `json:"command_sequence"`
 }
 
 type workerDisplayBarrier struct {
@@ -105,11 +111,15 @@ func (r *workerRegistry) SetMessageHandler(handler func(string, string, workerMe
 	r.onMessage = handler
 }
 
-func (r *workerRegistry) Register(sessionID string, generation string, workspaceRevision uint64, conn *websocket.Conn) *workerConnection {
-	worker := newWorkerConnection(sessionID, generation, workspaceRevision, conn, r)
+func (r *workerRegistry) Register(sessionID string, generation string, conn *websocket.Conn) *workerConnection {
+	worker := newWorkerConnection(sessionID, generation, conn, r)
 
 	r.mu.Lock()
 	existing := r.workers[sessionID]
+	if existing != nil && existing.idleTimer != nil {
+		existing.idleTimer.Stop()
+		existing.idleTimer = nil
+	}
 	r.workers[sessionID] = worker
 	waiters := r.waiters[sessionID]
 	delete(r.waiters, sessionID)
@@ -131,37 +141,15 @@ func (r *workerRegistry) Matches(sessionID string, generation string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	worker := r.workers[sessionID]
-	return worker != nil && worker.generation == generation
-}
-
-func (r *workerRegistry) WorkspaceRevision(sessionID string, generation string) (uint64, bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	worker := r.workers[sessionID]
-	if worker == nil || worker.generation != generation {
-		return 0, false
-	}
-	return worker.workspaceRevision, true
-}
-
-func (r *workerRegistry) CloseIfWorkspaceRevisionMismatch(sessionID string, expected uint64) bool {
-	r.mu.Lock()
-	worker := r.workers[sessionID]
-	if worker == nil || worker.workspaceRevision == expected {
-		r.mu.Unlock()
-		return false
-	}
-	delete(r.workers, sessionID)
-	r.mu.Unlock()
-	worker.close()
-	return true
+	return worker != nil && !worker.closing && worker.generation == generation
 }
 
 func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result workerConversationBoundResult) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
+	available := worker != nil && !worker.closing && worker.generation == generation
 	r.mu.Unlock()
-	if worker == nil || worker.generation != generation {
+	if !available {
 		return false
 	}
 	return worker.sendMessage(workerMessage{Type: workerMessageConversationBoundResult, ConversationBoundResult: &result})
@@ -170,11 +158,59 @@ func (r *workerRegistry) SendConversationBoundResult(sessionID string, generatio
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
+	available := worker != nil && !worker.closing
+	if available {
+		if worker.idleTimer != nil {
+			worker.idleTimer.Stop()
+			worker.idleTimer = nil
+		}
+		if command.Sequence > worker.lastCommandSequence {
+			worker.lastCommandSequence = command.Sequence
+		}
+	}
 	r.mu.Unlock()
-	if worker == nil {
+	if !available {
 		return false
 	}
 	return worker.send(command)
+}
+
+func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle workerIdle, timeout time.Duration) {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.closing || worker.generation != generation || worker.lastCommandSequence > idle.CommandSequence {
+		r.mu.Unlock()
+		return
+	}
+	if worker.idleTimer != nil {
+		worker.idleTimer.Stop()
+	}
+	if timeout <= 0 {
+		worker.idleTimer = nil
+		worker.closing = true
+		r.mu.Unlock()
+		worker.close()
+		return
+	}
+	worker.idleEpoch++
+	idleEpoch := worker.idleEpoch
+	worker.idleTimer = time.AfterFunc(timeout, func() {
+		r.closeIdleWorker(worker, idleEpoch, idle.CommandSequence)
+	})
+	r.mu.Unlock()
+}
+
+func (r *workerRegistry) closeIdleWorker(worker *workerConnection, idleEpoch uint64, commandSequence uint64) {
+	r.mu.Lock()
+	active := r.workers[worker.sessionID] == worker && !worker.closing && worker.idleTimer != nil && worker.idleEpoch == idleEpoch && worker.lastCommandSequence <= commandSequence
+	if active {
+		worker.idleTimer = nil
+		worker.closing = true
+	}
+	r.mu.Unlock()
+	if active {
+		worker.close()
+	}
 }
 
 func (r *workerRegistry) acknowledgeDisplayBarrier(sessionID string, barrier workerDisplayBarrier) bool {
@@ -208,8 +244,8 @@ func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, a
 func (r *workerRegistry) Has(sessionID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	_, ok := r.workers[sessionID]
-	return ok
+	worker := r.workers[sessionID]
+	return worker != nil && !worker.closing
 }
 
 func (r *workerRegistry) Close(sessionID string) {
@@ -223,7 +259,7 @@ func (r *workerRegistry) Close(sessionID string) {
 
 func (r *workerRegistry) Wait(ctxDone <-chan struct{}, sessionID string) bool {
 	r.mu.Lock()
-	if _, ok := r.workers[sessionID]; ok {
+	if worker := r.workers[sessionID]; worker != nil && !worker.closing {
 		r.mu.Unlock()
 		return true
 	}
@@ -261,6 +297,10 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 	r.mu.Lock()
 	removed := false
 	if r.workers[sessionID] == worker {
+		if worker.idleTimer != nil {
+			worker.idleTimer.Stop()
+			worker.idleTimer = nil
+		}
 		delete(r.workers, sessionID)
 		removed = true
 	}
@@ -282,28 +322,30 @@ func (r *workerRegistry) receive(worker *workerConnection, msg workerMessage) {
 }
 
 type workerConnection struct {
-	sessionID         string
-	generation        string
-	workspaceRevision uint64
-	conn              *websocket.Conn
-	registry          *workerRegistry
-	sendCh            chan workerMessage
-	doneCh            chan struct{}
-	closeOnce         sync.Once
-	waitersMu         sync.Mutex
-	waiters           map[string]chan workerApprovalResult
+	sessionID           string
+	generation          string
+	conn                *websocket.Conn
+	registry            *workerRegistry
+	sendCh              chan workerMessage
+	doneCh              chan struct{}
+	closeOnce           sync.Once
+	waitersMu           sync.Mutex
+	waiters             map[string]chan workerApprovalResult
+	idleTimer           *time.Timer
+	idleEpoch           uint64
+	lastCommandSequence uint64
+	closing             bool
 }
 
-func newWorkerConnection(sessionID string, generation string, workspaceRevision uint64, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
+func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID:         sessionID,
-		generation:        generation,
-		workspaceRevision: workspaceRevision,
-		conn:              conn,
-		registry:          registry,
-		sendCh:            make(chan workerMessage, 32),
-		doneCh:            make(chan struct{}),
-		waiters:           make(map[string]chan workerApprovalResult),
+		sessionID:  sessionID,
+		generation: generation,
+		conn:       conn,
+		registry:   registry,
+		sendCh:     make(chan workerMessage, 32),
+		doneCh:     make(chan struct{}),
+		waiters:    make(map[string]chan workerApprovalResult),
 	}
 }
 

@@ -2,7 +2,6 @@ package codexapp
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"testing"
 
@@ -20,46 +19,23 @@ func (f fakeRPC) Call(_ context.Context, method string, params any, result any) 
 func (fakeRPC) Notify(string, any) error { return nil }
 
 type fakeHost struct {
-	rpc RPC
+	rpc      RPC
+	releases int
 }
 
-func (h fakeHost) Ensure(context.Context) (RPC, string, error) { return h.rpc, "codex-test", nil }
-func (fakeHost) SocketPath() string                            { return "/tmp/codex.sock" }
-
-func TestAdapterFindWorkspaceScansAllPagesAndPrefersMetadata(t *testing.T) {
-	root := t.TempDir()
-	page := 0
-	host := fakeHost{rpc: fakeRPC{call: func(method string, _ any, result any) error {
-		if method != "project/list" {
-			return fmt.Errorf("unexpected method %s", method)
-		}
-		response := result.(*struct {
-			Data       []project `json:"data"`
-			NextCursor *string   `json:"nextCursor"`
-		})
-		page++
-		if page == 1 {
-			next := "page-2"
-			response.Data = []project{{ID: "root-only", Roots: []projectRoot{{Path: root}}, Metadata: map[string]string{}}}
-			response.NextCursor = &next
+func (h *fakeHost) Acquire(context.Context) (*Lease, error) {
+	return &Lease{
+		RPC: h.rpc, Version: "codex-test", SocketPath: "/tmp/codex.sock",
+		release: func() error {
+			h.releases++
 			return nil
-		}
-		response.Data = []project{{ID: "metadata", Roots: []projectRoot{{Path: root}}, Metadata: map[string]string{"zotigod.workspace_id": "workspace-1"}}}
-		return nil
-	}}}
-	adapter := NewAdapter(host, nil)
-	match, err := adapter.FindWorkspace(context.Background(), zotigoruntime.WorkspaceSpec{WorkspaceID: "workspace-1", Name: "Workspace", RootPath: root})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if match == nil || match.ID != "metadata" || page != 2 {
-		t.Fatalf("match = %#v, pages=%d", match, page)
-	}
+		},
+	}, nil
 }
 
 func TestAdapterProbeUsesModelSlugAndScansAllPages(t *testing.T) {
 	page := 0
-	host := fakeHost{rpc: fakeRPC{call: func(method string, _ any, result any) error {
+	host := &fakeHost{rpc: fakeRPC{call: func(method string, _ any, result any) error {
 		if method != "model/list" {
 			return fmt.Errorf("unexpected method %s", method)
 		}
@@ -99,80 +75,42 @@ func TestAdapterProbeUsesModelSlugAndScansAllPages(t *testing.T) {
 	if page != 2 || len(capabilities.Models) != 2 || capabilities.Models[0].ID != "gpt-5.6-luna" {
 		t.Fatalf("capabilities=%#v pages=%d", capabilities, page)
 	}
+	if host.releases != 1 {
+		t.Fatalf("host releases = %d, want 1", host.releases)
+	}
 }
 
-func TestAdapterCreateWorkspaceSendsStableProjectMetadata(t *testing.T) {
-	root := t.TempDir()
-	host := fakeHost{rpc: fakeRPC{call: func(method string, params any, result any) error {
-		if method != "project/create" {
-			return fmt.Errorf("unexpected method %s", method)
+func TestAdapterWorkerReleasesHostLeaseOnProcessExit(t *testing.T) {
+	host := &fakeHost{rpc: fakeRPC{call: func(string, any, any) error { return nil }}}
+	var onExit func()
+	adapter := NewAdapter(host, func(_ context.Context, _ zotigoruntime.WorkerLaunchSpec, socketPath string, release func()) error {
+		if socketPath != "/tmp/codex.sock" {
+			t.Fatalf("socket path = %q", socketPath)
 		}
-		request := params.(map[string]any)
-		if request["idempotencyKey"] != "stable-key" {
-			return fmt.Errorf("idempotency key = %v", request["idempotencyKey"])
-		}
-		response := result.(*struct {
-			Project project `json:"project"`
-		})
-		response.Project = project{
-			ID: "project-1", Name: "Workspace", Roots: []projectRoot{{Path: root}},
-			Metadata: map[string]string{"zotigod.workspace_id": "workspace-1"},
-		}
+		onExit = release
 		return nil
-	}}}
-	adapter := NewAdapter(host, nil)
-	created, err := adapter.CreateWorkspace(context.Background(), zotigoruntime.WorkspaceCreateIntent{
-		WorkspaceSpec:  zotigoruntime.WorkspaceSpec{WorkspaceID: "workspace-1", Name: "Workspace", RootPath: root},
-		IdempotencyKey: "stable-key",
 	})
-	if err != nil {
+	if err := adapter.StartWorker(context.Background(), zotigoruntime.WorkerLaunchSpec{}); err != nil {
 		t.Fatal(err)
 	}
-	if created.ID != "project-1" {
-		t.Fatalf("created = %#v", created)
+	if host.releases != 0 {
+		t.Fatalf("host released before worker exit")
+	}
+	onExit()
+	if host.releases != 1 {
+		t.Fatalf("host releases = %d, want 1", host.releases)
 	}
 }
 
-func TestAdapterFindWorkspaceSkipsProjectWithoutExactlyOneRoot(t *testing.T) {
-	root := t.TempDir()
-	host := fakeHost{rpc: fakeRPC{call: func(method string, _ any, result any) error {
-		if method != "project/list" {
-			return fmt.Errorf("unexpected method %s", method)
-		}
-		response := result.(*struct {
-			Data       []project `json:"data"`
-			NextCursor *string   `json:"nextCursor"`
-		})
-		response.Data = []project{
-			{ID: "no-roots", Metadata: map[string]string{"zotigod.workspace_id": "workspace-1"}},
-			{ID: "many-roots", Roots: []projectRoot{{Path: root}, {Path: root}}, Metadata: map[string]string{"zotigod.workspace_id": "workspace-1"}},
-		}
-		return nil
-	}}}
-	match, err := NewAdapter(host, nil).FindWorkspace(context.Background(), zotigoruntime.WorkspaceSpec{
-		WorkspaceID: "workspace-1", Name: "Workspace", RootPath: root,
+func TestAdapterWorkerStartFailureReleasesHostLease(t *testing.T) {
+	host := &fakeHost{rpc: fakeRPC{call: func(string, any, any) error { return nil }}}
+	adapter := NewAdapter(host, func(context.Context, zotigoruntime.WorkerLaunchSpec, string, func()) error {
+		return fmt.Errorf("start failed")
 	})
-	if err != nil {
-		t.Fatal(err)
+	if err := adapter.StartWorker(context.Background(), zotigoruntime.WorkerLaunchSpec{}); err == nil {
+		t.Fatal("worker start succeeded")
 	}
-	if match != nil {
-		t.Fatalf("invalid-root Project matched: %#v", match)
-	}
-}
-
-func TestAdapterCreateWorkspaceRecognizesDeletedIdempotencyKey(t *testing.T) {
-	root := t.TempDir()
-	host := fakeHost{rpc: fakeRPC{call: func(method string, _ any, _ any) error {
-		if method != "project/create" {
-			return fmt.Errorf("unexpected method %s", method)
-		}
-		return &RPCError{Code: -32600, Message: "idempotency key refers to deleted project"}
-	}}}
-	_, err := NewAdapter(host, nil).CreateWorkspace(context.Background(), zotigoruntime.WorkspaceCreateIntent{
-		WorkspaceSpec:  zotigoruntime.WorkspaceSpec{WorkspaceID: "workspace-1", Name: "Workspace", RootPath: root},
-		IdempotencyKey: "deleted-key",
-	})
-	if !errors.Is(err, zotigoruntime.ErrWorkspaceCreateTombstone) {
-		t.Fatalf("create error = %v", err)
+	if host.releases != 1 {
+		t.Fatalf("host releases = %d, want 1", host.releases)
 	}
 }

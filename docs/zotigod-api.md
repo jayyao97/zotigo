@@ -163,8 +163,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
-`service_unavailable`, and `internal_error`.
-Codex Project ambiguity returns `runtime_workspace_conflict` with HTTP `409`.
+`runtime_occupied`, `service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -230,13 +229,12 @@ to a ready Workspace and selects a concrete model and reasoning effort:
 
 `profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are
 valid only for Codex Sessions and are checked against the paginated `model/list`
-catalog using the runtime model slug. Creating a Codex Session creates or reuses
-a Codex local Project named after the Workspace, with the Workspace `code/`
-directory as its root, and persists the revision-fenced mapping before returning
-`201`. If that Project is later deleted outside Zotigo, the next create or start
-re-discovers a matching Project or recreates and rebinds it. A new Codex thread
-is created with both `projectId` and `cwd` when the first message is sent; a
-resumed thread is reassigned to the current Project when necessary.
+catalog using the runtime model slug. Creating a Codex Session does not create,
+reuse, or modify a Codex local Project. The worker uses the complete Workspace
+root as `cwd`, so `code/`, `notes/`, `artifacts/`, and root-level instructions
+share one context boundary. The first message creates a thread without `projectId`, and
+zotigod persists the returned thread ID as the Session backend binding. Resume
+uses the same `cwd` and does not change any existing Codex Project assignment.
 
 This bridge version does not expose Codex approval callbacks. Codex Sessions
 therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted
@@ -424,6 +422,25 @@ and waits for that worker to connect. It does not append a user message.
 `POST /sessions/{id}/messages` also resumes an offline session before accepting
 the message. Desktop's normal chat flow can call `messages` directly instead of
 calling `start` first.
+
+Worker lifetime is independent of Desktop lifetime. Runtime adapters declare an
+idle policy: Codex workers are released shortly after a completed turn so the
+same Codex thread can be opened by another app-server process, while native
+Zotigo workers remain warm for five minutes before release. A newer durable
+command cancels a pending idle release. The next message relaunches the worker
+and restores the stored runtime state or Codex thread binding.
+
+The Codex UDS app-server is lease-managed with its workers. With zotigod's
+current `StopWhenIdle` host policy enabled, the last released lease also stops
+the app-server so its thread writer locks are immediately available to Codex
+App. The policy is an internal host option and can be disabled later if keeping
+the app-server warm is more important than immediate cross-application handoff.
+
+Codex uses a short 250 ms idle grace period so a `start` immediately followed by
+`messages` can reuse the same worker. If another Codex app-server process already
+owns the thread writer lock, start or message returns `409` with code
+`runtime_occupied`. This failure is retryable: after the other application
+releases the thread, the next start or message attempts resume again.
 
 Pause, steering, and approval decisions do not auto-resume offline sessions
 because they refer to a currently running turn or a live pending approval. For a

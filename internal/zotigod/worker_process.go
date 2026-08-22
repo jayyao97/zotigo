@@ -7,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -18,8 +17,8 @@ type workerLauncher interface {
 	Start(ctx context.Context, sessionID string, workingDirectory string) error
 }
 
-func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime.WorkerLaunchSpec, socketPath string) error {
-	if l == nil || spec.WorkspaceBinding == nil {
+func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime.WorkerLaunchSpec, socketPath string, onExit func()) error {
+	if l == nil {
 		return fmt.Errorf("codex worker launcher is not configured")
 	}
 	args := []string{
@@ -28,11 +27,9 @@ func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime
 		"--session-id", spec.SessionID,
 		"--session-store-root", spec.SessionStoreRoot,
 		"--codex-socket", socketPath,
-		"--codex-project-id", spec.WorkspaceBinding.ExternalID,
 		"--codex-working-directory", spec.WorkingDirectory,
 		"--codex-model", spec.Settings.Model,
 		"--codex-reasoning-effort", spec.Settings.ReasoningEffort,
-		"--workspace-binding-revision", strconv.FormatUint(spec.WorkspaceBinding.Revision, 10),
 	}
 	if spec.SessionBinding != nil && spec.SessionBinding.ConversationID != "" {
 		args = append(args, "--codex-thread-id", spec.SessionBinding.ConversationID)
@@ -42,7 +39,7 @@ func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime
 	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output
-	if err := l.startTracked(spec.SessionID, "Codex worker", cmd); err != nil {
+	if err := l.startTracked(spec.SessionID, "Codex worker", cmd, onExit); err != nil {
 		return fmt.Errorf("start codex worker: %w", err)
 	}
 	return nil
@@ -105,13 +102,13 @@ func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, worki
 	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output
-	if err := l.startTracked(sessionID, "Worker", cmd); err != nil {
+	if err := l.startTracked(sessionID, "Worker", cmd, nil); err != nil {
 		return fmt.Errorf("start worker: %w", err)
 	}
 	return nil
 }
 
-func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd *exec.Cmd) error {
+func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd *exec.Cmd, onExit func()) error {
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -132,6 +129,11 @@ func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd
 	}
 	go func() {
 		defer l.wait.Done()
+		defer func() {
+			if onExit != nil {
+				onExit()
+			}
+		}()
 		err := cmd.Wait()
 		l.mu.Lock()
 		if l.commands[sessionID] == cmd {

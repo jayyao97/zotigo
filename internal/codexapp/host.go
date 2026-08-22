@@ -15,18 +15,40 @@ import (
 const defaultStartTimeout = 10 * time.Second
 
 type Host struct {
-	mu         sync.Mutex
-	binaryPath string
-	runtimeDir string
-	output     io.Writer
-	command    *exec.Cmd
-	client     *Client
-	socketPath string
-	version    string
-	closed     bool
+	mu           sync.Mutex
+	binaryPath   string
+	runtimeDir   string
+	output       io.Writer
+	command      *exec.Cmd
+	client       *Client
+	socketPath   string
+	version      string
+	leases       int
+	stopWhenIdle bool
+	closed       bool
 }
 
-func NewHost(binaryPath string, runtimeDir string, output io.Writer) (*Host, error) {
+type HostOptions struct {
+	StopWhenIdle bool
+}
+
+type Lease struct {
+	RPC        RPC
+	Version    string
+	SocketPath string
+	release    func() error
+	once       sync.Once
+}
+
+func (l *Lease) Release() (err error) {
+	if l == nil {
+		return nil
+	}
+	l.once.Do(func() { err = l.release() })
+	return err
+}
+
+func NewHost(binaryPath string, runtimeDir string, output io.Writer, options HostOptions) (*Host, error) {
 	if binaryPath == "" {
 		var err error
 		binaryPath, err = exec.LookPath("codex")
@@ -37,7 +59,7 @@ func NewHost(binaryPath string, runtimeDir string, output io.Writer) (*Host, err
 	if runtimeDir == "" {
 		return nil, fmt.Errorf("codex runtime directory is required")
 	}
-	return &Host{binaryPath: binaryPath, runtimeDir: runtimeDir, output: output}, nil
+	return &Host{binaryPath: binaryPath, runtimeDir: runtimeDir, output: output, stopWhenIdle: options.StopWhenIdle}, nil
 }
 
 func Discover() (string, string, error) {
@@ -55,6 +77,24 @@ func Discover() (string, string, error) {
 func (h *Host) Ensure(ctx context.Context) (RPC, string, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.ensureLocked(ctx)
+}
+
+func (h *Host) Acquire(ctx context.Context) (*Lease, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	client, version, err := h.ensureLocked(ctx)
+	if err != nil {
+		return nil, err
+	}
+	h.leases++
+	return &Lease{
+		RPC: client, Version: version, SocketPath: h.socketPath,
+		release: h.release,
+	}, nil
+}
+
+func (h *Host) ensureLocked(ctx context.Context) (RPC, string, error) {
 	if h.closed {
 		return nil, "", fmt.Errorf("codex app-server host is closed")
 	}
@@ -117,6 +157,18 @@ func (h *Host) Ensure(ctx context.Context) (RPC, string, error) {
 	h.version = initialized.UserAgent
 	go drainControlNotifications(client)
 	return h.client, h.version, nil
+}
+
+func (h *Host) release() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.leases > 0 {
+		h.leases--
+	}
+	if h.leases != 0 || h.closed || !h.stopWhenIdle {
+		return nil
+	}
+	return h.stopLocked()
 }
 
 func drainControlNotifications(client *Client) {

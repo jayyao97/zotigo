@@ -26,7 +26,6 @@ type agentCatalog struct {
 type agentCatalogCapabilities struct {
 	Profiles  bool `json:"profiles"`
 	Models    bool `json:"models"`
-	Projects  bool `json:"projects,omitempty"`
 	Steering  bool `json:"steering"`
 	Approvals bool `json:"approvals"`
 }
@@ -51,7 +50,7 @@ func (h *handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 	if _, _, err := codexapp.Discover(); err == nil {
 		response.Agents = append(response.Agents, agentCatalog{
 			ID: string(zotigoruntime.AgentCodex), Label: "Codex", Availability: "installed",
-			Capabilities: agentCatalogCapabilities{Models: true, Projects: true, Steering: true, Approvals: false},
+			Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false},
 		})
 	}
 	writeAPIJSON(w, http.StatusOK, response)
@@ -108,7 +107,7 @@ func codexCatalog(capabilities zotigoruntime.Capabilities) agentCatalog {
 	}
 	return agentCatalog{
 		ID: string(zotigoruntime.AgentCodex), Label: "Codex", Availability: "available", Version: capabilities.Version,
-		Capabilities: agentCatalogCapabilities{Models: true, Projects: true, Steering: true, Approvals: false},
+		Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false},
 		Models:       models,
 	}
 }

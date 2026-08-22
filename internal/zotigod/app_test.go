@@ -4218,6 +4218,29 @@ func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 	}
 }
 
+func TestOccupiedRuntimeFailureIsConflictAndRetryable(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID: "sess-occupied", State: SessionStateFailed, Agent: "codex",
+		Error: "thread already has an active writer", ErrorCode: "runtime_occupied", CreatedAt: time.Now().UTC(),
+	})
+	handler := &handler{registry: registry, workers: newWorkerRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}}
+
+	recorder := httptest.NewRecorder()
+	handler.writeEnsureRunningError(recorder, fmt.Errorf("%w: thread already has an active writer", errRuntimeOccupied))
+	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"runtime_occupied"`) {
+		t.Fatalf("occupied response = %d: %s", recorder.Code, recorder.Body.String())
+	}
+
+	session, launched, err := handler.ensureSessionStartedLocked(context.Background(), "sess-occupied")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !launched || session.State != SessionStateStarting || session.Error != "" || session.ErrorCode != "" {
+		t.Fatalf("retried occupied session = %#v, launched=%v", session, launched)
+	}
+}
+
 func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -5209,7 +5232,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 		display:   newWorkerDisplayLog("sess-close-stream", source),
 	}
 	runtime.runner = runner.New(ag, transport)
-	if err := runtime.startMessageTurn(context.Background(), "message-command", &messageCommandPayload{Text: "wait"}); err != nil {
+	if err := runtime.startMessageTurn(context.Background(), "message-command", 1, &messageCommandPayload{Text: "wait"}); err != nil {
 		t.Fatalf("start message turn: %v", err)
 	}
 	<-provider.started
