@@ -52,6 +52,8 @@ zotigod \
 ## Public endpoints
 
 - `GET /health`
+- `GET /agents`
+- `POST /agents/codex/prepare`
 - `GET /config/profiles`
 - `POST /sources/inspect`
 - `POST /projects`
@@ -82,6 +84,7 @@ zotigod \
 - `PUT /sessions/{id}/profile`
 - `PUT /sessions/{id}/approval-policy`
 - `POST /sessions/{id}/start`
+- `PUT /sessions/{id}/codex-settings`
 - `GET /sessions/{id}/items`
 - `GET /sessions/{id}/events`
 - `POST /sessions/{id}/title-suggestion`
@@ -160,7 +163,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
-`service_unavailable`, and `internal_error`.
+`runtime_occupied`, `service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -212,6 +215,41 @@ clients should pass the project root selected by the user:
 }
 ```
 
+Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned
+to a ready Workspace and selects a concrete model and reasoning effort:
+
+```json
+{
+  "workspace_id": "workspace_...",
+  "agent": "codex",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "medium"
+}
+```
+
+`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are
+valid only for Codex Sessions and are checked against the paginated `model/list`
+catalog using the runtime model slug. Creating a Codex Session does not create,
+reuse, or modify a Codex local Project. The worker uses the complete Workspace
+root as `cwd`, so `code/`, `notes/`, `artifacts/`, and root-level instructions
+share one context boundary. The first message creates a thread without `projectId`, and
+zotigod persists the returned thread ID as the Session backend binding. Resume
+uses the same `cwd` and does not change any existing Codex Project assignment.
+
+This bridge version does not expose Codex approval callbacks. Codex Sessions
+therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted
+or set to `bypass_permissions`, and later approval-policy changes return `409`.
+The ordinary Zotigo runtime retains the approval behavior described below.
+
+`GET /agents` performs binary discovery without starting app-server.
+`POST /agents/codex/prepare` starts the local UDS app-server and returns the
+model/reasoning catalog. Codex is omitted from `GET /agents` when no `codex`
+binary is visible on zotigod's `PATH`.
+
+`PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a
+Codex Session. The values apply to the next turn; the Codex thread and Project
+binding do not change.
+
 `working_directory` must be an absolute path that resolves to an existing
 directory. If it is omitted, zotigod uses its current working directory for
 CLI/backward compatibility. The directory is persisted in the core session
@@ -228,7 +266,7 @@ worker starts.
 Changing the project default later does not change new-format sessions. Use the
 profile endpoint below to change the profile selected for an existing session.
 
-`approval_policy` is optional and defaults to `auto`. Desktop clients may also
+For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Desktop clients may also
 set it to `bypass_permissions` for Full access. The value is persisted with the
 session and restored by replacement workers. The public Desktop API does not
 accept `manual`.
@@ -384,6 +422,25 @@ and waits for that worker to connect. It does not append a user message.
 `POST /sessions/{id}/messages` also resumes an offline session before accepting
 the message. Desktop's normal chat flow can call `messages` directly instead of
 calling `start` first.
+
+Worker lifetime is independent of Desktop lifetime. Runtime adapters declare an
+idle policy: Codex workers are released shortly after a completed turn so the
+same Codex thread can be opened by another app-server process, while native
+Zotigo workers remain warm for five minutes before release. A newer durable
+command cancels a pending idle release. The next message relaunches the worker
+and restores the stored runtime state or Codex thread binding.
+
+The Codex UDS app-server is lease-managed with its workers. With zotigod's
+current `StopWhenIdle` host policy enabled, the last released lease also stops
+the app-server so its thread writer locks are immediately available to Codex
+App. The policy is an internal host option and can be disabled later if keeping
+the app-server warm is more important than immediate cross-application handoff.
+
+Codex uses a short 250 ms idle grace period so a `start` immediately followed by
+`messages` can reuse the same worker. If another Codex app-server process already
+owns the thread writer lock, start or message returns `409` with code
+`runtime_occupied`. This failure is retryable: after the other application
+releases the thread, the next start or message attempts resume again.
 
 Pause, steering, and approval decisions do not auto-resume offline sessions
 because they refer to a currently running turn or a live pending approval. For a

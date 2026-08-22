@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 3
+const schemaVersion = 4
 
 type Store struct {
 	db          *sql.DB
@@ -205,6 +205,26 @@ func (s *Store) migrate(ctx context.Context) error {
 			CHECK((project_id IS NULL) = (workspace_id IS NULL)),
 			CHECK((pinned_at IS NULL) = (pinned_position IS NULL))
 		)`,
+		`CREATE TABLE IF NOT EXISTS runtime_workspace_bindings (
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			agent TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('creating', 'bound')),
+			external_id TEXT,
+			create_key TEXT,
+			create_name TEXT,
+			create_root TEXT,
+			revision INTEGER NOT NULL CHECK(revision > 0),
+			backend_version TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(workspace_id, agent),
+			CHECK(
+				(state = 'creating' AND external_id IS NULL AND create_key IS NOT NULL
+				 AND create_name IS NOT NULL AND create_root IS NOT NULL)
+				OR
+				(state = 'bound' AND external_id IS NOT NULL)
+			)
+		)`,
 	}
 	for _, statement := range statements {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
@@ -273,6 +293,31 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 		version = 3
+	}
+	if version == 3 {
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS runtime_workspace_bindings (
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			agent TEXT NOT NULL,
+			state TEXT NOT NULL CHECK(state IN ('creating', 'bound')),
+			external_id TEXT,
+			create_key TEXT,
+			create_name TEXT,
+			create_root TEXT,
+			revision INTEGER NOT NULL CHECK(revision > 0),
+			backend_version TEXT,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY(workspace_id, agent),
+			CHECK(
+				(state = 'creating' AND external_id IS NULL AND create_key IS NOT NULL
+				 AND create_name IS NOT NULL AND create_root IS NOT NULL)
+				OR
+				(state = 'bound' AND external_id IS NOT NULL)
+			)
+		)`); err != nil {
+			return fmt.Errorf("migrate runtime workspace bindings: %w", err)
+		}
+		version = 4
 	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)

@@ -8,7 +8,18 @@ import (
 	"path/filepath"
 )
 
-const ownerMarkerName = ".zotigo-owner.json"
+const (
+	ownerMarkerName        = ".zotigo-owner.json"
+	agentsInstructionsName = "AGENTS.md"
+	agentsInstructions     = "# Zotigo Workspace\n\n" +
+		"This is a Zotigo-managed workspace, not a Git repository.\n\n" +
+		"- `code/<source-key>/` contains source repositories. Run Git, build, and test commands inside the relevant repository.\n" +
+		"- `notes/<source-key>/` contains shared knowledge and reference material. Read relevant notes before changing code.\n" +
+		"- `artifacts/` contains generated reports, exports, and deliverables.\n" +
+		"- `.zotigo-owner.json` is managed by Zotigo. Do not edit or delete it.\n\n" +
+		"When a repository under `code/` contains its own `AGENTS.md`, follow those repository-specific instructions while working in that repository.\n\n" +
+		"Do not assume the Workspace root itself is a Git repository.\n"
+)
 
 type ownerMarker struct {
 	Version     int    `json:"version"`
@@ -26,7 +37,10 @@ func provisionScaffold(workspace Workspace, nonce string) error {
 		if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%w: workspace root is not an owned directory", ErrConflict)
 		}
-		return validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce)
+		if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
+			return err
+		}
+		return writeAgentsInstructionsIfAbsent(workspace.RootPath)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect workspace root: %w", err)
 	}
@@ -62,8 +76,32 @@ func provisionScaffold(workspace Workspace, nonce string) error {
 			return fmt.Errorf("create workspace %s directory: %w", directory, err)
 		}
 	}
+	if err := writeAgentsInstructionsIfAbsent(staging); err != nil {
+		return err
+	}
 	if err := os.Rename(staging, workspace.RootPath); err != nil {
 		return fmt.Errorf("publish workspace scaffold: %w", err)
+	}
+	return nil
+}
+
+func writeAgentsInstructionsIfAbsent(root string) error {
+	path := filepath.Join(root, agentsInstructionsName)
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if os.IsExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("create workspace agent instructions: %w", err)
+	}
+	if _, err := file.WriteString(agentsInstructions); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return fmt.Errorf("write workspace agent instructions: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return fmt.Errorf("close workspace agent instructions: %w", err)
 	}
 	return nil
 }

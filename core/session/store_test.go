@@ -481,6 +481,47 @@ func TestFileStore_SQLiteIndexMigratesProfileName(t *testing.T) {
 	}
 }
 
+func TestFileStore_RuntimeMetadataAndBackendBindingRoundTrip(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	now := time.Now().UTC()
+	session := &Session{Metadata: Metadata{
+		ID: "codex-session", WorkingDirectory: t.TempDir(), Agent: "codex",
+		ProfileName: "__zotigo_backend__:codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium",
+		CreatedAt: now, UpdatedAt: now,
+	}}
+	if err := store.Put(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateBackendBinding(ctx, session.ID, "codex", "", "thread-1", "codex-test"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateBackendBinding(ctx, session.ID, "codex", "", "thread-1", "codex-test"); err != nil {
+		t.Fatalf("idempotent binding replay: %v", err)
+	}
+	if err := store.UpdateBackendBinding(ctx, session.ID, "codex", "", "thread-2", "codex-test"); err == nil {
+		t.Fatal("expected conflicting conversation binding to fail")
+	}
+	loaded, err := store.Get(ctx, session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Agent != "codex" || loaded.Model != "gpt-5.6-luna" || loaded.ReasoningEffort != "medium" || loaded.ConversationID != "thread-1" {
+		t.Fatalf("loaded runtime metadata = %#v", loaded.Metadata)
+	}
+	listed, err := store.List(ctx, ListFilter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 || listed[0].ConversationID != "thread-1" || listed[0].Agent != "codex" {
+		t.Fatalf("listed runtime metadata = %#v", listed)
+	}
+}
+
 func TestFileStore_GetDefaultsMissingApprovalPolicyToAuto(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

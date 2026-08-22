@@ -39,7 +39,12 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS sessions (
 			id TEXT PRIMARY KEY,
 			working_directory TEXT NOT NULL,
+			agent TEXT NOT NULL DEFAULT 'zotigo',
 			profile_name TEXT NOT NULL DEFAULT '',
+			model TEXT NOT NULL DEFAULT '',
+			reasoning_effort TEXT NOT NULL DEFAULT '',
+			conversation_id TEXT NOT NULL DEFAULT '',
+			backend_version TEXT NOT NULL DEFAULT '',
 			approval_policy TEXT NOT NULL DEFAULT 'auto',
 			last_prompt TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
@@ -87,6 +92,26 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 			return fmt.Errorf("add session index approval policy column: %w", err)
 		}
 	}
+	for _, column := range []struct {
+		name       string
+		definition string
+	}{
+		{name: "agent", definition: "TEXT NOT NULL DEFAULT 'zotigo'"},
+		{name: "model", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "reasoning_effort", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "conversation_id", definition: "TEXT NOT NULL DEFAULT ''"},
+		{name: "backend_version", definition: "TEXT NOT NULL DEFAULT ''"},
+	} {
+		var count int
+		if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?`, column.name).Scan(&count); err != nil {
+			return fmt.Errorf("inspect session index %s column: %w", column.name, err)
+		}
+		if count == 0 {
+			if _, err := i.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN `+column.name+` `+column.definition); err != nil {
+				return fmt.Errorf("add session index %s column: %w", column.name, err)
+			}
+		}
+	}
 	return nil
 }
 
@@ -94,17 +119,28 @@ func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 	if meta.ApprovalPolicy == "" {
 		meta.ApprovalPolicy = agent.ApprovalPolicyAuto
 	}
+	if meta.Agent == "" {
+		meta.Agent = "zotigo"
+	}
 	_, err := i.db.ExecContext(ctx, `
-		INSERT INTO sessions (id, working_directory, profile_name, approval_policy, last_prompt, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO sessions (id, working_directory, agent, profile_name, model, reasoning_effort,
+			conversation_id, backend_version, approval_policy, last_prompt, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			working_directory = excluded.working_directory,
+			agent = excluded.agent,
 			profile_name = excluded.profile_name,
+			model = excluded.model,
+			reasoning_effort = excluded.reasoning_effort,
+			conversation_id = excluded.conversation_id,
+			backend_version = excluded.backend_version,
 			approval_policy = excluded.approval_policy,
 			last_prompt = excluded.last_prompt,
 			created_at = excluded.created_at,
 			updated_at = excluded.updated_at
-	`, meta.ID, meta.WorkingDirectory, meta.ProfileName, meta.ApprovalPolicy, meta.LastPrompt, formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))
+	`, meta.ID, meta.WorkingDirectory, meta.Agent, meta.ProfileName, meta.Model, meta.ReasoningEffort,
+		meta.ConversationID, meta.BackendVersion, meta.ApprovalPolicy, meta.LastPrompt,
+		formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert session index: %w", err)
 	}
@@ -159,7 +195,8 @@ func (i *sessionIndex) deleteExcept(ctx context.Context, keep map[string]struct{
 
 func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata, error) {
 	var query strings.Builder
-	query.WriteString(`SELECT id, working_directory, profile_name, approval_policy, last_prompt, created_at, updated_at FROM sessions`)
+	query.WriteString(`SELECT id, working_directory, agent, profile_name, model, reasoning_effort,
+		conversation_id, backend_version, approval_policy, last_prompt, created_at, updated_at FROM sessions`)
 	args := make([]any, 0, 2)
 	if filter.WorkingDirectory != "" {
 		query.WriteString(` WHERE working_directory = ?`)
@@ -194,7 +231,9 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 		var meta Metadata
 		var createdAt int64
 		var updatedAt int64
-		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.ProfileName, &meta.ApprovalPolicy, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
+		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.Agent, &meta.ProfileName,
+			&meta.Model, &meta.ReasoningEffort, &meta.ConversationID, &meta.BackendVersion,
+			&meta.ApprovalPolicy, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session index: %w", err)
 		}
 		meta.CreatedAt = parseIndexTime(createdAt)

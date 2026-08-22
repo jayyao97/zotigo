@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 type changeApprovalPolicyRequest struct {
@@ -100,6 +101,10 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		if stored != nil {
 			session.ApprovalPolicy = stored.ApprovalPolicy
 		}
+	}
+	if session.Agent == string(zotigoruntime.AgentCodex) {
+		writeAPIError(w, http.StatusConflict, "codex sessions do not support approval policy changes")
+		return
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
 		writeAPIError(w, http.StatusConflict, "approval policy change requires a resumable session")

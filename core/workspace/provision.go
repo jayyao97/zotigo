@@ -41,6 +41,9 @@ func (s *Store) ProvisionWorkspace(ctx context.Context, workspaceID string) (Wor
 		if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
 			return Workspace{}, err
 		}
+		if err := writeAgentsInstructionsIfAbsent(workspace.RootPath); err != nil {
+			return Workspace{}, err
+		}
 		checkouts, folders, err := s.workspaceBindings(ctx, workspace.ID)
 		if err != nil {
 			return Workspace{}, err
