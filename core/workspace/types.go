@@ -180,6 +180,27 @@ type SessionOrganization struct {
 	UpdatedAt           time.Time  `json:"updated_at"`
 }
 
+type RuntimeWorkspaceBindingState string
+
+const (
+	RuntimeWorkspaceBindingCreating RuntimeWorkspaceBindingState = "creating"
+	RuntimeWorkspaceBindingBound    RuntimeWorkspaceBindingState = "bound"
+)
+
+type RuntimeWorkspaceBinding struct {
+	WorkspaceID    string
+	Agent          string
+	State          RuntimeWorkspaceBindingState
+	ExternalID     string
+	CreateKey      string
+	CreateName     string
+	CreateRoot     string
+	Revision       uint64
+	BackendVersion string
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
 func (o SessionOrganization) EffectiveArchived() bool {
 	return o.SelfArchivedAt != nil || o.WorkspaceArchivedAt != nil
 }

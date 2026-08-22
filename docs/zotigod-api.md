@@ -52,6 +52,8 @@ zotigod \
 ## Public endpoints
 
 - `GET /health`
+- `GET /agents`
+- `POST /agents/codex/prepare`
 - `GET /config/profiles`
 - `POST /sources/inspect`
 - `POST /projects`
@@ -82,6 +84,7 @@ zotigod \
 - `PUT /sessions/{id}/profile`
 - `PUT /sessions/{id}/approval-policy`
 - `POST /sessions/{id}/start`
+- `PUT /sessions/{id}/codex-settings`
 - `GET /sessions/{id}/items`
 - `GET /sessions/{id}/events`
 - `POST /sessions/{id}/title-suggestion`
@@ -161,6 +164,7 @@ Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
 `service_unavailable`, and `internal_error`.
+Codex Project ambiguity returns `runtime_workspace_conflict` with HTTP `409`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -212,6 +216,42 @@ clients should pass the project root selected by the user:
 }
 ```
 
+Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned
+to a ready Workspace and selects a concrete model and reasoning effort:
+
+```json
+{
+  "workspace_id": "workspace_...",
+  "agent": "codex",
+  "model": "gpt-5.6-luna",
+  "reasoning_effort": "medium"
+}
+```
+
+`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are
+valid only for Codex Sessions and are checked against the paginated `model/list`
+catalog using the runtime model slug. Creating a Codex Session creates or reuses
+a Codex local Project named after the Workspace, with the Workspace `code/`
+directory as its root, and persists the revision-fenced mapping before returning
+`201`. If that Project is later deleted outside Zotigo, the next create or start
+re-discovers a matching Project or recreates and rebinds it. A new Codex thread
+is created with both `projectId` and `cwd` when the first message is sent; a
+resumed thread is reassigned to the current Project when necessary.
+
+This bridge version does not expose Codex approval callbacks. Codex Sessions
+therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted
+or set to `bypass_permissions`, and later approval-policy changes return `409`.
+The ordinary Zotigo runtime retains the approval behavior described below.
+
+`GET /agents` performs binary discovery without starting app-server.
+`POST /agents/codex/prepare` starts the local UDS app-server and returns the
+model/reasoning catalog. Codex is omitted from `GET /agents` when no `codex`
+binary is visible on zotigod's `PATH`.
+
+`PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a
+Codex Session. The values apply to the next turn; the Codex thread and Project
+binding do not change.
+
 `working_directory` must be an absolute path that resolves to an existing
 directory. If it is omitted, zotigod uses its current working directory for
 CLI/backward compatibility. The directory is persisted in the core session
@@ -228,7 +268,7 @@ worker starts.
 Changing the project default later does not change new-format sessions. Use the
 profile endpoint below to change the profile selected for an existing session.
 
-`approval_policy` is optional and defaults to `auto`. Desktop clients may also
+For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Desktop clients may also
 set it to `bypass_permissions` for Full access. The value is persisted with the
 session and restored by replacement workers. The public Desktop API does not
 accept `manual`.

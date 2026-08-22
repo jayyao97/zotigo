@@ -1794,6 +1794,21 @@ func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval a
 	}
 }
 
+func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversationID string) error {
+	msg := workerMessage{
+		Type:              workerMessageConversationBound,
+		ConversationBound: &workerConversationBound{ConversationID: conversationID},
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
 func (w *workerClientWriter) Close() {
 	w.closeOnce.Do(func() { close(w.done) })
 }

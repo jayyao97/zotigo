@@ -140,6 +140,73 @@ func (s *FileStore) UpdateApprovalPolicy(ctx context.Context, id string, policy 
 	})
 }
 
+func (s *FileStore) UpdateCodexSettings(ctx context.Context, id string, model string, reasoningEffort string, updatedAt time.Time) error {
+	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+		sess.Model = model
+		sess.ReasoningEffort = reasoningEffort
+		return metadataUpdatePlan{restoreAuthoritativeOnFailure: true}
+	})
+}
+
+// UpdateBackendBinding atomically binds a runtime conversation when the
+// authoritative session still has the expected value. Replaying the same
+// binding is idempotent; a different existing conversation is a conflict.
+func (s *FileStore) UpdateBackendBinding(ctx context.Context, id string, agentName string, expectedConversationID string, conversationID string, backendVersion string) error {
+	if id == "" || agentName == "" || conversationID == "" {
+		return fmt.Errorf("invalid backend binding")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	path := s.sessionPath(id)
+	previousData, exists, err := readOptionalFile(path)
+	if err != nil {
+		return fmt.Errorf("read backend binding session: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("session not found: %s", id)
+	}
+	previousRegistry, previousRegistryExists, err := readOptionalFile(s.registryPath)
+	if err != nil {
+		return fmt.Errorf("read backend binding registry: %w", err)
+	}
+	var previous Session
+	if err := json.Unmarshal(previousData, &previous); err != nil {
+		return fmt.Errorf("decode backend binding session: %w", err)
+	}
+	previous.EnsureInitialized()
+	if previous.Agent != agentName {
+		return fmt.Errorf("backend binding agent mismatch")
+	}
+	if previous.ConversationID == conversationID {
+		return nil
+	}
+	if previous.ConversationID != expectedConversationID {
+		return fmt.Errorf("backend binding conflict")
+	}
+	updated := previous
+	updated.ConversationID = conversationID
+	updated.BackendVersion = backendVersion
+	updated.UpdatedAt = time.Now().UTC()
+	data, err := json.MarshalIndent(&updated, "", "  ")
+	if err != nil {
+		return fmt.Errorf("encode backend binding session: %w", err)
+	}
+	if err := writeFileAtomic(path, data, 0o644); err != nil {
+		return fmt.Errorf("write backend binding session: %w", err)
+	}
+	if err := s.index.upsert(ctx, updated.Metadata); err != nil {
+		return s.rollbackMetadataUpdateLocked(ctx, err, true, path, previousData, &previous, previousRegistry, previousRegistryExists)
+	}
+	if err := s.updateRegistry(updated.Metadata); err != nil {
+		return s.rollbackMetadataUpdateLocked(ctx, err, true, path, previousData, &previous, previousRegistry, previousRegistryExists)
+	}
+	if err := s.recordLegacyRegistryMTime(ctx); err != nil {
+		return s.rollbackMetadataUpdateLocked(ctx, err, true, path, previousData, &previous, previousRegistry, previousRegistryExists)
+	}
+	return nil
+}
+
 type metadataUpdatePlan struct {
 	authoritativeLast             bool
 	restoreAuthoritativeOnFailure bool

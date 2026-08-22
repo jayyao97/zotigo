@@ -22,24 +22,28 @@ const (
 type workerMessageType string
 
 const (
-	workerMessageCommand          workerMessageType = "command"
-	workerMessageDelta            workerMessageType = "display_delta"
-	workerMessageDisplayWake      workerMessageType = "display_wake"
-	workerMessageDisplayBarrier   workerMessageType = "display_barrier"
-	workerMessageDisplayBarrierOK workerMessageType = "display_barrier_ack"
-	workerMessageApprovalRequest  workerMessageType = "approval_request"
-	workerMessageApprovalDecision workerMessageType = "approval_decision"
-	workerMessageApprovalResult   workerMessageType = "approval_result"
+	workerMessageCommand                 workerMessageType = "command"
+	workerMessageDelta                   workerMessageType = "display_delta"
+	workerMessageDisplayWake             workerMessageType = "display_wake"
+	workerMessageDisplayBarrier          workerMessageType = "display_barrier"
+	workerMessageDisplayBarrierOK        workerMessageType = "display_barrier_ack"
+	workerMessageApprovalRequest         workerMessageType = "approval_request"
+	workerMessageApprovalDecision        workerMessageType = "approval_decision"
+	workerMessageApprovalResult          workerMessageType = "approval_result"
+	workerMessageConversationBound       workerMessageType = "conversation_bound"
+	workerMessageConversationBoundResult workerMessageType = "conversation_bound_result"
 )
 
 type workerMessage struct {
-	Type             workerMessageType        `json:"type"`
-	Command          *commandResponse         `json:"command,omitempty"`
-	Delta            *displayDeltaEvent       `json:"delta,omitempty"`
-	DisplayBarrier   *workerDisplayBarrier    `json:"display_barrier,omitempty"`
-	ApprovalRequest  *approvalRequestResponse `json:"approval_request,omitempty"`
-	ApprovalDecision *workerApprovalDecision  `json:"approval_decision,omitempty"`
-	ApprovalResult   *workerApprovalResult    `json:"approval_result,omitempty"`
+	Type                    workerMessageType              `json:"type"`
+	Command                 *commandResponse               `json:"command,omitempty"`
+	Delta                   *displayDeltaEvent             `json:"delta,omitempty"`
+	DisplayBarrier          *workerDisplayBarrier          `json:"display_barrier,omitempty"`
+	ApprovalRequest         *approvalRequestResponse       `json:"approval_request,omitempty"`
+	ApprovalDecision        *workerApprovalDecision        `json:"approval_decision,omitempty"`
+	ApprovalResult          *workerApprovalResult          `json:"approval_result,omitempty"`
+	ConversationBound       *workerConversationBound       `json:"conversation_bound,omitempty"`
+	ConversationBoundResult *workerConversationBoundResult `json:"conversation_bound_result,omitempty"`
 }
 
 type workerDisplayBarrier struct {
@@ -58,12 +62,22 @@ type workerApprovalResult struct {
 	Error     string                   `json:"error,omitempty"`
 }
 
+type workerConversationBound struct {
+	ConversationID string `json:"conversation_id"`
+}
+
+type workerConversationBoundResult struct {
+	ConversationID string `json:"conversation_id"`
+	ErrorCode      string `json:"error_code,omitempty"`
+	Error          string `json:"error,omitempty"`
+}
+
 type workerRegistry struct {
 	mu           sync.Mutex
 	workers      map[string]*workerConnection
 	waiters      map[string][]chan struct{}
 	onDisconnect func(string)
-	onMessage    func(string, workerMessage)
+	onMessage    func(string, string, workerMessage)
 	pingInterval time.Duration
 	pongWait     time.Duration
 	approvalWait time.Duration
@@ -85,14 +99,14 @@ func (r *workerRegistry) SetDisconnectHandler(handler func(string)) {
 	r.onDisconnect = handler
 }
 
-func (r *workerRegistry) SetMessageHandler(handler func(string, workerMessage)) {
+func (r *workerRegistry) SetMessageHandler(handler func(string, string, workerMessage)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onMessage = handler
 }
 
-func (r *workerRegistry) Register(sessionID string, generation string, conn *websocket.Conn) *workerConnection {
-	worker := newWorkerConnection(sessionID, generation, conn, r)
+func (r *workerRegistry) Register(sessionID string, generation string, workspaceRevision uint64, conn *websocket.Conn) *workerConnection {
+	worker := newWorkerConnection(sessionID, generation, workspaceRevision, conn, r)
 
 	r.mu.Lock()
 	existing := r.workers[sessionID]
@@ -118,6 +132,39 @@ func (r *workerRegistry) Matches(sessionID string, generation string) bool {
 	defer r.mu.Unlock()
 	worker := r.workers[sessionID]
 	return worker != nil && worker.generation == generation
+}
+
+func (r *workerRegistry) WorkspaceRevision(sessionID string, generation string) (uint64, bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.generation != generation {
+		return 0, false
+	}
+	return worker.workspaceRevision, true
+}
+
+func (r *workerRegistry) CloseIfWorkspaceRevisionMismatch(sessionID string, expected uint64) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.workspaceRevision == expected {
+		r.mu.Unlock()
+		return false
+	}
+	delete(r.workers, sessionID)
+	r.mu.Unlock()
+	worker.close()
+	return true
+}
+
+func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result workerConversationBoundResult) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	r.mu.Unlock()
+	if worker == nil || worker.generation != generation {
+		return false
+	}
+	return worker.sendMessage(workerMessage{Type: workerMessageConversationBoundResult, ConversationBoundResult: &result})
 }
 
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
@@ -230,31 +277,33 @@ func (r *workerRegistry) receive(worker *workerConnection, msg workerMessage) {
 	handler := r.onMessage
 	r.mu.Unlock()
 	if active && handler != nil {
-		handler(worker.sessionID, msg)
+		handler(worker.sessionID, worker.generation, msg)
 	}
 }
 
 type workerConnection struct {
-	sessionID  string
-	generation string
-	conn       *websocket.Conn
-	registry   *workerRegistry
-	sendCh     chan workerMessage
-	doneCh     chan struct{}
-	closeOnce  sync.Once
-	waitersMu  sync.Mutex
-	waiters    map[string]chan workerApprovalResult
+	sessionID         string
+	generation        string
+	workspaceRevision uint64
+	conn              *websocket.Conn
+	registry          *workerRegistry
+	sendCh            chan workerMessage
+	doneCh            chan struct{}
+	closeOnce         sync.Once
+	waitersMu         sync.Mutex
+	waiters           map[string]chan workerApprovalResult
 }
 
-func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
+func newWorkerConnection(sessionID string, generation string, workspaceRevision uint64, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID:  sessionID,
-		generation: generation,
-		conn:       conn,
-		registry:   registry,
-		sendCh:     make(chan workerMessage, 32),
-		doneCh:     make(chan struct{}),
-		waiters:    make(map[string]chan workerApprovalResult),
+		sessionID:         sessionID,
+		generation:        generation,
+		workspaceRevision: workspaceRevision,
+		conn:              conn,
+		registry:          registry,
+		sendCh:            make(chan workerMessage, 32),
+		doneCh:            make(chan struct{}),
+		waiters:           make(map[string]chan workerApprovalResult),
 	}
 }
 

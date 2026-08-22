@@ -12,7 +12,12 @@ import (
 type Metadata struct {
 	ID               string               `json:"id"`
 	WorkingDirectory string               `json:"working_directory"` // The project path this session belongs to
+	Agent            string               `json:"agent,omitempty"`
 	ProfileName      string               `json:"profile_name,omitempty"`
+	Model            string               `json:"model,omitempty"`
+	ReasoningEffort  string               `json:"reasoning_effort,omitempty"`
+	ConversationID   string               `json:"conversation_id,omitempty"`
+	BackendVersion   string               `json:"backend_version,omitempty"`
 	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy,omitempty"`
 	LastPrompt       string               `json:"last_prompt"` // Preview of the last user interaction
 	CreatedAt        time.Time            `json:"created_at"`
@@ -75,6 +80,9 @@ func (m *Manager) CreateNew(workDir string) (*Session, error) {
 
 // EnsureInitialized backfills fields added in newer versions so old sessions remain usable.
 func (s *Session) EnsureInitialized() {
+	if s.Agent == "" {
+		s.Agent = "zotigo"
+	}
 	if s.ApprovalPolicy == "" {
 		s.ApprovalPolicy = agent.ApprovalPolicyAuto
 	}

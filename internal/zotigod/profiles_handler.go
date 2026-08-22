@@ -11,6 +11,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 type publicProfile struct {
@@ -124,6 +125,10 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 			writeAPIError(w, http.StatusNotFound, "session not found")
 			return
 		}
+	}
+	if session.Agent == string(zotigoruntime.AgentCodex) {
+		writeAPIError(w, http.StatusBadRequest, "profile is only valid for agent zotigo")
+		return
 	}
 	workingDirectory := session.WorkingDirectory
 	if workingDirectory == "" {
