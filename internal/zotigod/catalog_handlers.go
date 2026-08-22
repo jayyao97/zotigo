@@ -93,18 +93,12 @@ func (h *handler) handleSourceInspection(w http.ResponseWriter, r *http.Request)
 	h.inspectSource(w, r)
 }
 
-func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleProject(w http.ResponseWriter, r *http.Request, projectID string) {
 	if !h.requireCatalog(w) {
 		return
 	}
-	parts := splitCatalogPath(r.URL.Path, "/projects/")
-	if len(parts) == 0 {
-		writeAPIError(w, http.StatusNotFound, "project not found")
-		return
-	}
-	projectID := parts[0]
-	switch {
-	case len(parts) == 1 && r.Method == http.MethodPut:
+	switch r.Method {
+	case http.MethodPut:
 		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
 		defer unlockProject()
 		var request createProjectRequest
@@ -118,7 +112,7 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPIJSON(w, http.StatusOK, project)
-	case len(parts) == 1 && r.Method == http.MethodGet:
+	case http.MethodGet:
 		project, err := h.catalog.GetProject(r.Context(), projectID)
 		if err != nil {
 			h.writeCatalogError(w, err)
@@ -130,82 +124,168 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPIJSON(w, http.StatusOK, projectDetail{Project: project, Sources: sources})
-	case len(parts) == 2 && parts[1] == "archive-preview" && r.Method == http.MethodGet:
-		impact, err := h.catalog.PreviewProjectArchive(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, impact)
-	case len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost:
-		release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		if blocked {
-			writeAPIError(w, http.StatusConflict, "project has active sessions")
-			return
-		}
-		project, err := h.catalog.ArchiveProject(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, project)
-	case len(parts) == 2 && parts[1] == "unarchive" && r.Method == http.MethodPost:
-		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
-		defer unlockProject()
-		project, err := h.catalog.UnarchiveProject(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, project)
-	case len(parts) == 2 && parts[1] == "delete-preview" && r.Method == http.MethodGet:
-		impact, err := h.catalog.PreviewProjectDelete(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, impact)
-	case len(parts) == 2 && parts[1] == "delete" && r.Method == http.MethodPost:
-		release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		if blocked {
-			writeAPIError(w, http.StatusConflict, "project has active sessions")
-			return
-		}
-		var request deleteCatalogRequest
-		if err := readRequiredJSON(r, &request); err != nil {
-			writeAPIError(w, http.StatusBadRequest, "invalid project delete request")
-			return
-		}
-		if err := h.catalog.DeleteProject(r.Context(), projectID, request.Confirmation); err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, map[string]string{"project_id": projectID, "status": "deleted"})
-	case len(parts) == 3 && parts[1] == "sources" && parts[2] == "inspect" && r.Method == http.MethodPost:
-		h.inspectProjectSource(w, r, projectID)
-	case len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodPost:
-		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
-		defer unlockProject()
-		h.addProjectSource(w, r, projectID)
-	case len(parts) == 3 && parts[1] == "sources" && r.Method == http.MethodDelete:
-		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
-		defer unlockProject()
-		if err := h.catalog.DeleteSource(r.Context(), projectID, parts[2]); err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		w.WriteHeader(http.StatusNoContent)
-	case len(parts) == 2 && parts[1] == "workspaces" && r.Method == http.MethodGet:
+	default:
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+	}
+}
+
+func (h *handler) handleProjectArchivePreview(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	impact, err := h.catalog.PreviewProjectArchive(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, impact)
+}
+
+func (h *handler) handleProjectArchive(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	if blocked {
+		writeAPIError(w, http.StatusConflict, "project has active sessions")
+		return
+	}
+	project, err := h.catalog.ArchiveProject(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, project)
+}
+
+func (h *handler) handleProjectUnarchive(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+	defer unlockProject()
+	project, err := h.catalog.UnarchiveProject(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, project)
+}
+
+func (h *handler) handleProjectDeletePreview(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	impact, err := h.catalog.PreviewProjectDelete(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, impact)
+}
+
+func (h *handler) handleProjectDelete(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	release, blocked, err := h.lockProjectLifecycle(r.Context(), projectID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	if blocked {
+		writeAPIError(w, http.StatusConflict, "project has active sessions")
+		return
+	}
+	var request deleteCatalogRequest
+	if err := readRequiredJSON(r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid project delete request")
+		return
+	}
+	if err := h.catalog.DeleteProject(r.Context(), projectID, request.Confirmation); err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"project_id": projectID, "status": "deleted"})
+}
+
+func (h *handler) handleProjectSourceInspection(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	h.inspectProjectSource(w, r, projectID)
+}
+
+func (h *handler) handleProjectSources(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+	defer unlockProject()
+	h.addProjectSource(w, r, projectID)
+}
+
+func (h *handler) handleProjectSource(w http.ResponseWriter, r *http.Request, projectID string, sourceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if strings.Contains(sourceID, "/") {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	if r.Method != http.MethodDelete {
+		writeAPIError(w, http.StatusNotFound, "project route not found")
+		return
+	}
+	unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
+	defer unlockProject()
+	if err := h.catalog.DeleteSource(r.Context(), projectID, sourceID); err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) handleProjectWorkspaces(w http.ResponseWriter, r *http.Request, projectID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
 		includeArchived := r.URL.Query().Get("include_archived") == "true"
 		workspaces, err := h.catalog.ListWorkspaces(r.Context(), projectID, includeArchived)
 		if err != nil {
@@ -213,7 +293,7 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPIJSON(w, http.StatusOK, map[string][]zotigoworkspace.Workspace{"workspaces": workspaces})
-	case len(parts) == 2 && parts[1] == "workspaces" && r.Method == http.MethodPost:
+	case http.MethodPost:
 		unlockProject := h.workspaceOps.lock(projectOperationLockKey(projectID))
 		defer unlockProject()
 		var request createWorkspaceRequest
@@ -237,22 +317,50 @@ func (h *handler) handleProject(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleProjectRouteNotFound(w http.ResponseWriter, _ *http.Request) {
 	if !h.requireCatalog(w) {
 		return
 	}
-	parts := splitCatalogPath(r.URL.Path, "/workspaces/")
-	if len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodGet {
-		sources, err := h.catalog.ListWorkspaceSources(r.Context(), parts[0])
+	writeAPIError(w, http.StatusNotFound, "project route not found")
+}
+
+func (h *handler) handleProjectNotFound(w http.ResponseWriter, _ *http.Request) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	writeAPIError(w, http.StatusNotFound, "project not found")
+}
+
+func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	workspace, err := h.catalog.GetWorkspace(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, workspace)
+}
+
+func (h *handler) handleWorkspaceSources(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		sources, err := h.catalog.ListWorkspaceSources(r.Context(), workspaceID)
 		if err != nil {
 			h.writeCatalogError(w, err)
 			return
 		}
 		writeAPIJSON(w, http.StatusOK, map[string][]zotigoworkspace.WorkspaceSource{"sources": sources})
-		return
-	}
-	if len(parts) == 2 && parts[1] == "sources" && r.Method == http.MethodPost {
-		workspace, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
+	case http.MethodPost:
+		workspace, release, err := h.lockWorkspaceForUse(r.Context(), workspaceID)
 		if err != nil {
 			h.writeCatalogError(w, err)
 			return
@@ -267,118 +375,158 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "invalid workspace source request")
 			return
 		}
-		source, err := h.catalog.AddWorkspaceSource(r.Context(), parts[0], request)
+		source, err := h.catalog.AddWorkspaceSource(r.Context(), workspaceID, request)
 		if err != nil {
 			h.writeCatalogError(w, err)
 			return
 		}
 		writeAPIJSON(w, http.StatusCreated, source)
+	default:
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+	}
+}
+
+func (h *handler) handleWorkspaceArchivePreview(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
 		return
 	}
-	if len(parts) == 2 && parts[1] == "archive-preview" && r.Method == http.MethodGet {
-		impact, err := h.catalog.PreviewArchive(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, impact)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "archive" && r.Method == http.MethodPost {
-		unlockWorkspace := h.workspaceOps.lock(parts[0])
-		defer unlockWorkspace()
-		release, blocked, err := h.lockWorkspaceSessions(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		if blocked {
-			writeAPIError(w, http.StatusConflict, "workspace has active sessions")
-			return
-		}
-		workspace, err := h.catalog.ArchiveWorkspace(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, workspace)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "unarchive" && r.Method == http.MethodPost {
-		_, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		workspace, err := h.catalog.UnarchiveWorkspace(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, workspace)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "delete-preview" && r.Method == http.MethodGet {
-		impact, err := h.catalog.PreviewDelete(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, impact)
-		return
-	}
-	if len(parts) == 2 && parts[1] == "delete" && r.Method == http.MethodPost {
-		unlockWorkspace := h.workspaceOps.lock(parts[0])
-		defer unlockWorkspace()
-		release, blocked, err := h.lockWorkspaceSessions(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		if blocked {
-			writeAPIError(w, http.StatusConflict, "workspace has active sessions")
-			return
-		}
-		var request deleteCatalogRequest
-		if err := readRequiredJSON(r, &request); err != nil {
-			writeAPIError(w, http.StatusBadRequest, "invalid workspace delete request")
-			return
-		}
-		if err := h.catalog.DeleteWorkspace(r.Context(), parts[0], request.Confirmation); err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, map[string]string{"workspace_id": parts[0], "status": "deleted"})
-		return
-	}
-	if len(parts) == 2 && parts[1] == "retry" && r.Method == http.MethodPost {
-		_, release, err := h.lockWorkspaceForUse(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		defer release()
-		workspace, err := h.catalog.ProvisionWorkspace(r.Context(), parts[0])
-		if err != nil {
-			h.writeCatalogError(w, err)
-			return
-		}
-		writeAPIJSON(w, http.StatusOK, workspace)
-		return
-	}
-	if len(parts) != 1 || r.Method != http.MethodGet {
+	if r.Method != http.MethodGet {
 		writeAPIError(w, http.StatusNotFound, "workspace route not found")
 		return
 	}
-	workspace, err := h.catalog.GetWorkspace(r.Context(), parts[0])
+	impact, err := h.catalog.PreviewArchive(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, impact)
+}
+
+func (h *handler) handleWorkspaceArchive(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	unlockWorkspace := h.workspaceOps.lock(workspaceID)
+	defer unlockWorkspace()
+	release, blocked, err := h.lockWorkspaceSessions(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	if blocked {
+		writeAPIError(w, http.StatusConflict, "workspace has active sessions")
+		return
+	}
+	workspace, err := h.catalog.ArchiveWorkspace(r.Context(), workspaceID)
 	if err != nil {
 		h.writeCatalogError(w, err)
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, workspace)
+}
+
+func (h *handler) handleWorkspaceUnarchive(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	_, release, err := h.lockWorkspaceForUse(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	workspace, err := h.catalog.UnarchiveWorkspace(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, workspace)
+}
+
+func (h *handler) handleWorkspaceDeletePreview(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	impact, err := h.catalog.PreviewDelete(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, impact)
+}
+
+func (h *handler) handleWorkspaceDelete(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	unlockWorkspace := h.workspaceOps.lock(workspaceID)
+	defer unlockWorkspace()
+	release, blocked, err := h.lockWorkspaceSessions(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	if blocked {
+		writeAPIError(w, http.StatusConflict, "workspace has active sessions")
+		return
+	}
+	var request deleteCatalogRequest
+	if err := readRequiredJSON(r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid workspace delete request")
+		return
+	}
+	if err := h.catalog.DeleteWorkspace(r.Context(), workspaceID, request.Confirmation); err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string]string{"workspace_id": workspaceID, "status": "deleted"})
+}
+
+func (h *handler) handleWorkspaceRetry(w http.ResponseWriter, r *http.Request, workspaceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodPost {
+		writeAPIError(w, http.StatusNotFound, "workspace route not found")
+		return
+	}
+	_, release, err := h.lockWorkspaceForUse(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	defer release()
+	workspace, err := h.catalog.ProvisionWorkspace(r.Context(), workspaceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, workspace)
+}
+
+func (h *handler) handleWorkspaceRouteNotFound(w http.ResponseWriter, _ *http.Request) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	writeAPIError(w, http.StatusNotFound, "workspace route not found")
 }
 
 func projectOperationLockKey(projectID string) string {
@@ -575,12 +723,4 @@ func (h *handler) writeCatalogError(w http.ResponseWriter, err error) {
 		}
 		writeAPIError(w, http.StatusInternalServerError, "workspace catalog operation failed")
 	}
-}
-
-func splitCatalogPath(path string, prefix string) []string {
-	value := strings.Trim(strings.TrimPrefix(path, prefix), "/")
-	if value == "" {
-		return nil
-	}
-	return strings.Split(value, "/")
 }

@@ -55,6 +55,16 @@ func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	if len(listed.Sessions) != 1 || listed.Sessions[0].Availability != "ready" || listed.Sessions[0].Organization.Title == nil || *listed.Sessions[0].Organization.Title != "Catalog work" {
 		t.Fatalf("catalog sessions = %+v", listed.Sessions)
 	}
+	for _, path := range []string{
+		"/catalog/sessions/" + session.ID + "/",
+		"/projects/" + workspace.ProjectID + "/",
+		"/workspaces/" + workspace.ID + "/",
+	} {
+		response := requestCatalog(t, handler, http.MethodGet, path, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("trailing-slash route %q status = %d: %s", path, response.Code, response.Body.String())
+		}
+	}
 
 	if _, err := registry.Start(session.ID); err != nil {
 		t.Fatal(err)

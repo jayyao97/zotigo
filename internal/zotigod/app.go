@@ -591,15 +591,95 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
 	mux.HandleFunc("/sources/inspect", handler.handleSourceInspection)
 	mux.HandleFunc("/projects", handler.handleProjects)
-	mux.HandleFunc("/projects/", handler.handleProject)
-	mux.HandleFunc("/workspaces/", handler.handleWorkspace)
+	mux.HandleFunc("/projects/{$}", handler.handleProjectNotFound)
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}", withPathValue("project_id", handler.handleProject))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/archive-preview", withPathValue("project_id", handler.handleProjectArchivePreview))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/archive", withPathValue("project_id", handler.handleProjectArchive))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/unarchive", withPathValue("project_id", handler.handleProjectUnarchive))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/delete-preview", withPathValue("project_id", handler.handleProjectDeletePreview))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/delete", withPathValue("project_id", handler.handleProjectDelete))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/inspect", withPathValue("project_id", handler.handleProjectSourceInspection))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources", withPathValue("project_id", handler.handleProjectSources))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/{source_id}", withPathValues("project_id", "source_id", handler.handleProjectSource))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/workspaces", withPathValue("project_id", handler.handleProjectWorkspaces))
+	mux.HandleFunc("/projects/{project_id}/{route...}", handler.handleProjectRouteNotFound)
+	mux.HandleFunc("/workspaces/{$}", handler.handleWorkspaceRouteNotFound)
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}", withPathValue("workspace_id", handler.handleWorkspace))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/sources", withPathValue("workspace_id", handler.handleWorkspaceSources))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/archive-preview", withPathValue("workspace_id", handler.handleWorkspaceArchivePreview))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/archive", withPathValue("workspace_id", handler.handleWorkspaceArchive))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/unarchive", withPathValue("workspace_id", handler.handleWorkspaceUnarchive))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/delete-preview", withPathValue("workspace_id", handler.handleWorkspaceDeletePreview))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/delete", withPathValue("workspace_id", handler.handleWorkspaceDelete))
+	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/retry", withPathValue("workspace_id", handler.handleWorkspaceRetry))
+	mux.HandleFunc("/workspaces/{workspace_id}/{route...}", handler.handleWorkspaceRouteNotFound)
 	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
-	mux.HandleFunc("/catalog/sessions/", handler.handleCatalogSession)
+	mux.HandleFunc("/catalog/sessions/{$}", handler.handleCatalogSessionNotFound)
+	handleOptionalTrailingSlash(mux, "/catalog/sessions/{id}", withPathValue("id", handler.handleCatalogSession))
+	mux.HandleFunc("/catalog/sessions/{id}/{route...}", handler.handleCatalogSessionNotFound)
 	mux.HandleFunc("/sessions", handler.handleSessions)
-	mux.HandleFunc("/sessions/", handler.handleSession)
-	mux.HandleFunc("/internal/sessions/", handler.handleInternalSession)
+	mux.HandleFunc("/sessions/{$}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/sessions/{id}", withPathValue("id", handler.handleSessionGet))
+	mux.HandleFunc("/sessions/{id}/items", withPathValue("id", handler.handleSessionItems))
+	mux.HandleFunc("/sessions/{id}/events", withPathValue("id", handler.handleSessionEvents))
+	mux.HandleFunc("/sessions/{id}/messages", withPathValue("id", handler.handleSessionMessage))
+	mux.HandleFunc("/sessions/{id}/pause", withPathValue("id", handler.handleSessionPause))
+	mux.HandleFunc("/sessions/{id}/profile", withPathValue("id", handler.handleSessionProfile))
+	mux.HandleFunc("/sessions/{id}/approval-policy", withPathValue("id", handler.handleSessionApprovalPolicy))
+	mux.HandleFunc("/sessions/{id}/start", withPathValue("id", handler.handleSessionStart))
+	mux.HandleFunc("/sessions/{id}/steering", withPathValue("id", handler.handleSessionSteering))
+	mux.HandleFunc("/sessions/{id}/title-suggestion", withPathValue("id", handler.handleSessionTitleSuggestion))
+	mux.HandleFunc("/sessions/{id}/title", withPathValue("id", handler.handleSessionOrganizationTitle))
+	mux.HandleFunc("/sessions/{id}/pinned", withPathValue("id", handler.handleSessionOrganizationPinned))
+	mux.HandleFunc("/sessions/{id}/position", withPathValue("id", handler.handleSessionOrganizationPosition))
+	mux.HandleFunc("/sessions/{id}/archive", withPathValue("id", func(w http.ResponseWriter, r *http.Request, id string) {
+		handler.handleSessionOrganizationArchive(w, r, id, true)
+	}))
+	mux.HandleFunc("/sessions/{id}/unarchive", withPathValue("id", func(w http.ResponseWriter, r *http.Request, id string) {
+		handler.handleSessionOrganizationArchive(w, r, id, false)
+	}))
+	mux.HandleFunc("/sessions/{id}/images/{$}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/sessions/{id}/images/{name...}", withPathValues("id", "name", handler.handleSessionImage))
+	mux.HandleFunc("/sessions/{id}/approvals/{$}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/sessions/{id}/approvals/{approval_id...}", withPathValues("id", "approval_id", handler.handleApprovalDecision))
+	mux.HandleFunc("/sessions/{id}/{route...}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/internal/sessions/{$}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/internal/sessions/{id}/commands", withPathValue("id", handler.handleWorkerCommands))
+	mux.HandleFunc("/internal/sessions/{id}/turn/interrupted", withPathValue("id", handler.handleWorkerTurnInterrupted))
+	mux.HandleFunc("/internal/sessions/{id}/worker/attach", withPathValue("id", handler.handleWorkerAttach))
+	mux.HandleFunc("/internal/sessions/{id}/worker/finish", withPathValue("id", handler.handleWorkerFinish))
+	mux.HandleFunc("/internal/sessions/{id}/{route...}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/internal/workers/connect", handler.handleWorkerConnect)
 	return authenticatedHandler(mux, options.publicAuthToken, options.workerAuthToken)
+}
+
+func handleOptionalTrailingSlash(mux *http.ServeMux, pattern string, handler http.HandlerFunc) {
+	mux.HandleFunc(pattern, handler)
+	mux.HandleFunc(pattern+"/{$}", handler)
+}
+
+func withPathValue(name string, next func(http.ResponseWriter, *http.Request, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		value := r.PathValue(name)
+		// ServeMux decodes each wildcard segment, so an escaped slash would
+		// otherwise turn one path segment into a multi-segment identifier.
+		if strings.Contains(value, "/") {
+			writeAPIError(w, http.StatusNotFound, "not found")
+			return
+		}
+		next(w, r, value)
+	}
+}
+
+func withPathValues(first string, second string, next func(http.ResponseWriter, *http.Request, string, string)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		firstValue := r.PathValue(first)
+		if strings.Contains(firstValue, "/") {
+			writeAPIError(w, http.StatusNotFound, "not found")
+			return
+		}
+		next(w, r, firstValue, r.PathValue(second))
+	}
 }
 
 func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -819,76 +899,8 @@ func (h *handler) loadSessionIntoRegistry(ctx context.Context, id string) (Sessi
 	return h.registry.GetOrAdd(stored), true, nil
 }
 
-func (h *handler) handleSession(w http.ResponseWriter, r *http.Request) {
-	id, action, ok := parseSessionPath(r.URL.Path, "/sessions/")
-	if !ok {
-		writeAPIError(w, http.StatusNotFound, "not found")
-		return
-	}
-
-	switch action {
-	case "":
-		h.handleSessionGet(w, r, id)
-	case "items":
-		h.handleSessionItems(w, r, id)
-	case "events":
-		h.handleSessionEvents(w, r, id)
-	case "messages":
-		h.handleSessionMessage(w, r, id)
-	case "pause":
-		h.handleSessionPause(w, r, id)
-	case "profile":
-		h.handleSessionProfile(w, r, id)
-	case "approval-policy":
-		h.handleSessionApprovalPolicy(w, r, id)
-	case "start":
-		h.handleSessionStart(w, r, id)
-	case "steering":
-		h.handleSessionSteering(w, r, id)
-	case "title-suggestion":
-		h.handleSessionTitleSuggestion(w, r, id)
-	case "title":
-		h.handleSessionOrganizationTitle(w, r, id)
-	case "pinned":
-		h.handleSessionOrganizationPinned(w, r, id)
-	case "position":
-		h.handleSessionOrganizationPosition(w, r, id)
-	case "archive":
-		h.handleSessionOrganizationArchive(w, r, id, true)
-	case "unarchive":
-		h.handleSessionOrganizationArchive(w, r, id, false)
-	default:
-		if imageName, ok := strings.CutPrefix(action, "images/"); ok {
-			h.handleSessionImage(w, r, id, imageName)
-			return
-		}
-		if approvalID, ok := strings.CutPrefix(action, "approvals/"); ok {
-			h.handleApprovalDecision(w, r, id, approvalID)
-			return
-		}
-		writeAPIError(w, http.StatusNotFound, "not found")
-	}
-}
-
-func (h *handler) handleInternalSession(w http.ResponseWriter, r *http.Request) {
-	id, action, ok := parseSessionPath(r.URL.Path, "/internal/sessions/")
-	if !ok {
-		writeAPIError(w, http.StatusNotFound, "not found")
-		return
-	}
-
-	switch action {
-	case "commands":
-		h.handleWorkerCommands(w, r, id)
-	case "turn/interrupted":
-		h.handleWorkerTurnInterrupted(w, r, id)
-	case "worker/attach":
-		h.handleWorkerAttach(w, r, id)
-	case "worker/finish":
-		h.handleWorkerFinish(w, r, id)
-	default:
-		writeAPIError(w, http.StatusNotFound, "not found")
-	}
+func (h *handler) handleSessionRouteNotFound(w http.ResponseWriter, _ *http.Request) {
+	writeAPIError(w, http.StatusNotFound, "not found")
 }
 
 func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id string) {
@@ -1354,26 +1366,6 @@ func (h *handler) writeTransition(w http.ResponseWriter, session Session, err er
 	default:
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("update session: %v", err))
 	}
-}
-
-func parseSessionPath(path string, prefix string) (id string, action string, ok bool) {
-	rest := strings.TrimPrefix(path, prefix)
-	if rest == path || rest == "" {
-		return "", "", false
-	}
-	parts := strings.Split(rest, "/")
-	if parts[0] == "" {
-		return "", "", false
-	}
-	if len(parts) == 1 {
-		return parts[0], "", true
-	}
-	for _, part := range parts[1:] {
-		if part == "" {
-			return "", "", false
-		}
-	}
-	return parts[0], strings.Join(parts[1:], "/"), true
 }
 
 func readOptionalJSON(r *http.Request, value any) error {
