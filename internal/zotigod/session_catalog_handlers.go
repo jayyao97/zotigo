@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
@@ -69,18 +68,13 @@ func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) 
 	writeAPIJSON(w, http.StatusOK, map[string][]sessionProjection{"sessions": filtered})
 }
 
-func (h *handler) handleCatalogSession(w http.ResponseWriter, r *http.Request) {
+func (h *handler) handleCatalogSession(w http.ResponseWriter, r *http.Request, id string) {
 	if !h.requireCatalog(w) {
 		return
 	}
 	if r.Method != http.MethodGet {
 		w.Header().Set("Allow", http.MethodGet)
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
-		return
-	}
-	id := strings.Trim(strings.TrimPrefix(r.URL.Path, "/catalog/sessions/"), "/")
-	if id == "" || strings.Contains(id, "/") {
-		writeAPIError(w, http.StatusNotFound, "session not found")
 		return
 	}
 	projection, found, err := h.sessionProjection(r.Context(), id)
@@ -93,6 +87,18 @@ func (h *handler) handleCatalogSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, http.StatusOK, projection)
+}
+
+func (h *handler) handleCatalogSessionNotFound(w http.ResponseWriter, r *http.Request) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", http.MethodGet)
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	writeAPIError(w, http.StatusNotFound, "session not found")
 }
 
 func (h *handler) handleSessionOrganizationTitle(w http.ResponseWriter, r *http.Request, id string) {

@@ -6682,6 +6682,17 @@ func TestSessionRejectsUnknownAction(t *testing.T) {
 	}
 }
 
+func TestSessionRouteRejectsEscapedSlashInID(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess/escape"})
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/sess%2Fescape", nil))
+
+	assertAPIError(t, rec, http.StatusNotFound, "not_found", "not found")
+}
+
 func TestWorkerFinishRejectsBadJSON(t *testing.T) {
 	handler := NewHandler()
 	created := createSession(t, handler)
