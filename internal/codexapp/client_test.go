@@ -2,6 +2,7 @@ package codexapp
 
 import (
 	"context"
+	"encoding/json"
 	"net"
 	"net/http"
 	"os"
@@ -11,6 +12,22 @@ import (
 
 	"github.com/gorilla/websocket"
 )
+
+func TestClientPrefersCompletedCallWhenConnectionCloses(t *testing.T) {
+	done := make(chan struct{})
+	waiter := make(chan callResult, 1)
+	waiter <- callResult{result: json.RawMessage(`{"ok":true}`)}
+	close(done)
+
+	client := &Client{done: done}
+	result, err := client.waitForCallResult(context.Background(), waiter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := string(result.result); got != `{"ok":true}` {
+		t.Fatalf("result = %s, want {\"ok\":true}", got)
+	}
+}
 
 func TestClientCallsJSONRPCOverUnixSocket(t *testing.T) {
 	runtimeDir, err := os.MkdirTemp("/tmp", "zca-")

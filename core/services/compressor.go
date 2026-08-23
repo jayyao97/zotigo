@@ -48,7 +48,7 @@ type CompressorConfig struct {
 	// rather than relying on the default.
 	ContextWindowSize int
 
-	// TriggerRatio is when to trigger compression (default 0.7 = 70% of context)
+	// TriggerRatio is when to trigger compression (default 0.8 = 80% of context)
 	TriggerRatio float64
 
 	// TargetRatio is the target after compression (default 0.5 = 50% of context)
@@ -72,7 +72,7 @@ type CompressorConfig struct {
 func DefaultCompressorConfig() CompressorConfig {
 	return CompressorConfig{
 		ContextWindowSize:   config.DefaultContextWindow,
-		TriggerRatio:        0.7,  // Trigger at 70%
+		TriggerRatio:        0.8,  // Trigger at 80%
 		TargetRatio:         0.5,  // Target 50%
 		PreserveRatio:       0.3,  // Preserve 30% of recent
 		ToolOutputThreshold: 2000, // Summarize outputs > 2000 tokens
@@ -87,7 +87,7 @@ func NewCompressor(cfg CompressorConfig) *Compressor {
 		cfg.ContextWindowSize = config.DefaultContextWindow
 	}
 	if cfg.TriggerRatio <= 0 {
-		cfg.TriggerRatio = 0.7
+		cfg.TriggerRatio = 0.8
 	}
 	if cfg.TargetRatio <= 0 {
 		cfg.TargetRatio = 0.5
