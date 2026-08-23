@@ -99,22 +99,38 @@ func (c *Client) Call(ctx context.Context, method string, params any, result any
 	if err := c.writeJSON(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params}); err != nil {
 		return err
 	}
+	response, err := c.waitForCallResult(ctx, waiter)
+	if err != nil {
+		return err
+	}
+	if response.err != nil {
+		return response.err
+	}
+	if result == nil || len(response.result) == 0 || string(response.result) == "null" {
+		return nil
+	}
+	if err := json.Unmarshal(response.result, result); err != nil {
+		return fmt.Errorf("decode %s response: %w", method, err)
+	}
+	return nil
+}
+
+func (c *Client) waitForCallResult(ctx context.Context, waiter <-chan callResult) (callResult, error) {
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
-	case <-c.done:
-		return fmt.Errorf("codex app-server connection closed")
+		return callResult{}, ctx.Err()
 	case response := <-waiter:
-		if response.err != nil {
-			return response.err
+		return response, nil
+	case <-c.done:
+		// The read loop can deliver a response and then observe EOF before this
+		// goroutine is scheduled. Prefer the completed RPC over the subsequent
+		// connection closure.
+		select {
+		case response := <-waiter:
+			return response, nil
+		default:
+			return callResult{}, fmt.Errorf("codex app-server connection closed")
 		}
-		if result == nil || len(response.result) == 0 || string(response.result) == "null" {
-			return nil
-		}
-		if err := json.Unmarshal(response.result, result); err != nil {
-			return fmt.Errorf("decode %s response: %w", method, err)
-		}
-		return nil
 	}
 }
 
