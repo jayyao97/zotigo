@@ -15,9 +15,10 @@ const (
 	EventTypeToolResultDone EventType = "tool_result_done"
 
 	// Control
-	EventTypeSteeringApplied EventType = "steering_applied"
-	EventTypeFinish          EventType = "finish"
-	EventTypeError           EventType = "error"
+	EventTypeContextCompacted EventType = "context_compacted"
+	EventTypeSteeringApplied  EventType = "steering_applied"
+	EventTypeFinish           EventType = "finish"
+	EventTypeError            EventType = "error"
 )
 
 type Event struct {
@@ -27,10 +28,11 @@ type Event struct {
 	ContentPartDelta *ContentPartDelta `json:"content_part_delta,omitempty"`
 	ToolCallDelta    *ToolCallDelta    `json:"tool_call_delta,omitempty"`
 
-	ContentPart *ContentPart `json:"content_part,omitempty"`
-	ToolCall    *ToolCall    `json:"tool_call,omitempty"`
-	ToolResult  *ToolResult  `json:"tool_result,omitempty"`
-	SteeringIDs []string     `json:"steering_ids,omitempty"`
+	ContentPart       *ContentPart       `json:"content_part,omitempty"`
+	ToolCall          *ToolCall          `json:"tool_call,omitempty"`
+	ToolResult        *ToolResult        `json:"tool_result,omitempty"`
+	ContextCompaction *ContextCompaction `json:"context_compaction,omitempty"`
+	SteeringIDs       []string           `json:"steering_ids,omitempty"`
 	// SteeringAck keeps steering out of Agent history until the host has
 	// durably established its display boundary.
 	SteeringAck chan error `json:"-"`
@@ -38,6 +40,13 @@ type Event struct {
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Error        error        `json:"error,omitempty"`
 	Usage        *Usage       `json:"usage,omitempty"`
+}
+
+type ContextCompaction struct {
+	OriginalTokens   int `json:"original_tokens"`
+	CompressedTokens int `json:"compressed_tokens"`
+	MessagesBefore   int `json:"messages_before"`
+	MessagesAfter    int `json:"messages_after"`
 }
 
 type ContentPartDelta struct {

@@ -106,6 +106,67 @@ func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *test
 	}
 }
 
+func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-tool-progress", source)
+	var deltas []displayDeltaEvent
+	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	ctx := context.Background()
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.Event{
+		Type: protocol.EventTypeToolProgress,
+		ToolResult: &protocol.ToolResult{
+			ToolCallID: "call-1", ToolName: "shell", Type: protocol.ToolResultTypeText, Text: "building...\n",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 1 || deltas[0].PartType != "tool_progress" || deltas[0].ToolCallID != "call-1" || deltas[0].Delta != "building...\n" {
+		t.Fatalf("progress deltas = %#v", deltas)
+	}
+	items, _, err := source.LoadItems(ctx, "sess-tool-progress")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].Type != zotigosession.DisplayItemTurnStarted {
+		t.Fatalf("progress must remain volatile, items = %#v", items)
+	}
+}
+
+func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-compaction", source)
+	ctx := context.Background()
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.NewTextDeltaEvent("before compaction")); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.Event{
+		Type: protocol.EventTypeContextCompacted,
+		ContextCompaction: &protocol.ContextCompaction{
+			OriginalTokens: 183421, CompressedTokens: 91736,
+			MessagesBefore: 108, MessagesAfter: 19,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	items, _, err := source.LoadItems(ctx, "sess-compaction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[1].Type != zotigosession.DisplayItemAssistantMessage || items[2].Type != zotigosession.DisplayItemContextCompacted {
+		t.Fatalf("unexpected compaction display log: %#v", items)
+	}
+	if got := items[2].ContextCompaction; got == nil || got.OriginalTokens != 183421 || got.CompressedTokens != 91736 || got.MessagesBefore != 108 || got.MessagesAfter != 19 {
+		t.Fatalf("context compaction metadata = %#v", got)
+	}
+}
+
 func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	display := newWorkerDisplayLog("sess-text-stream", source)

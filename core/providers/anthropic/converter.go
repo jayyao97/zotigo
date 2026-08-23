@@ -106,8 +106,7 @@ func convertToAnthropicParams(msgs []protocol.Message, toolsList []tools.Tool, t
 	markLastMessageBlockCacheable(anthropicMsgs)
 
 	params := anthropic.MessageNewParams{
-		Messages:  anthropicMsgs,
-		MaxTokens: 4096,
+		Messages: anthropicMsgs,
 	}
 
 	// Set system prompt blocks — one per system message, cache_control on the first (static) block

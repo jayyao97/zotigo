@@ -91,3 +91,17 @@ func TestResolveOpenAIMode(t *testing.T) {
 		})
 	}
 }
+
+func TestNewResponsesUsesConfiguredMaxOutputTokens(t *testing.T) {
+	maxOutputTokens := int64(65536)
+	provider, err := New(config.ProfileConfig{
+		Provider: "openai", Model: "gpt-5", MaxOutputTokens: &maxOutputTokens,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := provider.(*ResponseProvider).maxOutputTokens
+	if got != maxOutputTokens {
+		t.Fatalf("maxOutputTokens = %d, want %d", got, maxOutputTokens)
+	}
+}

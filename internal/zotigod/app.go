@@ -60,7 +60,15 @@ type Session struct {
 	EndedAt          *time.Time           `json:"ended_at,omitempty"`
 	Error            string               `json:"error,omitempty"`
 	ErrorCode        string               `json:"error_code,omitempty"`
+	Working          bool                 `json:"working"`
+	ActiveTool       string               `json:"active_tool,omitempty"`
+	ContextUsage     *SessionContextUsage `json:"context_usage,omitempty"`
 	seq              uint64
+}
+
+type SessionContextUsage struct {
+	Tokens int `json:"tokens"`
+	Window int `json:"window"`
 }
 
 var (
@@ -170,6 +178,41 @@ func (r *sessionRegistry) List() []Session {
 	return sessions
 }
 
+func (r *sessionRegistry) MarkWorking(id string, activeTool string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[id]
+	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused) {
+		return
+	}
+	changed := !session.Working
+	session.Working = true
+	if session.ActiveTool != activeTool {
+		session.ActiveTool = activeTool
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	r.sessions[id] = session
+	r.notifyChangedLocked()
+}
+
+func (r *sessionRegistry) MarkIdle(id string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[id]
+	if !ok || (!session.Working && session.ActiveTool == "") {
+		return
+	}
+	session.Working = false
+	session.ActiveTool = ""
+	r.sessions[id] = session
+	r.notifyChangedLocked()
+}
+
 func (r *sessionRegistry) Start(id string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateCreated}, func(session *Session) {
@@ -273,6 +316,16 @@ func (r *sessionRegistry) ResetStarting(id string) (Session, error) {
 	})
 }
 
+func (r *sessionRegistry) ReleaseIdleWorker(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+		session.State = SessionStateCreated
+		session.StartedAt = nil
+		session.EndedAt = nil
+		session.Error = ""
+		session.ErrorCode = ""
+	})
+}
+
 func isRuntimeOccupiedSession(session Session) bool {
 	return session.ErrorCode == "runtime_occupied" || strings.HasPrefix(session.Error, runtimeOccupiedErrorPrefix)
 }
@@ -293,6 +346,10 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 		return Session{}, errInvalidSessionTransition
 	}
 	apply(&session)
+	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused {
+		session.Working = false
+		session.ActiveTool = ""
+	}
 	r.sessions[id] = session
 	r.notifyChangedLocked()
 	return session, nil
@@ -661,7 +718,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 				return
 			}
 			switch msg.Delta.PartType {
-			case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning):
+			case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning), "tool_progress":
+				handler.registry.MarkWorking(sessionID, msg.Delta.ToolName)
 				handler.events.PublishDelta(sessionID, *msg.Delta)
 			}
 		case workerMessageDisplayWake:
@@ -687,6 +745,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
 		case workerMessageIdle:
 			if msg.Idle != nil {
+				handler.registry.MarkIdle(sessionID)
 				handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle)
 			}
 		}
@@ -1010,15 +1069,16 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	copy(sessions, registrySessions)
 	for _, meta := range metadata {
 		if _, ok := seen[meta.ID]; ok {
-			sessions[registryIndex[meta.ID]].Agent = meta.Agent
+			idx := registryIndex[meta.ID]
+			sessions[idx].Agent = meta.Agent
 			if meta.Agent == string(zotigoruntime.AgentCodex) {
-				sessions[registryIndex[meta.ID]].ProfileName = ""
+				sessions[idx].ProfileName = ""
 			} else {
-				sessions[registryIndex[meta.ID]].ProfileName = meta.ProfileName
+				sessions[idx].ProfileName = meta.ProfileName
 			}
-			sessions[registryIndex[meta.ID]].Model = meta.Model
-			sessions[registryIndex[meta.ID]].ReasoningEffort = meta.ReasoningEffort
-			sessions[registryIndex[meta.ID]].ApprovalPolicy = meta.ApprovalPolicy
+			sessions[idx].Model = meta.Model
+			sessions[idx].ReasoningEffort = meta.ReasoningEffort
+			sessions[idx].ApprovalPolicy = meta.ApprovalPolicy
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -1103,7 +1163,12 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 			writeAPIError(w, http.StatusNotFound, "session not found")
 			return
 		}
-		writeAPIJSON(w, http.StatusOK, stored)
+		full, err := h.store.Get(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, h.decorateSession(r.Context(), stored, full))
 		return
 	}
 	if h.store != nil {
@@ -1119,7 +1184,11 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 		}
 	}
 	session.Live = true
-	writeAPIJSON(w, http.StatusOK, session)
+	var full *zotigosession.Session
+	if h.store != nil {
+		full, _ = h.store.Get(r.Context(), id)
+	}
+	writeAPIJSON(w, http.StatusOK, h.decorateSession(r.Context(), session, full))
 }
 
 func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id string) {
@@ -1371,7 +1440,73 @@ func (h *handler) sessionWithStoredMetadata(ctx context.Context, session Session
 		session.ReasoningEffort = stored.ReasoningEffort
 		session.ApprovalPolicy = stored.ApprovalPolicy
 	}
-	return session, nil
+	return h.decorateSession(ctx, session, stored), nil
+}
+
+func (h *handler) decorateSession(ctx context.Context, session Session, stored *zotigosession.Session) Session {
+	items, _, err := h.items.LoadItems(ctx, session.ID)
+	if err == nil {
+		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePaused {
+			session.Working = lastOpenTurnID(items) != ""
+			session.ActiveTool = activeToolName(items)
+		} else {
+			session.Working = false
+			session.ActiveTool = ""
+		}
+		for idx := len(items) - 1; idx >= 0; idx-- {
+			if items[idx].ContextUsage != nil {
+				session.ContextUsage = &SessionContextUsage{Tokens: items[idx].ContextUsage.Tokens, Window: items[idx].ContextUsage.Window}
+				break
+			}
+		}
+	}
+	if stored == nil || zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex || session.ContextUsage != nil {
+		return session
+	}
+	usage, ok := protocol.LastTurnUsage(stored.AgentSnapshot.History)
+	if !ok {
+		return session
+	}
+	appConfig, err := config.NewManager().LoadForDir(session.WorkingDirectory)
+	if err != nil {
+		return session
+	}
+	_, profile, err := appConfig.ResolveProfile(session.ProfileName)
+	if err != nil {
+		return session
+	}
+	contextWindow := profile.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = config.DefaultContextWindow
+	}
+	session.ContextUsage = &SessionContextUsage{Tokens: usage.Normalized().TotalTokens, Window: contextWindow}
+	return session
+}
+
+func activeToolName(items []zotigosession.DisplayItem) string {
+	active := make(map[string]string)
+	order := make([]string, 0)
+	for _, item := range items {
+		if item.Type == zotigosession.DisplayItemToolExecutionStarted && item.ToolExecution != nil {
+			id := item.ToolExecution.ToolCallID
+			active[id] = item.ToolExecution.ToolName
+			order = append(order, id)
+		}
+		for _, part := range item.Content {
+			if part.ToolResult != nil {
+				delete(active, part.ToolResult.ToolCallID)
+			}
+		}
+		if item.Type == zotigosession.DisplayItemTurnCompleted || item.Type == zotigosession.DisplayItemTurnFailed || item.Type == zotigosession.DisplayItemTurnInterrupted {
+			clear(active)
+		}
+	}
+	for idx := len(order) - 1; idx >= 0; idx-- {
+		if name, ok := active[order[idx]]; ok {
+			return name
+		}
+	}
+	return ""
 }
 
 func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
@@ -1554,6 +1689,7 @@ func (h *handler) handleWorkerDisconnect(id string) {
 	if session, ok := h.registry.Get(id); ok {
 		_, _ = h.reconcileApprovalState(context.Background(), id, session)
 	}
+	h.registry.MarkIdle(id)
 	_, _ = h.registry.ResetStarting(id)
 }
 
@@ -1589,23 +1725,35 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
+	unlockApproval := h.approvalOps.lock(id)
+	unlockSession := h.sessionOps.lock(id)
 	if req.Generation != "" && !h.workers.Matches(id, req.Generation) {
+		unlockSession()
+		unlockApproval()
 		writeAPIError(w, http.StatusConflict, "worker finish does not match the active connection")
 		return
 	}
 
-	unlock := h.approvalOps.lock(id)
-	defer unlock()
-
+	var session Session
+	var err error
 	if req.Error != "" {
-		session, err := h.registry.FailWithCode(id, req.ErrorCode, req.Error)
-		if err == nil {
-			h.workers.Close(id)
+		// An explicit runtime failure is authoritative even if a command was
+		// accepted concurrently. The durable command remains available for the
+		// failed-session retry path and diagnostics.
+		session, err = h.registry.FailWithCode(id, req.ErrorCode, req.Error)
+	} else {
+		items, _, loadErr := h.items.LoadItems(r.Context(), id)
+		switch {
+		case loadErr != nil:
+			err = fmt.Errorf("load session activity: %w", loadErr)
+		case lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items):
+			err = errInvalidSessionTransition
+		default:
+			session, err = h.registry.End(id)
 		}
-		h.writeTransition(w, session, err)
-		return
 	}
-	session, err := h.registry.End(id)
+	unlockSession()
+	unlockApproval()
 	if err == nil {
 		h.workers.Close(id)
 	}

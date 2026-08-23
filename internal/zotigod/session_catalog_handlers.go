@@ -206,11 +206,32 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 		return
 	}
 	unlock := h.sessionOps.lock(id)
-	defer unlock()
+	var idleWorker *workerConnection
+	defer func() {
+		unlock()
+		if idleWorker != nil {
+			idleWorker.close()
+		}
+	}()
+	releaseIdleWorker := false
 	if archived {
+		ownsIdleWorker := false
 		if session, ok := h.registry.Get(id); ok && sessionIsActive(session) {
-			writeAPIError(w, http.StatusConflict, "session is active")
-			return
+			if session.State != SessionStateRunning {
+				writeAPIError(w, http.StatusConflict, "session is active")
+				return
+			}
+			items, _, err := h.items.LoadItems(r.Context(), id)
+			if err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "load session activity failed")
+				return
+			}
+			if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items) {
+				writeAPIError(w, http.StatusConflict, "session is active")
+				return
+			}
+			ownsIdleWorker = h.workers.Has(id)
+			releaseIdleWorker = true
 		}
 		if h.store != nil {
 			locked, err := h.store.IsLocked(r.Context(), id)
@@ -218,7 +239,7 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 				writeAPIError(w, http.StatusInternalServerError, "check session lock failed")
 				return
 			}
-			if locked {
+			if locked && !ownsIdleWorker {
 				writeAPIError(w, http.StatusConflict, "session is active")
 				return
 			}
@@ -239,6 +260,13 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 	if _, err := h.catalog.SetSessionArchived(r.Context(), id, archived); err != nil {
 		h.writeCatalogError(w, err)
 		return
+	}
+	if releaseIdleWorker {
+		if _, err := h.registry.ReleaseIdleWorker(id); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, "stop idle session failed")
+			return
+		}
+		idleWorker = h.workers.Detach(id)
 	}
 	h.writeSessionProjection(w, r, id)
 }

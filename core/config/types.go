@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -13,6 +14,11 @@ import (
 // guess looks more authoritative than "I don't know" while being just
 // as wrong. Profile config is the source of truth.
 const DefaultContextWindow = 200_000
+
+// DefaultMaxOutputTokens is the native Zotigo runtime output limit when a
+// profile does not configure max_output_tokens. Codex app-server sessions do
+// not use ProfileConfig and are therefore unaffected by this default.
+const DefaultMaxOutputTokens int64 = 32_768
 
 // Config represents the top-level configuration structure.
 type Config struct {
@@ -68,6 +74,10 @@ type ProfileConfig struct {
 	//   Gemini: ThinkingLevel (LOW, MEDIUM, HIGH)
 	ThinkingLevel string `mapstructure:"thinking_level,omitempty" yaml:"thinking_level,omitempty"`
 
+	// MaxOutputTokens caps model output for native Zotigo providers. A nil value
+	// uses DefaultMaxOutputTokens. Values must be positive.
+	MaxOutputTokens *int64 `mapstructure:"max_output_tokens,omitempty" yaml:"max_output_tokens,omitempty" json:"max_output_tokens,omitempty"`
+
 	// ContextWindow sets the model's context window (in tokens) for
 	// the TUI status display and any future budget-aware logic. Set
 	// this for any model where DefaultContextWindow would mislead —
@@ -81,6 +91,40 @@ type ProfileConfig struct {
 
 	// Additional provider-specific params can be added here or in a generic map
 	Params map[string]any `mapstructure:"params,omitempty" yaml:"params,omitempty"`
+}
+
+// EffectiveMaxOutputTokens resolves the native runtime output limit. Gemini's
+// historical params.max_tokens spelling remains readable when the top-level
+// field is absent; new configuration should use max_output_tokens.
+func (c ProfileConfig) EffectiveMaxOutputTokens() (int64, error) {
+	if c.MaxOutputTokens != nil {
+		if *c.MaxOutputTokens <= 0 {
+			return 0, fmt.Errorf("max_output_tokens must be greater than zero")
+		}
+		return *c.MaxOutputTokens, nil
+	}
+
+	if strings.EqualFold(strings.TrimSpace(c.Provider), "gemini") {
+		if legacy, ok := c.Params["max_tokens"]; ok {
+			value, err := positiveInt64(legacy)
+			if err != nil {
+				return 0, fmt.Errorf("params.max_tokens: %w", err)
+			}
+			return value, nil
+		}
+	}
+	return DefaultMaxOutputTokens, nil
+}
+
+func positiveInt64(value any) (int64, error) {
+	n, err := strconv.ParseInt(fmt.Sprint(value), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("must be an integer")
+	}
+	if n <= 0 {
+		return 0, fmt.Errorf("must be greater than zero")
+	}
+	return n, nil
 }
 
 // ResolveProfile resolves an explicit profile name or the configured default.

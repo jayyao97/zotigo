@@ -34,6 +34,7 @@ type ResponseProvider struct {
 	client          *openai.Client
 	model           string
 	reasoningEffort string // "", "low", "medium", "high" — default for calls
+	maxOutputTokens int64
 }
 
 func (p *ResponseProvider) Name() string {
@@ -47,7 +48,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 		effort = p.reasoningEffort
 	}
 
-	params, err := buildResponseParams(p.model, messages, toolsList, effort, resolved.ToolChoice)
+	params, err := buildResponseParams(p.model, p.maxOutputTokens, messages, toolsList, effort, resolved.ToolChoice)
 	if err != nil {
 		return nil, err
 	}
@@ -362,7 +363,7 @@ func mapResponseCompletedReason(resp *responses.Response) protocol.FinishReason 
 // the Responses API's input-item + tool shape. Messages become
 // EasyInputMessage; existing tool calls in history become function_call
 // items; tool results become function_call_output items.
-func buildResponseParams(model string, msgs []protocol.Message, toolsList []tools.Tool, effort string, toolChoice providers.ToolChoice) (responses.ResponseNewParams, error) {
+func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Message, toolsList []tools.Tool, effort string, toolChoice providers.ToolChoice) (responses.ResponseNewParams, error) {
 	msgs = providers.MergeConsecutiveUserMessages(msgs)
 
 	var instructions strings.Builder
@@ -455,8 +456,9 @@ func buildResponseParams(model string, msgs []protocol.Message, toolsList []tool
 	}
 
 	params := responses.ResponseNewParams{
-		Model: shared.ResponsesModel(model),
-		Input: responses.ResponseNewParamsInputUnion{OfInputItemList: items},
+		Model:           shared.ResponsesModel(model),
+		Input:           responses.ResponseNewParamsInputUnion{OfInputItemList: items},
+		MaxOutputTokens: param.NewOpt(maxOutputTokens),
 		// Ask the server to emit encrypted reasoning blobs so we can
 		// pass them back on the next turn. This is what makes stateless
 		// multi-turn reasoning work without previous_response_id.

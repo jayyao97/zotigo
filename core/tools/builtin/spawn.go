@@ -323,6 +323,10 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	return spawnOutput{
 		text:  formatSpawnResult(args.Name, args.AgentType, childWorkDir, args.Description, report, trace, countSubagentToolCalls(snap.History), usage),
 		usage: usage,
+		subagent: spawnResultMetadata{
+			Name: args.Name, AgentType: args.AgentType, WorkDir: childWorkDir,
+			Description: args.Description, Status: "completed", History: snap.History, Usage: usage,
+		},
 	}, nil
 }
 
@@ -357,8 +361,19 @@ func deniedSpawnToolResults(results []transport.ApprovalResult, pending []*agent
 }
 
 type spawnOutput struct {
-	text  string
-	usage protocol.Usage
+	text     string
+	usage    protocol.Usage
+	subagent spawnResultMetadata
+}
+
+type spawnResultMetadata struct {
+	Name        string             `json:"name"`
+	AgentType   string             `json:"agent_type"`
+	WorkDir     string             `json:"workdir"`
+	Description string             `json:"description"`
+	Status      string             `json:"status"`
+	History     []protocol.Message `json:"history"`
+	Usage       protocol.Usage     `json:"usage"`
 }
 
 func (o spawnOutput) ToolOutputText() string {
@@ -366,7 +381,7 @@ func (o spawnOutput) ToolOutputText() string {
 }
 
 func (o spawnOutput) ToolResultMetadata() map[string]any {
-	return map[string]any{"usage": o.usage}
+	return map[string]any{"usage": o.usage, "subagent": o.subagent}
 }
 
 func resolveSpawnWorkDir(parentWorkDir, requested string) string {

@@ -257,6 +257,22 @@ func (r *workerRegistry) Close(sessionID string) {
 	}
 }
 
+func (r *workerRegistry) Detach(sessionID string) *workerConnection {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.closing {
+		return nil
+	}
+	if worker.idleTimer != nil {
+		worker.idleTimer.Stop()
+		worker.idleTimer = nil
+	}
+	worker.closing = true
+	delete(r.workers, sessionID)
+	return worker
+}
+
 func (r *workerRegistry) Wait(ctxDone <-chan struct{}, sessionID string) bool {
 	r.mu.Lock()
 	if worker := r.workers[sessionID]; worker != nil && !worker.closing {

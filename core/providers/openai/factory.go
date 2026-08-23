@@ -27,6 +27,10 @@ func init() {
 //     thinking event stream lives on /v1/responses.
 //  3. Everything else — Chat Completions, same as before.
 func New(cfg config.ProfileConfig) (providers.Provider, error) {
+	maxOutputTokens, err := cfg.EffectiveMaxOutputTokens()
+	if err != nil {
+		return nil, err
+	}
 	opts := []option.RequestOption{}
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
@@ -44,6 +48,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 			client:          &client,
 			model:           cfg.Model,
 			reasoningEffort: cfg.ThinkingLevel,
+			maxOutputTokens: maxOutputTokens,
 		}, nil
 	default:
 		return &ChatProvider{

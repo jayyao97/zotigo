@@ -6,8 +6,11 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 func TestShellTool(t *testing.T) {
@@ -58,6 +61,33 @@ func TestShellTool(t *testing.T) {
 			t.Error("Expected error for missing command")
 		}
 	})
+}
+
+func TestShellToolSchemaDescribesWorkspaceRootWorkDir(t *testing.T) {
+	schema := (&ShellTool{}).Schema().(map[string]any)
+	properties := schema["properties"].(map[string]any)
+	workDir := properties["workdir"].(map[string]any)
+
+	const want = "Working directory for the command, relative to the Workspace root. Defaults to the Workspace root."
+	if got := workDir["description"]; got != want {
+		t.Fatalf("workdir description = %q, want %q", got, want)
+	}
+}
+
+func TestShellProgressReporterFlushesThrottledOutput(t *testing.T) {
+	var events []protocol.Event
+	reporter := newShellProgressReporter(agent.ToolEventSink(func(event protocol.Event) {
+		events = append(events, event)
+	}), "call-1")
+	reporter.lastEmit = time.Now()
+	reporter.report(executor.ExecOutput{Stream: "stdout", Data: []byte("final output")})
+	if len(events) != 0 {
+		t.Fatalf("throttled report emitted %d events, want 0", len(events))
+	}
+	reporter.flush()
+	if len(events) != 1 || events[0].ToolResult == nil || events[0].ToolResult.Text != "final output" {
+		t.Fatalf("flushed events = %#v", events)
+	}
 }
 
 func TestGrepTool(t *testing.T) {

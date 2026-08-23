@@ -79,6 +79,135 @@ func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	}
 }
 
+func TestIdleRunningSessionCanBeArchivedAndRestarted(t *testing.T) {
+	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
+	writeTestProfileConfig(t, workspace.RootPath)
+	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+	var session Session
+	decodeCatalogData(t, create, &session)
+	if _, err := registry.Start(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.MarkRunning(session.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/archive", "")
+	if archive.Code != http.StatusOK {
+		t.Fatalf("idle session archive status = %d: %s", archive.Code, archive.Body.String())
+	}
+	if runtime, _ := registry.Get(session.ID); runtime.State != SessionStateCreated {
+		t.Fatalf("released session state = %q, want %q", runtime.State, SessionStateCreated)
+	}
+	organization, err := catalog.GetSessionOrganization(context.Background(), session.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if organization.SelfArchivedAt == nil {
+		t.Fatal("session was not archived")
+	}
+
+	unarchive := requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/unarchive", "")
+	if unarchive.Code != http.StatusOK {
+		t.Fatalf("session unarchive status = %d: %s", unarchive.Code, unarchive.Body.String())
+	}
+	if _, err := registry.Start(session.ID); err != nil {
+		t.Fatalf("restart unarchived session: %v", err)
+	}
+}
+
+func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	workers := newWorkerRegistry()
+	handler, registry, _, workspace := newCatalogSessionFixtureWithRuntime(t, newSessionOperationLocks(), source, workers)
+	writeTestProfileConfig(t, workspace.RootPath)
+	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+	var session Session
+	decodeCatalogData(t, create, &session)
+	if _, err := registry.Start(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.MarkRunning(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	workers.workers[session.ID] = newWorkerConnection(session.ID, "generation-1", nil, workers)
+	appendStarted := make(chan struct{})
+	releaseAppend := make(chan struct{})
+	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == session.ID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+			close(appendStarted)
+			<-releaseAppend
+		}
+	}
+
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		messageDone <- requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/messages", `{"text":"pending"}`)
+	}()
+	<-appendStarted
+	archiveDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		archiveDone <- requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/archive", "")
+	}()
+	select {
+	case archive := <-archiveDone:
+		close(releaseAppend)
+		t.Fatalf("archive bypassed message append lock: %d: %s", archive.Code, archive.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseAppend)
+	message := <-messageDone
+	if message.Code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", message.Code, message.Body.String())
+	}
+	archive := <-archiveDone
+	if archive.Code != http.StatusConflict {
+		t.Fatalf("pending-message archive status = %d: %s", archive.Code, archive.Body.String())
+	}
+}
+
+func TestIdleSessionArchiveFailurePreservesRunningState(t *testing.T) {
+	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
+	writeTestProfileConfig(t, workspace.RootPath)
+	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+	var session Session
+	decodeCatalogData(t, create, &session)
+	if _, err := registry.Start(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.MarkRunning(session.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalog.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	archive := requestCatalog(t, handler, http.MethodPost, "/sessions/"+session.ID+"/archive", "")
+	if archive.Code != http.StatusInternalServerError {
+		t.Fatalf("archive status = %d, want %d: %s", archive.Code, http.StatusInternalServerError, archive.Body.String())
+	}
+	if runtime, _ := registry.Get(session.ID); runtime.State != SessionStateRunning {
+		t.Fatalf("failed archive changed session state to %q", runtime.State)
+	}
+}
+
+func TestDetachedWorkerCannotUnregisterReplacement(t *testing.T) {
+	workers := newWorkerRegistry()
+	old := newWorkerConnection("session-1", "old", nil, workers)
+	workers.workers[old.sessionID] = old
+
+	detached := workers.Detach(old.sessionID)
+	if detached != old || !old.closing {
+		t.Fatalf("detached worker = %#v, old closing = %v", detached, old.closing)
+	}
+	replacement := newWorkerConnection(old.sessionID, "replacement", nil, workers)
+	workers.workers[old.sessionID] = replacement
+	workers.unregister(old.sessionID, old)
+	if got := workers.workers[old.sessionID]; got != replacement {
+		t.Fatalf("old worker unregister removed replacement: %#v", got)
+	}
+}
+
 func TestAssignedSessionCreationUsesWorkspaceLifecycleLock(t *testing.T) {
 	workspaceOps := newSessionOperationLocks()
 	handler, _, _, workspace := newCatalogSessionFixtureWithWorkspaceOps(t, workspaceOps)
@@ -165,6 +294,10 @@ func newCatalogSessionFixture(t *testing.T) (http.Handler, *sessionRegistry, *zo
 }
 
 func newCatalogSessionFixtureWithWorkspaceOps(t *testing.T, workspaceOps *sessionOperationLocks) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
+	return newCatalogSessionFixtureWithRuntime(t, workspaceOps, nil, nil)
+}
+
+func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items displayItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
 	root := t.TempDir()
 	store, err := zotigosession.NewFileStore(root)
@@ -190,6 +323,9 @@ func newCatalogSessionFixtureWithWorkspaceOps(t *testing.T, workspaceOps *sessio
 		t.Fatal(err)
 	}
 	registry := newSessionRegistry()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store, catalog: catalog, workspaceOps: workspaceOps})
+	if items == nil {
+		items = storedDisplayItemSource{store: store}
+	}
+	handler := newHandler(registry, items, handlerOptions{store: store, catalog: catalog, workspaceOps: workspaceOps, workers: workers})
 	return handler, registry, catalog, workspace
 }

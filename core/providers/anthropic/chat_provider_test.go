@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	anthropicSDK "github.com/anthropics/anthropic-sdk-go"
+	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -53,8 +54,22 @@ func TestMapStopReason(t *testing.T) {
 	}
 }
 
+func TestNewUsesConfiguredMaxOutputTokens(t *testing.T) {
+	maxOutputTokens := int64(65536)
+	provider, err := New(config.ProfileConfig{
+		Provider: "anthropic", Model: "claude-test", MaxOutputTokens: &maxOutputTokens,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	got := provider.(*ChatProvider).maxOutputTokens
+	if got != maxOutputTokens {
+		t.Fatalf("maxOutputTokens = %d, want %d", got, maxOutputTokens)
+	}
+}
+
 func TestApplyThinkingConfig_UsesAdaptiveThinking(t *testing.T) {
-	params := anthropicSDK.MessageNewParams{MaxTokens: 4096}
+	params := anthropicSDK.MessageNewParams{MaxTokens: 65536}
 	applyThinkingConfig(&params, "low")
 
 	if params.Thinking.OfAdaptive == nil {
@@ -62,6 +77,9 @@ func TestApplyThinkingConfig_UsesAdaptiveThinking(t *testing.T) {
 	}
 	if params.OutputConfig.Effort != anthropicSDK.OutputConfigEffortLow {
 		t.Fatalf("effort = %q, want low", params.OutputConfig.Effort)
+	}
+	if params.MaxTokens != 65536 {
+		t.Fatalf("MaxTokens = %d, want explicit 65536 preserved", params.MaxTokens)
 	}
 }
 

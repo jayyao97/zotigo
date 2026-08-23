@@ -125,6 +125,7 @@ type fakeDisplayItemSource struct {
 	appendErr      func(sessionID string, item zotigosession.DisplayItem) error
 	appendHook     func(sessionID string, item zotigosession.DisplayItem)
 	offsetCalls    atomic.Int32
+	loadCalls      atomic.Int32
 	offsetMaxLines []int
 }
 
@@ -163,6 +164,7 @@ func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id stri
 }
 
 func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
+	s.loadCalls.Add(1)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.err != nil {
@@ -365,6 +367,42 @@ func TestHealth(t *testing.T) {
 	}
 }
 
+func TestActiveToolNameTracksDurableExecution(t *testing.T) {
+	items := []zotigosession.DisplayItem{
+		{Type: zotigosession.DisplayItemTurnStarted},
+		{Type: zotigosession.DisplayItemToolExecutionStarted, ToolExecution: &zotigosession.DisplayToolExecution{ToolCallID: "call-1", ToolName: "shell"}},
+	}
+	if got := activeToolName(items); got != "shell" {
+		t.Fatalf("active tool = %q, want shell", got)
+	}
+	items = append(items, zotigosession.DisplayItem{Content: []zotigosession.DisplayContentPart{{ToolResult: &zotigosession.DisplayToolResult{ToolCallID: "call-1"}}}})
+	if got := activeToolName(items); got != "" {
+		t.Fatalf("active tool after result = %q", got)
+	}
+}
+
+func TestDecorateSessionDoesNotReportInactiveSessionWorking(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+		"sess-failed": {
+			{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
+			{Type: zotigosession.DisplayItemToolExecutionStarted, ToolExecution: &zotigosession.DisplayToolExecution{ToolCallID: "call-1", ToolName: "shell"}},
+		},
+	}}
+	handler := &handler{items: source}
+
+	for _, state := range []SessionState{SessionStateCreated, SessionStateOffline, SessionStateEnded, SessionStateFailed} {
+		got := handler.decorateSession(context.Background(), Session{
+			ID: "sess-failed", State: state, Working: true, ActiveTool: "stale-tool",
+		}, nil)
+		if got.Working {
+			t.Fatalf("%s session must not be reported as working", state)
+		}
+		if got.ActiveTool != "" {
+			t.Fatalf("%s session active tool = %q, want empty", state, got.ActiveTool)
+		}
+	}
+}
+
 func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
 	homeDir := t.TempDir()
 	t.Setenv("HOME", homeDir)
@@ -390,6 +428,7 @@ profiles:
     provider: openai
     model: gpt-5.5
     thinking_level: high
+    max_output_tokens: 65536
     api_key: should-not-leak
     base_url: https://private.example.com
     params:
@@ -437,8 +476,14 @@ profiles:
 	if projectProfile.Provider != "openai" || projectProfile.Model != "gpt-5.5" || projectProfile.ThinkingLevel != "high" {
 		t.Fatalf("unexpected project profile: %#v", projectProfile)
 	}
+	if projectProfile.MaxOutputTokens != 65536 {
+		t.Fatalf("project max_output_tokens = %d, want 65536", projectProfile.MaxOutputTokens)
+	}
 	if globalProfile == nil || globalProfile.Provider != "anthropic" || globalProfile.Model != "claude-fast" {
 		t.Fatalf("expected merged global profile, got %#v", globalProfile)
+	}
+	if globalProfile.MaxOutputTokens != 32768 {
+		t.Fatalf("global max_output_tokens = %d, want effective default 32768", globalProfile.MaxOutputTokens)
 	}
 	for _, forbidden := range []string{"should-not-leak", "global-secret", "private.example.com", "private_option", "api_key", "base_url"} {
 		if strings.Contains(rec.Body.String(), forbidden) {
@@ -1419,6 +1464,82 @@ func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
 	}
 }
 
+func TestSessionsListDoesNotLoadSessionHistories(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	putStoredSession(t, store, "sess-stored", t.TempDir())
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess-live", State: SessionStateRunning, Working: true, ActiveTool: "shell"})
+	handler := newHandler(registry, source, handlerOptions{store: store})
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if got := source.loadCalls.Load(); got != 0 {
+		t.Fatalf("session list loaded %d display histories, want 0", got)
+	}
+	var list sessionListResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decode list response: %v", err)
+	}
+	for _, session := range list.Sessions {
+		if session.ID == "sess-live" && (!session.Working || session.ActiveTool != "shell") {
+			t.Fatalf("live activity lost from list response: %#v", session)
+		}
+	}
+}
+
+func TestSessionRegistryActivityClearsWhenIdleOrTerminal(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess-activity", State: SessionStateRunning})
+	registry.MarkWorking("sess-activity", "shell")
+	working, _ := registry.Get("sess-activity")
+	if !working.Working || working.ActiveTool != "shell" {
+		t.Fatalf("working activity = %#v", working)
+	}
+	registry.MarkWorking("sess-activity", "")
+	continued, _ := registry.Get("sess-activity")
+	if !continued.Working || continued.ActiveTool != "" {
+		t.Fatalf("continued activity = %#v", continued)
+	}
+	registry.MarkWorking("sess-activity", "shell")
+	registry.MarkIdle("sess-activity")
+	idle, _ := registry.Get("sess-activity")
+	if idle.Working || idle.ActiveTool != "" {
+		t.Fatalf("idle activity = %#v", idle)
+	}
+	registry.MarkWorking("sess-activity", "read_file")
+	if _, err := registry.End("sess-activity"); err != nil {
+		t.Fatalf("end session: %v", err)
+	}
+	ended, _ := registry.Get("sess-activity")
+	if ended.Working || ended.ActiveTool != "" {
+		t.Fatalf("ended activity = %#v", ended)
+	}
+}
+
+func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess-disconnect", State: SessionStateRunning, Working: true, ActiveTool: "shell"})
+	handler := &handler{
+		registry:   registry,
+		items:      &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		events:     newDisplayEventBroker(),
+		sessionOps: newSessionOperationLocks(),
+	}
+
+	handler.handleWorkerDisconnect("sess-disconnect")
+	session, _ := registry.Get("sess-disconnect")
+	if session.Working || session.ActiveTool != "" {
+		t.Fatalf("disconnected activity = %#v", session)
+	}
+}
+
 func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -1573,6 +1694,27 @@ func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
 						MediaType: "image/png",
 					},
 				}},
+				Metadata: map[string]any{
+					"private": "must-not-leak",
+					"subagent": map[string]any{
+						"name": "inspect-code",
+						"history": []protocol.Message{{
+							Role:     protocol.RoleAssistant,
+							Metadata: &protocol.MessageMetadata{Raw: map[string]any{"secret": "provider-continuation"}},
+							Content: []protocol.ContentPart{{
+								Type: protocol.ContentTypeReasoning, Text: "thinking", Signature: "anthropic-signature", EncryptedContent: "openai-encrypted",
+							}, {
+								Type: protocol.ContentTypeImage, Image: &protocol.MediaPart{Data: []byte("raw-image"), URL: "file:///tmp/child.png", MediaType: "image/png"},
+							}, {
+								Type:     protocol.ContentTypeToolCall,
+								ToolCall: &protocol.ToolCall{ID: "child-call-1", Name: "read_file", Arguments: `{"path":"foo.go"}`},
+							}, {
+								Type:       protocol.ContentTypeToolResult,
+								ToolResult: &protocol.ToolResult{ToolCallID: "child-call-1", Type: protocol.ToolResultTypeText, Text: "ok", Metadata: map[string]any{"nested-secret": "must-not-leak"}},
+							}},
+						}},
+					},
+				},
 			},
 		}},
 		CreatedAt: time.Now().UTC(),
@@ -1598,6 +1740,43 @@ func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
 	}
 	if result.Content[1].Image == nil || result.Content[1].Image.URL != "file:///tmp/screenshot.png" {
 		t.Fatalf("unexpected image content part: %#v", result.Content[1])
+	}
+	subagent, ok := result.Metadata["subagent"].(map[string]any)
+	if !ok || subagent["name"] != "inspect-code" {
+		t.Fatalf("expected public tool result to retain structured subagent metadata, got %#v", result.Metadata)
+	}
+	publicMetadata, err := json.Marshal(result.Metadata)
+	if err != nil {
+		t.Fatalf("marshal public metadata: %v", err)
+	}
+	for _, secret := range []string{"must-not-leak", "provider-continuation", "anthropic-signature", "openai-encrypted", "raw-image"} {
+		if bytes.Contains(publicMetadata, []byte(secret)) {
+			t.Fatalf("public tool metadata leaked %q: %s", secret, publicMetadata)
+		}
+	}
+	if !bytes.Contains(publicMetadata, []byte("child-call-1")) || !bytes.Contains(publicMetadata, []byte("file:///tmp/child.png")) {
+		t.Fatalf("public subagent history lost safe display fields: %s", publicMetadata)
+	}
+}
+
+func TestSessionItemsReturnsContextCompaction(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = []zotigosession.DisplayItem{{
+		ID: "item_compacted", Sequence: 1, Type: zotigosession.DisplayItemContextCompacted,
+		ContextCompaction: &zotigosession.DisplayContextCompaction{
+			OriginalTokens: 1200, CompressedTokens: 300, MessagesBefore: 20, MessagesAfter: 6,
+		},
+		CreatedAt: time.Now().UTC(),
+	}}
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(resp.Items) != 1 || resp.Items[0].ContextCompaction == nil {
+		t.Fatalf("expected public context compaction metadata, got %#v", resp.Items)
+	}
+	if got := resp.Items[0].ContextCompaction; got.OriginalTokens != 1200 || got.CompressedTokens != 300 || got.MessagesBefore != 20 || got.MessagesAfter != 6 {
+		t.Fatalf("unexpected public context compaction metadata: %#v", got)
 	}
 }
 
@@ -4941,7 +5120,8 @@ func TestSessionSteeringRejectsOversizedRequestBody(t *testing.T) {
 func TestSessionMessageReturnsAcceptedWhenWorkerDisconnectsAfterAppend(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
-	handler := newHandler(newSessionRegistry(), source, handlerOptions{workers: workers})
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source, handlerOptions{workers: workers})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -4970,6 +5150,63 @@ func TestSessionMessageReturnsAcceptedWhenWorkerDisconnectsAfterAppend(t *testin
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "persist this" {
 		t.Fatalf("expected durable message command, got %#v", commands)
+	}
+	session, _ := registry.Get(created.ID)
+	if session.Working || session.ActiveTool != "" {
+		t.Fatalf("failed dispatch activity = %#v", session)
+	}
+}
+
+func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	appendStarted := make(chan struct{})
+	releaseAppend := make(chan struct{})
+	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == created.ID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+			close(appendStarted)
+			<-releaseAppend
+		}
+	}
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"before finish"}`)))
+		messageDone <- rec
+	}()
+	<-appendStarted
+	finishDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/finish", nil))
+		finishDone <- rec
+	}()
+	select {
+	case finish := <-finishDone:
+		close(releaseAppend)
+		t.Fatalf("finish bypassed message append lock: %d: %s", finish.Code, finish.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseAppend)
+	if message := <-messageDone; message.Code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", message.Code, message.Body.String())
+	}
+	if finish := <-finishDone; finish.Code != http.StatusConflict {
+		t.Fatalf("finish status = %d: %s", finish.Code, finish.Body.String())
+	}
+	if session := getSession(t, handler, created.ID); session.State != SessionStateRunning {
+		t.Fatalf("session state = %q, want %q", session.State, SessionStateRunning)
+	}
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "before finish" {
+		t.Fatalf("expected pending message command after rejected finish, got %#v", commands)
 	}
 }
 

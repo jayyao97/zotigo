@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -59,6 +60,35 @@ func TestLocalExecutor_Exec(t *testing.T) {
 
 	if string(result.Stdout) != "hello\n" {
 		t.Errorf("stdout mismatch: got %q", result.Stdout)
+	}
+}
+
+func TestLocalExecutor_ExecStreamsOutputPreview(t *testing.T) {
+	exec, err := NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var outputMu sync.Mutex
+	var output []ExecOutput
+	result, err := exec.Exec(context.Background(), "printf out; printf err >&2", ExecOptions{
+		OnOutput: func(chunk ExecOutput) {
+			outputMu.Lock()
+			defer outputMu.Unlock()
+			output = append(output, chunk)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(result.Stdout) != "out" || string(result.Stderr) != "err" {
+		t.Fatalf("final output = stdout %q stderr %q", result.Stdout, result.Stderr)
+	}
+	streams := make(map[string]string, len(output))
+	for _, chunk := range output {
+		streams[chunk.Stream] += string(chunk.Data)
+	}
+	if streams["stdout"] != "out" || streams["stderr"] != "err" {
+		t.Fatalf("streamed output = %#v", output)
 	}
 }
 

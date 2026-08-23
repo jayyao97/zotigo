@@ -52,6 +52,15 @@ type ExecOptions struct {
 	Timeout time.Duration
 	// Stdin provides input to the command
 	Stdin []byte
+	// OnOutput receives best-effort stdout/stderr chunks while the command runs.
+	// Executors that cannot stream output may leave it unused. Callbacks may run
+	// concurrently for stdout and stderr.
+	OnOutput func(ExecOutput)
+}
+
+type ExecOutput struct {
+	Stream string
+	Data   []byte
 }
 
 // ExecResult contains the output of a command execution

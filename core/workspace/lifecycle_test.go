@@ -12,7 +12,7 @@ import (
 func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
-	worktree := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	artifact := filepath.Join(workspace.RootPath, "artifacts", "result.txt")
 	if err := os.WriteFile(artifact, []byte("keep"), 0o644); err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
 func TestDeleteWorkspaceRemovesOwnedRootAndLocalBranchOnly(t *testing.T) {
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
-	worktree := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if err := os.WriteFile(filepath.Join(worktree, "discard.txt"), []byte("discard"), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -378,6 +378,34 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			})
 			return err
 		}
+	case protocol.EventTypeToolProgress:
+		if event.ToolResult != nil && event.ToolResult.ToolCallID != "" && event.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
+			l.delta(displayDeltaEvent{
+				ItemID:     "tool-progress:" + event.ToolResult.ToolCallID,
+				Role:       string(protocol.RoleAssistant),
+				PartType:   "tool_progress",
+				Delta:      event.ToolResult.Text,
+				ToolCallID: event.ToolResult.ToolCallID,
+				ToolName:   event.ToolResult.ToolName,
+			})
+		}
+	case protocol.EventTypeContextCompacted:
+		if event.ContextCompaction == nil {
+			return nil
+		}
+		if err := l.flushBlockLocked(ctx); err != nil {
+			return err
+		}
+		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemContextCompacted,
+			ContextCompaction: &zotigosession.DisplayContextCompaction{
+				OriginalTokens:   event.ContextCompaction.OriginalTokens,
+				CompressedTokens: event.ContextCompaction.CompressedTokens,
+				MessagesBefore:   event.ContextCompaction.MessagesBefore,
+				MessagesAfter:    event.ContextCompaction.MessagesAfter,
+			},
+		})
+		return err
 	case protocol.EventTypeSteeringApplied:
 		if err := l.flushBlockLocked(ctx); err != nil {
 			return err
@@ -578,6 +606,7 @@ func displayToolResultFromProtocol(result *protocol.ToolResult) *zotigosession.D
 		Reason:     result.Reason,
 		Content:    displayToolResultContentFromProtocol(result.Content),
 		IsError:    result.IsError,
+		Metadata:   result.Metadata,
 	}
 }
 

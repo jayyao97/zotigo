@@ -158,10 +158,10 @@ func (e *LocalExecutor) Exec(ctx context.Context, cmdStr string, opts ExecOption
 		cmd.Stdin = bytes.NewReader(opts.Stdin)
 	}
 
-	// Capture output
+	// Capture output while optionally forwarding preview chunks.
 	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
+	cmd.Stdout = execOutputWriter{buffer: &stdout, stream: "stdout", onOutput: opts.OnOutput}
+	cmd.Stderr = execOutputWriter{buffer: &stderr, stream: "stderr", onOutput: opts.OnOutput}
 
 	// Run command
 	err := cmd.Run()
@@ -185,6 +185,21 @@ func (e *LocalExecutor) Exec(ctx context.Context, cmdStr string, opts ExecOption
 	}
 
 	return result, nil
+}
+
+type execOutputWriter struct {
+	buffer   *bytes.Buffer
+	stream   string
+	onOutput func(ExecOutput)
+}
+
+func (w execOutputWriter) Write(data []byte) (int, error) {
+	written, err := w.buffer.Write(data)
+	if written > 0 && w.onOutput != nil {
+		chunk := append([]byte(nil), data[:written]...)
+		w.onOutput(ExecOutput{Stream: w.stream, Data: chunk})
+	}
+	return written, err
 }
 
 // resolvePath resolves a path relative to the working directory

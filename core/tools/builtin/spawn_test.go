@@ -170,6 +170,10 @@ func TestSpawnToolRunsChildAgent(t *testing.T) {
 	if _, ok := metadata["usage"].(protocol.Usage); !ok {
 		t.Fatalf("spawn output should expose usage metadata, got %#v", metadata)
 	}
+	subagent, ok := metadata["subagent"].(spawnResultMetadata)
+	if !ok || subagent.Name != "inspect-code" || subagent.Status != "completed" || len(subagent.History) == 0 {
+		t.Fatalf("spawn output should expose structured child history, got %#v", metadata["subagent"])
+	}
 
 	messages, toolNames := recorder.snapshot()
 	if !containsTool(toolNames, "write_file") {
@@ -289,6 +293,29 @@ func TestSpawnToolReturnsCompactTrace(t *testing.T) {
 	output := spawnTestOutputText(t, result)
 	if !strings.Contains(output, "Trace:\n[trace-agent] read_file(path=foo.go)") {
 		t.Fatalf("spawn output should include compact subagent trace:\n%s", output)
+	}
+	metadata := result.(interface{ ToolResultMetadata() map[string]any }).ToolResultMetadata()
+	subagent, ok := metadata["subagent"].(spawnResultMetadata)
+	if !ok {
+		t.Fatalf("spawn output should expose structured subagent metadata, got %#v", metadata["subagent"])
+	}
+	var call *protocol.ToolCall
+	var toolResult *protocol.ToolResult
+	for _, message := range subagent.History {
+		for _, part := range message.Content {
+			if part.ToolCall != nil {
+				call = part.ToolCall
+			}
+			if part.ToolResult != nil {
+				toolResult = part.ToolResult
+			}
+		}
+	}
+	if call == nil || call.ID != "call_1" || call.Name != "read_file" {
+		t.Fatalf("structured subagent history should retain the tool call, got %#v", subagent.History)
+	}
+	if toolResult == nil || toolResult.ToolCallID != call.ID {
+		t.Fatalf("structured subagent history should retain the matching tool result, got %#v", subagent.History)
 	}
 }
 

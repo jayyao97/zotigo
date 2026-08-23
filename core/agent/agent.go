@@ -637,7 +637,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 			a.mu.Lock()
-			msgs, err := a.buildContext()
+			msgs, compaction, err := a.buildContext()
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
@@ -646,6 +646,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				turnErr = fmt.Errorf("build context: %w", err)
 				outCh <- protocol.NewErrorEvent(turnErr)
 				return
+			}
+			if compaction != nil {
+				outCh <- protocol.Event{Type: protocol.EventTypeContextCompacted, ContextCompaction: compaction}
 			}
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
@@ -1652,6 +1655,7 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 	}
 	started()
 	ctx = withToolEventSink(ctx, eventSink)
+	ctx = withToolCallContext(ctx, call)
 	invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {
 		return c.Tool.Execute(ctx, c.Executor, c.Arguments)
 	})
@@ -2226,8 +2230,9 @@ func isZeroUsage(usage protocol.Usage) bool {
 		usage.CacheReadInputTokens == 0
 }
 
-func (a *Agent) buildContext() ([]protocol.Message, error) {
+func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction, error) {
 	var msgs []protocol.Message
+	var compaction *protocol.ContextCompaction
 
 	pctx := prompt.PromptContext{
 		WorkDir:  a.executor.WorkDir(),
@@ -2252,12 +2257,18 @@ func (a *Agent) buildContext() ([]protocol.Message, error) {
 		result, err := a.compressHistoryLocked(context.Background(), false)
 		if err != nil {
 			if errors.Is(err, ErrHistoryRecord) {
-				return nil, err
+				return nil, nil, err
 			}
 			debug.Logf("agent proactive compression failed, continuing uncompressed: %v", err)
 		}
 		if err == nil && result.Compressed {
 			history = a.conversation.history
+			compaction = &protocol.ContextCompaction{
+				OriginalTokens:   result.OriginalTokens,
+				CompressedTokens: result.CompressedTokens,
+				MessagesBefore:   result.MessagesBefore,
+				MessagesAfter:    result.MessagesAfter,
+			}
 		}
 	}
 
@@ -2267,7 +2278,7 @@ func (a *Agent) buildContext() ([]protocol.Message, error) {
 	}
 
 	msgs = append(msgs, history...)
-	return msgs, nil
+	return msgs, compaction, nil
 }
 
 func (a *Agent) applyPendingTurnUserInput(ctx context.Context, outCh chan<- protocol.Event) (bool, error) {
@@ -2477,6 +2488,15 @@ func (a *Agent) tryReactiveRecover(ctx context.Context, err error, retries *int,
 
 	*retries++
 	debug.Logf("agent reactive recover ok: %d→%d tokens", result.OriginalTokens, result.CompressedTokens)
+	outCh <- protocol.Event{
+		Type: protocol.EventTypeContextCompacted,
+		ContextCompaction: &protocol.ContextCompaction{
+			OriginalTokens:   result.OriginalTokens,
+			CompressedTokens: result.CompressedTokens,
+			MessagesBefore:   result.MessagesBefore,
+			MessagesAfter:    result.MessagesAfter,
+		},
+	}
 	outCh <- protocol.Event{
 		Type: protocol.EventTypeContentDelta,
 		ContentPartDelta: &protocol.ContentPartDelta{

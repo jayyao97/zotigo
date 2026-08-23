@@ -48,6 +48,10 @@ func (s *Store) ProvisionWorkspace(ctx context.Context, workspaceID string) (Wor
 		if err != nil {
 			return Workspace{}, err
 		}
+		checkouts, err = s.migrateLegacyCheckoutNames(ctx, workspace, checkouts)
+		if err != nil {
+			return Workspace{}, err
+		}
 		for _, checkout := range checkouts {
 			if err := s.provisionCheckout(ctx, workspace, checkout); err != nil {
 				_ = s.setCheckoutStatus(ctx, workspace.ID, checkout.SourceID, "error", err.Error())
@@ -113,6 +117,111 @@ func (s *Store) ProvisionWorkspace(ctx context.Context, workspaceID string) (Wor
 		return Workspace{}, err
 	}
 	return s.GetWorkspace(ctx, workspace.ID)
+}
+
+func (s *Store) migrateLegacyCheckoutNames(ctx context.Context, workspace Workspace, checkouts []Checkout) ([]Checkout, error) {
+	used := make(map[string]struct{}, len(checkouts))
+	for _, checkout := range checkouts {
+		source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
+		if err != nil {
+			return nil, err
+		}
+		name := filepath.Base(filepath.Clean(source.CanonicalPath))
+		if _, exists := used[name]; exists {
+			name += "-" + source.SourceKey[:8]
+		}
+		used[name] = struct{}{}
+		if checkout.Status != "ready" || filepath.Base(checkout.WorktreePath) != source.SourceKey {
+			continue
+		}
+		target := filepath.Join(workspace.RootPath, "code", name)
+		if samePath(checkout.WorktreePath, target) {
+			continue
+		}
+		if _, err := os.Lstat(target); err == nil {
+			reconciled, reconcileErr := s.reconcileMovedLegacyCheckout(ctx, workspace, source, checkout, target)
+			if reconcileErr != nil {
+				return nil, reconcileErr
+			}
+			if reconciled {
+				checkout.WorktreePath = target
+				for idx := range checkouts {
+					if checkouts[idx].SourceID == checkout.SourceID {
+						checkouts[idx] = checkout
+						break
+					}
+				}
+				continue
+			}
+			return nil, fmt.Errorf("%w: repository-named workspace target is occupied: %s", ErrConflict, target)
+		} else if !os.IsNotExist(err) {
+			return nil, err
+		}
+		if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
+			return nil, err
+		}
+		_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "unlock", checkout.WorktreePath)
+		if _, err := runGitMutation(ctx, source.CanonicalPath, "worktree", "move", checkout.WorktreePath, target); err != nil {
+			_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "lock", "--reason", "zotigo workspace "+workspace.ID, checkout.WorktreePath)
+			return nil, fmt.Errorf("rename workspace worktree: %w", err)
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE workspace_checkouts SET worktree_path = ? WHERE workspace_id = ? AND source_id = ?`, target, workspace.ID, checkout.SourceID); err != nil {
+			_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "move", target, checkout.WorktreePath)
+			_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "lock", "--reason", "zotigo workspace "+workspace.ID, checkout.WorktreePath)
+			return nil, fmt.Errorf("record renamed workspace worktree: %w", err)
+		}
+		_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "lock", "--reason", "zotigo workspace "+workspace.ID, target)
+		checkout.WorktreePath = target
+		for idx := range checkouts {
+			if checkouts[idx].SourceID == checkout.SourceID {
+				checkouts[idx] = checkout
+				break
+			}
+		}
+	}
+	return checkouts, nil
+}
+
+func (s *Store) reconcileMovedLegacyCheckout(ctx context.Context, workspace Workspace, source Source, checkout Checkout, target string) (bool, error) {
+	if _, err := os.Lstat(checkout.WorktreePath); err == nil {
+		return false, nil
+	} else if !os.IsNotExist(err) {
+		return false, err
+	}
+	targetInfo, err := os.Lstat(target)
+	if err != nil {
+		return false, err
+	}
+	if !targetInfo.IsDir() || targetInfo.Mode()&os.ModeSymlink != 0 {
+		return false, fmt.Errorf("%w: repository-named workspace target is not a directory: %s", ErrConflict, target)
+	}
+	worktrees, err := listGitWorktrees(ctx, source.CanonicalPath)
+	if err != nil {
+		return false, err
+	}
+	branchRef := "refs/heads/" + checkout.BranchName
+	registered := false
+	for _, candidate := range worktrees {
+		if !samePath(candidate.Path, target) {
+			continue
+		}
+		if candidate.Branch != branchRef {
+			return false, fmt.Errorf("%w: repository-named workspace target belongs to another branch", ErrConflict)
+		}
+		registered = true
+		break
+	}
+	if !registered {
+		return false, fmt.Errorf("%w: repository-named workspace target is not the registered worktree", ErrConflict)
+	}
+	if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
+		return false, err
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE workspace_checkouts SET worktree_path = ? WHERE workspace_id = ? AND source_id = ?`, target, workspace.ID, checkout.SourceID); err != nil {
+		return false, fmt.Errorf("record recovered workspace worktree rename: %w", err)
+	}
+	_, _ = runGitMutation(ctx, source.CanonicalPath, "worktree", "lock", "--reason", "zotigo workspace "+workspace.ID, target)
+	return true, nil
 }
 
 func (s *Store) failWorkspaceProvision(ctx context.Context, workspaceID string, cause error) (Workspace, error) {

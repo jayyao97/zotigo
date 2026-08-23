@@ -97,11 +97,11 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 			t.Fatalf("workspace %s directory: %v", directory, err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(workspace.RootPath, "notes", source.SourceKey, "content.txt")); err == nil || !os.IsNotExist(err) {
+	if _, err := os.Stat(filepath.Join(workspace.RootPath, "notes", filepath.Base(source.CanonicalPath), "content.txt")); err == nil || !os.IsNotExist(err) {
 		// The source is intentionally empty; only its binding marker should exist.
 		t.Fatalf("unexpected copied content: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(workspace.RootPath, "notes", source.SourceKey, ".zotigo-binding.json")); err != nil {
+	if _, err := os.Stat(filepath.Join(workspace.RootPath, "notes", filepath.Base(source.CanonicalPath), ".zotigo-binding.json")); err != nil {
 		t.Fatalf("binding marker: %v", err)
 	}
 
@@ -294,7 +294,7 @@ func TestCatalogCreatesGitWorkspaceWithoutClientSideCommitResolution(t *testing.
 	}
 	var workspace zotigoworkspace.Workspace
 	decodeCatalogData(t, workspaceRec, &workspace)
-	if _, err := os.Stat(filepath.Join(workspace.RootPath, "code", source.SourceKey, "README.md")); err != nil {
+	if _, err := os.Stat(filepath.Join(workspace.RootPath, "code", filepath.Base(source.CanonicalPath), "README.md")); err != nil {
 		t.Fatalf("Git workspace checkout: %v", err)
 	}
 }

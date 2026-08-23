@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
+	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -58,7 +61,7 @@ func (t *ShellTool) Schema() any {
 			},
 			"workdir": map[string]any{
 				"type":        "string",
-				"description": "Working directory for the command (optional, defaults to current directory)",
+				"description": "Working directory for the command, relative to the Workspace root. Defaults to the Workspace root.",
 			},
 			"timeout_ms": map[string]any{
 				"type":        "integer",
@@ -144,6 +147,17 @@ func (t *ShellTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		WorkDir: args.WorkDir,
 		Timeout: timeout,
 	}
+	var reporter *shellProgressReporter
+	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+		if call, hasCall := agent.ToolCallFromContext(ctx); hasCall {
+			reporter = newShellProgressReporter(sink, call.ID)
+			reporter.emit("$ " + args.Command + "\n")
+			opts.OnOutput = reporter.report
+		}
+	}
+	if reporter != nil {
+		defer reporter.flush()
+	}
 
 	result, err := exec.Exec(ctx, args.Command, opts)
 	if err != nil {
@@ -172,4 +186,61 @@ func (t *ShellTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		return "Command completed successfully (no output)", nil
 	}
 	return output, nil
+}
+
+const shellProgressInterval = 300 * time.Millisecond
+const shellProgressChunkLimit = 4096
+
+type shellProgressReporter struct {
+	mu         sync.Mutex
+	sink       agent.ToolEventSink
+	toolCallID string
+	lastEmit   time.Time
+	pending    strings.Builder
+}
+
+func newShellProgressReporter(sink agent.ToolEventSink, toolCallID string) *shellProgressReporter {
+	return &shellProgressReporter{sink: sink, toolCallID: toolCallID}
+}
+
+func (r *shellProgressReporter) report(output executor.ExecOutput) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if output.Stream == "stderr" {
+		r.pending.WriteString("[stderr]\n")
+	}
+	r.pending.Write(output.Data)
+	if !r.lastEmit.IsZero() && time.Since(r.lastEmit) < shellProgressInterval {
+		return
+	}
+	text := r.pending.String()
+	r.pending.Reset()
+	r.lastEmit = time.Now()
+	r.emit(text)
+}
+
+func (r *shellProgressReporter) flush() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	text := r.pending.String()
+	r.pending.Reset()
+	r.emit(text)
+}
+
+func (r *shellProgressReporter) emit(text string) {
+	if len(text) > shellProgressChunkLimit {
+		text = text[len(text)-shellProgressChunkLimit:]
+	}
+	if text == "" {
+		return
+	}
+	r.sink(protocol.Event{
+		Type: protocol.EventTypeToolProgress,
+		ToolResult: &protocol.ToolResult{
+			ToolCallID: r.toolCallID,
+			ToolName:   "shell",
+			Type:       protocol.ToolResultTypeText,
+			Text:       text,
+		},
+	})
 }

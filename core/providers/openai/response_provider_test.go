@@ -55,11 +55,14 @@ func TestBuildResponseParams_TextOnlyUser(t *testing.T) {
 	msgs := []protocol.Message{
 		protocol.NewUserMessage("Hello there"),
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	js := marshalJSON(t, params)
+	if !strings.Contains(js, `"max_output_tokens":32768`) {
+		t.Errorf("expected max_output_tokens, got %s", js)
+	}
 	// Text-only user messages should use the string shorthand for
 	// content, not a content list.
 	if !strings.Contains(js, `"content":"Hello there"`) {
@@ -84,7 +87,7 @@ func TestBuildResponseParams_UserWithImageData(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -116,7 +119,7 @@ func TestBuildResponseParams_UserWithImageURL(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -137,7 +140,7 @@ func TestBuildResponseParams_UserWithFileID(t *testing.T) {
 			},
 		},
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -156,7 +159,7 @@ func TestBuildResponseParams_ImageWithNoPayloadErrors(t *testing.T) {
 			},
 		},
 	}
-	_, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	_, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err == nil {
 		t.Fatal("expected error for empty image part")
 	}
@@ -167,7 +170,7 @@ func TestBuildResponseParams_SystemMessageBecomesInstructions(t *testing.T) {
 		protocol.NewSystemMessage("Be concise."),
 		protocol.NewUserMessage("hi"),
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -186,7 +189,7 @@ func TestBuildResponseParams_IncludesEncryptedContentFlag(t *testing.T) {
 	// blobs. Without this flag, the server won't include
 	// encrypted_content in reasoning items and stateless multi-turn
 	// chain-of-thought won't work.
-	params, err := buildResponseParams("gpt-5", []protocol.Message{protocol.NewUserMessage("hi")}, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, []protocol.Message{protocol.NewUserMessage("hi")}, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -215,7 +218,7 @@ func TestBuildResponseParams_PassesReasoningItemsBack(t *testing.T) {
 		protocol.NewUserMessage("start"),
 		asst,
 	}
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -245,7 +248,7 @@ func TestBuildResponseParams_DropsReasoningWithoutEncryptedContent(t *testing.T)
 		{Type: protocol.ContentTypeReasoning, Text: "no blob"},
 		{Type: protocol.ContentTypeText, Text: "hi"},
 	}
-	params, err := buildResponseParams("gpt-5", []protocol.Message{asst}, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, []protocol.Message{asst}, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
@@ -268,7 +271,7 @@ func TestBuildResponseParams_ToolResultExecutionDeniedIncludesReason(t *testing.
 		}),
 	}
 
-	params, err := buildResponseParams("gpt-5", msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}

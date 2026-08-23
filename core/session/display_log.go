@@ -25,6 +25,7 @@ const (
 	DisplayItemProfileFailed         DisplayItemType = "profile_change_failed"
 	DisplayItemApprovalPolicyChanged DisplayItemType = "approval_policy_changed"
 	DisplayItemToolExecutionStarted  DisplayItemType = "tool_execution_started"
+	DisplayItemContextUsageUpdated   DisplayItemType = "context_usage_updated"
 )
 
 type DisplayContentPart struct {
@@ -50,12 +51,18 @@ type DisplayToolResult struct {
 	Reason     string                         `json:"reason,omitempty"`
 	Content    []DisplayToolResultContentPart `json:"content,omitempty"`
 	IsError    bool                           `json:"is_error,omitempty"`
+	Metadata   map[string]any                 `json:"metadata,omitempty"`
 }
 
 type DisplayToolExecution struct {
 	TurnID     string `json:"turn_id,omitempty"`
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	ToolName   string `json:"tool_name,omitempty"`
+}
+
+type DisplayContextUsage struct {
+	Tokens int `json:"tokens"`
+	Window int `json:"window"`
 }
 
 type DisplayToolResultContentPart struct {
@@ -139,21 +146,30 @@ type DisplayCommandImage struct {
 	Data      []byte `json:"-"`
 }
 
+type DisplayContextCompaction struct {
+	OriginalTokens   int `json:"original_tokens"`
+	CompressedTokens int `json:"compressed_tokens"`
+	MessagesBefore   int `json:"messages_before"`
+	MessagesAfter    int `json:"messages_after"`
+}
+
 type DisplayItem struct {
-	ID             string                       `json:"id"`
-	Sequence       uint64                       `json:"sequence"`
-	Type           DisplayItemType              `json:"type"`
-	Role           string                       `json:"role,omitempty"`
-	Content        []DisplayContentPart         `json:"content,omitempty"`
-	Turn           *DisplayTurn                 `json:"turn,omitempty"`
-	Approval       *DisplayApproval             `json:"approval,omitempty"`
-	Command        *DisplayCommand              `json:"command,omitempty"`
-	Profile        *DisplayProfileChange        `json:"profile,omitempty"`
-	ApprovalPolicy *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
-	ToolExecution  *DisplayToolExecution        `json:"tool_execution,omitempty"`
-	Error          string                       `json:"error,omitempty"`
-	CreatedAt      time.Time                    `json:"created_at"`
-	LogOffset      int64                        `json:"-"`
+	ID                string                       `json:"id"`
+	Sequence          uint64                       `json:"sequence"`
+	Type              DisplayItemType              `json:"type"`
+	Role              string                       `json:"role,omitempty"`
+	Content           []DisplayContentPart         `json:"content,omitempty"`
+	Turn              *DisplayTurn                 `json:"turn,omitempty"`
+	Approval          *DisplayApproval             `json:"approval,omitempty"`
+	Command           *DisplayCommand              `json:"command,omitempty"`
+	Profile           *DisplayProfileChange        `json:"profile,omitempty"`
+	ApprovalPolicy    *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
+	ToolExecution     *DisplayToolExecution        `json:"tool_execution,omitempty"`
+	ContextUsage      *DisplayContextUsage         `json:"context_usage,omitempty"`
+	ContextCompaction *DisplayContextCompaction    `json:"context_compaction,omitempty"`
+	Error             string                       `json:"error,omitempty"`
+	CreatedAt         time.Time                    `json:"created_at"`
+	LogOffset         int64                        `json:"-"`
 }
 
 type DisplayPageQuery struct {
