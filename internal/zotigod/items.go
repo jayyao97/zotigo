@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -9,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -151,18 +153,19 @@ func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigose
 }
 
 type itemResponse struct {
-	ID             string                      `json:"id"`
-	Sequence       uint64                      `json:"sequence"`
-	Type           string                      `json:"type"`
-	Role           string                      `json:"role,omitempty"`
-	Content        []itemContentResponse       `json:"content,omitempty"`
-	Turn           *itemTurnResponse           `json:"turn,omitempty"`
-	Approval       *itemApprovalResponse       `json:"approval,omitempty"`
-	Command        *itemCommandResponse        `json:"command,omitempty"`
-	Profile        *itemProfileResponse        `json:"profile,omitempty"`
-	ApprovalPolicy *itemApprovalPolicyResponse `json:"approval_policy,omitempty"`
-	Error          string                      `json:"error,omitempty"`
-	CreatedAt      time.Time                   `json:"created_at"`
+	ID                string                         `json:"id"`
+	Sequence          uint64                         `json:"sequence"`
+	Type              string                         `json:"type"`
+	Role              string                         `json:"role,omitempty"`
+	Content           []itemContentResponse          `json:"content,omitempty"`
+	Turn              *itemTurnResponse              `json:"turn,omitempty"`
+	Approval          *itemApprovalResponse          `json:"approval,omitempty"`
+	Command           *itemCommandResponse           `json:"command,omitempty"`
+	Profile           *itemProfileResponse           `json:"profile,omitempty"`
+	ApprovalPolicy    *itemApprovalPolicyResponse    `json:"approval_policy,omitempty"`
+	ContextCompaction *itemContextCompactionResponse `json:"context_compaction,omitempty"`
+	Error             string                         `json:"error,omitempty"`
+	CreatedAt         time.Time                      `json:"created_at"`
 }
 
 type itemContentResponse struct {
@@ -188,12 +191,35 @@ type itemToolResultResponse struct {
 	Reason     string                          `json:"reason,omitempty"`
 	Content    []itemToolResultContentResponse `json:"content,omitempty"`
 	IsError    bool                            `json:"is_error,omitempty"`
+	Metadata   map[string]any                  `json:"metadata,omitempty"`
 }
 
 type itemToolResultContentResponse struct {
 	Type  string                 `json:"type"`
 	Text  string                 `json:"text,omitempty"`
 	Image *itemMediaPartResponse `json:"image,omitempty"`
+}
+
+type itemSubagentResponse struct {
+	Name        string                        `json:"name,omitempty"`
+	AgentType   string                        `json:"agent_type,omitempty"`
+	WorkDir     string                        `json:"workdir,omitempty"`
+	Description string                        `json:"description,omitempty"`
+	Status      string                        `json:"status,omitempty"`
+	History     []itemSubagentMessageResponse `json:"history,omitempty"`
+	Usage       protocol.Usage                `json:"usage"`
+}
+
+type itemSubagentMessageResponse struct {
+	Role    string                `json:"role"`
+	Content []itemContentResponse `json:"content"`
+}
+
+type itemContextCompactionResponse struct {
+	OriginalTokens   int `json:"original_tokens"`
+	CompressedTokens int `json:"compressed_tokens"`
+	MessagesBefore   int `json:"messages_before"`
+	MessagesAfter    int `json:"messages_after"`
 }
 
 type itemMediaPartResponse struct {
@@ -342,18 +368,31 @@ func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.D
 
 func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 	return itemResponse{
-		ID:             item.ID,
-		Sequence:       item.Sequence,
-		Type:           string(item.Type),
-		Role:           item.Role,
-		Content:        publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
-		Turn:           publicDisplayTurn(item.Turn),
-		Approval:       publicDisplayApproval(item.Approval),
-		Command:        publicDisplayCommand(item.Command),
-		Profile:        publicDisplayProfile(item.Profile),
-		ApprovalPolicy: publicDisplayApprovalPolicy(item.ApprovalPolicy),
-		Error:          item.Error,
-		CreatedAt:      item.CreatedAt,
+		ID:                item.ID,
+		Sequence:          item.Sequence,
+		Type:              string(item.Type),
+		Role:              item.Role,
+		Content:           publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
+		Turn:              publicDisplayTurn(item.Turn),
+		Approval:          publicDisplayApproval(item.Approval),
+		Command:           publicDisplayCommand(item.Command),
+		Profile:           publicDisplayProfile(item.Profile),
+		ApprovalPolicy:    publicDisplayApprovalPolicy(item.ApprovalPolicy),
+		ContextCompaction: publicDisplayContextCompaction(item.ContextCompaction),
+		Error:             item.Error,
+		CreatedAt:         item.CreatedAt,
+	}
+}
+
+func publicDisplayContextCompaction(compaction *zotigosession.DisplayContextCompaction) *itemContextCompactionResponse {
+	if compaction == nil {
+		return nil
+	}
+	return &itemContextCompactionResponse{
+		OriginalTokens:   compaction.OriginalTokens,
+		CompressedTokens: compaction.CompressedTokens,
+		MessagesBefore:   compaction.MessagesBefore,
+		MessagesAfter:    compaction.MessagesAfter,
 	}
 }
 
@@ -365,7 +404,7 @@ func publicDisplayProfile(profile *zotigosession.DisplayProfileChange) *itemProf
 }
 
 func isPublicDisplayItem(item zotigosession.DisplayItem) bool {
-	return item.Type != zotigosession.DisplayItemToolExecutionStarted
+	return item.Type != zotigosession.DisplayItemToolExecutionStarted && item.Type != zotigosession.DisplayItemContextUsageUpdated
 }
 
 func publicDisplayApprovalPolicy(change *zotigosession.DisplayApprovalPolicyChange) *itemApprovalPolicyResponse {
@@ -428,7 +467,85 @@ func publicDisplayToolResult(result *zotigosession.DisplayToolResult) *itemToolR
 		Reason:     result.Reason,
 		Content:    publicDisplayToolResultContent(result.Content),
 		IsError:    result.IsError,
+		Metadata:   publicDisplayToolResultMetadata(result.Metadata),
 	}
+}
+
+func publicDisplayToolResultMetadata(metadata map[string]any) map[string]any {
+	raw, ok := metadata["subagent"]
+	if !ok {
+		return nil
+	}
+	data, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	var subagent struct {
+		Name        string             `json:"name"`
+		AgentType   string             `json:"agent_type"`
+		WorkDir     string             `json:"workdir"`
+		Description string             `json:"description"`
+		Status      string             `json:"status"`
+		History     []protocol.Message `json:"history"`
+		Usage       protocol.Usage     `json:"usage"`
+	}
+	if err := json.Unmarshal(data, &subagent); err != nil {
+		return nil
+	}
+	history := make([]itemSubagentMessageResponse, 0, len(subagent.History))
+	for _, message := range subagent.History {
+		content := publicSubagentContent(message.Content)
+		if len(content) == 0 {
+			continue
+		}
+		history = append(history, itemSubagentMessageResponse{Role: string(message.Role), Content: content})
+	}
+	return map[string]any{"subagent": itemSubagentResponse{
+		Name: subagent.Name, AgentType: subagent.AgentType, WorkDir: subagent.WorkDir,
+		Description: subagent.Description, Status: subagent.Status, History: history, Usage: subagent.Usage,
+	}}
+}
+
+func publicSubagentContent(content []protocol.ContentPart) []itemContentResponse {
+	parts := make([]itemContentResponse, 0, len(content))
+	for _, part := range content {
+		response := itemContentResponse{Type: string(part.Type), Text: part.Text}
+		if part.Image != nil {
+			response.Image = &itemMediaPartResponse{URL: part.Image.URL, FileID: part.Image.FileID, MediaType: part.Image.MediaType}
+		}
+		if part.ToolCall != nil {
+			response.ToolCall = &itemToolCallResponse{ID: part.ToolCall.ID, Name: part.ToolCall.Name, Arguments: part.ToolCall.Arguments}
+		}
+		if part.ToolResult != nil {
+			response.ToolResult = &itemToolResultResponse{
+				ToolCallID: part.ToolResult.ToolCallID,
+				ToolName:   part.ToolResult.ToolName,
+				ResultType: string(part.ToolResult.Type),
+				Text:       part.ToolResult.Text,
+				JSON:       part.ToolResult.JSON,
+				Reason:     part.ToolResult.Reason,
+				Content:    publicProtocolToolResultContent(part.ToolResult.Content),
+				IsError:    part.ToolResult.IsError,
+			}
+		}
+		parts = append(parts, response)
+	}
+	return parts
+}
+
+func publicProtocolToolResultContent(content []protocol.ToolResultContentPart) []itemToolResultContentResponse {
+	if len(content) == 0 {
+		return nil
+	}
+	parts := make([]itemToolResultContentResponse, 0, len(content))
+	for _, part := range content {
+		response := itemToolResultContentResponse{Type: string(part.Type), Text: part.Text}
+		if part.Image != nil {
+			response.Image = &itemMediaPartResponse{URL: part.Image.URL, FileID: part.Image.FileID, MediaType: part.Image.MediaType}
+		}
+		parts = append(parts, response)
+	}
+	return parts
 }
 
 func publicDisplayToolResultContent(content []zotigosession.DisplayToolResultContentPart) []itemToolResultContentResponse {

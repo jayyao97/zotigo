@@ -178,13 +178,32 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
 		return
 	}
-	item, err := h.appendMessageCommand(r.Context(), id, text, images)
-	if err != nil {
-		if errors.Is(err, errSessionBusy) {
-			writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
-			return
+	item, err := func() (zotigosession.DisplayItem, error) {
+		unlock := h.sessionOps.lock(id)
+		defer unlock()
+		if unavailable, availabilityErr := h.ensureSessionActivatable(r.Context(), id); availabilityErr != nil {
+			return zotigosession.DisplayItem{}, fmt.Errorf("check session availability: %w", availabilityErr)
+		} else if unavailable != "" {
+			return zotigosession.DisplayItem{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
 		}
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append message command: %v", err))
+		session, ok := h.registry.Get(id)
+		if !ok {
+			return zotigosession.DisplayItem{}, errSessionNotFound
+		}
+		if session.State != SessionStateRunning && session.State != SessionStatePaused {
+			return zotigosession.DisplayItem{}, errInvalidSessionTransition
+		}
+		return h.appendMessageCommand(r.Context(), id, text, images)
+	}()
+	if err != nil {
+		switch {
+		case errors.Is(err, errSessionBusy):
+			writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
+		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
+			h.writeEnsureRunningError(w, err)
+		default:
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append message command: %v", err))
+		}
 		return
 	}
 
@@ -193,7 +212,10 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("build message command: %v", err))
 		return
 	}
-	h.sendCommand(r.Context(), id, command)
+	h.registry.MarkWorking(id, "")
+	if !h.sendCommand(r.Context(), id, command) {
+		h.registry.MarkIdle(id)
+	}
 	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 

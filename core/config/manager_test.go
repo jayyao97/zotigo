@@ -1,8 +1,10 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -144,6 +146,54 @@ func TestLoadDoesNotInjectProfiles(t *testing.T) {
 	}
 	if len(cfg.Profiles) != 0 {
 		t.Fatalf("Profiles = %#v, want empty", cfg.Profiles)
+	}
+}
+
+func TestLoadResolvesMaxOutputTokens(t *testing.T) {
+	tests := []struct {
+		name    string
+		profile string
+		want    int64
+	}{
+		{name: "default", profile: "provider: openai\n    model: gpt-5", want: 32768},
+		{name: "explicit", profile: "provider: openai\n    model: gpt-5\n    max_output_tokens: 65536", want: 65536},
+		{name: "legacy gemini", profile: "provider: gemini\n    model: gemini-test\n    params:\n      max_tokens: 49152", want: 49152},
+		{name: "top-level wins over legacy gemini", profile: "provider: gemini\n    model: gemini-test\n    max_output_tokens: 65536\n    params:\n      max_tokens: 49152", want: 65536},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			projectDir := t.TempDir()
+			contents := "profiles:\n  test:\n    " + tc.profile + "\n"
+			if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte(contents), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := config.NewManager().LoadForDir(projectDir)
+			if err != nil {
+				t.Fatalf("LoadForDir: %v", err)
+			}
+			got := cfg.Profiles["test"].MaxOutputTokens
+			if got == nil || *got != tc.want {
+				t.Fatalf("MaxOutputTokens = %v, want %d", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestLoadRejectsNonPositiveMaxOutputTokens(t *testing.T) {
+	for _, value := range []int{0, -1} {
+		t.Run(fmt.Sprintf("value_%d", value), func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			projectDir := t.TempDir()
+			contents := fmt.Sprintf("profiles:\n  test:\n    provider: openai\n    model: gpt-5\n    max_output_tokens: %d\n", value)
+			if err := os.WriteFile(filepath.Join(projectDir, config.ProjectConfig), []byte(contents), 0644); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			_, err := config.NewManager().LoadForDir(projectDir)
+			if err == nil || !strings.Contains(err.Error(), "max_output_tokens must be greater than zero") {
+				t.Fatalf("LoadForDir error = %v, want positive-value error", err)
+			}
+		})
 	}
 }
 

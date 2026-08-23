@@ -2,6 +2,8 @@ package gemini
 
 import (
 	"context"
+	"fmt"
+	"math"
 
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/providers"
@@ -15,6 +17,13 @@ func init() {
 }
 
 func New(cfg config.ProfileConfig) (providers.Provider, error) {
+	maxOutputTokens, err := cfg.EffectiveMaxOutputTokens()
+	if err != nil {
+		return nil, err
+	}
+	if maxOutputTokens > math.MaxInt32 {
+		return nil, fmt.Errorf("max_output_tokens %d exceeds Gemini's maximum representable value %d", maxOutputTokens, int64(math.MaxInt32))
+	}
 	clientCfg := &genai.ClientConfig{
 		APIKey:  cfg.APIKey,
 		Backend: genai.BackendGeminiAPI,
@@ -34,6 +43,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	p := &ChatProvider{
 		client:        client,
 		model:         cfg.Model,
+		maxTokens:     int32(maxOutputTokens),
 		thinkingLevel: cfg.ThinkingLevel,
 	}
 
@@ -44,15 +54,6 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 			p.temperature = &t
 		case float32:
 			p.temperature = &v
-		}
-	}
-
-	if mt, ok := cfg.Params["max_tokens"]; ok {
-		switch v := mt.(type) {
-		case int:
-			p.maxTokens = int32(v)
-		case float64:
-			p.maxTokens = int32(v)
 		}
 	}
 

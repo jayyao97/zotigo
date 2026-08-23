@@ -73,7 +73,7 @@ func TestProjectArchiveRejectsDirtyWorktreeBeforeChangingProjectStatus(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktree := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if err := os.WriteFile(filepath.Join(worktree, "dirty.txt"), []byte("dirty"), 0o600); err != nil {
 		t.Fatal(err)
 	}

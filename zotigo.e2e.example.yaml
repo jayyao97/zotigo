@@ -14,6 +14,7 @@ profiles:
     api_key: "your-openai-api-key"
     base_url: "https://api.openai.com/v1"
     thinking_level: medium
+    max_output_tokens: 65536
     context_window: 1050000
     safety:
       classifier:
@@ -31,6 +32,7 @@ profiles:
     api_key: "your-anthropic-api-key"
     base_url: "https://api.anthropic.com"
     thinking_level: disabled
+    max_output_tokens: 32768
     context_window: 1000000
 
   claude-opus:
@@ -45,6 +47,7 @@ profiles:
     provider: gemini
     model: gemini-2.5-flash
     api_key: "your-gemini-api-key"
+    max_output_tokens: 32768
 
   # Thinking/reasoning profiles
   claude-sonnet-thinking:

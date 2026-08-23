@@ -4560,6 +4560,7 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 	}
 
 	var sawText bool
+	var compaction *protocol.ContextCompaction
 	var lastFinish protocol.FinishReason
 	for e := range events {
 		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil &&
@@ -4569,6 +4570,9 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 		}
 		if e.Type == protocol.EventTypeFinish {
 			lastFinish = e.FinishReason
+		}
+		if e.Type == protocol.EventTypeContextCompacted {
+			compaction = e.ContextCompaction
 		}
 		if e.Type == protocol.EventTypeError {
 			t.Fatalf("error event leaked through reactive recovery: %v", e.Error)
@@ -4580,6 +4584,9 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 	}
 	if !sawText {
 		t.Error("did not see recovered content delta")
+	}
+	if compaction == nil || compaction.OriginalTokens <= compaction.CompressedTokens || compaction.MessagesBefore <= compaction.MessagesAfter {
+		t.Errorf("missing or invalid context compaction event: %#v", compaction)
 	}
 	if lastFinish != protocol.FinishReasonStop {
 		t.Errorf("expected final FinishReasonStop, got %q", lastFinish)

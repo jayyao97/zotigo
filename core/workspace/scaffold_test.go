@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -81,6 +82,25 @@ func TestProvisionWorkspaceScaffoldRestoresMissingAgentInstructions(t *testing.T
 	}
 	if data, err := os.ReadFile(agentsPath); err != nil || string(data) != agentsInstructions {
 		t.Fatalf("restored agent instructions = %q, err=%v", data, err)
+	}
+}
+
+func TestWorkspaceAgentInstructionsUpgradeLegacyDirectoryNamesWithoutLosingNotes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), agentsInstructionsName)
+	legacy := "- `code/<source-key>/` contains source repositories.\n- `notes/<source-key>/` contains shared knowledge and reference material.\n\n## User notes\nKeep this.\n"
+	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateLegacyAgentsInstructions(path); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if !strings.Contains(text, "code/<repository-name>") || !strings.Contains(text, "notes/<source-name>") || !strings.Contains(text, "## User notes\nKeep this.") {
+		t.Fatalf("upgraded instructions = %q", text)
 	}
 }
 

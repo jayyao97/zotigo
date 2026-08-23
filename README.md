@@ -116,6 +116,7 @@ profiles:
     model: gpt-5.6-sol
     api_key: sk-...
     thinking_level: medium
+    max_output_tokens: 65536
     context_window: 1050000
     safety:
       classifier:
@@ -154,6 +155,7 @@ profiles:
     provider: gemini
     model: gemini-3.0-pro-latest
     api_key: ...
+    max_output_tokens: 65536
   deepseek:
     provider: deepseek
     model: deepseek-v4-flash
@@ -166,6 +168,16 @@ The example uses the current API IDs from the
 [OpenAI model guide](https://developers.openai.com/api/docs/guides/model-guidance?model=gpt-5.6)
 and [Claude model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
 Zotigo still has no built-in model Profile; copy only the profiles you need.
+
+Native Zotigo profiles default `max_output_tokens` to `32768`; configured
+values must be positive. The setting maps to Anthropic Messages `max_tokens`,
+OpenAI Responses `max_output_tokens`, and Gemini `MaxOutputTokens`.
+`thinking_level` never changes an explicit output limit; unsupported provider
+limits fail when the profile is prepared. For compatibility, Gemini profiles
+may still read the old `params.max_tokens` value when top-level
+`max_output_tokens` is absent, but new configuration should use the top-level
+field and it takes precedence. Codex app-server sessions use Codex's own model
+settings and are not given Zotigo's 32K default.
 
 Run:
 ```bash

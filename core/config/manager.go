@@ -88,6 +88,11 @@ func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 	classifierDefaults := defaultSafetyClassifierConfig()
 	for name, profile := range cfg.Profiles {
 		merged := profile
+		maxOutputTokens, err := merged.EffectiveMaxOutputTokens()
+		if err != nil {
+			return nil, fmt.Errorf("profile %q: %w", name, err)
+		}
+		merged.MaxOutputTokens = &maxOutputTokens
 		userOmittedClassifier := merged.Safety.Classifier == (SafetyClassifierConfig{})
 		if userOmittedClassifier {
 			merged.Safety.Classifier = classifierDefaults

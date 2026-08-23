@@ -26,6 +26,9 @@ func TestConvertToAnthropicParams_TextOnly(t *testing.T) {
 	if len(params.Messages) != 1 {
 		t.Fatalf("Expected 1 message, got %d", len(params.Messages))
 	}
+	if params.MaxTokens != 0 {
+		t.Fatalf("MaxTokens = %d, converter must not inject a hard-coded limit", params.MaxTokens)
+	}
 
 	b, _ := json.Marshal(params.Messages[0])
 	jsonStr := string(b)

@@ -55,6 +55,12 @@ func WithToolExecutionRecorder(recorder ToolExecutionRecorder) AgentOption {
 type Next func(ctx context.Context, call *ToolCall) (any, error)
 
 type toolEventSinkKey struct{}
+type toolCallContextKey struct{}
+
+type ToolCallContext struct {
+	ID   string
+	Name string
+}
 
 // ToolEventSink emits observational events from long-running tools.
 // It is optional: most tools ignore it and return a final ToolResult only.
@@ -75,6 +81,15 @@ func withToolEventSink(ctx context.Context, sink ToolEventSink) context.Context 
 func ToolEventSinkFromContext(ctx context.Context) (ToolEventSink, bool) {
 	sink, ok := ctx.Value(toolEventSinkKey{}).(ToolEventSink)
 	return sink, ok && sink != nil
+}
+
+func withToolCallContext(ctx context.Context, call *ToolCall) context.Context {
+	return context.WithValue(ctx, toolCallContextKey{}, ToolCallContext{ID: call.ToolCallID, Name: call.Name})
+}
+
+func ToolCallFromContext(ctx context.Context) (ToolCallContext, bool) {
+	call, ok := ctx.Value(toolCallContextKey{}).(ToolCallContext)
+	return call, ok && call.ID != ""
 }
 
 // Middleware is a tool-call wrapper in the HTTP-handler-middleware

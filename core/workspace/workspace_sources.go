@@ -57,7 +57,10 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if _, err := runGitMutation(ctx, source.CanonicalPath, "check-ref-format", "--branch", branchName); err != nil {
 			return fmt.Errorf("%w: invalid workspace branch", ErrInvalid)
 		}
-		target := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+		target, err := workspaceSourceTarget(ctx, db, workspace, source, "code")
+		if err != nil {
+			return err
+		}
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO workspace_checkouts(
 				workspace_id, source_id, worktree_path, base_ref,
@@ -78,7 +81,10 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if selection.Mode == FolderModeReference {
 			parent = "notes"
 		}
-		target := filepath.Join(workspace.RootPath, parent, source.SourceKey)
+		target, err := workspaceSourceTarget(ctx, db, workspace, source, parent)
+		if err != nil {
+			return err
+		}
 		directPath := ""
 		if selection.Mode == FolderModeDirect {
 			directPath = source.CanonicalPath
@@ -98,6 +104,32 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		return ErrInvalid
 	}
 	return nil
+}
+
+func workspaceSourceTarget(ctx context.Context, db workspaceSourcePlanDB, workspace Workspace, source Source, parent string) (string, error) {
+	name := workspaceSourceName(source)
+	target := filepath.Join(workspace.RootPath, parent, name)
+	var count int
+	err := db.QueryRowContext(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM workspace_checkouts WHERE workspace_id = ? AND worktree_path = ?) +
+			(SELECT COUNT(*) FROM workspace_folders WHERE workspace_id = ? AND target_path = ?)
+	`, workspace.ID, target, workspace.ID, target).Scan(&count)
+	if err != nil {
+		return "", fmt.Errorf("inspect workspace source target: %w", err)
+	}
+	if count > 0 {
+		target = filepath.Join(workspace.RootPath, parent, name+"-"+source.SourceKey[:8])
+	}
+	return target, nil
+}
+
+func workspaceSourceName(source Source) string {
+	name := filepath.Base(filepath.Clean(source.CanonicalPath))
+	if name == "." || name == string(filepath.Separator) || name == "" {
+		return source.SourceKey
+	}
+	return name
 }
 
 func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([]WorkspaceSource, error) {

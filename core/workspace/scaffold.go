@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 const (
@@ -13,8 +14,8 @@ const (
 	agentsInstructionsName = "AGENTS.md"
 	agentsInstructions     = "# Zotigo Workspace\n\n" +
 		"This is a Zotigo-managed workspace, not a Git repository.\n\n" +
-		"- `code/<source-key>/` contains source repositories. Run Git, build, and test commands inside the relevant repository.\n" +
-		"- `notes/<source-key>/` contains shared knowledge and reference material. Read relevant notes before changing code.\n" +
+		"- `code/<repository-name>/` contains source repositories. Run Git, build, and test commands inside the relevant repository.\n" +
+		"- `notes/<source-name>/` contains shared knowledge and reference material. Read relevant notes before changing code.\n" +
 		"- `artifacts/` contains generated reports, exports, and deliverables.\n" +
 		"- `.zotigo-owner.json` is managed by Zotigo. Do not edit or delete it.\n\n" +
 		"When a repository under `code/` contains its own `AGENTS.md`, follow those repository-specific instructions while working in that repository.\n\n" +
@@ -89,7 +90,7 @@ func writeAgentsInstructionsIfAbsent(root string) error {
 	path := filepath.Join(root, agentsInstructionsName)
 	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 	if os.IsExist(err) {
-		return nil
+		return updateLegacyAgentsInstructions(path)
 	}
 	if err != nil {
 		return fmt.Errorf("create workspace agent instructions: %w", err)
@@ -102,6 +103,26 @@ func writeAgentsInstructionsIfAbsent(root string) error {
 	if err := file.Close(); err != nil {
 		_ = os.Remove(path)
 		return fmt.Errorf("close workspace agent instructions: %w", err)
+	}
+	return nil
+}
+
+func updateLegacyAgentsInstructions(path string) error {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return fmt.Errorf("read workspace agent instructions: %w", err)
+	}
+	updated := strings.ReplaceAll(string(data),
+		"`code/<source-key>/` contains source repositories",
+		"`code/<repository-name>/` contains source repositories")
+	updated = strings.ReplaceAll(updated,
+		"`notes/<source-key>/` contains shared knowledge and reference material",
+		"`notes/<source-name>/` contains shared knowledge and reference material")
+	if updated == string(data) {
+		return nil
+	}
+	if err := os.WriteFile(path, []byte(updated), 0o600); err != nil {
+		return fmt.Errorf("update workspace agent instructions: %w", err)
 	}
 	return nil
 }

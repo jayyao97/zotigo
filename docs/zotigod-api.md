@@ -193,14 +193,17 @@ URLs, provider parameters, or safety configuration:
       "name": "gpt-5.6-sol-high",
       "provider": "openai",
       "model": "gpt-5.6-sol",
-      "thinking_level": "high"
+      "thinking_level": "high",
+      "max_output_tokens": 32768
     }
   ]
 }
 ```
 
-Profiles are ordered by `name`. This endpoint only reads configuration and does
-not start a worker or create a session.
+Profiles are ordered by `name`, and `max_output_tokens` is the effective native
+Zotigo value after applying the 32768 default. This endpoint only reads
+configuration and does not start a worker or create a session. Codex app-server
+model settings are separate and do not inherit this value.
 
 ## Create sessions
 
@@ -409,6 +412,11 @@ return it as offline:
 }
 ```
 
+`GET /sessions` is an index-backed catalog read: it does not load each session
+snapshot or display log. Live `working` and `active_tool` values come from the
+in-memory runtime registry. Clients that need history-derived context usage or
+other detail for the selected session should use `GET /sessions/{id}`.
+
 `live: false` means desktop may render history but should not show turn-scoped
 controls as usable. Sending a new message or explicitly starting the session can
 make it live again. Stored-only sessions are never reported as `running`;
@@ -559,6 +567,23 @@ Current item types include:
 - `profile_change_failed`
 - `approval_policy_changed`
 
+`context_compacted` marks the durable point where the runtime replaced older
+model history with a summary. Display history remains intact. New markers
+include the measured before/after values; clients must also accept older
+markers without `context_compaction`:
+
+```json
+{
+  "type": "context_compacted",
+  "context_compaction": {
+    "original_tokens": 183421,
+    "compressed_tokens": 91736,
+    "messages_before": 108,
+    "messages_after": 19
+  }
+}
+```
+
 Profile result items expose the command correlation and transition without
 provider credentials:
 
@@ -607,6 +632,13 @@ runtime events finish, rather than waiting for the whole turn. A single model
 turn may therefore produce multiple ordered `assistant_message` items. Text and
 reasoning are persisted once per completed content block instead of creating
 one durable item per token.
+
+Completed `spawn` results may include `tool_result.metadata.subagent` with the
+child name, type, workdir, description, status, usage, and public message
+history. The public projection preserves renderable text, reasoning, tool
+calls, tool results, and media references, but omits provider continuation
+state, signatures, encrypted reasoning, inline media bytes, and nested internal
+metadata.
 
 Immediately before invoking a registered tool, the worker appends an internal
 `tool_execution_started` journal item containing `turn_id`, `tool_call_id`, and

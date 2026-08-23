@@ -321,6 +321,29 @@ func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-cha
 
 func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message codexapp.Message) error {
 	switch message.Method {
+	case "thread/tokenUsage/updated":
+		var updated struct {
+			ThreadID   string `json:"threadId"`
+			TokenUsage struct {
+				Last struct {
+					TotalTokens int `json:"totalTokens"`
+				} `json:"last"`
+				ModelContextWindow int `json:"modelContextWindow"`
+			} `json:"tokenUsage"`
+		}
+		if err := sonic.Unmarshal(message.Params, &updated); err != nil {
+			return err
+		}
+		if updated.ThreadID != r.threadID || updated.TokenUsage.ModelContextWindow <= 0 {
+			return nil
+		}
+		return r.append(zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemContextUsageUpdated,
+			ContextUsage: &zotigosession.DisplayContextUsage{
+				Tokens: updated.TokenUsage.Last.TotalTokens,
+				Window: updated.TokenUsage.ModelContextWindow,
+			},
+		})
 	case "item/agentMessage/delta":
 		var delta struct {
 			TurnID string `json:"turnId"`

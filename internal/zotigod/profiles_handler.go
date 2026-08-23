@@ -15,10 +15,11 @@ import (
 )
 
 type publicProfile struct {
-	Name          string `json:"name"`
-	Provider      string `json:"provider"`
-	Model         string `json:"model"`
-	ThinkingLevel string `json:"thinking_level,omitempty"`
+	Name            string `json:"name"`
+	Provider        string `json:"provider"`
+	Model           string `json:"model"`
+	ThinkingLevel   string `json:"thinking_level,omitempty"`
+	MaxOutputTokens int64  `json:"max_output_tokens"`
 }
 
 type profilesResponse struct {
@@ -76,11 +77,17 @@ func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 
 	profiles := make([]publicProfile, 0, len(appConfig.Profiles))
 	for name, profile := range appConfig.Profiles {
+		maxOutputTokens, err := profile.EffectiveMaxOutputTokens()
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("profile %q: %v", name, err))
+			return
+		}
 		profiles = append(profiles, publicProfile{
-			Name:          name,
-			Provider:      profile.Provider,
-			Model:         profile.Model,
-			ThinkingLevel: profile.ThinkingLevel,
+			Name:            name,
+			Provider:        profile.Provider,
+			Model:           profile.Model,
+			ThinkingLevel:   profile.ThinkingLevel,
+			MaxOutputTokens: maxOutputTokens,
 		})
 	}
 	sort.Slice(profiles, func(i, j int) bool {

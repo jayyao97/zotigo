@@ -67,7 +67,7 @@ func TestProvisionWorkspaceFolderBindings(t *testing.T) {
 		if fixture.mode == FolderModeReference {
 			parent = "notes"
 		}
-		target := filepath.Join(workspace.RootPath, parent, fixture.source.SourceKey)
+		target := filepath.Join(workspace.RootPath, parent, workspaceSourceName(fixture.source))
 		info, err := os.Lstat(target)
 		if err != nil {
 			t.Fatal(err)
@@ -177,7 +177,7 @@ func TestProvisionWorkspaceGitWorktree(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	worktree := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if data, err := os.ReadFile(filepath.Join(worktree, "README.md")); err != nil || string(data) != "source\n" {
 		t.Fatalf("worktree content = %q, err=%v", data, err)
 	}
@@ -191,7 +191,7 @@ func TestProvisionWorkspaceGitWorktree(t *testing.T) {
 
 func TestReadyWorkspaceRetryRecreatesMissingWorktree(t *testing.T) {
 	store, workspace, source := createGitWorkspaceFixture(t)
-	worktree := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if err := os.RemoveAll(worktree); err != nil {
 		t.Fatal(err)
 	}
@@ -200,6 +200,63 @@ func TestReadyWorkspaceRetryRecreatesMissingWorktree(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(worktree, "README.md")); err != nil {
 		t.Fatalf("recreated worktree: %v", err)
+	}
+}
+
+func TestReadyWorkspaceRetryRenamesLegacyHashedWorktree(t *testing.T) {
+	store, workspace, source := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	named := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
+	legacy := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "unlock", named)
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "move", named, legacy)
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "lock", "--reason", "legacy fixture", legacy)
+	if _, err := store.db.ExecContext(ctx, `UPDATE workspace_checkouts SET worktree_path = ? WHERE workspace_id = ? AND source_id = ?`, legacy, workspace.ID, source.ID); err != nil {
+		t.Fatalf("record legacy worktree: %v", err)
+	}
+
+	if _, err := store.ProvisionWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatalf("retry ready workspace: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(named, "README.md")); err != nil {
+		t.Fatalf("repository-named worktree: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy hash path still exists: %v", err)
+	}
+	bindings, err := store.ListWorkspaceSources(ctx, workspace.ID)
+	if err != nil || len(bindings) != 1 || bindings[0].WorktreePath != named {
+		t.Fatalf("catalog bindings = %#v, err=%v", bindings, err)
+	}
+}
+
+func TestReadyWorkspaceRetryReconcilesInterruptedLegacyWorktreeRename(t *testing.T) {
+	store, workspace, source := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	named := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
+	legacy := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "unlock", named)
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "move", named, legacy)
+	if _, err := store.db.ExecContext(ctx, `UPDATE workspace_checkouts SET worktree_path = ? WHERE workspace_id = ? AND source_id = ?`, legacy, workspace.ID, source.ID); err != nil {
+		t.Fatalf("record legacy worktree: %v", err)
+	}
+
+	// Simulate interruption after Git moved the worktree but before SQLite
+	// recorded the repository-named path.
+	runGitProvisionCommand(t, source.CanonicalPath, "worktree", "move", legacy, named)
+
+	if _, err := store.ProvisionWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatalf("recover interrupted worktree rename: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(named, "README.md")); err != nil {
+		t.Fatalf("repository-named worktree: %v", err)
+	}
+	if _, err := os.Stat(legacy); !os.IsNotExist(err) {
+		t.Fatalf("legacy hash path still exists: %v", err)
+	}
+	bindings, err := store.ListWorkspaceSources(ctx, workspace.ID)
+	if err != nil || len(bindings) != 1 || bindings[0].WorktreePath != named {
+		t.Fatalf("catalog bindings = %#v, err=%v", bindings, err)
 	}
 }
 
@@ -318,7 +375,7 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 	}
 	baseCommit := strings.TrimSpace(runGitProvisionCommand(t, repository, "rev-parse", "main"))
 	partialBranch := "zotigo/partial-ref"
-	partialTarget := filepath.Join(partial.RootPath, "code", source.SourceKey)
+	partialTarget := filepath.Join(partial.RootPath, "code", workspaceSourceName(source))
 	if _, err := store.db.ExecContext(ctx, `
 		INSERT INTO workspace_checkouts(
 			workspace_id, source_id, worktree_path, base_ref, base_commit, branch_name, owned_head, status, error
@@ -514,7 +571,7 @@ func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
 		if err := writeBindingMarker(external, workspace.ID, source.ID); err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+		target := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 		if err := os.Symlink(external, target); err != nil {
 			t.Fatal(err)
 		}
@@ -536,7 +593,7 @@ func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+		target := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 		if err := os.WriteFile(target, []byte("occupied"), 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -623,7 +680,7 @@ func TestFolderBindingRecoveryRetainsOwnedTargets(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		target := filepath.Join(workspace.RootPath, "code", source.SourceKey)
+		target := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 		if err := os.Mkdir(target, 0o700); err != nil {
 			t.Fatal(err)
 		}

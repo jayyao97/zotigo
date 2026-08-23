@@ -50,6 +50,29 @@ func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 	}
 }
 
+func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+		Method: "thread/tokenUsage/updated",
+		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000},"last":{"totalTokens":2400},"modelContextWindow":128000}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-usage")
+	if err != nil || len(items) != 1 || items[0].ContextUsage == nil || items[0].ContextUsage.Tokens != 2400 || items[0].ContextUsage.Window != 128000 {
+		t.Fatalf("context usage items = %#v, err=%v", items, err)
+	}
+}
+
 func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, result any) error {
 	r.methods = append(r.methods, method)
 	request := params.(map[string]any)

@@ -10,9 +10,10 @@ import (
 )
 
 type ChatProvider struct {
-	client        *anthropic.Client
-	model         string
-	thinkingLevel string // "", "disabled", "low", "medium", "high"
+	client          *anthropic.Client
+	model           string
+	thinkingLevel   string // "", "disabled", "low", "medium", "high"
+	maxOutputTokens int64
 }
 
 func (p *ChatProvider) Name() string {
@@ -35,30 +36,6 @@ func effortFromLevel(level string) anthropic.OutputConfigEffort {
 	}
 }
 
-// maxTokensForLevel returns a generous max_tokens ceiling for the
-// given thinking effort. Adaptive thinking output counts toward
-// max_tokens, so the converter's 4096 default would silently truncate
-// high-effort reasoning chains before the model gets to write its
-// answer. Numbers retain the spirit of the old enabled-mode mapping
-// (low/medium/high thinking budgets of 2048/8192/32768 plus 4096 for
-// response): low and medium round their budget+4096 up to the next
-// power of two (8192, 16384); high keeps 32768 because that's both
-// the old high-budget cap and around the practical output ceiling
-// most current Anthropic models accept. Callers that explicitly set
-// MaxTokens higher keep their override.
-func maxTokensForLevel(level string) int64 {
-	switch level {
-	case "low":
-		return 8192
-	case "medium":
-		return 16384
-	case "high":
-		return 32768
-	default:
-		return 0
-	}
-}
-
 func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Message, toolsList []tools.Tool, opts ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	resolved := providers.ResolveOptions(opts)
 	params, err := convertToAnthropicParams(messages, toolsList, resolved.ToolChoice)
@@ -67,6 +44,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}
 
 	params.Model = anthropic.Model(p.model)
+	params.MaxTokens = p.maxOutputTokens
 
 	// Adaptive thinking — Claude 4.7+ rejects the legacy
 	// `thinking.type: enabled` + budget_tokens shape; older 4.x still
@@ -250,9 +228,6 @@ func applyThinkingConfig(params *anthropic.MessageNewParams, level string) {
 			},
 		}
 		params.OutputConfig.Effort = effortFromLevel(level)
-		if want := maxTokensForLevel(level); params.MaxTokens < want {
-			params.MaxTokens = want
-		}
 	}
 }
 
