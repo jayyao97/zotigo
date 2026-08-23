@@ -13,6 +13,19 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
+func TestCompressor_DefaultTriggerRatio(t *testing.T) {
+	for name, c := range map[string]*Compressor{
+		"default config": NewCompressor(DefaultCompressorConfig()),
+		"zero config":    NewCompressor(CompressorConfig{}),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if got := c.config.TriggerRatio; got != 0.8 {
+				t.Fatalf("TriggerRatio = %v, want 0.8", got)
+			}
+		})
+	}
+}
+
 func TestCompressor_EstimatePromptTokens_AnchorsOnLastAssistantUsage(t *testing.T) {
 	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
 
