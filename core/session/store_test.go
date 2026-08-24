@@ -107,6 +107,30 @@ func TestFileStore_PutGet(t *testing.T) {
 	}
 }
 
+func TestFileStoreGetRejectsTrailingJSON(t *testing.T) {
+	rootDir := t.TempDir()
+	store, err := NewFileStore(rootDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sess := &Session{Metadata: Metadata{ID: "trailing-json"}}
+	if err := store.Put(context.Background(), sess); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(rootDir, "sessions", sess.ID+".json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, append(data, []byte(` {}`)...), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(context.Background(), sess.ID); err == nil {
+		t.Fatal("expected trailing JSON to be rejected")
+	}
+}
+
 func TestFileStoreUpdateProfileRestoresSessionWhenIndexUpdateFails(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

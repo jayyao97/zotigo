@@ -15,7 +15,10 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 )
 
-const RuntimeWALFormatVersion = 1
+const (
+	legacyRuntimeWALFormatVersion = 1
+	RuntimeWALFormatVersion       = 2
+)
 
 type RuntimeWALHeader struct {
 	FormatVersion       int       `json:"format_version"`
@@ -72,7 +75,30 @@ func NewRuntimeWALHeader(sessionID string, baseVersion uint64, snapshot agent.Sn
 }
 
 func SnapshotDigest(snapshot agent.Snapshot) string {
-	data, _ := json.Marshal(snapshot.History)
+	return canonicalJSONDigest(snapshot.History)
+}
+
+func SnapshotDigestForRuntimeWAL(snapshot agent.Snapshot, formatVersion int) string {
+	if formatVersion == legacyRuntimeWALFormatVersion {
+		return legacyJSONDigest(snapshot.History)
+	}
+	return SnapshotDigest(snapshot)
+}
+
+func canonicalJSONDigest(value any) string {
+	data, _ := json.Marshal(value)
+	var normalized any
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if decoder.Decode(&normalized) == nil {
+		data, _ = json.Marshal(normalized)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func legacyJSONDigest(value any) string {
+	data, _ := json.Marshal(value)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
@@ -139,7 +165,7 @@ func (s *FileStore) LoadRuntimeWAL(_ context.Context, sessionID string) (*Runtim
 	if err := json.Unmarshal(lines[0], &header); err != nil {
 		return nil, fmt.Errorf("decode runtime WAL header: %w", err)
 	}
-	if header.FormatVersion != RuntimeWALFormatVersion || header.SessionID != sessionID || header.WALID == "" {
+	if !supportedRuntimeWALFormat(header.FormatVersion) || header.SessionID != sessionID || header.WALID == "" {
 		return nil, fmt.Errorf("runtime WAL header does not match session")
 	}
 	wal := &RuntimeWAL{Header: header}
@@ -155,10 +181,14 @@ func (s *FileStore) LoadRuntimeWAL(_ context.Context, sessionID string) (*Runtim
 			}
 			return nil, fmt.Errorf("decode runtime WAL record %d: %w", expected, err)
 		}
-		if record.FormatVersion != RuntimeWALFormatVersion || record.WALID != header.WALID || record.Sequence != expected {
+		if record.FormatVersion != header.FormatVersion || record.WALID != header.WALID || record.Sequence != expected {
 			return nil, fmt.Errorf("runtime WAL record sequence or identity mismatch at %d", expected)
 		}
-		if record.Checksum == "" || record.Checksum != runtimeWALChecksum(record) {
+		checksum := runtimeWALChecksum(record)
+		if header.FormatVersion == legacyRuntimeWALFormatVersion {
+			checksum = legacyRuntimeWALChecksum(line)
+		}
+		if record.Checksum == "" || record.Checksum != checksum {
 			return nil, fmt.Errorf("runtime WAL checksum mismatch at %d", expected)
 		}
 		wal.Records = append(wal.Records, record)
@@ -184,9 +214,27 @@ func (s *FileStore) DeleteRuntimeWAL(_ context.Context, sessionID string) error 
 
 func runtimeWALChecksum(record RuntimeWALRecord) string {
 	record.Checksum = ""
-	data, _ := json.Marshal(record)
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:])
+	return canonicalJSONDigest(record)
+}
+
+func legacyRuntimeWALChecksum(line []byte) string {
+	var record struct {
+		FormatVersion        int             `json:"format_version"`
+		WALID                string          `json:"wal_id"`
+		Sequence             uint64          `json:"sequence"`
+		Mutation             json.RawMessage `json:"mutation,omitempty"`
+		ToolExecutionStarted json.RawMessage `json:"tool_execution_started,omitempty"`
+		Checksum             string          `json:"checksum"`
+	}
+	if json.Unmarshal(line, &record) != nil {
+		return ""
+	}
+	record.Checksum = ""
+	return legacyJSONDigest(record)
+}
+
+func supportedRuntimeWALFormat(version int) bool {
+	return version == legacyRuntimeWALFormatVersion || version == RuntimeWALFormatVersion
 }
 
 func (s *FileStore) runtimeWALPath(id string) string {

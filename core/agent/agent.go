@@ -2217,9 +2217,17 @@ func intFromAny(v any) int {
 		return int(n)
 	case float64:
 		return int(n)
+	case json.Number:
+		if value, err := n.Int64(); err == nil {
+			return int(value)
+		}
+		if value, err := n.Float64(); err == nil {
+			return int(value)
+		}
 	default:
 		return 0
 	}
+	return 0
 }
 
 func isZeroUsage(usage protocol.Usage) bool {

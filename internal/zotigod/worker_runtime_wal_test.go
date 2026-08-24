@@ -2,7 +2,12 @@ package zotigod
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -70,6 +75,130 @@ func TestRecoverRuntimeWALReplaysHistoryAndIgnoresCommittedStaleFile(t *testing.
 	if err != nil || wal != nil {
 		t.Fatalf("stale WAL remains: wal=%#v err=%v", wal, err)
 	}
+}
+
+func TestRuntimeWALBeginAcceptsPersistedSemanticSnapshot(t *testing.T) {
+	type providerMetadata struct {
+		Second string `json:"second"`
+		First  string `json:"first"`
+	}
+	message := protocol.NewAssistantMessage("answer")
+	message.Metadata = &protocol.MessageMetadata{Raw: map[string]any{
+		"provider":      providerMetadata{Second: "two", First: "one"},
+		"large_integer": int64(9007199254740993),
+	}}
+	snapshot := agent.Snapshot{State: agent.StatePaused, History: []protocol.Message{message}}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	sess := &zotigosession.Session{
+		Metadata:        zotigosession.Metadata{ID: "session-semantic-begin"},
+		AgentSnapshot:   snapshot,
+		SnapshotVersion: 1,
+	}
+	ctx := context.Background()
+	if err := store.Put(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wal := newWorkerRuntimeWAL(store, sess.ID)
+	if err := wal.Begin(ctx, persisted, snapshot, "turn-semantic-begin"); err != nil {
+		t.Fatalf("begin WAL from semantically identical persisted snapshot: %v", err)
+	}
+}
+
+func TestRecoverLegacyRuntimeWALReplaysStartedTool(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	base := agent.Snapshot{State: agent.StateIdle, History: []protocol.Message{protocol.NewUserMessage("question")}}
+	sess := &zotigosession.Session{
+		Metadata:        zotigosession.Metadata{ID: "session-legacy-recovery"},
+		AgentSnapshot:   base,
+		SnapshotVersion: 3,
+	}
+	if err := store.Put(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	persisted, err := store.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	header := zotigosession.RuntimeWALHeader{
+		FormatVersion:       1,
+		SessionID:           sess.ID,
+		TurnID:              "turn-legacy-recovery",
+		WALID:               "legacy-recovery-wal",
+		BaseSnapshotVersion: persisted.SnapshotVersion,
+		BaseSnapshotDigest:  zotigosession.SnapshotDigestForRuntimeWAL(persisted.AgentSnapshot, 1),
+	}
+	assistant := protocol.NewAssistantMessage("")
+	assistant.AddToolCall(protocol.ToolCall{ID: "call-legacy", Name: "shell", Arguments: `{"command":"touch marker"}`})
+	records := []zotigosession.RuntimeWALRecord{
+		{
+			FormatVersion: 1,
+			WALID:         header.WALID,
+			Sequence:      1,
+			Mutation:      agent.HistoryMutation{Messages: []protocol.Message{assistant}},
+		},
+		{
+			FormatVersion:        1,
+			WALID:                header.WALID,
+			Sequence:             2,
+			ToolExecutionStarted: &zotigosession.RuntimeWALToolExecution{ToolCallID: "call-legacy", ToolName: "shell"},
+		},
+	}
+	headerLine, err := json.Marshal(header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := append(headerLine, '\n')
+	for index := range records {
+		records[index].Checksum = legacyRuntimeWALRecordChecksum(records[index])
+		line, err := json.Marshal(records[index])
+		if err != nil {
+			t.Fatal(err)
+		}
+		data = append(data, append(line, '\n')...)
+	}
+	walPath := filepath.Join(store.RootDir(), "sessions", sess.ID+".json.runtime.jsonl")
+	if err := os.WriteFile(walPath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := recoverRuntimeWAL(ctx, store, persisted)
+	if err != nil || !recovered {
+		t.Fatalf("recover legacy WAL: recovered=%v err=%v", recovered, err)
+	}
+	last := persisted.AgentSnapshot.History[len(persisted.AgentSnapshot.History)-1]
+	if last.Content[0].ToolResult == nil || !strings.Contains(last.Content[0].ToolResult.Text, "outcome is unknown") {
+		t.Fatalf("legacy started tool was not recovered as unknown: %#v", last)
+	}
+	if wal, err := store.LoadRuntimeWAL(ctx, sess.ID); err != nil || wal != nil {
+		t.Fatalf("legacy WAL remains after recovery: wal=%#v err=%v", wal, err)
+	}
+	reloaded, err := store.Get(ctx, sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	last = reloaded.AgentSnapshot.History[len(reloaded.AgentSnapshot.History)-1]
+	if last.Content[0].ToolResult == nil || !strings.Contains(last.Content[0].ToolResult.Text, "outcome is unknown") {
+		t.Fatalf("legacy recovery was not persisted: %#v", last)
+	}
+}
+
+func legacyRuntimeWALRecordChecksum(record zotigosession.RuntimeWALRecord) string {
+	record.Checksum = ""
+	data, _ := json.Marshal(record)
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
 }
 
 func TestRecoverUnansweredToolCallAddsNonExecutedResult(t *testing.T) {
