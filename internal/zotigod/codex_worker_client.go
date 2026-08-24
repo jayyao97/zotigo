@@ -128,6 +128,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	}
 
 	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string)}
+	runtime.toolNames = make(map[string]string)
 	for {
 		select {
 		case err := <-channels.errors:
@@ -187,6 +188,58 @@ type codexWorkerRuntime struct {
 	turnStarted     time.Time
 	messages        map[string]string
 	messageOrder    []string
+	toolNames       map[string]string
+	toolOrder       []string
+}
+
+type codexThreadItem struct {
+	ID               string               `json:"id"`
+	Type             string               `json:"type"`
+	Text             string               `json:"text,omitempty"`
+	Summary          []string             `json:"summary,omitempty"`
+	Content          any                  `json:"content,omitempty"`
+	Command          string               `json:"command,omitempty"`
+	CWD              string               `json:"cwd,omitempty"`
+	CommandActions   []codexCommandAction `json:"commandActions,omitempty"`
+	AggregatedOutput *string              `json:"aggregatedOutput,omitempty"`
+	ExitCode         *int                 `json:"exitCode,omitempty"`
+	DurationMS       *int64               `json:"durationMs,omitempty"`
+	Changes          any                  `json:"changes,omitempty"`
+	Status           string               `json:"status,omitempty"`
+	Server           string               `json:"server,omitempty"`
+	Namespace        *string              `json:"namespace,omitempty"`
+	Tool             string               `json:"tool,omitempty"`
+	Arguments        any                  `json:"arguments,omitempty"`
+	Result           any                  `json:"result,omitempty"`
+	Error            *struct {
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
+	ContentItems      any                        `json:"contentItems,omitempty"`
+	Success           *bool                      `json:"success,omitempty"`
+	Prompt            *string                    `json:"prompt,omitempty"`
+	Model             *string                    `json:"model,omitempty"`
+	ReasoningEffort   *string                    `json:"reasoningEffort,omitempty"`
+	ReceiverThreadIDs []string                   `json:"receiverThreadIds,omitempty"`
+	AgentsStates      map[string]codexAgentState `json:"agentsStates,omitempty"`
+}
+
+type codexAgentState struct {
+	Status  string  `json:"status"`
+	Message *string `json:"message,omitempty"`
+}
+
+type codexCommandAction struct {
+	Type    string  `json:"type"`
+	Command string  `json:"command,omitempty"`
+	Name    string  `json:"name,omitempty"`
+	Path    *string `json:"path,omitempty"`
+	Query   *string `json:"query,omitempty"`
+}
+
+type codexItemNotification struct {
+	ThreadID string          `json:"threadId"`
+	TurnID   string          `json:"turnId"`
+	Item     codexThreadItem `json:"item"`
 }
 
 func (r *codexWorkerRuntime) Close() error {
@@ -207,6 +260,9 @@ func (r *codexWorkerRuntime) Close() error {
 		}); err != nil {
 			return errors.Join(interruptErr, err)
 		}
+	}
+	if err := r.finishPendingTools("codex worker disconnected"); err != nil {
+		return errors.Join(interruptErr, err)
 	}
 	duration := int64(0)
 	if !r.turnStarted.IsZero() {
@@ -361,6 +417,81 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 		r.messages[delta.ItemID] += delta.Delta
 		r.writer.SendDelta(displayDeltaEvent{ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: string(protocol.ContentTypeText), Delta: delta.Delta})
+	case "item/started":
+		var started codexItemNotification
+		if err := sonic.Unmarshal(message.Params, &started); err != nil {
+			return err
+		}
+		if !r.matchesActiveItem(started.ThreadID, started.TurnID, started.Item.ID) {
+			return nil
+		}
+		name, arguments, ok, err := codexToolCall(started.Item)
+		if err != nil || !ok {
+			return err
+		}
+		if r.toolNames == nil {
+			r.toolNames = make(map[string]string)
+		}
+		r.toolNames[started.Item.ID] = name
+		r.toolOrder = append(r.toolOrder, started.Item.ID)
+		return r.append(zotigosession.DisplayItem{
+			ID: started.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+			Content: []zotigosession.DisplayContentPart{{Type: "tool_call", ToolCall: &zotigosession.DisplayToolCall{
+				ID: started.Item.ID, Name: name, Arguments: arguments,
+			}}},
+		})
+	case "item/commandExecution/outputDelta":
+		var delta struct {
+			ThreadID string `json:"threadId"`
+			TurnID   string `json:"turnId"`
+			ItemID   string `json:"itemId"`
+			Delta    string `json:"delta"`
+		}
+		if err := sonic.Unmarshal(message.Params, &delta); err != nil {
+			return err
+		}
+		if !r.matchesActiveItem(delta.ThreadID, delta.TurnID, delta.ItemID) || r.writer == nil {
+			return nil
+		}
+		r.writer.SendDelta(displayDeltaEvent{
+			ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: "tool_progress", Delta: delta.Delta,
+			ToolCallID: delta.ItemID, ToolName: r.toolNames[delta.ItemID],
+		})
+	case "item/completed":
+		var completed codexItemNotification
+		if err := sonic.Unmarshal(message.Params, &completed); err != nil {
+			return err
+		}
+		if !r.matchesActiveItem(completed.ThreadID, completed.TurnID, completed.Item.ID) {
+			return nil
+		}
+		switch completed.Item.Type {
+		case "agentMessage":
+			text := completed.Item.Text
+			if text == "" {
+				text = r.messages[completed.Item.ID]
+			}
+			return r.persistAgentMessage(completed.Item.ID, text)
+		case "reasoning":
+			text := codexReasoningText(completed.Item)
+			if text == "" {
+				return nil
+			}
+			return r.append(zotigosession.DisplayItem{
+				ID: completed.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+				Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeReasoning), Text: text}},
+			})
+		default:
+			result, ok := codexToolResult(completed.Item, r.toolNames[completed.Item.ID])
+			if !ok {
+				return nil
+			}
+			r.forgetTool(completed.Item.ID)
+			return r.append(zotigosession.DisplayItem{
+				Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+				Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
+			})
+		}
 	case "turn/completed":
 		var completed struct {
 			Turn struct {
@@ -402,6 +533,9 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if duration == 0 && !r.turnStarted.IsZero() {
 			duration = time.Since(r.turnStarted).Milliseconds()
 		}
+		if err := r.finishPendingTools("codex turn completed before tool result"); err != nil {
+			return err
+		}
 		if err := r.append(zotigosession.DisplayItem{
 			Type: itemType, Error: errorText,
 			Turn: &zotigosession.DisplayTurn{ID: r.activeTurnID, Status: status, DurationMS: duration},
@@ -413,6 +547,8 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.turnStarted = time.Time{}
 		r.messages = make(map[string]string)
 		r.messageOrder = nil
+		r.toolNames = make(map[string]string)
+		r.toolOrder = nil
 		if r.writer != nil {
 			if err := r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence}); err != nil {
 				return err
@@ -420,6 +556,172 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 	}
 	return nil
+}
+
+func codexReasoningText(item codexThreadItem) string {
+	parts := append([]string(nil), item.Summary...)
+	if content, ok := item.Content.([]any); ok {
+		for _, part := range content {
+			if text, ok := part.(string); ok {
+				parts = append(parts, text)
+			}
+		}
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n\n"))
+}
+
+func (r *codexWorkerRuntime) matchesActiveItem(threadID, turnID, itemID string) bool {
+	return threadID == r.threadID && turnID == r.activeTurnID && itemID != ""
+}
+
+func (r *codexWorkerRuntime) persistAgentMessage(itemID, text string) error {
+	delete(r.messages, itemID)
+	for index, id := range r.messageOrder {
+		if id == itemID {
+			r.messageOrder = append(r.messageOrder[:index], r.messageOrder[index+1:]...)
+			break
+		}
+	}
+	if text == "" {
+		return nil
+	}
+	return r.append(zotigosession.DisplayItem{
+		ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: text}},
+	})
+}
+
+func (r *codexWorkerRuntime) forgetTool(itemID string) {
+	delete(r.toolNames, itemID)
+	for index, id := range r.toolOrder {
+		if id == itemID {
+			r.toolOrder = append(r.toolOrder[:index], r.toolOrder[index+1:]...)
+			return
+		}
+	}
+}
+
+func (r *codexWorkerRuntime) finishPendingTools(reason string) error {
+	for _, itemID := range r.toolOrder {
+		name := r.toolNames[itemID]
+		if name == "" {
+			continue
+		}
+		if err := r.append(zotigosession.DisplayItem{
+			Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+			Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: &zotigosession.DisplayToolResult{
+				ToolCallID: itemID, ToolName: name, ResultType: "text", Text: reason, Reason: reason, IsError: true,
+			}}},
+		}); err != nil {
+			return err
+		}
+	}
+	r.toolNames = make(map[string]string)
+	r.toolOrder = nil
+	return nil
+}
+
+func codexToolCall(item codexThreadItem) (string, string, bool, error) {
+	name := ""
+	arguments := any(nil)
+	switch item.Type {
+	case "commandExecution":
+		name, arguments = codexCommandTool(item)
+	case "fileChange":
+		name, arguments = "apply_patch", map[string]any{"changes": item.Changes}
+	case "mcpToolCall", "dynamicToolCall":
+		name, arguments = item.Tool, item.Arguments
+	case "collabAgentToolCall":
+		name = codexCollabToolName(item.Tool)
+		arguments = map[string]any{
+			"description": item.Prompt, "prompt": item.Prompt, "model": item.Model,
+			"reasoning_effort": item.ReasoningEffort, "receiver_thread_ids": item.ReceiverThreadIDs,
+		}
+	default:
+		return "", "", false, nil
+	}
+	encoded, err := sonic.Marshal(arguments)
+	return name, string(encoded), true, err
+}
+
+func codexCollabToolName(tool string) string {
+	switch tool {
+	case "spawnAgent":
+		return "spawn_agent"
+	case "sendInput":
+		return "send_message"
+	case "resumeAgent":
+		return "resume_agent"
+	case "closeAgent":
+		return "close_agent"
+	default:
+		return tool
+	}
+}
+
+func codexCommandTool(item codexThreadItem) (string, any) {
+	arguments := map[string]any{"command": item.Command, "cwd": item.CWD}
+	if len(item.CommandActions) != 1 {
+		return "shell", arguments
+	}
+	action := item.CommandActions[0]
+	switch action.Type {
+	case "read":
+		arguments["path"] = action.Path
+		return "read_file", arguments
+	case "listFiles":
+		arguments["path"] = action.Path
+		return "glob", arguments
+	case "search":
+		arguments["path"] = action.Path
+		arguments["query"] = action.Query
+		return "grep", arguments
+	default:
+		return "shell", arguments
+	}
+}
+
+func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayToolResult, bool) {
+	if name == "" {
+		name, _, _, _ = codexToolCall(item)
+	}
+	if name == "" {
+		return nil, false
+	}
+	result := &zotigosession.DisplayToolResult{ToolCallID: item.ID, ToolName: name, ResultType: "text"}
+	switch item.Type {
+	case "commandExecution":
+		if item.AggregatedOutput != nil {
+			result.Text = *item.AggregatedOutput
+		}
+		result.JSON = map[string]any{"exit_code": item.ExitCode, "duration_ms": item.DurationMS, "status": item.Status}
+		result.IsError = codexFailedStatus(item.Status) || item.ExitCode != nil && *item.ExitCode != 0
+	case "fileChange":
+		result.JSON = map[string]any{"changes": item.Changes, "status": item.Status}
+		result.Text = item.Status
+		result.IsError = strings.EqualFold(item.Status, "failed") || strings.EqualFold(item.Status, "declined")
+	case "mcpToolCall":
+		result.JSON = item.Result
+		result.IsError = codexFailedStatus(item.Status)
+		if item.Error != nil {
+			result.Text = item.Error.Message
+			result.Reason = item.Error.Message
+			result.IsError = true
+		}
+	case "dynamicToolCall":
+		result.JSON = item.ContentItems
+		result.IsError = codexFailedStatus(item.Status) || item.Success != nil && !*item.Success
+	case "collabAgentToolCall":
+		result.JSON = map[string]any{"receiver_thread_ids": item.ReceiverThreadIDs, "agents_states": item.AgentsStates, "status": item.Status}
+		result.IsError = codexFailedStatus(item.Status)
+	default:
+		return nil, false
+	}
+	return result, true
+}
+
+func codexFailedStatus(status string) bool {
+	return strings.EqualFold(status, "failed") || strings.EqualFold(status, "declined")
 }
 
 func (r *codexWorkerRuntime) append(item zotigosession.DisplayItem) error {

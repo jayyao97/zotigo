@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 )
@@ -50,6 +52,45 @@ func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 	}
 }
 
+func TestCodexWorkerCloseCompletesPendingToolAsInterrupted(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-pending", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), "session-pending", zotigosession.DisplayItem{
+		ID: "tool-1", Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+		Content: []zotigosession.DisplayContentPart{{Type: "tool_call", ToolCall: &zotigosession.DisplayToolCall{ID: "tool-1", Name: "shell"}}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-pending"}}, store: store, app: &codexWorkerRPC{},
+		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string),
+		toolNames: map[string]string{"tool-1": "shell"}, toolOrder: []string{"tool-1"},
+	}
+	if err := runtime.Close(); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-pending")
+	if err != nil || len(items) != 3 {
+		t.Fatalf("display items = %#v, err=%v", items, err)
+	}
+	result := items[1].Content[0].ToolResult
+	if result == nil || result.ToolCallID != "tool-1" || !result.IsError || result.Reason != "codex worker disconnected" {
+		t.Fatalf("interrupted tool result = %#v", items[1])
+	}
+	if items[2].Type != zotigosession.DisplayItemTurnInterrupted {
+		t.Fatalf("terminal item = %#v", items[2])
+	}
+}
+
 func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -72,6 +113,137 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 		t.Fatalf("context usage items = %#v, err=%v", items, err)
 	}
 }
+
+func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-items", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	writer := &workerClientWriter{sendCh: make(chan workerMessage, 8), done: make(chan struct{})}
+	runtime := &codexWorkerRuntime{
+		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-items"}}, store: store, writer: writer,
+		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string),
+	}
+	notifications := []codexapp.Message{
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":0,"item":{"type":"userMessage","id":"user-1","content":[{"type":"text","text":"Read AGENTS.md"}]}}`)},
+		{Method: "item/agentMessage/delta", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","itemId":"message-1","delta":"Checking files."}`)},
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":1,"item":{"type":"agentMessage","id":"message-1","text":"Checking files."}}`)},
+		{Method: "item/started", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","startedAtMs":2,"item":{"type":"commandExecution","id":"tool-1","command":"sed -n '1,20p' AGENTS.md","cwd":"/tmp/workspace","status":"inProgress","commandActions":[{"type":"read","command":"sed -n '1,20p' AGENTS.md","name":"AGENTS.md","path":"/tmp/workspace/AGENTS.md"}]}}`)},
+		{Method: "item/commandExecution/outputDelta", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","itemId":"tool-1","delta":"# Instructions\n"}`)},
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":3,"item":{"type":"commandExecution","id":"tool-1","command":"sed -n '1,20p' AGENTS.md","cwd":"/tmp/workspace","status":"completed","commandActions":[{"type":"read","command":"sed -n '1,20p' AGENTS.md","name":"AGENTS.md","path":"/tmp/workspace/AGENTS.md"}],"aggregatedOutput":"# Instructions\n","exitCode":0,"durationMs":12}}`)},
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":4,"item":{"type":"reasoning","id":"reasoning-1","summary":["The instructions apply."],"content":[]}}`)},
+		{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-1","status":"completed","durationMs":20}}`)},
+	}
+	for _, notification := range notifications {
+		if err := runtime.handleNotification(context.Background(), notification); err != nil {
+			t.Fatalf("handle %s: %v", notification.Method, err)
+		}
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-items")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 5 {
+		t.Fatalf("display items = %#v", items)
+	}
+	if items[0].ID != "message-1" || items[0].Content[0].Text != "Checking files." {
+		t.Fatalf("message item = %#v", items[0])
+	}
+	call := items[1].Content[0].ToolCall
+	if call == nil || call.ID != "tool-1" || call.Name != "read_file" || !strings.Contains(call.Arguments, `"path":"/tmp/workspace/AGENTS.md"`) {
+		t.Fatalf("tool call = %#v", items[1])
+	}
+	result := items[2].Content[0].ToolResult
+	if result == nil || result.ToolCallID != "tool-1" || result.ToolName != "read_file" || result.Text != "# Instructions\n" || result.IsError {
+		t.Fatalf("tool result = %#v", items[2])
+	}
+	if items[3].Content[0].Type != string(protocol.ContentTypeReasoning) || items[3].Content[0].Text != "The instructions apply." {
+		t.Fatalf("reasoning item = %#v", items[3])
+	}
+	if items[4].Type != zotigosession.DisplayItemTurnCompleted {
+		t.Fatalf("turn item = %#v", items[4])
+	}
+	firstDelta := nextWorkerDelta(t, writer.sendCh)
+	secondDelta := nextWorkerDelta(t, writer.sendCh)
+	if firstDelta.Delta == nil || firstDelta.Delta.PartType != string(protocol.ContentTypeText) {
+		t.Fatalf("first delta = %#v", firstDelta)
+	}
+	if secondDelta.Delta == nil || secondDelta.Delta.PartType != "tool_progress" || secondDelta.Delta.ToolCallID != "tool-1" || secondDelta.Delta.ToolName != "read_file" {
+		t.Fatalf("second delta = %#v", secondDelta)
+	}
+}
+
+func nextWorkerDelta(t *testing.T, messages <-chan workerMessage) workerMessage {
+	t.Helper()
+	for {
+		select {
+		case message := <-messages:
+			if message.Delta != nil {
+				return message
+			}
+		case <-time.After(time.Second):
+			t.Fatal("timed out waiting for worker delta")
+		}
+	}
+}
+
+func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
+	tests := []struct {
+		name     string
+		item     codexThreadItem
+		toolName string
+		isError  bool
+	}{
+		{name: "file change", item: codexThreadItem{ID: "file-1", Type: "fileChange", Status: "completed", Changes: []any{map[string]any{"path": "a.go"}}}, toolName: "apply_patch"},
+		{name: "command failed without exit", item: codexThreadItem{ID: "command-1", Type: "commandExecution", Status: "failed"}, toolName: "shell", isError: true},
+		{name: "command declined", item: codexThreadItem{ID: "command-2", Type: "commandExecution", Status: "declined"}, toolName: "shell", isError: true},
+		{name: "mcp", item: codexThreadItem{ID: "mcp-1", Type: "mcpToolCall", Tool: "search", Status: "completed", Arguments: map[string]any{"query": "zotigo"}, Result: map[string]any{"content": []any{"ok"}}}, toolName: "search"},
+		{name: "mcp failed with result", item: codexThreadItem{ID: "mcp-failed", Type: "mcpToolCall", Tool: "search", Status: "failed", Result: map[string]any{"content": []any{"error"}}}, toolName: "search", isError: true},
+		{name: "mcp error", item: codexThreadItem{ID: "mcp-2", Type: "mcpToolCall", Tool: "fetch", Error: &struct {
+			Message string `json:"message"`
+		}{Message: "unavailable"}}, toolName: "fetch", isError: true},
+		{name: "dynamic", item: codexThreadItem{ID: "dynamic-1", Type: "dynamicToolCall", Tool: "lookup", Arguments: map[string]any{"id": 1}, Success: boolPointer(false)}, toolName: "lookup", isError: true},
+		{name: "dynamic failed without success", item: codexThreadItem{ID: "dynamic-2", Type: "dynamicToolCall", Tool: "lookup", Status: "failed"}, toolName: "lookup", isError: true},
+		{name: "spawn subagent thread", item: codexThreadItem{ID: "spawn-1", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed", Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"}, AgentsStates: map[string]codexAgentState{"thread-child": {Status: "running"}}}, toolName: "spawn_agent"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			name, _, ok, err := codexToolCall(test.item)
+			if err != nil || !ok || name != test.toolName {
+				t.Fatalf("tool call = name %q, ok %v, err %v", name, ok, err)
+			}
+			result, ok := codexToolResult(test.item, name)
+			if !ok || result.ToolName != test.toolName || result.IsError != test.isError {
+				t.Fatalf("tool result = %#v, ok=%v", result, ok)
+			}
+		})
+	}
+	spawn := codexThreadItem{
+		ID: "spawn-details", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed",
+		Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"},
+		AgentsStates: map[string]codexAgentState{"thread-child": {Status: "completed"}},
+	}
+	_, arguments, _, err := codexToolCall(spawn)
+	if err != nil || !strings.Contains(arguments, `"description":"review code"`) {
+		t.Fatalf("spawn arguments = %q, err=%v", arguments, err)
+	}
+	result, ok := codexToolResult(spawn, "spawn_agent")
+	resultJSON, isMap := result.JSON.(map[string]any)
+	if !ok || !isMap || resultJSON["agents_states"] == nil || result.Metadata != nil {
+		t.Fatalf("spawn result = %#v, ok=%v", result, ok)
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }
+
+func stringPointer(value string) *string { return &value }
 
 func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, result any) error {
 	r.methods = append(r.methods, method)
