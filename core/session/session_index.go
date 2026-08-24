@@ -3,7 +3,6 @@ package session
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -411,7 +410,7 @@ func (s *FileStore) bootstrapSessionIndexFromFiles(ctx context.Context) error {
 			return fmt.Errorf("read session for index bootstrap: %w", err)
 		}
 		var sess Session
-		if err := json.Unmarshal(data, &sess); err != nil {
+		if err := decodeSession(data, &sess); err != nil {
 			continue
 		}
 		if sess.ID == "" {

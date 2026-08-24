@@ -86,11 +86,24 @@ func (s *FileStore) Get(ctx context.Context, id string) (*Session, error) {
 	}
 
 	var sess Session
-	if err := json.Unmarshal(data, &sess); err != nil {
+	if err := decodeSession(data, &sess); err != nil {
 		return nil, fmt.Errorf("failed to unmarshal session: %w", err)
 	}
 	sess.EnsureInitialized()
 	return &sess, nil
+}
+
+func decodeSession(data []byte, sess *Session) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	if err := decoder.Decode(sess); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return fmt.Errorf("unexpected data after session JSON")
+	}
+	return nil
 }
 
 // Put stores a session.
@@ -171,7 +184,7 @@ func (s *FileStore) UpdateBackendBinding(ctx context.Context, id string, agentNa
 		return fmt.Errorf("read backend binding registry: %w", err)
 	}
 	var previous Session
-	if err := json.Unmarshal(previousData, &previous); err != nil {
+	if err := decodeSession(previousData, &previous); err != nil {
 		return fmt.Errorf("decode backend binding session: %w", err)
 	}
 	previous.EnsureInitialized()
@@ -225,7 +238,7 @@ func (s *FileStore) updateMetadata(ctx context.Context, id string, updatedAt tim
 		return fmt.Errorf("session not found: %s", id)
 	}
 	previousSession := &Session{}
-	if err := json.Unmarshal(previousData, previousSession); err != nil {
+	if err := decodeSession(previousData, previousSession); err != nil {
 		return fmt.Errorf("unmarshal previous session: %w", err)
 	}
 	previousRegistry, previousRegistryExists, err := readOptionalFile(s.registryPath)

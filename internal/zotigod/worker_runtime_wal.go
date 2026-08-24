@@ -135,7 +135,7 @@ func recoverRuntimeWAL(ctx context.Context, store zotigosession.Store, sess *zot
 	if wal.Header.BaseSnapshotVersion != sess.SnapshotVersion {
 		return true, fmt.Errorf("runtime WAL base version %d does not match snapshot version %d", wal.Header.BaseSnapshotVersion, sess.SnapshotVersion)
 	}
-	if wal.Header.BaseSnapshotDigest != zotigosession.SnapshotDigest(sess.AgentSnapshot) {
+	if wal.Header.BaseSnapshotDigest != zotigosession.SnapshotDigestForRuntimeWAL(sess.AgentSnapshot, wal.Header.FormatVersion) {
 		return true, fmt.Errorf("runtime WAL base snapshot checksum mismatch")
 	}
 	for _, record := range wal.Records {
