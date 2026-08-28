@@ -39,12 +39,13 @@ const (
 )
 
 type Project struct {
-	ID         string        `json:"id"`
-	Name       string        `json:"name"`
-	Status     ProjectStatus `json:"status"`
-	ArchivedAt *time.Time    `json:"archived_at,omitempty"`
-	CreatedAt  time.Time     `json:"created_at"`
-	UpdatedAt  time.Time     `json:"updated_at"`
+	ID          string        `json:"id"`
+	Name        string        `json:"name"`
+	Status      ProjectStatus `json:"status"`
+	ArchivedAt  *time.Time    `json:"archived_at,omitempty"`
+	CreatedAt   time.Time     `json:"created_at"`
+	UpdatedAt   time.Time     `json:"updated_at"`
+	storageName string
 }
 
 type Source struct {
@@ -61,16 +62,17 @@ type Source struct {
 }
 
 type Workspace struct {
-	ID         string          `json:"id"`
-	ProjectID  string          `json:"project_id"`
-	Title      string          `json:"title"`
-	RootPath   string          `json:"root_path"`
-	Status     WorkspaceStatus `json:"status"`
-	Error      string          `json:"error,omitempty"`
-	ArchivedAt *time.Time      `json:"archived_at,omitempty"`
-	DeletedAt  *time.Time      `json:"deleted_at,omitempty"`
-	CreatedAt  time.Time       `json:"created_at"`
-	UpdatedAt  time.Time       `json:"updated_at"`
+	ID          string          `json:"id"`
+	ProjectID   string          `json:"project_id"`
+	Title       string          `json:"title"`
+	RootPath    string          `json:"root_path"`
+	Status      WorkspaceStatus `json:"status"`
+	Error       string          `json:"error,omitempty"`
+	ArchivedAt  *time.Time      `json:"archived_at,omitempty"`
+	DeletedAt   *time.Time      `json:"deleted_at,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+	UpdatedAt   time.Time       `json:"updated_at"`
+	storageName string
 }
 
 type SourceInput struct {

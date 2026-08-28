@@ -230,7 +230,7 @@ func (s *Store) failWorkspaceProvision(ctx context.Context, workspaceID string, 
 }
 
 func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, checkout Checkout) error {
-	if err := s.validateWorkspaceBindingTarget(workspace, checkout.WorktreePath); err != nil {
+	if err := s.validateWorkspaceBindingTarget(ctx, workspace, checkout.WorktreePath); err != nil {
 		return err
 	}
 	source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
@@ -364,7 +364,7 @@ func samePath(left string, right string) bool {
 }
 
 func (s *Store) provisionFolder(ctx context.Context, workspace Workspace, binding FolderBinding) error {
-	if err := s.validateWorkspaceBindingTarget(workspace, binding.TargetPath); err != nil {
+	if err := s.validateWorkspaceBindingTarget(ctx, workspace, binding.TargetPath); err != nil {
 		return err
 	}
 	source, err := s.GetSource(ctx, workspace.ProjectID, binding.SourceID)

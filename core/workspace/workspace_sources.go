@@ -52,7 +52,11 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		}
 		branchName := strings.TrimSpace(selection.BranchName)
 		if branchName == "" {
-			branchName = "zotigo/" + workspace.ID + "/" + source.SourceKey
+			if workspace.storageName == workspace.ID {
+				branchName = "zotigo/" + workspace.ID + "/" + source.SourceKey
+			} else {
+				branchName = "zotigo/" + workspace.storageName
+			}
 		}
 		if _, err := runGitMutation(ctx, source.CanonicalPath, "check-ref-format", "--branch", branchName); err != nil {
 			return fmt.Errorf("%w: invalid workspace branch", ErrInvalid)
@@ -317,8 +321,8 @@ func (s *Store) cancelFailedFolderBinding(ctx context.Context, workspace Workspa
 	return nil
 }
 
-func (s *Store) validateWorkspaceBindingTarget(workspace Workspace, target string) error {
-	if err := s.validateManagedWorkspacePath(workspace, workspace.RootPath); err != nil {
+func (s *Store) validateWorkspaceBindingTarget(ctx context.Context, workspace Workspace, target string) error {
+	if err := s.validateManagedWorkspacePath(ctx, workspace, workspace.RootPath); err != nil {
 		return err
 	}
 	absRoot, err := filepath.Abs(workspace.RootPath)

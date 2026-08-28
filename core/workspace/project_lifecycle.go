@@ -182,7 +182,7 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string, confirmatio
 			return err
 		}
 	}
-	if err := s.removeEmptyProjectDirectories(projectID); err != nil {
+	if err := s.removeEmptyProjectDirectories(project.storageName); err != nil {
 		return err
 	}
 	return s.finishProjectDelete(ctx, projectID)
@@ -210,9 +210,9 @@ func (s *Store) setProjectStatus(ctx context.Context, projectID string, status P
 	return nil
 }
 
-func (s *Store) removeEmptyProjectDirectories(projectID string) error {
+func (s *Store) removeEmptyProjectDirectories(storageName string) error {
 	projectsDir := filepath.Join(s.rootDir, "projects")
-	projectDir := filepath.Join(projectsDir, projectID)
+	projectDir := filepath.Join(projectsDir, storageName)
 	projectsInfo, err := os.Lstat(projectsDir)
 	if os.IsNotExist(err) {
 		return nil

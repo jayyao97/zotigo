@@ -102,7 +102,7 @@ func TestDeleteWorkspaceRemovesOwnedRootAndLocalBranchOnly(t *testing.T) {
 
 func TestDeleteWorkspaceRejectsSymlinkAncestor(t *testing.T) {
 	store, workspace, _ := createGitWorkspaceFixture(t)
-	projectDir := filepath.Join(store.RootDir(), "projects", workspace.ProjectID)
+	projectDir := filepath.Dir(filepath.Dir(workspace.RootPath))
 	relocated := filepath.Join(store.RootDir(), "relocated-project")
 	if err := os.Rename(projectDir, relocated); err != nil {
 		t.Fatal(err)

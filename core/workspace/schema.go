@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 4
+const schemaVersion = 5
 
 type Store struct {
 	db          *sql.DB
@@ -116,6 +116,7 @@ func (s *Store) migrate(ctx context.Context) error {
 		`CREATE TABLE IF NOT EXISTS projects (
 			id TEXT PRIMARY KEY,
 			name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
+			storage_name TEXT NOT NULL UNIQUE,
 			status TEXT NOT NULL DEFAULT 'active'
 				CHECK(status IN ('active', 'archiving', 'archived', 'deleting')),
 			archived_at INTEGER,
@@ -150,6 +151,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			id TEXT PRIMARY KEY,
 			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
 			title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+			storage_name TEXT NOT NULL,
 			root_path TEXT NOT NULL UNIQUE,
 			owner_nonce TEXT NOT NULL,
 			status TEXT NOT NULL CHECK(status IN
@@ -318,6 +320,34 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate runtime workspace bindings: %w", err)
 		}
 		version = 4
+	}
+	if version == 4 {
+		for _, table := range []string{"projects", "workspaces"} {
+			var hasStorageName bool
+			query := fmt.Sprintf(`SELECT EXISTS(
+				SELECT 1 FROM pragma_table_info('%s') WHERE name = 'storage_name'
+			)`, table)
+			if err := tx.QueryRowContext(ctx, query).Scan(&hasStorageName); err != nil {
+				return fmt.Errorf("inspect %s storage name schema: %w", table, err)
+			}
+			if hasStorageName {
+				continue
+			}
+			statement := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN storage_name TEXT NOT NULL DEFAULT ''`, table)
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate semantic storage names: %w", err)
+			}
+		}
+		for _, statement := range []string{
+			`UPDATE projects SET storage_name = id WHERE storage_name = ''`,
+			`CREATE UNIQUE INDEX IF NOT EXISTS projects_storage_name ON projects(storage_name)`,
+			`UPDATE workspaces SET storage_name = id WHERE storage_name = ''`,
+		} {
+			if _, err := tx.ExecContext(ctx, statement); err != nil {
+				return fmt.Errorf("migrate semantic storage names: %w", err)
+			}
+		}
+		version = 5
 	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)

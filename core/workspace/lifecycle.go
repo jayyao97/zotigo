@@ -274,7 +274,7 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 	}
 	trash := filepath.Join(filepath.Dir(workspace.RootPath), ".trash-"+workspace.ID)
 	if _, err := os.Lstat(workspace.RootPath); err == nil {
-		if err := s.validateManagedWorkspacePath(workspace, workspace.RootPath); err != nil {
+		if err := s.validateManagedWorkspacePath(ctx, workspace, workspace.RootPath); err != nil {
 			return err
 		}
 		if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
@@ -292,7 +292,7 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 		return err
 	}
 	if _, err := os.Lstat(trash); err == nil {
-		if err := s.validateManagedWorkspacePath(workspace, trash); err != nil {
+		if err := s.validateManagedWorkspacePath(ctx, workspace, trash); err != nil {
 			return err
 		}
 		if err := validateOwnerMarker(trash, workspace.ProjectID, workspace.ID, nonce); err != nil {
@@ -349,8 +349,12 @@ func verifyCheckoutGeneration(ctx context.Context, source Source, checkout Check
 	return nil
 }
 
-func (s *Store) validateManagedWorkspacePath(workspace Workspace, candidate string) error {
-	expectedRoot := filepath.Join(s.rootDir, "projects", workspace.ProjectID, "workspaces", workspace.ID)
+func (s *Store) validateManagedWorkspacePath(ctx context.Context, workspace Workspace, candidate string) error {
+	project, err := s.GetProject(ctx, workspace.ProjectID)
+	if err != nil {
+		return err
+	}
+	expectedRoot := filepath.Join(s.rootDir, "projects", project.storageName, "workspaces", workspace.storageName)
 	expectedCandidate := expectedRoot
 	if filepath.Base(candidate) == ".trash-"+workspace.ID {
 		expectedCandidate = filepath.Join(filepath.Dir(expectedRoot), ".trash-"+workspace.ID)
@@ -368,8 +372,8 @@ func (s *Store) validateManagedWorkspacePath(workspace Workspace, candidate stri
 	}
 	paths := []string{
 		filepath.Join(s.rootDir, "projects"),
-		filepath.Join(s.rootDir, "projects", workspace.ProjectID),
-		filepath.Join(s.rootDir, "projects", workspace.ProjectID, "workspaces"),
+		filepath.Join(s.rootDir, "projects", project.storageName),
+		filepath.Join(s.rootDir, "projects", project.storageName, "workspaces"),
 		candidate,
 	}
 	for _, path := range paths {

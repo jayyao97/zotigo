@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"os/exec"
@@ -186,6 +188,228 @@ func TestProvisionWorkspaceGitWorktree(t *testing.T) {
 	}
 	if branch := strings.TrimSpace(runGitProvisionCommand(t, repository, "branch", "--show-current")); branch != "main" {
 		t.Fatalf("source branch = %q", branch)
+	}
+}
+
+func TestProvisionWorkspaceUsesSemanticStorageNames(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, "示例 / Project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	repository := filepath.Join(t.TempDir(), "zotigo-repo")
+	if err := os.Mkdir(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("source\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "add", "README.md")
+	runGitProvisionCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	inspection, err := InspectSource(ctx, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source, err := store.AddSource(ctx, project.ID, SourceInput{
+		Kind: inspection.Kind, CanonicalPath: inspection.CanonicalPath, GitCommonDir: inspection.GitCommonDir,
+		GitObjectFormat: inspection.GitObjectFormat, SourceKey: inspection.SourceKey,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := store.CreateWorkspacePlan(ctx, project.ID, "主要 Workspace", []WorkspaceSourceInput{{
+		SourceID: source.ID, BaseRef: "main",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = store.ProvisionWorkspace(ctx, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantProjectName := storageName(project.Name, project.ID, "project_", "project")
+	wantWorkspaceName := storageName(workspace.Title, workspace.ID, "workspace_", "workspace")
+	wantRoot := filepath.Join(root, "projects", wantProjectName, "workspaces", wantWorkspaceName)
+	if workspace.RootPath != wantRoot {
+		t.Fatalf("workspace root = %q, want %q", workspace.RootPath, wantRoot)
+	}
+	worktree := filepath.Join(workspace.RootPath, "code", "zotigo-repo")
+	if _, err := os.Stat(filepath.Join(worktree, "README.md")); err != nil {
+		t.Fatalf("repository-named worktree: %v", err)
+	}
+	wantBranch := "zotigo/" + wantWorkspaceName
+	if branch := strings.TrimSpace(runGitProvisionCommand(t, worktree, "branch", "--show-current")); branch != wantBranch {
+		t.Fatalf("worktree branch = %q, want %q", branch, wantBranch)
+	}
+}
+
+func TestMigratesExistingLegacyWorktreeWithoutRenaming(t *testing.T) {
+	root := t.TempDir()
+	ctx := context.Background()
+	projectID := "project_11111111-1111-1111-1111-111111111111"
+	workspaceID := "workspace_22222222-2222-2222-2222-222222222222"
+	sourceID := "source_33333333-3333-3333-3333-333333333333"
+	nonce := "legacy-owner-nonce"
+	repository := filepath.Join(t.TempDir(), "legacy-repo")
+	if err := os.Mkdir(repository, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "init", "-b", "main")
+	if err := os.WriteFile(filepath.Join(repository, "README.md"), []byte("legacy\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "add", "README.md")
+	runGitProvisionCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-m", "initial")
+	inspection, err := InspectSource(ctx, repository)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseCommit := strings.TrimSpace(runGitProvisionCommand(t, repository, "rev-parse", "main"))
+	legacyBranch := "zotigo/" + workspaceID + "/" + inspection.SourceKey
+	legacyRoot := filepath.Join(root, "projects", projectID, "workspaces", workspaceID)
+	legacyWorktree := filepath.Join(legacyRoot, "code", "legacy-repo")
+	for _, directory := range []string{filepath.Join(legacyRoot, "code"), filepath.Join(legacyRoot, "artifacts"), filepath.Join(legacyRoot, "notes")} {
+		if err := os.MkdirAll(directory, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	marker, err := json.Marshal(ownerMarker{Version: 1, ProjectID: projectID, WorkspaceID: workspaceID, Nonce: nonce})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(legacyRoot, ownerMarkerName), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, repository, "worktree", "add", "-b", legacyBranch, legacyWorktree, baseCommit)
+	runGitProvisionCommand(t, repository, "worktree", "lock", "--reason", "legacy workspace", legacyWorktree)
+	runGitProvisionCommand(t, repository, "update-ref", checkoutOwnershipRef(workspaceID, inspection.SourceKey), baseCommit)
+
+	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, statement := range []string{
+		`CREATE TABLE schema_meta (
+			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+			version INTEGER NOT NULL CHECK(version > 0)
+		)`,
+		`INSERT INTO schema_meta(singleton, version) VALUES(1, 4)`,
+		`CREATE TABLE projects (
+			id TEXT PRIMARY KEY,
+			name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
+			status TEXT NOT NULL DEFAULT 'active'
+				CHECK(status IN ('active', 'archiving', 'archived', 'deleting')),
+			archived_at INTEGER,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE sources (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+			kind TEXT NOT NULL CHECK(kind IN ('git', 'folder')),
+			canonical_path TEXT NOT NULL,
+			git_common_dir TEXT,
+			git_object_format TEXT,
+			folder_mode TEXT,
+			source_key TEXT NOT NULL,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL,
+			UNIQUE(project_id, canonical_path),
+			UNIQUE(project_id, source_key)
+		)`,
+		`CREATE TABLE workspaces (
+			id TEXT PRIMARY KEY,
+			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
+			title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
+			root_path TEXT NOT NULL UNIQUE,
+			owner_nonce TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error TEXT,
+			archived_at INTEGER,
+			deleted_at INTEGER,
+			created_at INTEGER NOT NULL,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE workspace_checkouts (
+			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
+			worktree_path TEXT NOT NULL UNIQUE,
+			base_ref TEXT NOT NULL,
+			base_commit TEXT NOT NULL,
+			branch_name TEXT NOT NULL,
+			owned_head TEXT NOT NULL,
+			status TEXT NOT NULL,
+			error TEXT,
+			PRIMARY KEY(workspace_id, source_id)
+		)`,
+	} {
+		if _, err := db.ExecContext(ctx, statement); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	for _, insertion := range []struct {
+		query string
+		args  []any
+	}{
+		{`INSERT INTO projects(id, name, status, created_at, updated_at) VALUES(?, 'Legacy', 'active', 0, 0)`, []any{projectID}},
+		{`INSERT INTO sources(id, project_id, kind, canonical_path, git_common_dir, git_object_format, source_key, created_at, updated_at)
+			VALUES(?, ?, 'git', ?, ?, ?, ?, 0, 0)`, []any{sourceID, projectID, inspection.CanonicalPath, inspection.GitCommonDir, inspection.GitObjectFormat, inspection.SourceKey}},
+		{`INSERT INTO workspaces(id, project_id, title, root_path, owner_nonce, status, created_at, updated_at)
+			VALUES(?, ?, 'Legacy workspace', ?, ?, 'ready', 0, 0)`, []any{workspaceID, projectID, legacyRoot, nonce}},
+		{`INSERT INTO workspace_checkouts(workspace_id, source_id, worktree_path, base_ref, base_commit, branch_name, owned_head, status)
+			VALUES(?, ?, ?, 'main', ?, ?, ?, 'ready')`, []any{workspaceID, sourceID, legacyWorktree, baseCommit, legacyBranch, baseCommit}},
+	} {
+		if _, err := db.ExecContext(ctx, insertion.query, insertion.args...); err != nil {
+			_ = db.Close()
+			t.Fatal(err)
+		}
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	workspace, err := store.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.GetProject(ctx, projectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if project.storageName != projectID || workspace.storageName != workspaceID || workspace.RootPath != legacyRoot {
+		t.Fatalf("migrated legacy records changed storage identity: project=%+v workspace=%+v", project, workspace)
+	}
+	if _, err := store.ProvisionWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatalf("retry migrated legacy workspace: %v", err)
+	}
+	bindings, err := store.ListWorkspaceSources(ctx, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(bindings) != 1 || bindings[0].WorktreePath != legacyWorktree || bindings[0].BranchName != legacyBranch {
+		t.Fatalf("migrated legacy binding changed: %+v", bindings)
+	}
+	if _, err := store.ArchiveWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatalf("archive migrated legacy workspace: %v", err)
+	}
+	if _, err := store.UnarchiveWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatalf("unarchive migrated legacy workspace: %v", err)
+	}
+	if branch := strings.TrimSpace(runGitProvisionCommand(t, legacyWorktree, "branch", "--show-current")); branch != legacyBranch {
+		t.Fatalf("legacy worktree branch = %q, want %q", branch, legacyBranch)
 	}
 }
 
@@ -404,12 +628,12 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBranch := "zotigo/" + workspace.ID + "/" + source.SourceKey
+	wantBranch := "zotigo/" + workspace.storageName
 	if binding.BranchName != wantBranch || binding.Status != "ready" {
 		t.Fatalf("binding = %+v, want branch %q and ready", binding, wantBranch)
 	}
-	if strings.Contains(binding.BranchName, workspace.Title) {
-		t.Fatalf("default branch %q contains workspace title", binding.BranchName)
+	if strings.Contains(binding.BranchName, workspace.ID) {
+		t.Fatalf("default branch %q contains full workspace ID", binding.BranchName)
 	}
 	if _, err := os.Stat(filepath.Join(binding.WorktreePath, "README.md")); err != nil {
 		t.Fatalf("added worktree: %v", err)

@@ -85,6 +85,52 @@ func TestRenameProject(t *testing.T) {
 	if got.Name != "Renamed" {
 		t.Fatalf("stored project name = %q", got.Name)
 	}
+	workspace, err := store.CreateWorkspace(ctx, project.ID, "After rename")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantParent := filepath.Join(store.RootDir(), "projects", project.storageName, "workspaces")
+	if filepath.Dir(workspace.RootPath) != wantParent {
+		t.Fatalf("renamed project workspace parent = %q, want %q", filepath.Dir(workspace.RootPath), wantParent)
+	}
+}
+
+func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	firstProject, err := store.CreateProject(ctx, "Same Name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondProject, err := store.CreateProject(ctx, "Same Name")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstProject.storageName == secondProject.storageName {
+		t.Fatalf("duplicate projects share storage name %q", firstProject.storageName)
+	}
+	for _, project := range []Project{firstProject, secondProject} {
+		want := storageName(project.Name, project.ID, "project_", "project")
+		if project.storageName != want {
+			t.Fatalf("project %q storage name = %q, want %q", project.ID, project.storageName, want)
+		}
+	}
+
+	firstWorkspace, err := store.CreateWorkspace(ctx, firstProject.ID, "Same Workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondWorkspace, err := store.CreateWorkspace(ctx, firstProject.ID, "Same Workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if firstWorkspace.storageName == secondWorkspace.storageName {
+		t.Fatalf("duplicate workspaces share storage name %q", firstWorkspace.storageName)
+	}
 }
 
 func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
@@ -148,7 +194,7 @@ func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
 	if workspace.Status != WorkspaceStatusProvisioning || workspace.Title != "Implement catalog" {
 		t.Fatalf("unexpected workspace: %+v", workspace)
 	}
-	wantRoot := filepath.Join(store.RootDir(), "projects", project.ID, "workspaces", workspace.ID)
+	wantRoot := filepath.Join(store.RootDir(), "projects", project.storageName, "workspaces", workspace.storageName)
 	if workspace.RootPath != wantRoot {
 		t.Fatalf("workspace root = %q, want %q", workspace.RootPath, wantRoot)
 	}
@@ -357,6 +403,20 @@ func TestMigratesV2CheckoutOwnershipSchema(t *testing.T) {
 	}
 	if ownedHead != "abc123" {
 		t.Fatalf("owned_head = %q, want base commit", ownedHead)
+	}
+	legacyProject, err := store.GetProject(context.Background(), "project_v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyWorkspace, err := store.GetWorkspace(context.Background(), "workspace_v2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if legacyProject.storageName != legacyProject.ID {
+		t.Fatalf("legacy project storage name = %q, want %q", legacyProject.storageName, legacyProject.ID)
+	}
+	if legacyWorkspace.storageName != legacyWorkspace.ID || legacyWorkspace.RootPath != "/tmp/workspace" {
+		t.Fatalf("legacy workspace changed during migration: %+v", legacyWorkspace)
 	}
 
 	repository := t.TempDir()

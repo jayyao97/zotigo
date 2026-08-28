@@ -353,10 +353,13 @@ func TestCatalogProjectStatusAllIncludesDeletingProject(t *testing.T) {
 	}
 	var project zotigoworkspace.Project
 	decodeCatalogData(t, projectRec, &project)
-	projectDir := filepath.Join(root, "projects", project.ID)
-	if err := os.MkdirAll(projectDir, 0o700); err != nil {
-		t.Fatal(err)
+	workspaceRec := requestCatalog(t, handler, http.MethodPost, "/projects/"+project.ID+"/workspaces", `{"title":"Deleting Workspace"}`)
+	if workspaceRec.Code != http.StatusCreated {
+		t.Fatalf("create workspace status = %d: %s", workspaceRec.Code, workspaceRec.Body.String())
 	}
+	var workspace zotigoworkspace.Workspace
+	decodeCatalogData(t, workspaceRec, &workspace)
+	projectDir := filepath.Dir(filepath.Dir(workspace.RootPath))
 	if err := os.WriteFile(filepath.Join(projectDir, "unknown.txt"), []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
