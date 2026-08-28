@@ -19,4 +19,7 @@ func TestCodexCatalogDoesNotApplyNativeMaxOutputTokens(t *testing.T) {
 	if strings.Contains(string(payload), "max_output_tokens") {
 		t.Fatalf("Codex app-server catalog inherited native runtime output limit: %s", payload)
 	}
+	if catalog.Capabilities.PreToolUseHooks || !catalog.Capabilities.PostToolUseHooks {
+		t.Fatalf("unexpected Codex hook capabilities: %#v", catalog.Capabilities)
+	}
 }

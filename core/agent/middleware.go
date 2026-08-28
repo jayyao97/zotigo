@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -53,6 +55,36 @@ func WithToolExecutionRecorder(recorder ToolExecutionRecorder) AgentOption {
 // invokes the tool itself; every middleware between wraps its outer
 // neighbor.
 type Next func(ctx context.Context, call *ToolCall) (any, error)
+
+// ToolExecutionDeniedError lets middleware reject a call without collapsing
+// the result into a generic tool error.
+type ToolExecutionDeniedError struct {
+	Reason string
+}
+
+func (e *ToolExecutionDeniedError) Error() string {
+	if reason := strings.TrimSpace(e.Reason); reason != "" {
+		return reason
+	}
+	return "tool execution denied"
+}
+
+func DenyToolExecution(reason string) error {
+	return &ToolExecutionDeniedError{Reason: strings.TrimSpace(reason)}
+}
+
+func IsToolExecutionDenied(err error) bool {
+	var denied *ToolExecutionDeniedError
+	return errors.As(err, &denied)
+}
+
+func toolExecutionDenialReason(err error) (string, bool) {
+	var denied *ToolExecutionDeniedError
+	if !errors.As(err, &denied) {
+		return "", false
+	}
+	return denied.Error(), true
+}
 
 type toolEventSinkKey struct{}
 type toolCallContextKey struct{}

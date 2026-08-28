@@ -1661,6 +1661,15 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 	})
 	res, err := invoke(ctx, call)
 	if err != nil {
+		if reason, denied := toolExecutionDenialReason(err); denied {
+			return protocol.ToolResult{
+				ToolCallID: action.ToolCallID,
+				ToolName:   action.Name,
+				Type:       protocol.ToolResultTypeExecutionDenied,
+				Reason:     reason,
+				IsError:    true,
+			}
+		}
 		tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(fmt.Sprintf("Error: %v", err)), true)
 		tr.ToolName = action.Name
 		return tr
