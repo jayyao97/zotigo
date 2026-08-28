@@ -32,9 +32,10 @@ func (s *Store) CreateProject(ctx context.Context, name string) (Project, error)
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
+	project.storageName = projectStorageName(project.Name, project.ID)
 	_, err = s.db.ExecContext(ctx, `
-		INSERT INTO projects(id, name, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?)
-	`, project.ID, project.Name, project.Status, unixMillis(now), unixMillis(now))
+		INSERT INTO projects(id, name, storage_name, status, created_at, updated_at) VALUES(?, ?, ?, ?, ?, ?)
+	`, project.ID, project.Name, project.storageName, project.Status, unixMillis(now), unixMillis(now))
 	if err != nil {
 		return Project{}, fmt.Errorf("create project: %w", err)
 	}
@@ -80,7 +81,7 @@ func normalizeProjectName(name string) (string, error) {
 
 func (s *Store) GetProject(ctx context.Context, id string) (Project, error) {
 	return scanProject(s.db.QueryRowContext(ctx, `
-		SELECT id, name, status, archived_at, created_at, updated_at FROM projects WHERE id = ?
+		SELECT id, name, storage_name, status, archived_at, created_at, updated_at FROM projects WHERE id = ?
 	`, id))
 }
 
@@ -100,7 +101,7 @@ func (s *Store) ListAllProjects(ctx context.Context) ([]Project, error) {
 
 func (s *Store) listProjects(ctx context.Context, status *ProjectStatus) ([]Project, error) {
 	query := `
-		SELECT id, name, status, archived_at, created_at, updated_at
+		SELECT id, name, storage_name, status, archived_at, created_at, updated_at
 		FROM projects`
 	args := make([]any, 0, 1)
 	if status != nil {
@@ -236,20 +237,26 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	if title == "" || len(title) > 200 {
 		return Workspace{}, ErrInvalid
 	}
-	if err := s.requireActiveProject(ctx, projectID); err != nil {
+	project, err := s.GetProject(ctx, projectID)
+	if err != nil {
 		return Workspace{}, err
 	}
+	if project.Status != ProjectStatusActive {
+		return Workspace{}, fmt.Errorf("%w: project is %s", ErrConflict, project.Status)
+	}
 	id := "workspace_" + uuid.NewString()
-	rootPath := filepath.Join(s.rootDir, "projects", projectID, "workspaces", id)
+	storageName := workspaceStorageName(title, id)
+	rootPath := filepath.Join(s.rootDir, "projects", project.storageName, "workspaces", storageName)
 	now := time.Now().UTC()
 	workspace := Workspace{
-		ID:        id,
-		ProjectID: projectID,
-		Title:     title,
-		RootPath:  rootPath,
-		Status:    WorkspaceStatusProvisioning,
-		CreatedAt: now,
-		UpdatedAt: now,
+		ID:          id,
+		ProjectID:   projectID,
+		Title:       title,
+		RootPath:    rootPath,
+		Status:      WorkspaceStatusProvisioning,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		storageName: storageName,
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -258,10 +265,10 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO workspaces(
-			id, project_id, title, root_path, owner_nonce, status, created_at, updated_at
-		) VALUES(?, ?, ?, ?, ?, ?, ?, ?)
-	`, workspace.ID, workspace.ProjectID, workspace.Title, workspace.RootPath,
-		uuid.NewString(), workspace.Status, unixMillis(now), unixMillis(now)); err != nil {
+			id, project_id, title, storage_name, root_path, owner_nonce, status, created_at, updated_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+	`, workspace.ID, workspace.ProjectID, workspace.Title, workspace.storageName,
+		workspace.RootPath, uuid.NewString(), workspace.Status, unixMillis(now), unixMillis(now)); err != nil {
 		if isConstraintError(err) {
 			return Workspace{}, fmt.Errorf("%w: project missing or workspace path reserved", ErrConflict)
 		}
@@ -288,7 +295,7 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 
 func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) {
 	return scanWorkspace(s.db.QueryRowContext(ctx, `
-		SELECT id, project_id, title, root_path, status, error,
+		SELECT id, project_id, title, storage_name, root_path, status, error,
 		       archived_at, deleted_at, created_at, updated_at
 		FROM workspaces WHERE id = ? AND status != 'deleted'
 	`, id))
@@ -296,7 +303,7 @@ func (s *Store) GetWorkspace(ctx context.Context, id string) (Workspace, error) 
 
 func (s *Store) ListWorkspaces(ctx context.Context, projectID string, includeArchived bool) ([]Workspace, error) {
 	query := `
-		SELECT id, project_id, title, root_path, status, error,
+		SELECT id, project_id, title, storage_name, root_path, status, error,
 		       archived_at, deleted_at, created_at, updated_at
 		FROM workspaces WHERE project_id = ? AND status != 'deleted'`
 	if !includeArchived {
@@ -477,7 +484,7 @@ func scanProject(row scanner) (Project, error) {
 	var project Project
 	var archivedAt sql.NullInt64
 	var createdAt, updatedAt int64
-	if err := row.Scan(&project.ID, &project.Name, &project.Status, &archivedAt, &createdAt, &updatedAt); err != nil {
+	if err := row.Scan(&project.ID, &project.Name, &project.storageName, &project.Status, &archivedAt, &createdAt, &updatedAt); err != nil {
 		return Project{}, scanError("project", err)
 	}
 	project.ArchivedAt = nullableTime(archivedAt)
@@ -519,7 +526,7 @@ func scanWorkspace(row scanner) (Workspace, error) {
 	var errorText sql.NullString
 	var archivedAt, deletedAt sql.NullInt64
 	var createdAt, updatedAt int64
-	if err := row.Scan(&workspace.ID, &workspace.ProjectID, &workspace.Title,
+	if err := row.Scan(&workspace.ID, &workspace.ProjectID, &workspace.Title, &workspace.storageName,
 		&workspace.RootPath, &workspace.Status, &errorText, &archivedAt, &deletedAt,
 		&createdAt, &updatedAt); err != nil {
 		return Workspace{}, scanError("workspace", err)

@@ -96,7 +96,7 @@ func TestProjectArchiveRejectsDirtyWorktreeBeforeChangingProjectStatus(t *testin
 func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 	store, project, workspace, source := createFolderProjectFixture(t)
 	ctx := context.Background()
-	projectDir := filepath.Join(store.RootDir(), "projects", project.ID)
+	projectDir := filepath.Join(store.RootDir(), "projects", project.storageName)
 	unknownPath := filepath.Join(projectDir, "unknown.txt")
 	if err := os.WriteFile(unknownPath, []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
@@ -202,7 +202,7 @@ func TestProjectDeleteRejectsSymlinkedProjectDirectoryBeforeTouchingDescendants(
 	if err := os.Mkdir(externalWorkspaces, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(externalProject, filepath.Join(projectsDir, project.ID)); err != nil {
+	if err := os.Symlink(externalProject, filepath.Join(projectsDir, project.storageName)); err != nil {
 		t.Fatal(err)
 	}
 

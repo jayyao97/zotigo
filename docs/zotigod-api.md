@@ -115,8 +115,9 @@ creation:
 ```
 
 For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when
-omitted, zotigod generates a branch from opaque Workspace and Source IDs, never
-from the Workspace title. Folder Sources require an explicit `mode` of
+omitted, zotigod generates a stable `zotigo/<workspace-slug>-<short-id>` branch
+when the Workspace is created. Later display-name changes do not rename it.
+Folder Sources require an explicit `mode` of
 `direct`, `reference`, or `copy`.
 
 The Source must already belong to the Workspace's Project. A Source registered
