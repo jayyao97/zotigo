@@ -11,6 +11,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/hooks"
 )
 
 type codexWorkerRPC struct {
@@ -127,9 +128,10 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		t.Fatal(err)
 	}
 	writer := &workerClientWriter{sendCh: make(chan workerMessage, 8), done: make(chan struct{})}
+	hookDispatcher := &capturingHookDispatcher{}
 	runtime := &codexWorkerRuntime{
 		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-items"}}, store: store, writer: writer,
-		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string),
+		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string), hooks: hookDispatcher,
 	}
 	notifications := []codexapp.Message{
 		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":0,"item":{"type":"userMessage","id":"user-1","content":[{"type":"text","text":"Read AGENTS.md"}]}}`)},
@@ -170,6 +172,13 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if items[4].Type != zotigosession.DisplayItemTurnCompleted {
 		t.Fatalf("turn item = %#v", items[4])
 	}
+	if len(hookDispatcher.events) != 1 {
+		t.Fatalf("hook events = %#v", hookDispatcher.events)
+	}
+	hookEvent := hookDispatcher.events[0]
+	if hookEvent.EventName != hooks.PostToolUse || hookEvent.Tool == nil || hookEvent.Tool.Name != "read_file" || hookEvent.Tool.NativeName != "commandExecution" || hookEvent.Tool.Result == nil || hookEvent.Tool.Result.Status != "succeeded" {
+		t.Fatalf("PostToolUse event = %#v", hookEvent)
+	}
 	firstDelta := nextWorkerDelta(t, writer.sendCh)
 	secondDelta := nextWorkerDelta(t, writer.sendCh)
 	if firstDelta.Delta == nil || firstDelta.Delta.PartType != string(protocol.ContentTypeText) {
@@ -196,20 +205,24 @@ func nextWorkerDelta(t *testing.T, messages <-chan workerMessage) workerMessage 
 
 func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 	tests := []struct {
-		name     string
-		item     codexThreadItem
-		toolName string
-		isError  bool
+		name       string
+		item       codexThreadItem
+		toolName   string
+		isError    bool
+		hookStatus string
 	}{
 		{name: "file change", item: codexThreadItem{ID: "file-1", Type: "fileChange", Status: "completed", Changes: []any{map[string]any{"path": "a.go"}}}, toolName: "apply_patch"},
+		{name: "file change declined", item: codexThreadItem{ID: "file-declined", Type: "fileChange", Status: "declined"}, toolName: "apply_patch", isError: true, hookStatus: "denied"},
 		{name: "command failed without exit", item: codexThreadItem{ID: "command-1", Type: "commandExecution", Status: "failed"}, toolName: "shell", isError: true},
-		{name: "command declined", item: codexThreadItem{ID: "command-2", Type: "commandExecution", Status: "declined"}, toolName: "shell", isError: true},
+		{name: "command declined", item: codexThreadItem{ID: "command-2", Type: "commandExecution", Status: "declined"}, toolName: "shell", isError: true, hookStatus: "denied"},
 		{name: "mcp", item: codexThreadItem{ID: "mcp-1", Type: "mcpToolCall", Tool: "search", Status: "completed", Arguments: map[string]any{"query": "zotigo"}, Result: map[string]any{"content": []any{"ok"}}}, toolName: "search"},
+		{name: "mcp declined", item: codexThreadItem{ID: "mcp-declined", Type: "mcpToolCall", Tool: "search", Status: "declined"}, toolName: "search", isError: true, hookStatus: "denied"},
 		{name: "mcp failed with result", item: codexThreadItem{ID: "mcp-failed", Type: "mcpToolCall", Tool: "search", Status: "failed", Result: map[string]any{"content": []any{"error"}}}, toolName: "search", isError: true},
 		{name: "mcp error", item: codexThreadItem{ID: "mcp-2", Type: "mcpToolCall", Tool: "fetch", Error: &struct {
 			Message string `json:"message"`
 		}{Message: "unavailable"}}, toolName: "fetch", isError: true},
 		{name: "dynamic", item: codexThreadItem{ID: "dynamic-1", Type: "dynamicToolCall", Tool: "lookup", Arguments: map[string]any{"id": 1}, Success: boolPointer(false)}, toolName: "lookup", isError: true},
+		{name: "dynamic declined", item: codexThreadItem{ID: "dynamic-declined", Type: "dynamicToolCall", Tool: "lookup", Status: "declined"}, toolName: "lookup", isError: true, hookStatus: "denied"},
 		{name: "dynamic failed without success", item: codexThreadItem{ID: "dynamic-2", Type: "dynamicToolCall", Tool: "lookup", Status: "failed"}, toolName: "lookup", isError: true},
 		{name: "spawn subagent thread", item: codexThreadItem{ID: "spawn-1", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed", Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"}, AgentsStates: map[string]codexAgentState{"thread-child": {Status: "running"}}}, toolName: "spawn_agent"},
 	}
@@ -222,6 +235,16 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 			result, ok := codexToolResult(test.item, name)
 			if !ok || result.ToolName != test.toolName || result.IsError != test.isError {
 				t.Fatalf("tool result = %#v, ok=%v", result, ok)
+			}
+			wantStatus := test.hookStatus
+			if wantStatus == "" {
+				wantStatus = "succeeded"
+				if test.isError {
+					wantStatus = "failed"
+				}
+			}
+			if status := codexToolResultStatus(test.item.Status, result); status != wantStatus {
+				t.Fatalf("hook status = %q, want %q", status, wantStatus)
 			}
 		})
 	}

@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -13,6 +15,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/hooks"
 )
 
 type codexWorkerConfig struct {
@@ -23,6 +26,7 @@ type codexWorkerConfig struct {
 	ReasoningEffort  string
 	ThreadID         string
 	SessionStoreRoot string
+	HookDispatcher   hookEventDispatcher
 }
 
 type codexWorkerChannels struct {
@@ -126,9 +130,25 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
 		return fmt.Errorf("report codex worker ready: %w", err)
 	}
+	hookDispatcher := cfg.HookDispatcher
+	var ownedHookDispatcher *hooks.Dispatcher
+	if hookDispatcher == nil {
+		hookLogger := log.New(os.Stderr, "[zotigo-hooks] ", log.LstdFlags)
+		ownedHookDispatcher, err = hooks.LoadDefault(hookLogger)
+		if err != nil {
+			hookLogger.Printf("hook_config outcome=failed error=%q", err)
+		} else {
+			hookDispatcher = ownedHookDispatcher
+		}
+	}
+	if ownedHookDispatcher != nil {
+		defer closeHookDispatcher(ownedHookDispatcher)
+	}
 
-	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string)}
+	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), hooks: hookDispatcher}
 	runtime.toolNames = make(map[string]string)
+	runtime.toolArguments = make(map[string]string)
+	runtime.toolNativeNames = make(map[string]string)
 	for {
 		select {
 		case err := <-channels.errors:
@@ -189,7 +209,10 @@ type codexWorkerRuntime struct {
 	messages        map[string]string
 	messageOrder    []string
 	toolNames       map[string]string
+	toolArguments   map[string]string
+	toolNativeNames map[string]string
 	toolOrder       []string
+	hooks           hookEventDispatcher
 }
 
 type codexThreadItem struct {
@@ -433,6 +456,14 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			r.toolNames = make(map[string]string)
 		}
 		r.toolNames[started.Item.ID] = name
+		if r.toolArguments == nil {
+			r.toolArguments = make(map[string]string)
+		}
+		if r.toolNativeNames == nil {
+			r.toolNativeNames = make(map[string]string)
+		}
+		r.toolArguments[started.Item.ID] = arguments
+		r.toolNativeNames[started.Item.ID] = started.Item.Type
 		r.toolOrder = append(r.toolOrder, started.Item.ID)
 		return r.append(zotigosession.DisplayItem{
 			ID: started.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
@@ -486,11 +517,15 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			if !ok {
 				return nil
 			}
-			r.forgetTool(completed.Item.ID)
-			return r.append(zotigosession.DisplayItem{
+			if err := r.append(zotigosession.DisplayItem{
 				Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
-			})
+			}); err != nil {
+				return err
+			}
+			r.dispatchPostToolUse(ctx, completed.Item.ID, result, codexToolResultStatus(completed.Item.Status, result))
+			r.forgetTool(completed.Item.ID)
+			return nil
 		}
 	case "turn/completed":
 		var completed struct {
@@ -548,6 +583,8 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.messages = make(map[string]string)
 		r.messageOrder = nil
 		r.toolNames = make(map[string]string)
+		r.toolArguments = make(map[string]string)
+		r.toolNativeNames = make(map[string]string)
 		r.toolOrder = nil
 		if r.writer != nil {
 			if err := r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence}); err != nil {
@@ -593,6 +630,8 @@ func (r *codexWorkerRuntime) persistAgentMessage(itemID, text string) error {
 
 func (r *codexWorkerRuntime) forgetTool(itemID string) {
 	delete(r.toolNames, itemID)
+	delete(r.toolArguments, itemID)
+	delete(r.toolNativeNames, itemID)
 	for index, id := range r.toolOrder {
 		if id == itemID {
 			r.toolOrder = append(r.toolOrder[:index], r.toolOrder[index+1:]...)
@@ -615,10 +654,55 @@ func (r *codexWorkerRuntime) finishPendingTools(reason string) error {
 		}); err != nil {
 			return err
 		}
+		r.dispatchPostToolUse(context.Background(), itemID, &zotigosession.DisplayToolResult{
+			ToolCallID: itemID, ToolName: name, Text: reason, Reason: reason, IsError: true,
+		}, "interrupted")
 	}
 	r.toolNames = make(map[string]string)
+	r.toolArguments = make(map[string]string)
+	r.toolNativeNames = make(map[string]string)
 	r.toolOrder = nil
 	return nil
+}
+
+func (r *codexWorkerRuntime) dispatchPostToolUse(ctx context.Context, itemID string, result *zotigosession.DisplayToolResult, status string) {
+	if r == nil || r.hooks == nil || result == nil {
+		return
+	}
+	name := result.ToolName
+	nativeName := r.toolNativeNames[itemID]
+	if nativeName == "" {
+		nativeName = name
+	}
+	event := hooks.NewEvent(hooks.PostToolUse, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory)
+	event.TurnID = r.activeTurnID
+	event.Tool = &hooks.ToolPayload{
+		CallID: itemID, Name: name, NativeName: nativeName,
+		Input:  hooks.DecodeToolInput(r.toolArguments[itemID]),
+		Result: hooks.NewToolResult(status, result.Text),
+	}
+	r.hooks.Dispatch(ctx, event)
+}
+
+func codexToolResultStatus(itemStatus string, result *zotigosession.DisplayToolResult) string {
+	switch strings.ToLower(strings.TrimSpace(itemStatus)) {
+	case "declined", "denied":
+		return "denied"
+	case "interrupted", "cancelled", "canceled":
+		return "interrupted"
+	case "failed":
+		return "failed"
+	}
+	if result == nil {
+		return "failed"
+	}
+	if result.ResultType == string(protocol.ToolResultTypeExecutionDenied) || strings.EqualFold(result.Text, "declined") {
+		return "denied"
+	}
+	if result.IsError {
+		return "failed"
+	}
+	return "succeeded"
 }
 
 func codexToolCall(item codexThreadItem) (string, string, bool, error) {

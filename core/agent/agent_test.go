@@ -1189,6 +1189,49 @@ func TestAgentBypassResumeExecutesRegisteredAndBlocksUnknownTools(t *testing.T) 
 	}
 }
 
+func TestAgentMiddlewareDenialProducesExecutionDeniedResult(t *testing.T) {
+	const providerName = "middleware-tool-denial"
+	provider := &StepMockProvider{}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return provider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	middlewareCalled := false
+	deny := func(_ agent.Next) agent.Next {
+		return func(context.Context, *agent.ToolCall) (any, error) {
+			middlewareCalled = true
+			return nil, agent.DenyToolExecution("blocked by hook")
+		}
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
+		agent.WithTools(&TimeTool{}),
+		agent.WithMiddleware(deny),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := ag.Run(context.Background(), "check the time")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result *protocol.ToolResult
+	for event := range events {
+		if event.Type == protocol.EventTypeToolResultDone {
+			result = event.ToolResult
+		}
+	}
+	if !middlewareCalled {
+		t.Fatal("middleware was not invoked")
+	}
+	if result == nil || result.Type != protocol.ToolResultTypeExecutionDenied || result.Reason != "blocked by hook" || !result.IsError {
+		t.Fatalf("unexpected tool result: %#v", result)
+	}
+}
+
 func TestAgentExecutesSafeToolBatchConcurrently(t *testing.T) {
 	providers.Register("batch-safe", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &BatchToolProvider{}, nil

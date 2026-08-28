@@ -53,3 +53,18 @@ jobs:
       # and need live API keys — we deliberately do not run them in CI.
       - name: go test
         run: go test ./... -count=1 -race -timeout 5m
+
+  windows-hooks:
+    name: windows hook process containment
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: go test hooks
+        run: go test ./internal/hooks -count=1 -timeout 5m

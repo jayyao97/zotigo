@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -35,6 +36,7 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/wiring"
 )
@@ -251,6 +253,7 @@ type workerRuntimeConfig struct {
 	NotifyApproval         func(context.Context, approvalRequestResponse)
 	NotifyApprovalResolved func(context.Context, approvalRequestResponse)
 	NotifyIdle             func(context.Context, workerIdle) error
+	HookDispatcher         *hooks.Dispatcher
 }
 
 func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
@@ -436,6 +439,18 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		}
 	}
 
+	hookDispatcher := cfg.HookDispatcher
+	ownsHookDispatcher := false
+	if hookDispatcher == nil {
+		hookLogger := log.New(os.Stderr, "[zotigo-hooks] ", log.LstdFlags)
+		hookDispatcher, err = hooks.LoadDefault(hookLogger)
+		if err != nil {
+			hookLogger.Printf("hook_config outcome=failed error=%q", err)
+		} else {
+			ownsHookDispatcher = true
+		}
+	}
+
 	stepStarted = time.Now()
 	ag, err := wiring.NewAgent(wiring.AgentConfig{
 		Config:      appConfig,
@@ -456,9 +471,18 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		ConfigureClassifier: true,
 		Middleware: []agent.Middleware{
 			middleware.ReadTracker(readTracker),
+			hooks.ToolMiddleware(hookDispatcher, hooks.ToolContext{
+				SessionID: cfg.SessionID,
+				Agent:     "zotigo",
+				CWD:       cwd,
+				TurnID:    display.CurrentTurnID,
+			}),
 		},
 	})
 	if err != nil {
+		if ownsHookDispatcher {
+			closeHookDispatcher(hookDispatcher)
+		}
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
@@ -482,6 +506,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		LSPManager:  lspManager,
 		Spawn:       true,
 	}); err != nil {
+		if ownsHookDispatcher {
+			closeHookDispatcher(hookDispatcher)
+		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -490,6 +517,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
+		if ownsHookDispatcher {
+			closeHookDispatcher(hookDispatcher)
+		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
@@ -531,6 +561,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}))
 
 	runtime.cleanup = func() {
+		if ownsHookDispatcher {
+			closeHookDispatcher(hookDispatcher)
+		}
 		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 		_ = observer.Close(closeCtx)
@@ -538,6 +571,15 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 	}
 	return runtime, nil
+}
+
+func closeHookDispatcher(dispatcher *hooks.Dispatcher) {
+	if dispatcher == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	_ = dispatcher.Close(ctx)
 }
 
 func resolveWorkerProfile(sess *zotigosession.Session, appConfig *config.Config) (string, config.ProfileConfig, error) {

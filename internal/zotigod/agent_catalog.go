@@ -24,10 +24,12 @@ type agentCatalog struct {
 }
 
 type agentCatalogCapabilities struct {
-	Profiles  bool `json:"profiles"`
-	Models    bool `json:"models"`
-	Steering  bool `json:"steering"`
-	Approvals bool `json:"approvals"`
+	Profiles         bool `json:"profiles"`
+	Models           bool `json:"models"`
+	Steering         bool `json:"steering"`
+	Approvals        bool `json:"approvals"`
+	PreToolUseHooks  bool `json:"pre_tool_use_hooks"`
+	PostToolUseHooks bool `json:"post_tool_use_hooks"`
 }
 
 type agentCatalogModel struct {
@@ -45,12 +47,12 @@ func (h *handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 	}
 	response := agentCatalogResponse{DefaultAgent: string(zotigoruntime.AgentZotigo), Agents: []agentCatalog{{
 		ID: string(zotigoruntime.AgentZotigo), Label: "Zotigo", Availability: "available",
-		Capabilities: agentCatalogCapabilities{Profiles: true, Steering: true, Approvals: true},
+		Capabilities: agentCatalogCapabilities{Profiles: true, Steering: true, Approvals: true, PreToolUseHooks: true, PostToolUseHooks: true},
 	}}}
 	if _, _, err := codexapp.Discover(); err == nil {
 		response.Agents = append(response.Agents, agentCatalog{
 			ID: string(zotigoruntime.AgentCodex), Label: "Codex", Availability: "installed",
-			Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false},
+			Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false, PostToolUseHooks: true},
 		})
 	}
 	writeAPIJSON(w, http.StatusOK, response)
@@ -107,7 +109,7 @@ func codexCatalog(capabilities zotigoruntime.Capabilities) agentCatalog {
 	}
 	return agentCatalog{
 		ID: string(zotigoruntime.AgentCodex), Label: "Codex", Availability: "available", Version: capabilities.Version,
-		Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false},
+		Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false, PostToolUseHooks: true},
 		Models:       models,
 	}
 }

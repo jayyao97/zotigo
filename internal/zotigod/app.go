@@ -24,6 +24,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
@@ -64,6 +65,7 @@ type Session struct {
 	ActiveTool       string               `json:"active_tool,omitempty"`
 	ContextUsage     *SessionContextUsage `json:"context_usage,omitempty"`
 	seq              uint64
+	activationSource string
 }
 
 type SessionContextUsage struct {
@@ -218,6 +220,9 @@ func (r *sessionRegistry) Start(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateCreated}, func(session *Session) {
 		session.State = SessionStateStarting
 		session.StartedAt = &now
+		if session.activationSource == "" {
+			session.activationSource = "start"
+		}
 	})
 }
 
@@ -230,6 +235,7 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.activationSource = "restart"
 	})
 }
 
@@ -287,11 +293,16 @@ func (r *sessionRegistry) FailWithCode(id string, code string, message string) (
 }
 
 func (r *sessionRegistry) FailStarting(id string, message string) (Session, error) {
+	return r.FailStartingWithCode(id, "", message)
+}
+
+func (r *sessionRegistry) FailStartingWithCode(id string, code string, message string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateStarting}, func(session *Session) {
 		session.State = SessionStateFailed
 		session.EndedAt = &now
 		session.Error = message
+		session.ErrorCode = code
 	})
 }
 
@@ -303,6 +314,7 @@ func (r *sessionRegistry) RetryOccupiedWorker(id string) (Session, error) {
 		session.EndedAt = nil
 		session.Error = ""
 		session.ErrorCode = ""
+		session.activationSource = "restart"
 	})
 }
 
@@ -323,6 +335,7 @@ func (r *sessionRegistry) ReleaseIdleWorker(id string) (Session, error) {
 		session.EndedAt = nil
 		session.Error = ""
 		session.ErrorCode = ""
+		session.activationSource = "resume"
 	})
 }
 
@@ -386,6 +399,7 @@ type handler struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	logger               *log.Logger
+	hooks                hookEventDispatcher
 }
 
 type createSessionRequest struct {
@@ -498,6 +512,13 @@ func Run(args []string) int {
 	if created {
 		logger.Printf("Created default config template at %s. Add a profile, set default_profile, and configure its API key before creating sessions.", configPath)
 	}
+	hookDispatcher, hookErr := hooks.LoadDefault(logger)
+	if hookErr != nil {
+		logger.Printf("Hook configuration failed; hooks disabled: %v", hookErr)
+	}
+	if hookDispatcher != nil {
+		defer closeHookDispatcher(hookDispatcher)
+	}
 	launcher, err := newProcessWorkerLauncher(workerCallback, workerAuthToken, logger)
 	if err != nil {
 		logger.Printf("Worker launcher disabled: %v", err)
@@ -530,6 +551,7 @@ func Run(args []string) int {
 			publicAuthToken: publicAuthToken,
 			workerAuthToken: workerAuthToken,
 			logger:          logger,
+			hooks:           hookDispatcher,
 		}),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -589,6 +611,7 @@ type handlerOptions struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	logger               *log.Logger
+	hooks                hookEventDispatcher
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -709,6 +732,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		catalog:              options.catalog,
 		catalogErr:           options.catalogErr,
 		logger:               options.logger,
+		hooks:                options.hooks,
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	handler.workers.SetMessageHandler(func(sessionID string, generation string, msg workerMessage) {
@@ -1138,6 +1162,7 @@ func (h *handler) loadSessionIntoRegistry(ctx context.Context, id string) (Sessi
 	}
 	stored.State = SessionStateCreated
 	stored.Live = true
+	stored.activationSource = "resume"
 	return h.registry.GetOrAdd(stored), true, nil
 }
 
@@ -1262,11 +1287,16 @@ func (h *handler) launchWorkerInBackground(id string) {
 	if h.workerConnectTimeout > 0 {
 		watchdog = time.AfterFunc(h.workerConnectTimeout, func() {
 			unlock := h.sessionOps.lock(id)
+			var failed Session
+			var failErr error
 			if !h.workers.Has(id) {
-				_, _ = h.registry.FailStarting(id, errWorkerConnectTimeout.Error())
+				failed, failErr = h.registry.FailStartingWithCode(id, "worker_connect_timeout", errWorkerConnectTimeout.Error())
 				cancel()
 			}
 			unlock()
+			if failErr == nil && failed.ID != "" {
+				h.dispatchSessionEnd(failed)
+			}
 		})
 	}
 	go func() {
@@ -1276,8 +1306,11 @@ func (h *handler) launchWorkerInBackground(id string) {
 				watchdog.Stop()
 			}
 			unlock := h.sessionOps.lock(id)
-			defer unlock()
-			_, _ = h.registry.FailStarting(id, fmt.Sprintf("start worker: %v", err))
+			failed, failErr := h.registry.FailStartingWithCode(id, "worker_start_failed", fmt.Sprintf("start worker: %v", err))
+			unlock()
+			if failErr == nil {
+				h.dispatchSessionEnd(failed)
+			}
 			return
 		}
 		_ = h.waitForRunningWorker(launchCtx, id)
@@ -1623,7 +1656,12 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	}
 
 	unlock := h.sessionOps.lock(id)
-	defer unlock()
+	locked := true
+	defer func() {
+		if locked {
+			unlock()
+		}
+	}()
 	session, ok := h.registry.Get(id)
 	if !ok {
 		h.writeTransition(w, Session{}, errSessionNotFound)
@@ -1644,10 +1682,16 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	switch session.State {
 	case SessionStateStarting:
 		session, err := h.registry.MarkRunning(id)
-		h.writeTransition(w, session, err)
 		if err == nil {
 			h.closeReadyWorkerWhenIdle(r.Context(), session, req.Generation)
 		}
+		unlock()
+		locked = false
+		if err == nil {
+			h.dispatchSessionStart(session)
+		}
+		h.writeTransition(w, session, err)
+		return
 	case SessionStateRunning:
 		writeAPIJSON(w, http.StatusOK, session)
 		h.closeReadyWorkerWhenIdle(r.Context(), session, req.Generation)
@@ -1756,6 +1800,7 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 	unlockApproval()
 	if err == nil {
 		h.workers.Close(id)
+		h.dispatchSessionEnd(session)
 	}
 	h.writeTransition(w, session, err)
 }
