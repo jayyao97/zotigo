@@ -12,6 +12,7 @@ func TestLoadFileDefaultsAndMatcherList(t *testing.T) {
 hooks:
   PreToolUse:
     - command: /tmp/check
+      agents: [zotigo, codex]
       matchers: [shell, write_file, edit]
   PostToolUse:
     - command: /tmp/audit
@@ -28,7 +29,7 @@ hooks:
 		t.Fatalf("unexpected issues: %v", issues)
 	}
 	pre := config.Hooks[PreToolUse]
-	if len(pre) != 1 || len(pre[0].Matchers) != 3 || pre[0].Async {
+	if len(pre) != 1 || len(pre[0].Agents) != 2 || len(pre[0].Matchers) != 3 || pre[0].Async {
 		t.Fatalf("unexpected PreToolUse handler: %#v", pre)
 	}
 	post := config.Hooks[PostToolUse]
@@ -88,5 +89,24 @@ hooks:
 	}
 	if len(config.Hooks[PreToolUse]) != 0 || len(issues) != 1 {
 		t.Fatalf("zero timeout should skip handler: hooks=%#v issues=%v", config.Hooks, issues)
+	}
+}
+
+func TestLoadFileRejectsEmptyAgent(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ConfigFileName)
+	if err := os.WriteFile(path, []byte(`version: 1
+hooks:
+  SessionStart:
+    - command: /tmp/audit
+      agents: [zotigo, ""]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	config, issues, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Hooks[SessionStart]) != 0 || len(issues) != 1 {
+		t.Fatalf("empty agent should skip handler: hooks=%#v issues=%v", config.Hooks, issues)
 	}
 }

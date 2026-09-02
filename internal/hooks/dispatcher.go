@@ -110,6 +110,9 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event Event) DispatchResult {
 		defer cancel()
 	}
 	for index, handler := range d.config.Hooks[event.EventName] {
+		if !handler.matchesAgent(event.Agent) {
+			continue
+		}
 		if event.Tool != nil && !handler.matches(event.Tool.Name) {
 			continue
 		}

@@ -28,6 +28,45 @@ func TestDispatchMatcherORRunsHandlerOnce(t *testing.T) {
 	}
 }
 
+func TestDispatchAgentFilter(t *testing.T) {
+	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
+		PreToolUse: {{Command: "check", Agents: []string{"zotigo", "custom"}}},
+	}})
+	var agents []string
+	dispatcher.execute = func(_ context.Context, _ Handler, event Event) processResult {
+		agents = append(agents, event.Agent)
+		return processResult{started: true, exitCode: 0, stdout: `{"decision":"allow"}`}
+	}
+
+	for _, agentName := range []string{"codex", "zotigo", "custom"} {
+		event := testToolEvent(PreToolUse, "shell")
+		event.Agent = agentName
+		dispatcher.Dispatch(context.Background(), event)
+	}
+	if len(agents) != 2 || agents[0] != "zotigo" || agents[1] != "custom" {
+		t.Fatalf("handler ran for unexpected agents: %v", agents)
+	}
+}
+
+func TestDispatchAgentFilterAppliesToSessionEvents(t *testing.T) {
+	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
+		SessionStart: {{Command: "audit", Agents: []string{"zotigo"}}},
+	}})
+	count := 0
+	dispatcher.execute = func(context.Context, Handler, Event) processResult {
+		count++
+		return processResult{started: true, exitCode: 0}
+	}
+
+	codexEvent := NewEvent(SessionStart, "sess-codex", "codex", "/tmp")
+	dispatcher.Dispatch(context.Background(), codexEvent)
+	zotigoEvent := NewEvent(SessionStart, "sess-zotigo", "zotigo", "/tmp")
+	dispatcher.Dispatch(context.Background(), zotigoEvent)
+	if count != 1 {
+		t.Fatalf("session handler should run only for zotigo: count=%d", count)
+	}
+}
+
 func TestDispatchDenialStopsLaterHandlers(t *testing.T) {
 	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
 		PreToolUse: {{Command: "deny"}, {Command: "must-not-run"}},
