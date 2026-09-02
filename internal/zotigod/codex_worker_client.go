@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
 )
@@ -58,6 +60,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	defer func() {
 		if runtime != nil {
 			returnErr = errors.Join(returnErr, runtime.Close())
+			returnErr = errors.Join(returnErr, runtime.cleanupSkillFiles())
 		}
 		if runErr == nil {
 			runErr = returnErr
@@ -217,6 +220,9 @@ type codexWorkerRuntime struct {
 	toolNativeNames map[string]string
 	toolOrder       []string
 	hooks           hookEventDispatcher
+	skills          *skills.SkillManager
+	skillTempDir    string
+	skillPaths      map[string]string
 }
 
 type codexThreadItem struct {
@@ -327,7 +333,10 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		if err != nil || stored == nil {
 			return fmt.Errorf("load codex turn settings: %w", err)
 		}
-		inputs := codexInputs(command.Message.Text, command.Message.Images)
+		inputs, err := r.codexInputs(command.Message.Text, command.Message.Images, command.Message.Skills)
+		if err != nil {
+			return err
+		}
 		var response struct {
 			Turn struct {
 				ID string `json:"id"`
@@ -875,9 +884,60 @@ func (r *codexWorkerRuntime) append(item zotigosession.DisplayItem) error {
 }
 
 func codexInputs(text string, images []commandImageData) []map[string]any {
-	inputs := make([]map[string]any, 0, 1+len(images))
+	inputs, _ := buildCodexInputs(text, images, nil)
+	return inputs
+}
+
+func (r *codexWorkerRuntime) codexInputs(text string, images []commandImageData, names []string) ([]map[string]any, error) {
+	if len(names) == 0 {
+		return codexInputs(text, images), nil
+	}
+	if r.skills == nil {
+		r.skills = skills.NewSkillManager(r.cfg.WorkingDirectory)
+	}
+	if err := r.skills.Reload(); err != nil {
+		return nil, fmt.Errorf("reload Codex skills: %w", err)
+	}
+	selected, err := r.skills.ResolveExplicit(names)
+	if err != nil {
+		return nil, fmt.Errorf("resolve Codex skills: %w", err)
+	}
+	resolved := make([]*skills.SkillDefinition, 0, len(selected))
+	for _, skill := range selected {
+		path, pathErr := r.codexSkillPath(skill)
+		if pathErr != nil {
+			return nil, pathErr
+		}
+		copy := *skill
+		copy.Path = path
+		resolved = append(resolved, &copy)
+	}
+	return buildCodexInputs(text, images, resolved)
+}
+
+func buildCodexInputs(text string, images []commandImageData, selected []*skills.SkillDefinition) ([]map[string]any, error) {
+	mentions := make(map[string]bool)
+	for _, name := range skills.DetectSkillMentions(text) {
+		mentions[name] = true
+	}
+	var prefix []string
+	for _, skill := range selected {
+		if !mentions[skill.Name] {
+			prefix = append(prefix, "$"+skill.Name)
+		}
+	}
+	if len(prefix) > 0 {
+		text = strings.Join(prefix, " ") + " " + text
+	}
+	inputs := make([]map[string]any, 0, 1+len(images)+len(selected))
 	if strings.TrimSpace(text) != "" {
 		inputs = append(inputs, map[string]any{"type": "text", "text": text, "textElements": []any{}})
+	}
+	for _, skill := range selected {
+		if !filepath.IsAbs(skill.Path) {
+			return nil, fmt.Errorf("codex skill %q does not have an absolute SKILL.md path", skill.Name)
+		}
+		inputs = append(inputs, map[string]any{"type": "skill", "name": skill.Name, "path": skill.Path})
 	}
 	for _, image := range images {
 		inputs = append(inputs, map[string]any{
@@ -885,7 +945,47 @@ func codexInputs(text string, images []commandImageData) []map[string]any {
 			"url":  "data:" + image.MimeType + ";base64," + image.DataBase64,
 		})
 	}
-	return inputs
+	return inputs, nil
+}
+
+func (r *codexWorkerRuntime) codexSkillPath(skill *skills.SkillDefinition) (string, error) {
+	if filepath.IsAbs(skill.Path) {
+		return skill.Path, nil
+	}
+	if skill.Source != skills.SkillSourceBuiltin {
+		return "", fmt.Errorf("codex skill %q does not have an absolute SKILL.md path", skill.Name)
+	}
+	if path := r.skillPaths[skill.Name]; path != "" {
+		return path, nil
+	}
+	if r.skillTempDir == "" {
+		dir, err := os.MkdirTemp("", "zotigo-codex-skills-")
+		if err != nil {
+			return "", fmt.Errorf("create Codex builtin skill directory: %w", err)
+		}
+		r.skillTempDir = dir
+		r.skillPaths = make(map[string]string)
+	}
+	dir, err := os.MkdirTemp(r.skillTempDir, "skill-")
+	if err != nil {
+		return "", fmt.Errorf("create Codex builtin skill: %w", err)
+	}
+	path := filepath.Join(dir, skills.SkillFileName)
+	if err := os.WriteFile(path, []byte(skill.Content), 0600); err != nil {
+		return "", fmt.Errorf("write Codex builtin skill: %w", err)
+	}
+	r.skillPaths[skill.Name] = path
+	return path, nil
+}
+
+func (r *codexWorkerRuntime) cleanupSkillFiles() error {
+	if r == nil || r.skillTempDir == "" {
+		return nil
+	}
+	err := os.RemoveAll(r.skillTempDir)
+	r.skillTempDir = ""
+	r.skillPaths = nil
+	return err
 }
 
 func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {

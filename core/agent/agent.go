@@ -538,7 +538,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				a.mu.Unlock()
 				return nil, err
 			}
-			a.startNewTurn(msg.String())
+			a.startNewTurn(msg.DisplayString())
 		} else {
 			if err := a.conversation.appendMessages(msg); err != nil {
 				a.mu.Unlock()

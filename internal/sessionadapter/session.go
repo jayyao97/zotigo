@@ -9,7 +9,7 @@ import (
 func LastUserPrompt(history []protocol.Message) string {
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == protocol.RoleUser && !history[i].IsContextualUser() {
-			return history[i].String()
+			return history[i].DisplayString()
 		}
 	}
 	return ""

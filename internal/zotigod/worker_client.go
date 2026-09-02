@@ -33,6 +33,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/runner"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
@@ -313,6 +314,7 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 type workerRuntime struct {
 	sessionID        string
 	workDir          string
+	skills           *skills.SkillManager
 	store            zotigosession.Store
 	agent            *agent.Agent
 	runner           *runner.Runner
@@ -532,6 +534,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	runtime := &workerRuntime{
 		sessionID:  cfg.SessionID,
 		workDir:    cwd,
+		skills:     skills,
 		store:      cfg.Store,
 		agent:      ag,
 		transport:  transport,
@@ -1083,7 +1086,7 @@ func isStaleTurnUserInputError(err error) bool {
 }
 
 func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *messageCommandPayload) error {
-	msg, err := messageFromCommand(commandID, command)
+	msg, err := messageFromCommandWithSkills(commandID, command, r.skills)
 	if err != nil {
 		return err
 	}
@@ -1141,6 +1144,34 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		}
 	}()
 	return nil
+}
+
+func messageFromCommandWithSkills(commandID string, command *messageCommandPayload, manager *skills.SkillManager) (protocol.Message, error) {
+	if len(command.Skills) == 0 {
+		return messageFromCommand(commandID, command)
+	}
+	original, err := messageFromCommand(commandID, command)
+	if err != nil {
+		return protocol.Message{}, err
+	}
+	if manager == nil {
+		return protocol.Message{}, fmt.Errorf("skill manager is not configured")
+	}
+	if err := manager.Reload(); err != nil {
+		return protocol.Message{}, fmt.Errorf("reload explicit skills: %w", err)
+	}
+	selected, err := manager.ResolveExplicit(command.Skills)
+	if err != nil {
+		return protocol.Message{}, fmt.Errorf("resolve explicit skills: %w", err)
+	}
+	commandCopy := *command
+	commandCopy.Text = skills.InjectExplicit(command.Text, selected)
+	enriched, err := messageFromCommand(commandID, &commandCopy)
+	if err != nil {
+		return protocol.Message{}, err
+	}
+	enriched.Metadata = &protocol.MessageMetadata{OriginalText: original.String()}
+	return enriched, nil
 }
 
 func (r *workerRuntime) noteTurnCommandSequence(sequence uint64) {

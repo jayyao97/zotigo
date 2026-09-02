@@ -18,11 +18,12 @@ type Message struct {
 }
 
 type MessageMetadata struct {
-	Provider  string         `json:"provider,omitempty"`
-	Model     string         `json:"model,omitempty"`
-	Usage     *Usage         `json:"usage,omitempty"`
-	ToolUsage *Usage         `json:"tool_usage,omitempty"`
-	Raw       map[string]any `json:"raw,omitempty"`
+	Provider     string         `json:"provider,omitempty"`
+	Model        string         `json:"model,omitempty"`
+	Usage        *Usage         `json:"usage,omitempty"`
+	ToolUsage    *Usage         `json:"tool_usage,omitempty"`
+	OriginalText string         `json:"original_text,omitempty"`
+	Raw          map[string]any `json:"raw,omitempty"`
 }
 
 // Usage normalizes token-accounting fields across providers.
@@ -303,6 +304,15 @@ func (m Message) String() string {
 		}
 	}
 	return s
+}
+
+// DisplayString returns the original user-visible text when runtime adapters
+// enrich a message before it is added to provider history.
+func (m Message) DisplayString() string {
+	if m.Metadata != nil && m.Metadata.OriginalText != "" {
+		return m.Metadata.OriginalText
+	}
+	return m.String()
 }
 
 func (m Message) JSONString() string {

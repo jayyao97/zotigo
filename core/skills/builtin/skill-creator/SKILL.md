@@ -56,11 +56,11 @@ Your detailed instructions go here...
 
 Skills can be placed in two locations:
 
-1. **User Skills** (`~/.zotigo/skills/`)
+1. **User Skills** (`~/.agents/skills/`)
    - Available across all projects
    - Good for personal workflows
 
-2. **Project Skills** (`.zotigo/skills/`)
+2. **Workspace Skills** (`.agents/skills/`)
    - Project-specific skills
    - Higher priority than user skills
    - Good for team-shared workflows
@@ -96,9 +96,9 @@ Skills can be placed in two locations:
 
 3. **Create Skill Directory**
    ```bash
-   mkdir -p ~/.zotigo/skills/my-skill
+   mkdir -p ~/.agents/skills/my-skill
    # Or for project-specific:
-   mkdir -p .zotigo/skills/my-skill
+   mkdir -p .agents/skills/my-skill
    ```
 
 4. **Write SKILL.md**

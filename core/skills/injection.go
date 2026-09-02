@@ -4,8 +4,24 @@ import (
 	"bytes"
 	"fmt"
 	"regexp"
+	"strings"
 	"text/template"
 )
+
+type ResolutionError struct {
+	Kind string
+	Name string
+	Err  error
+}
+
+func (e *ResolutionError) Error() string {
+	if e.Err != nil {
+		return fmt.Sprintf("skill %q is %s: %v", e.Name, e.Kind, e.Err)
+	}
+	return fmt.Sprintf("skill %q is %s", e.Name, e.Kind)
+}
+
+func (e *ResolutionError) Unwrap() error { return e.Err }
 
 // skillMentionRegex matches $skill-name patterns
 // Supports: $skill-name, $skill_name, $skillName
@@ -85,4 +101,52 @@ func (m *SkillManager) ReplaceMentions(text string) string {
 		}
 		return fmt.Sprintf("[skill: %s]", skill.Name)
 	})
+}
+
+// ResolveExplicit resolves and deduplicates names for one turn.
+func (m *SkillManager) ResolveExplicit(names []string) ([]*SkillDefinition, error) {
+	if err := m.EnsureLoaded(); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	resolved := make([]*SkillDefinition, 0, len(names))
+	for _, requested := range names {
+		requested = strings.TrimSpace(requested)
+		if requested == "" {
+			continue
+		}
+		skill, ok := m.Get(requested)
+		if !ok {
+			for _, diagnostic := range m.Diagnostics() {
+				if diagnostic.Name == requested && (diagnostic.Code == "invalid_skill" || diagnostic.Code == "missing_skill_file") {
+					return nil, &ResolutionError{Kind: "invalid", Name: requested}
+				}
+			}
+			return nil, &ResolutionError{Kind: "not_found", Name: requested}
+		}
+		if !skill.IsEnabled() {
+			return nil, &ResolutionError{Kind: "disabled", Name: skill.Name}
+		}
+		if seen[skill.Name] {
+			continue
+		}
+		seen[skill.Name] = true
+		resolved = append(resolved, skill)
+	}
+	return resolved, nil
+}
+
+// InjectExplicit deterministically includes complete selected SKILL.md files.
+func InjectExplicit(text string, selected []*SkillDefinition) string {
+	if len(selected) == 0 {
+		return text
+	}
+	var builder strings.Builder
+	builder.WriteString("<selected_skills>\n")
+	for _, skill := range selected {
+		fmt.Fprintf(&builder, "<skill name=%q>\n%s\n</skill>\n", skill.Name, strings.TrimSpace(skill.Content))
+	}
+	builder.WriteString("</selected_skills>\n\n")
+	builder.WriteString(text)
+	return builder.String()
 }

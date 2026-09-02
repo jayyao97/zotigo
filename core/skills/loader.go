@@ -20,6 +20,7 @@ const (
 
 // yamlFrontMatterRegex matches YAML front matter: ---\n...\n---
 var yamlFrontMatterRegex = regexp.MustCompile(`(?s)^---\r?\n(.*?)\r?\n---\r?\n?(.*)$`)
+var skillNameRegex = regexp.MustCompile(`^[a-z][a-z0-9-]*$`)
 
 // ParseSkillFile parses a SKILL.md file and returns a SkillDefinition
 func ParseSkillFile(path string) (*SkillDefinition, error) {
@@ -46,50 +47,90 @@ func ParseSkillContent(content string, path string) (*SkillDefinition, error) {
 		return nil, fmt.Errorf("failed to parse YAML front matter: %w", err)
 	}
 
+	skill.Description = strings.TrimSpace(skill.Description)
 	if skill.Name == "" {
 		return nil, fmt.Errorf("skill name is required")
 	}
+	if !skillNameRegex.MatchString(skill.Name) {
+		return nil, fmt.Errorf("skill name must start with a lowercase letter and contain only lowercase letters, digits, and hyphens")
+	}
+	if skill.Description == "" {
+		return nil, fmt.Errorf("skill description is required")
+	}
 
 	skill.Instructions = instructions
+	skill.Content = content
 	skill.Path = path
 
 	return &skill, nil
 }
 
-// DiscoverSkills discovers all skills in a directory
-func DiscoverSkills(dir string, source SkillSource) ([]*SkillDefinition, error) {
-	var skills []*SkillDefinition
+type Diagnostic struct {
+	Code    string
+	Message string
+	Scope   string
+	Name    string
+	Path    string
+}
 
-	// Check if directory exists
+func DiscoverSkillsWithDiagnostics(dir string, source SkillSource) ([]*SkillDefinition, []Diagnostic, error) {
+	var discovered []*SkillDefinition
+	var diagnostics []Diagnostic
 	info, err := os.Stat(dir)
 	if os.IsNotExist(err) {
-		return skills, nil // Directory doesn't exist, return empty
+		return discovered, diagnostics, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to stat directory: %w", err)
+		return nil, nil, fmt.Errorf("failed to stat directory: %w", err)
 	}
 	if !info.IsDir() {
-		return nil, fmt.Errorf("not a directory: %s", dir)
+		return nil, nil, fmt.Errorf("not a directory: %s", dir)
 	}
 
-	// Traverse with a depth limit and canonical-directory deduplication so
-	// directory symlinks work without allowing cycles.
+	rootEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read directory: %w", err)
+	}
+	foundRoots := make(map[string]bool)
 	err = walkSkillsDir(dir, func(skillPath string) error {
-		skill, err := ParseSkillFile(skillPath)
-		if err != nil {
-			// Log warning but continue
+		rel, relErr := filepath.Rel(dir, skillPath)
+		if relErr == nil {
+			parts := strings.Split(rel, string(filepath.Separator))
+			if len(parts) > 1 {
+				foundRoots[parts[0]] = true
+			}
+		}
+		skill, parseErr := ParseSkillFile(skillPath)
+		if parseErr != nil {
+			diagnostics = append(diagnostics, Diagnostic{
+				Code: "invalid_skill", Message: parseErr.Error(), Scope: source.String(),
+				Name: filepath.Base(filepath.Dir(skillPath)), Path: skillPath,
+			})
 			return nil
 		}
 		skill.Source = source
-		skills = append(skills, skill)
+		discovered = append(discovered, skill)
 		return nil
 	})
-
 	if err != nil {
-		return nil, err
+		return nil, diagnostics, err
 	}
+	for _, entry := range rootEntries {
+		if !entry.IsDir() || foundRoots[entry.Name()] {
+			continue
+		}
+		diagnostics = append(diagnostics, Diagnostic{
+			Code: "missing_skill_file", Message: "skill directory is missing SKILL.md",
+			Scope: source.String(), Name: entry.Name(), Path: filepath.Join(dir, entry.Name()),
+		})
+	}
+	return discovered, diagnostics, nil
+}
 
-	return skills, nil
+// DiscoverSkills discovers all skills in a directory
+func DiscoverSkills(dir string, source SkillSource) ([]*SkillDefinition, error) {
+	skills, _, err := DiscoverSkillsWithDiagnostics(dir, source)
+	return skills, err
 }
 
 // walkSkillsDir walks the directory looking for SKILL.md files
@@ -182,13 +223,13 @@ func walkSkillsDir(root string, fn func(string) error) error {
 	return nil
 }
 
-// GetUserSkillsDir returns the user skills directory path (Zotigo-native).
+// GetUserSkillsDir returns the canonical user skills directory path.
 func GetUserSkillsDir() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
-	return filepath.Join(home, ".zotigo", "skills"), nil
+	return filepath.Join(home, ".agents", "skills"), nil
 }
 
 // GetAgentsUserSkillsDir returns the ~/.agents/skills/ directory path
@@ -199,14 +240,10 @@ func GetUserSkillsDir() (string, error) {
 // (permission denied, symlink loops, stale NFS) surface through the normal
 // DiscoverSkills warning path instead of being silently ignored.
 func GetAgentsUserSkillsDir() (string, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "", fmt.Errorf("failed to get home directory: %w", err)
-	}
-	return filepath.Join(home, ".agents", "skills"), nil
+	return GetUserSkillsDir()
 }
 
-// GetProjectSkillsDir returns the project skills directory path
+// GetProjectSkillsDir returns the canonical workspace skills directory path.
 func GetProjectSkillsDir(projectDir string) string {
-	return filepath.Join(projectDir, ".zotigo", "skills")
+	return filepath.Join(projectDir, ".agents", "skills")
 }

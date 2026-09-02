@@ -157,6 +157,37 @@ func (t *TimeTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelLow}
 }
 
+func TestAgentRunMessageUsesOriginalTextForTurnSummary(t *testing.T) {
+	const providerName = "original-user-text-summary"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "done"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.NewUserMessage("<selected_skills>secret instructions</selected_skills>\n\nreview this")
+	message.Metadata = &protocol.MessageMetadata{OriginalText: "review this"}
+	events, err := ag.RunMessage(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	snapshot := ag.Snapshot()
+	if len(snapshot.Turns) != 1 || snapshot.Turns[0].UserPromptSummary != "review this" {
+		t.Fatalf("turns = %#v", snapshot.Turns)
+	}
+	if len(snapshot.History) == 0 || !strings.Contains(snapshot.History[0].String(), "secret instructions") {
+		t.Fatalf("provider history lost injected instructions: %#v", snapshot.History)
+	}
+}
+
 func TestAgentRuntimeProfileSwitchUsesLatestProfileForNextGeneration(t *testing.T) {
 	const initialProviderName = "runtime-profile-initial"
 	oldProvider := &blockingToolCallProvider{started: make(chan struct{}), release: make(chan struct{})}
