@@ -97,6 +97,28 @@ func NewEvent(name EventName, sessionID string, agentName string, cwd string) Ev
 	}
 }
 
+func (e Event) matcherValue() (string, bool) {
+	switch e.EventName {
+	case PreToolUse, PostToolUse:
+		if e.Tool != nil {
+			return e.Tool.Name, true
+		}
+	case SessionStart:
+		if e.Session != nil {
+			return e.Session.Source, true
+		}
+	case SessionEnd:
+		if e.Session != nil {
+			return e.Session.Result, true
+		}
+	case TurnStart, TurnEnd:
+		if e.Turn != nil {
+			return e.Turn.Status, true
+		}
+	}
+	return "", false
+}
+
 func DecodeToolInput(arguments string) any {
 	arguments = strings.TrimSpace(arguments)
 	if arguments == "" {

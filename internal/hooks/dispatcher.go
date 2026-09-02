@@ -113,7 +113,7 @@ func (d *Dispatcher) Dispatch(ctx context.Context, event Event) DispatchResult {
 		if !handler.matchesAgent(event.Agent) {
 			continue
 		}
-		if event.Tool != nil && !handler.matches(event.Tool.Name) {
+		if !handler.matchesEvent(event) {
 			continue
 		}
 		if handler.Async {

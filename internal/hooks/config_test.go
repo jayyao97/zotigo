@@ -44,8 +44,10 @@ func TestLoadFileSkipsInvalidHandlers(t *testing.T) {
 hooks:
   SessionStart:
     - command: /tmp/valid
+      matchers: [start, resume]
+  UserPromptSubmit:
     - command: /tmp/invalid
-      matchers: [shell]
+      matchers: [anything]
   PreToolUse:
     - command: /tmp/unknown-field
       matcher: shell
@@ -58,7 +60,7 @@ hooks:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Hooks[SessionStart]) != 1 {
+	if len(config.Hooks[SessionStart]) != 1 || len(config.Hooks[SessionStart][0].Matchers) != 2 {
 		t.Fatalf("valid handler was not preserved: %#v", config.Hooks[SessionStart])
 	}
 	if len(config.Hooks[PreToolUse]) != 0 || len(issues) != 2 {
@@ -66,18 +68,20 @@ hooks:
 	}
 }
 
-func TestLoadFileAcceptsTurnEventsAndRejectsTheirMatchers(t *testing.T) {
+func TestLoadFileAcceptsLifecycleMatchersAndRejectsPromptMatchers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), ConfigFileName)
 	data := []byte(`version: 1
 hooks:
   TurnStart:
     - command: /tmp/turn-start
+      matchers: [running]
   UserPromptSubmit:
     - command: /tmp/prompt
+    - command: /tmp/invalid
+      matchers: [anything]
   TurnEnd:
     - command: /tmp/turn-end
-    - command: /tmp/invalid
-      matchers: [shell]
+      matchers: [completed, failed, interrupted]
 `)
 	if err := os.WriteFile(path, data, 0o600); err != nil {
 		t.Fatal(err)
@@ -87,7 +91,7 @@ hooks:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(config.Hooks[TurnStart]) != 1 || len(config.Hooks[UserPromptSubmit]) != 1 || len(config.Hooks[TurnEnd]) != 1 {
+	if len(config.Hooks[TurnStart]) != 1 || len(config.Hooks[UserPromptSubmit]) != 1 || len(config.Hooks[TurnEnd]) != 1 || len(config.Hooks[TurnEnd][0].Matchers) != 3 {
 		t.Fatalf("turn handlers = %#v", config.Hooks)
 	}
 	if len(issues) != 1 {
