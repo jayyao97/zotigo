@@ -776,7 +776,7 @@ func (m *Model) buildCmdEnv(output *strings.Builder) *commands.Environment {
 			fmt.Fprintf(output, format+"\n", args...)
 		},
 		ClearHistory: func() {
-			m.agent.Restore(agent.Snapshot{})
+			m.agent.ClearHistory()
 		},
 	}
 }

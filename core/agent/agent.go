@@ -66,6 +66,7 @@ type Agent struct {
 	mu              sync.RWMutex
 	state           State
 	conversation    conversationState
+	cumulativeUsage protocol.Usage
 	pendingTurnUser []protocol.Message
 	activeToolRun   *activeToolRun
 	pendingActions  []*PendingAction
@@ -391,6 +392,7 @@ func (a *Agent) Snapshot() Snapshot {
 	return Snapshot{
 		State:            a.state,
 		History:          hist,
+		CumulativeUsage:  a.cumulativeUsage.Normalized(),
 		PendingActions:   pending,
 		DeferredActions:  deferred,
 		TurnSafety:       a.turnSafety,
@@ -406,6 +408,10 @@ func (a *Agent) Restore(s Snapshot) {
 	defer a.mu.Unlock()
 	a.state = s.State
 	a.conversation.restore(s.History, s.UserContextState)
+	a.cumulativeUsage = s.CumulativeUsage.Normalized()
+	if a.cumulativeUsage == (protocol.Usage{}) {
+		a.cumulativeUsage = protocol.SessionUsage(s.History).Normalized()
+	}
 	a.pendingTurnUser = nil
 	a.pendingActions = s.PendingActions
 	a.deferredActions = s.DeferredActions
@@ -415,6 +421,18 @@ func (a *Agent) Restore(s Snapshot) {
 	} else {
 		a.turns = s.Turns
 	}
+}
+
+// ClearHistory starts a fresh conversation while retaining session-level usage.
+func (a *Agent) ClearHistory() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.conversation.restore(nil, nil)
+	a.pendingTurnUser = nil
+	a.pendingActions = nil
+	a.deferredActions = nil
+	a.turnSafety = TurnSafetyState{}
+	a.turns = make([]TurnAudit, 0)
 }
 
 // QueueTurnUserInput queues additional user input for the active turn.
@@ -886,6 +904,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 
 			a.mu.Lock()
 			err = a.conversation.appendMessages(asstMsg)
+			if err == nil {
+				a.cumulativeUsage = a.cumulativeUsage.Add(protocol.SessionUsage([]protocol.Message{asstMsg})).Normalized()
+			}
 			steeringPending := len(a.pendingTurnUser) > 0
 			a.mu.Unlock()
 			if err != nil {

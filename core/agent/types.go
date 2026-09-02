@@ -22,6 +22,7 @@ const (
 type Snapshot struct {
 	State            State                    `json:"state"`
 	History          []protocol.Message       `json:"history"`
+	CumulativeUsage  protocol.Usage           `json:"cumulative_usage,omitempty"`
 	PendingActions   []*PendingAction         `json:"pending_actions,omitempty"`
 	DeferredActions  []*PendingAction         `json:"deferred_actions,omitempty"`
 	TurnSafety       TurnSafetyState          `json:"turn_safety,omitempty"`

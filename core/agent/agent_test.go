@@ -88,8 +88,9 @@ func (p *blockingToolCallProvider) StreamChat(context.Context, []protocol.Messag
 }
 
 type profileTextProvider struct {
-	name string
-	text string
+	name  string
+	text  string
+	usage *protocol.Usage
 }
 
 func (p *profileTextProvider) Name() string { return p.name }
@@ -97,7 +98,9 @@ func (p *profileTextProvider) Name() string { return p.name }
 func (p *profileTextProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	ch := make(chan protocol.Event, 2)
 	ch <- protocol.NewTextDeltaEvent(p.text)
-	ch <- protocol.NewFinishEvent(protocol.FinishReasonStop)
+	finish := protocol.NewFinishEvent(protocol.FinishReasonStop)
+	finish.Usage = p.usage
+	ch <- finish
 	close(ch)
 	return ch, nil
 }
@@ -1427,9 +1430,51 @@ func TestAgentAddsToolResultUsageToSessionUsage(t *testing.T) {
 	for range events {
 	}
 
-	total := protocol.SessionUsage(ag.Snapshot().History).Normalized()
+	snapshot := ag.Snapshot()
+	total := protocol.SessionUsage(snapshot.History).Normalized()
 	if total != childUsage {
 		t.Fatalf("session usage should include tool result usage: got %+v want %+v", total, childUsage)
+	}
+	if snapshot.CumulativeUsage != childUsage {
+		t.Fatalf("cumulative usage should include tool result usage: got %+v want %+v", snapshot.CumulativeUsage, childUsage)
+	}
+}
+
+func TestAgentClearHistoryPreservesCumulativeUsage(t *testing.T) {
+	const providerName = "clear-history-usage"
+	turnUsage := protocol.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "answer", usage: &turnUsage}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	events, err := ag.Run(context.Background(), "before clear")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	ag.ClearHistory()
+	cleared := ag.Snapshot()
+	if len(cleared.History) != 0 || cleared.CumulativeUsage != turnUsage {
+		t.Fatalf("clear lost session usage: history=%d usage=%+v", len(cleared.History), cleared.CumulativeUsage)
+	}
+	events, err = ag.Run(context.Background(), "after clear")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	want := turnUsage.Add(turnUsage)
+	if got := ag.Snapshot().CumulativeUsage; got != want {
+		t.Fatalf("cumulative usage after clear = %+v, want %+v", got, want)
 	}
 }
 

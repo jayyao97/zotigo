@@ -138,6 +138,9 @@ func recoverRuntimeWAL(ctx context.Context, store zotigosession.Store, sess *zot
 	if wal.Header.BaseSnapshotDigest != zotigosession.SnapshotDigestForRuntimeWAL(sess.AgentSnapshot, wal.Header.FormatVersion) {
 		return true, fmt.Errorf("runtime WAL base snapshot checksum mismatch")
 	}
+	if sess.AgentSnapshot.CumulativeUsage == (protocol.Usage{}) {
+		sess.AgentSnapshot.CumulativeUsage = protocol.SessionUsage(sess.AgentSnapshot.History).Normalized()
+	}
 	for _, record := range wal.Records {
 		if record.ToolExecutionStarted != nil {
 			continue
@@ -146,6 +149,7 @@ func recoverRuntimeWAL(ctx context.Context, store zotigosession.Store, sess *zot
 			sess.AgentSnapshot.History = append([]protocol.Message(nil), record.Mutation.Messages...)
 		} else {
 			sess.AgentSnapshot.History = append(sess.AgentSnapshot.History, record.Mutation.Messages...)
+			sess.AgentSnapshot.CumulativeUsage = sess.AgentSnapshot.CumulativeUsage.Add(protocol.SessionUsage(record.Mutation.Messages)).Normalized()
 		}
 		if record.Mutation.HasUserContextState {
 			sess.AgentSnapshot.UserContextState = record.Mutation.UserContextState
