@@ -25,6 +25,7 @@ type Config struct {
 type Handler struct {
 	Command   string
 	Args      []string
+	Agents    []string
 	Matchers  []string
 	TimeoutMS int
 	Async     bool
@@ -38,6 +39,7 @@ type rawConfig struct {
 type rawHandler struct {
 	Command   string   `yaml:"command"`
 	Args      []string `yaml:"args,omitempty"`
+	Agents    []string `yaml:"agents,omitempty"`
 	Matchers  []string `yaml:"matchers,omitempty"`
 	TimeoutMS *int     `yaml:"timeout_ms,omitempty"`
 	Async     *bool    `yaml:"async,omitempty"`
@@ -128,6 +130,14 @@ func decodeHandler(eventName EventName, node yaml.Node) (Handler, error) {
 		return Handler{}, fmt.Errorf("async is not valid for PreToolUse")
 	}
 
+	agents := make([]string, 0, len(raw.Agents))
+	for _, agent := range raw.Agents {
+		agent = strings.TrimSpace(agent)
+		if agent == "" {
+			return Handler{}, fmt.Errorf("agents must not contain empty values")
+		}
+		agents = append(agents, agent)
+	}
 	matchers := make([]string, 0, len(raw.Matchers))
 	for _, matcher := range raw.Matchers {
 		matcher = strings.TrimSpace(matcher)
@@ -145,9 +155,21 @@ func decodeHandler(eventName EventName, node yaml.Node) (Handler, error) {
 		timeoutMS = *raw.TimeoutMS
 	}
 	return Handler{
-		Command: raw.Command, Args: append([]string(nil), raw.Args...), Matchers: matchers,
+		Command: raw.Command, Args: append([]string(nil), raw.Args...), Agents: agents, Matchers: matchers,
 		TimeoutMS: timeoutMS, Async: async,
 	}, nil
+}
+
+func (h Handler) matchesAgent(agentName string) bool {
+	if len(h.Agents) == 0 {
+		return true
+	}
+	for _, agent := range h.Agents {
+		if agent == agentName {
+			return true
+		}
+	}
+	return false
 }
 
 func (h Handler) matches(toolName string) bool {
