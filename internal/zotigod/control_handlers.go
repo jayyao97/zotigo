@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 )
 
 const (
@@ -42,6 +44,8 @@ type pauseSessionRequest struct {
 type submitMessageRequest struct {
 	Text   string                      `json:"text"`
 	Images []submitMessageImageRequest `json:"images,omitempty"`
+	Skills []string                    `json:"skills,omitempty"`
+	Path   json.RawMessage             `json:"path,omitempty"`
 }
 
 type steeringRequest struct {
@@ -84,6 +88,7 @@ type commandResponse struct {
 type messageCommandPayload struct {
 	Text   string             `json:"text"`
 	Images []commandImageData `json:"images,omitempty"`
+	Skills []string           `json:"skills,omitempty"`
 }
 
 type steeringCommandPayload struct {
@@ -119,6 +124,7 @@ type publicCommandResponse struct {
 	Sequence       uint64                       `json:"sequence"`
 	Type           string                       `json:"type"`
 	Text           string                       `json:"text,omitempty"`
+	Skills         []string                     `json:"skills,omitempty"`
 	Images         []publicCommandImageResponse `json:"images,omitempty"`
 	TurnID         string                       `json:"turn_id,omitempty"`
 	Reason         string                       `json:"reason,omitempty"`
@@ -152,6 +158,10 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		return
 	}
 	text := strings.TrimSpace(req.Text)
+	if req.Path != nil {
+		writeAPIError(w, http.StatusBadRequest, "path is not accepted; select skills by name")
+		return
+	}
 	images, err := validateMessageImages(req.Images)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
@@ -160,6 +170,28 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	if text == "" && len(images) == 0 {
 		writeAPIError(w, http.StatusBadRequest, "message requires text or images")
 		return
+	}
+	var selectedNames []string
+	if len(req.Skills) > 0 {
+		selected, err := h.resolveSessionSkills(r.Context(), id, req.Skills)
+		if err != nil {
+			var resolutionErr *skills.ResolutionError
+			if errors.As(err, &resolutionErr) {
+				writeAPIErrorCode(w, http.StatusBadRequest, "skill_"+resolutionErr.Kind, resolutionErr.Error())
+				return
+			}
+			if errors.Is(err, errSessionNotFound) {
+				writeAPIError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			h.logSkillsError("resolve skills", id, err)
+			writeAPIError(w, http.StatusInternalServerError, "failed to resolve skills")
+			return
+		}
+		selectedNames = make([]string, len(selected))
+		for index, skill := range selected {
+			selectedNames[index] = skill.Name
+		}
 	}
 	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
 		h.writeEnsureRunningError(w, err)
@@ -193,7 +225,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		if session.State != SessionStateRunning && session.State != SessionStatePaused {
 			return zotigosession.DisplayItem{}, errInvalidSessionTransition
 		}
-		return h.appendMessageCommand(r.Context(), id, text, images)
+		return h.appendMessageCommand(r.Context(), id, text, images, selectedNames)
 	}()
 	if err != nil {
 		switch {
@@ -281,7 +313,7 @@ var (
 	errApprovalPending = errors.New("approval is pending")
 )
 
-func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage) (zotigosession.DisplayItem, error) {
+func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage, selectedSkills []string) (zotigosession.DisplayItem, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
 		return zotigosession.DisplayItem{}, err
@@ -300,6 +332,7 @@ func (h *handler) appendMessageCommand(ctx context.Context, id string, text stri
 		Type:   sessionCommandMessage,
 		Text:   text,
 		Images: displayCommandImages(images),
+		Skills: append([]string(nil), selectedSkills...),
 	}
 	item, err = h.items.AppendItemIf(ctx, id, item, requireIdleSession)
 	if err != nil {
@@ -972,6 +1005,7 @@ func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (com
 	}
 	if item.Command != nil {
 		command.Message.Text = item.Command.Text
+		command.Message.Skills = append([]string(nil), item.Command.Skills...)
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
 		if err != nil {
 			return commandResponse{}, err
@@ -1025,6 +1059,7 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 	case sessionCommandMessage:
 		if command.Message != nil {
 			resp.Text = command.Message.Text
+			resp.Skills = append([]string(nil), command.Message.Skills...)
 			resp.Images = publicCommandImages(command.Message.Images)
 		}
 	case sessionCommandSteering:

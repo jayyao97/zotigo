@@ -118,6 +118,7 @@ type DisplayApprovalDecision struct {
 type DisplayCommand struct {
 	Type           string                `json:"type,omitempty"`
 	Text           string                `json:"text,omitempty"`
+	Skills         []string              `json:"skills,omitempty"`
 	Images         []DisplayCommandImage `json:"images,omitempty"`
 	TurnID         string                `json:"turn_id,omitempty"`
 	Reason         string                `json:"reason,omitempty"`

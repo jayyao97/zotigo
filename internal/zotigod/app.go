@@ -22,6 +22,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
@@ -400,6 +401,8 @@ type handler struct {
 	catalogErr           error
 	logger               *log.Logger
 	hooks                hookEventDispatcher
+	skillsMu             sync.Mutex
+	skillManagers        map[string]*skills.SkillManager
 }
 
 type createSessionRequest struct {
@@ -776,6 +779,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
+	mux.HandleFunc("/skills", handler.handleSkills)
 	mux.HandleFunc("/agents", handler.handleAgents)
 	mux.HandleFunc("/agents/codex/prepare", handler.handleCodexPrepare)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)

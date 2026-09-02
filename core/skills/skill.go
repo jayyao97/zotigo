@@ -6,24 +6,26 @@ type SkillSource int
 const (
 	// SkillSourceBuiltin - built into the binary
 	SkillSourceBuiltin SkillSource = iota
-	// SkillSourceAgents - loaded from ~/.agents/skills/ (shared across agent CLIs)
-	SkillSourceAgents
-	// SkillSourceUser - loaded from ~/.zotigo/skills/
+	// SkillSourceUser - loaded from ~/.agents/skills/
 	SkillSourceUser
-	// SkillSourceProject - loaded from .zotigo/skills/
-	SkillSourceProject
+	// SkillSourceWorkspace - loaded from <workspace>/.agents/skills/
+	SkillSourceWorkspace
+)
+
+// Deprecated source names retained for SDK source compatibility.
+const (
+	SkillSourceAgents  = SkillSourceUser
+	SkillSourceProject = SkillSourceWorkspace
 )
 
 func (s SkillSource) String() string {
 	switch s {
 	case SkillSourceBuiltin:
 		return "builtin"
-	case SkillSourceAgents:
-		return "agents"
 	case SkillSourceUser:
 		return "user"
-	case SkillSourceProject:
-		return "project"
+	case SkillSourceWorkspace:
+		return "workspace"
 	default:
 		return "unknown"
 	}
@@ -43,11 +45,21 @@ type SkillDefinition struct {
 	// Instructions is the markdown content after the YAML front matter
 	Instructions string `yaml:"-"`
 
+	// Content is the complete SKILL.md content used for explicit activation.
+	Content string `yaml:"-"`
+
+	// Enabled can explicitly disable a discovered skill. Omitted means enabled.
+	Enabled *bool `yaml:"enabled,omitempty"`
+
 	// Source indicates where this skill was loaded from
 	Source SkillSource `yaml:"-"`
 
 	// Path is the file path (for debugging and reloading)
 	Path string `yaml:"-"`
+}
+
+func (s *SkillDefinition) IsEnabled() bool {
+	return s.Enabled == nil || *s.Enabled
 }
 
 // HasAlias checks if the skill has a specific alias

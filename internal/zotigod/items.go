@@ -268,6 +268,7 @@ type itemApprovalDecisionResponse struct {
 type itemCommandResponse struct {
 	Type           string                     `json:"type,omitempty"`
 	Text           string                     `json:"text,omitempty"`
+	Skills         []string                   `json:"skills,omitempty"`
 	Images         []itemCommandImageResponse `json:"images,omitempty"`
 	TurnID         string                     `json:"turn_id,omitempty"`
 	Reason         string                     `json:"reason,omitempty"`
@@ -610,6 +611,7 @@ func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandRes
 	return &itemCommandResponse{
 		Type:           command.Type,
 		Text:           command.Text,
+		Skills:         append([]string(nil), command.Skills...),
 		Images:         publicDisplayCommandImages(command.Images),
 		TurnID:         command.TurnID,
 		Reason:         command.Reason,

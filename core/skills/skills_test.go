@@ -49,6 +49,9 @@ func TestParseSkillContent_Invalid(t *testing.T) {
 	}{
 		{"no front matter", "# Just markdown"},
 		{"missing name", "---\ndescription: test\n---\n# Content"},
+		{"missing description", "---\nname: test-skill\n---\n# Content"},
+		{"invalid name", "---\nname: Invalid Skill\ndescription: test\n---\n# Content"},
+		{"padded name", "---\nname: \" test-skill \"\ndescription: test\n---\n# Content"},
 		{"invalid yaml", "---\nname: [invalid\n---\n# Content"},
 	}
 
@@ -344,7 +347,7 @@ func TestSkillManager_Load(t *testing.T) {
 	tmpDir := t.TempDir()
 	userDir := filepath.Join(tmpDir, "user-skills")
 	projectDir := filepath.Join(tmpDir, "project")
-	projectSkillsDir := filepath.Join(projectDir, ".zotigo", "skills")
+	projectSkillsDir := filepath.Join(projectDir, ".agents", "skills")
 
 	// Create directories
 	os.MkdirAll(filepath.Join(userDir, "user-skill"), 0755)
@@ -406,7 +409,7 @@ func TestSkillManager_Priority(t *testing.T) {
 	tmpDir := t.TempDir()
 	userDir := filepath.Join(tmpDir, "user-skills")
 	projectDir := filepath.Join(tmpDir, "project")
-	projectSkillsDir := filepath.Join(projectDir, ".zotigo", "skills")
+	projectSkillsDir := filepath.Join(projectDir, ".agents", "skills")
 
 	// Create same-named skill in both locations
 	os.MkdirAll(filepath.Join(userDir, "my-skill"), 0755)
@@ -450,6 +453,95 @@ Project instructions.
 	if skill.Description != "Project version" {
 		t.Errorf("Expected 'Project version', got '%s'", skill.Description)
 	}
+}
+
+func TestSkillManagerCanonicalDiscoveryAndDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	userDir := filepath.Join(home, ".agents", "skills")
+	workspaceDir := filepath.Join(workspace, ".agents", "skills")
+	legacyDir := filepath.Join(home, ".zotigo", "skills")
+	claudeDir := filepath.Join(home, ".claude", "skills")
+	writeTestSkill(t, userDir, "shared", "user version", "user instructions", "")
+	writeTestSkill(t, userDir, "user-only", "user only", "user only instructions", "")
+	writeTestSkill(t, workspaceDir, "shared", "workspace version", "workspace instructions", "")
+	writeTestSkill(t, legacyDir, "legacy-only", "legacy", "legacy instructions", "")
+	writeTestSkill(t, legacyDir, "user-only", "legacy user", "legacy user instructions", "")
+	writeTestSkill(t, claudeDir, "claude-only", "claude", "claude instructions", "")
+	if err := os.MkdirAll(filepath.Join(workspaceDir, "missing"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestSkill(t, workspaceDir, "invalid", "invalid", "ignored", "not front matter")
+
+	manager := NewSkillManager(workspace, WithUserDir(userDir))
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
+	}
+	shared, ok := manager.Get("shared")
+	if !ok || shared.Source != SkillSourceWorkspace || shared.Description != "workspace version" {
+		t.Fatalf("workspace override = %#v, %v", shared, ok)
+	}
+	userOnly, ok := manager.Get("user-only")
+	if !ok || userOnly.Source != SkillSourceUser || userOnly.Description != "user only" {
+		t.Fatalf("canonical user skill = %#v, %v", userOnly, ok)
+	}
+	for _, name := range []string{"legacy-only", "claude-only", "invalid", "missing"} {
+		if _, ok := manager.Get(name); ok {
+			t.Fatalf("unexpected skill %q", name)
+		}
+	}
+	codes := map[string]string{}
+	for _, diagnostic := range manager.Diagnostics() {
+		codes[diagnostic.Name] = diagnostic.Code
+	}
+	if codes["shared"] != "skill_overridden" || codes["invalid"] != "invalid_skill" || codes["missing"] != "missing_skill_file" {
+		t.Fatalf("diagnostics = %#v", manager.Diagnostics())
+	}
+}
+
+func TestSkillManagerWithoutWorkspaceLoadsCanonicalUserSkills(t *testing.T) {
+	userDir := filepath.Join(t.TempDir(), ".agents", "skills")
+	writeTestSkill(t, userDir, "user-only", "user only", "instructions", "")
+	manager := NewSkillManager("", WithUserDir(userDir))
+	if err := manager.Load(); err != nil {
+		t.Fatal(err)
+	}
+	if skill, ok := manager.Get("user-only"); !ok || skill.Source != SkillSourceUser {
+		t.Fatalf("user skill = %#v, %v", skill, ok)
+	}
+}
+
+func TestResolveExplicitRejectsMissingInvalidAndDisabled(t *testing.T) {
+	userDir := filepath.Join(t.TempDir(), "skills")
+	writeTestSkill(t, userDir, "disabled", "disabled", "instructions", "enabled: false")
+	writeTestSkill(t, userDir, "invalid", "invalid", "ignored", "bad content")
+	manager := NewSkillManager("", WithUserDir(userDir))
+	for _, name := range []string{"missing", "invalid", "disabled"} {
+		if _, err := manager.ResolveExplicit([]string{name}); err == nil {
+			t.Fatalf("expected %s to be rejected", name)
+		}
+	}
+}
+
+func writeTestSkill(t *testing.T, root, name, description, instructions, override string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	content := override
+	if content == "" || content == "enabled: false" {
+		extra := ""
+		if content != "" {
+			extra = content + "\n"
+		}
+		content = "---\nname: " + name + "\ndescription: " + description + "\n" + extra + "---\n" + instructions + "\n"
+	}
+	path := filepath.Join(dir, SkillFileName)
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }
 
 func TestSkillManager_Aliases(t *testing.T) {
@@ -512,14 +604,14 @@ func TestBuildSkillIndex(t *testing.T) {
 		Description:  "A test skill",
 		Instructions: "Do something\nDo another thing",
 		Source:       SkillSourceUser,
-		Path:         "/home/user/.zotigo/skills/test-skill/SKILL.md",
+		Path:         "/home/user/.agents/skills/test-skill/SKILL.md",
 	})
 	sm.addSkill(&SkillDefinition{
 		Name:         "another-skill",
 		Description:  "Another skill",
 		Instructions: "Instructions here",
 		Source:       SkillSourceProject,
-		Path:         "/project/.zotigo/skills/another-skill/SKILL.md",
+		Path:         "/project/.agents/skills/another-skill/SKILL.md",
 	})
 
 	index := sm.BuildSkillIndex()
@@ -538,7 +630,7 @@ func TestBuildSkillIndex(t *testing.T) {
 		t.Error("Should contain skill name 'another-skill'")
 	}
 	// Should contain file paths
-	if !contains(index, "/home/user/.zotigo/skills/test-skill/SKILL.md") {
+	if !contains(index, "/home/user/.agents/skills/test-skill/SKILL.md") {
 		t.Error("Should contain skill file path")
 	}
 	// Should contain How to use skills section

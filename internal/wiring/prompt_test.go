@@ -13,7 +13,6 @@ import (
 func TestPromptBuildersSplitSkillsAndUserContext(t *testing.T) {
 	workDir := t.TempDir()
 	userSkillsDir := filepath.Join(t.TempDir(), "skills")
-	agentsDir := filepath.Join(t.TempDir(), "agents-skills")
 	if err := os.WriteFile(filepath.Join(workDir, "AGENTS.md"), []byte("Follow project rules."), 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -30,7 +29,7 @@ Use this skill for tests.
 		t.Fatal(err)
 	}
 
-	sm := skills.NewSkillManager(workDir, skills.WithUserDir(userSkillsDir), skills.WithAgentsDir(agentsDir))
+	sm := skills.NewSkillManager(workDir, skills.WithUserDir(userSkillsDir))
 	if err := sm.Load(); err != nil {
 		t.Fatal(err)
 	}

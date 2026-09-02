@@ -53,6 +53,7 @@ zotigod \
 
 - `GET /health`
 - `GET /agents`
+- `GET /skills`
 - `POST /agents/codex/prepare`
 - `GET /config/profiles`
 - `POST /sources/inspect`
@@ -205,6 +206,37 @@ Profiles are ordered by `name`, and `max_output_tokens` is the effective native
 Zotigo value after applying the 32768 default. This endpoint only reads
 configuration and does not start a worker or create a session. Codex app-server
 model settings are separate and do not inherit this value.
+
+## Discover Agent Skills
+
+`GET /skills` returns builtin and canonical user Skills from
+`~/.agents/skills`. Pass a Session ID to also merge Skills from the Session's
+saved semantic working directory at `<workspace>/.agents/skills`:
+
+```http
+GET /skills?session_id=sess_8f0e12ab34cd56ef&force_reload=true
+```
+
+```json
+{
+  "skills": [
+    {
+      "name": "review-taste",
+      "description": "Review code for correctness and maintainability.",
+      "scope": "workspace",
+      "enabled": true
+    }
+  ],
+  "diagnostics": []
+}
+```
+
+`force_reload` defaults to `false`; `true` explicitly rescans the canonical
+directories. Discovery priority is builtin, then user, then workspace, with a
+higher-priority same-name Skill replacing the lower-priority definition and
+adding a diagnostic. Responses never expose local Skill paths. Legacy
+`.zotigo/skills` and client-specific directories such as `.claude/skills` are
+not scanned.
 
 ## Create sessions
 
@@ -916,6 +948,21 @@ Text-only payloads remain supported:
   "text": "Build the desktop runtime."
 }
 ```
+
+To explicitly enable one or more discovered Agent Skills for this turn, pass
+their names. The daemon resolves them against the Session's saved working
+directory and persists the normalized, deduplicated selection with the command:
+
+```json
+{
+  "text": "Review this change.",
+  "skills": ["review-taste"]
+}
+```
+
+Clients cannot submit Skill paths. Unknown, disabled, or invalid Skills return
+`400`; omitting `skills` or sending an empty list preserves the existing message
+behavior.
 
 Messages may also include image input:
 
