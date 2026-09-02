@@ -8,11 +8,14 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 )
 
 const defaultStartTimeout = 10 * time.Second
+const codexBinaryEnv = "ZOTIGO_CODEX_BINARY"
 
 type Host struct {
 	mu           sync.Mutex
@@ -51,7 +54,7 @@ func (l *Lease) Release() (err error) {
 func NewHost(binaryPath string, runtimeDir string, output io.Writer, options HostOptions) (*Host, error) {
 	if binaryPath == "" {
 		var err error
-		binaryPath, err = exec.LookPath("codex")
+		binaryPath, err = discoverBinaryPath()
 		if err != nil {
 			return nil, fmt.Errorf("find codex binary: %w", err)
 		}
@@ -63,7 +66,7 @@ func NewHost(binaryPath string, runtimeDir string, output io.Writer, options Hos
 }
 
 func Discover() (string, string, error) {
-	binaryPath, err := exec.LookPath("codex")
+	binaryPath, err := discoverBinaryPath()
 	if err != nil {
 		return "", "", err
 	}
@@ -72,6 +75,41 @@ func Discover() (string, string, error) {
 		return "", "", fmt.Errorf("read codex version: %w", err)
 	}
 	return binaryPath, string(bytesTrimSpace(output)), nil
+}
+
+func discoverBinaryPath() (string, error) {
+	if configured := strings.TrimSpace(os.Getenv(codexBinaryEnv)); configured != "" {
+		if !filepath.IsAbs(configured) {
+			return "", fmt.Errorf("%s must be an absolute path", codexBinaryEnv)
+		}
+		binaryPath, err := exec.LookPath(configured)
+		if err != nil {
+			return "", fmt.Errorf("inspect %s: %w", codexBinaryEnv, err)
+		}
+		return binaryPath, nil
+	}
+	if binaryPath, err := exec.LookPath("codex"); err == nil {
+		return binaryPath, nil
+	}
+	if runtime.GOOS == "darwin" {
+		candidates := []string{"/Applications/ChatGPT.app/Contents/Resources/codex"}
+		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+			candidates = append([]string{filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex")}, candidates...)
+		}
+		if binaryPath := firstExecutable(candidates...); binaryPath != "" {
+			return binaryPath, nil
+		}
+	}
+	return "", exec.ErrNotFound
+}
+
+func firstExecutable(candidates ...string) string {
+	for _, candidate := range candidates {
+		if binaryPath, err := exec.LookPath(candidate); err == nil {
+			return binaryPath
+		}
+	}
+	return ""
 }
 
 func (h *Host) Ensure(ctx context.Context) (RPC, string, error) {

@@ -247,8 +247,11 @@ The ordinary Zotigo runtime retains the approval behavior described below.
 
 `GET /agents` performs binary discovery without starting app-server.
 `POST /agents/codex/prepare` starts the local UDS app-server and returns the
-model/reasoning catalog. Codex is omitted from `GET /agents` when no `codex`
-binary is visible on zotigod's `PATH`.
+model/reasoning catalog. Discovery checks `ZOTIGO_CODEX_BINARY` (an absolute
+executable path), then `codex` on `PATH`, then the standard per-user and
+system-wide ChatGPT.app locations on macOS. Codex is omitted from `GET /agents`
+when discovery fails. Restart zotigod after changing its environment or
+installing a runtime so the runtime registry is rebuilt.
 
 `PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a
 Codex Session. The values apply to the next turn; the Codex thread and Project
