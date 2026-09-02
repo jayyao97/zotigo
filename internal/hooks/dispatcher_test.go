@@ -67,6 +67,47 @@ func TestDispatchAgentFilterAppliesToSessionEvents(t *testing.T) {
 	}
 }
 
+func TestDispatchSessionMatcherUsesLifecycleSource(t *testing.T) {
+	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
+		SessionStart: {{Command: "audit", Matchers: []string{"resume", "restart"}}},
+	}})
+	var sources []string
+	dispatcher.execute = func(_ context.Context, _ Handler, event Event) processResult {
+		sources = append(sources, event.Session.Source)
+		return processResult{started: true, exitCode: 0}
+	}
+
+	for _, source := range []string{"start", "resume", "restart"} {
+		event := NewEvent(SessionStart, "sess-test", "zotigo", "/tmp")
+		event.Session = &SessionPayload{Source: source}
+		dispatcher.Dispatch(context.Background(), event)
+	}
+	if got, want := strings.Join(sources, ","), "resume,restart"; got != want {
+		t.Fatalf("matched sources = %q, want %q", got, want)
+	}
+}
+
+func TestDispatchTurnMatcherUsesTerminalStatus(t *testing.T) {
+	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
+		TurnEnd: {{Command: "audit", Matchers: []string{"failed", "interrupted"}}},
+	}})
+	var statuses []string
+	dispatcher.execute = func(_ context.Context, _ Handler, event Event) processResult {
+		statuses = append(statuses, event.Turn.Status)
+		return processResult{started: true, exitCode: 0}
+	}
+
+	for _, status := range []string{"completed", "failed", "interrupted"} {
+		event := NewEvent(TurnEnd, "sess-test", "zotigo", "/tmp")
+		event.TurnID = "turn-test"
+		event.Turn = &TurnPayload{Status: status}
+		dispatcher.Dispatch(context.Background(), event)
+	}
+	if got, want := strings.Join(statuses, ","), "failed,interrupted"; got != want {
+		t.Fatalf("matched statuses = %q, want %q", got, want)
+	}
+}
+
 func TestDispatchDenialStopsLaterHandlers(t *testing.T) {
 	dispatcher := New(Config{Version: ConfigVersion, Hooks: map[EventName][]Handler{
 		PreToolUse: {{Command: "deny"}, {Command: "must-not-run"}},

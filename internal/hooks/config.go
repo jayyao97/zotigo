@@ -123,8 +123,8 @@ func decodeHandler(eventName EventName, node yaml.Node) (Handler, error) {
 	if raw.TimeoutMS != nil && *raw.TimeoutMS <= 0 {
 		return Handler{}, fmt.Errorf("timeout_ms must be greater than zero")
 	}
-	if (eventName == SessionStart || eventName == SessionEnd) && len(raw.Matchers) > 0 {
-		return Handler{}, fmt.Errorf("matchers are only valid for tool events")
+	if eventName == UserPromptSubmit && len(raw.Matchers) > 0 {
+		return Handler{}, fmt.Errorf("matchers are not supported for UserPromptSubmit")
 	}
 	if eventName == PreToolUse && raw.Async != nil && *raw.Async {
 		return Handler{}, fmt.Errorf("async is not valid for PreToolUse")
@@ -172,12 +172,16 @@ func (h Handler) matchesAgent(agentName string) bool {
 	return false
 }
 
-func (h Handler) matches(toolName string) bool {
+func (h Handler) matchesEvent(event Event) bool {
 	if len(h.Matchers) == 0 {
 		return true
 	}
+	value, ok := event.matcherValue()
+	if !ok {
+		return false
+	}
 	for _, matcher := range h.Matchers {
-		if matcher == "*" || matcher == toolName {
+		if matcher == "*" || matcher == value {
 			return true
 		}
 	}

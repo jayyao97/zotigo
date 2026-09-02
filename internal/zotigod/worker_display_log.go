@@ -22,6 +22,8 @@ type workerDisplayLog struct {
 	mu          sync.Mutex
 	turnID      string
 	turnStarted time.Time
+	terminalID  string
+	terminal    string
 	block       *workerDisplayBlock
 	toolCalls   map[string]chan struct{}
 	toolCallErr map[string]error
@@ -45,6 +47,8 @@ func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
 	defer l.mu.Unlock()
 	l.turnStarted = time.Now()
 	l.turnID = fmt.Sprintf("turn_%d", l.turnStarted.UnixNano())
+	l.terminalID = ""
+	l.terminal = ""
 	l.block = nil
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
@@ -61,6 +65,12 @@ func (l *workerDisplayLog) CurrentTurnID() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.turnID
+}
+
+func (l *workerDisplayLog) TerminalStatus(turnID string) (string, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.terminal, turnID != "" && l.terminalID == turnID
 }
 
 func (l *workerDisplayLog) QueueSteering(command commandResponse) {
@@ -257,6 +267,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	if reason == "" {
 		reason = userPauseReason
 	}
+	turnID := l.turnID
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
@@ -266,6 +277,10 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 			DurationMS: time.Since(l.turnStarted).Milliseconds(),
 		},
 	})
+	if err == nil {
+		l.terminalID = turnID
+		l.terminal = "interrupted"
+	}
 	l.turnID = ""
 	return err
 }
@@ -273,25 +288,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 func (l *workerDisplayLog) Fail(ctx context.Context, err error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	l.block = nil
-	errText := fmt.Sprintf("%v", err)
-	if _, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
-		Type:  zotigosession.DisplayItemError,
-		Error: errText,
-	}); appendErr != nil {
-		return appendErr
-	}
-	_, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
-		Type:  zotigosession.DisplayItemTurnFailed,
-		Error: errText,
-		Turn: &zotigosession.DisplayTurn{
-			ID:         l.turnID,
-			Status:     "failed",
-			DurationMS: time.Since(l.turnStarted).Milliseconds(),
-		},
-	})
-	l.turnID = ""
-	return appendErr
+	return l.failLocked(ctx, err)
 }
 
 func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event) error {
@@ -466,6 +463,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		if err := l.flushBlockLocked(ctx); err != nil {
 			return err
 		}
+		turnID := l.turnID
 		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemTurnCompleted,
 			Turn: &zotigosession.DisplayTurn{
@@ -475,6 +473,10 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 				DurationMS:           time.Since(l.turnStarted).Milliseconds(),
 			},
 		})
+		if err == nil {
+			l.terminalID = turnID
+			l.terminal = "completed"
+		}
 		l.turnID = ""
 		return err
 	case protocol.EventTypeError:
@@ -511,6 +513,7 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 	}); appendErr != nil {
 		return appendErr
 	}
+	turnID := l.turnID
 	_, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemTurnFailed,
 		Error: errText,
@@ -520,6 +523,10 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 			DurationMS: time.Since(l.turnStarted).Milliseconds(),
 		},
 	})
+	if appendErr == nil {
+		l.terminalID = turnID
+		l.terminal = "failed"
+	}
 	l.turnID = ""
 	return appendErr
 }

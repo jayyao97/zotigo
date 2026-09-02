@@ -206,6 +206,10 @@ type codexWorkerRuntime struct {
 	activeTurnID    string
 	commandSequence uint64
 	turnStarted     time.Time
+	turnModel       string
+	turnUsage       protocol.Usage
+	totalUsage      protocol.Usage
+	hasTotalUsage   bool
 	messages        map[string]string
 	messageOrder    []string
 	toolNames       map[string]string
@@ -295,6 +299,9 @@ func (r *codexWorkerRuntime) Close() error {
 		Type: zotigosession.DisplayItemTurnInterrupted, Error: "codex worker disconnected",
 		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "interrupted", DurationMS: duration},
 	})
+	if appendErr == nil {
+		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, "interrupted", r.turnModel, r.turnUsage)
+	}
 	r.activeTurnID = ""
 	return errors.Join(interruptErr, appendErr)
 }
@@ -335,10 +342,17 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		}
 		r.activeTurnID = response.Turn.ID
 		r.turnStarted = time.Now()
-		return r.append(zotigosession.DisplayItem{
+		r.turnModel = stored.Model
+		r.turnUsage = protocol.Usage{}
+		if err := r.append(zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemTurnStarted,
 			Turn: &zotigosession.DisplayTurn{ID: r.activeTurnID, Status: "in_progress"},
-		})
+		}); err != nil {
+			return err
+		}
+		dispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, r.turnModel)
+		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Message.Text)
+		return nil
 	case sessionCommandPause:
 		if r.activeTurnID == "" {
 			return nil
@@ -350,11 +364,15 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 			return fmt.Errorf("codex steering requires an active turn")
 		}
 		var response any
-		return r.app.Call(ctx, "turn/steer", map[string]any{
+		if err := r.app.Call(ctx, "turn/steer", map[string]any{
 			"threadId": r.threadID, "expectedTurnId": r.activeTurnID,
 			"clientUserMessageId": command.ID,
 			"input":               codexInputs(command.Steering.Text, command.Steering.Images),
-		}, &response)
+		}, &response); err != nil {
+			return err
+		}
+		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Steering.Text)
+		return nil
 	default:
 		return fmt.Errorf("codex runtime does not support command %q", command.Type)
 	}
@@ -403,17 +421,30 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 	case "thread/tokenUsage/updated":
 		var updated struct {
 			ThreadID   string `json:"threadId"`
+			TurnID     string `json:"turnId"`
 			TokenUsage struct {
-				Last struct {
-					TotalTokens int `json:"totalTokens"`
-				} `json:"last"`
-				ModelContextWindow int `json:"modelContextWindow"`
+				Total              codexTokenUsage `json:"total"`
+				Last               codexTokenUsage `json:"last"`
+				ModelContextWindow int             `json:"modelContextWindow"`
 			} `json:"tokenUsage"`
 		}
 		if err := sonic.Unmarshal(message.Params, &updated); err != nil {
 			return err
 		}
-		if updated.ThreadID != r.threadID || updated.TokenUsage.ModelContextWindow <= 0 {
+		if updated.ThreadID != r.threadID {
+			return nil
+		}
+		totalUsage := updated.TokenUsage.Total.protocolUsage()
+		if r.activeTurnID != "" && updated.TurnID == r.activeTurnID {
+			usage := updated.TokenUsage.Last.protocolUsage()
+			if r.hasTotalUsage {
+				usage = turnUsageDelta(r.totalUsage, totalUsage)
+			}
+			r.turnUsage = r.turnUsage.Add(usage)
+		}
+		r.totalUsage = totalUsage
+		r.hasTotalUsage = true
+		if updated.TokenUsage.ModelContextWindow <= 0 {
 			return nil
 		}
 		return r.append(zotigosession.DisplayItem{
@@ -577,9 +608,12 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}); err != nil {
 			return err
 		}
+		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, status, r.turnModel, r.turnUsage)
 		r.activeTurnID = ""
 		commandSequence := r.commandSequence
 		r.turnStarted = time.Time{}
+		r.turnModel = ""
+		r.turnUsage = protocol.Usage{}
 		r.messages = make(map[string]string)
 		r.messageOrder = nil
 		r.toolNames = make(map[string]string)
@@ -593,6 +627,28 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 	}
 	return nil
+}
+
+type codexTokenUsage struct {
+	TotalTokens           int `json:"totalTokens"`
+	InputTokens           int `json:"inputTokens"`
+	CachedInputTokens     int `json:"cachedInputTokens"`
+	CacheWriteInputTokens int `json:"cacheWriteInputTokens"`
+	OutputTokens          int `json:"outputTokens"`
+}
+
+func (u codexTokenUsage) protocolUsage() protocol.Usage {
+	inputTokens := u.InputTokens - u.CachedInputTokens - u.CacheWriteInputTokens
+	if inputTokens < 0 {
+		inputTokens = 0
+	}
+	return protocol.Usage{
+		InputTokens:              inputTokens,
+		OutputTokens:             u.OutputTokens,
+		TotalTokens:              u.TotalTokens,
+		CacheCreationInputTokens: u.CacheWriteInputTokens,
+		CacheReadInputTokens:     u.CachedInputTokens,
+	}
 }
 
 func codexReasoningText(item codexThreadItem) string {
