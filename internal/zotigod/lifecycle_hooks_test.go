@@ -5,7 +5,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/hooks"
 )
@@ -78,5 +81,60 @@ func TestWorkerFinishDispatchesSessionEndAfterTransition(t *testing.T) {
 	event := dispatcher.events[0]
 	if event.EventName != hooks.SessionEnd || event.Session == nil || event.Session.Result != string(SessionStateEnded) {
 		t.Fatalf("unexpected event: %#v", event)
+	}
+}
+
+func TestSessionEndHookIncludesModelAndUsage(t *testing.T) {
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	first := protocol.NewAssistantMessage("first")
+	first.Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{
+		InputTokens: 100, OutputTokens: 20, CacheReadInputTokens: 40,
+	}}
+	second := protocol.NewAssistantMessage("second")
+	second.Metadata = &protocol.MessageMetadata{
+		Usage:     &protocol.Usage{InputTokens: 80, OutputTokens: 10, CacheCreationInputTokens: 30},
+		ToolUsage: &protocol.Usage{InputTokens: 5, OutputTokens: 2},
+	}
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID: "sess-usage", WorkingDirectory: workDir, Agent: "zotigo", ProfileName: "test",
+			CreatedAt: now, UpdatedAt: now,
+		},
+		AgentSnapshot: agent.Snapshot{
+			// Compaction may remove older assistant messages from History. The
+			// cumulative ledger must remain authoritative for lifecycle hooks.
+			History:         []protocol.Message{second},
+			CumulativeUsage: protocol.SessionUsage([]protocol.Message{first, second}).Normalized(),
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	dispatcher := &capturingHookDispatcher{}
+	handler := &handler{store: store, hooks: dispatcher}
+	handler.dispatchSessionEnd(Session{
+		ID: "sess-usage", State: SessionStateEnded, WorkingDirectory: workDir, Agent: "zotigo", ProfileName: "test",
+	})
+
+	if len(dispatcher.events) != 1 {
+		t.Fatalf("expected one event, got %d", len(dispatcher.events))
+	}
+	payload := dispatcher.events[0].Session
+	if payload == nil || payload.Model != "test" || payload.Usage == nil {
+		t.Fatalf("unexpected session payload: %#v", payload)
+	}
+	if got, want := *payload.Usage, (hooks.UsagePayload{
+		InputTokens: 185, OutputTokens: 32, TotalTokens: 287,
+		CacheCreationInputTokens: 30, CacheReadInputTokens: 40,
+	}); got != want {
+		t.Fatalf("usage = %#v, want %#v", got, want)
 	}
 }

@@ -77,6 +77,59 @@ func TestRecoverRuntimeWALReplaysHistoryAndIgnoresCommittedStaleFile(t *testing.
 	}
 }
 
+func TestRecoverRuntimeWALPreservesCumulativeUsageAcrossReplacement(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	oldAssistant := protocol.NewAssistantMessage("old answer")
+	oldAssistant.Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 10, OutputTokens: 2}}
+	base := agent.Snapshot{State: agent.StateIdle, History: []protocol.Message{
+		protocol.NewUserMessage("old question"), oldAssistant,
+	}}
+	sess := &zotigosession.Session{
+		Metadata:      zotigosession.Metadata{ID: "session-usage-replay", CreatedAt: time.Now(), UpdatedAt: time.Now()},
+		AgentSnapshot: base, SnapshotVersion: 1,
+	}
+	if err := store.Put(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	header, err := zotigosession.NewRuntimeWALHeader(sess.ID, sess.SnapshotVersion, base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.BeginRuntimeWAL(ctx, header); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.AppendRuntimeWAL(ctx, sess.ID, zotigosession.RuntimeWALRecord{
+		WALID: header.WALID, Sequence: 1,
+		Mutation: agent.HistoryMutation{Replace: true, Messages: []protocol.Message{protocol.NewUserMessage("summary")}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newAssistant := protocol.NewAssistantMessage("new answer")
+	newAssistant.Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 5, OutputTokens: 1}}
+	if err := store.AppendRuntimeWAL(ctx, sess.ID, zotigosession.RuntimeWALRecord{
+		WALID: header.WALID, Sequence: 2,
+		Mutation: agent.HistoryMutation{Messages: []protocol.Message{newAssistant}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := recoverRuntimeWAL(ctx, store, sess); err != nil {
+		t.Fatal(err)
+	}
+	want := (protocol.Usage{InputTokens: 15, OutputTokens: 3, TotalTokens: 18})
+	if sess.AgentSnapshot.CumulativeUsage != want {
+		t.Fatalf("cumulative usage = %+v, want %+v", sess.AgentSnapshot.CumulativeUsage, want)
+	}
+	if got := protocol.SessionUsage(sess.AgentSnapshot.History).Normalized(); got == want {
+		t.Fatalf("test did not replace compacted usage: history usage=%+v", got)
+	}
+}
+
 func TestRuntimeWALBeginAcceptsPersistedSemanticSnapshot(t *testing.T) {
 	type providerMetadata struct {
 		Second string `json:"second"`
