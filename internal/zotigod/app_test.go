@@ -31,6 +31,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/hooks"
 )
 
 type sessionListResponse struct {
@@ -5518,8 +5519,12 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 		t.Fatalf("new agent: %v", err)
 	}
 	runtime := &workerRuntime{
+		sessionID:  "sess-ready",
+		workDir:    "/workspace",
 		agent:      ag,
 		display:    display,
+		hooks:      &channelHookDispatcher{events: make(chan hooks.Event, 1)},
+		hookModel:  "model-test",
 		turnActive: true,
 		turnReady:  make(chan struct{}),
 		turnDone:   make(chan struct{}),
@@ -5551,6 +5556,15 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("expected steering to apply after turn ready")
+	}
+	dispatcher := runtime.hooks.(*channelHookDispatcher)
+	select {
+	case event := <-dispatcher.events:
+		if event.EventName != hooks.UserPromptSubmit || event.TurnID != turnID || event.Prompt == nil || event.Prompt.Text != "use the smaller fix" {
+			t.Fatalf("unexpected steering hook: %#v", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected steering UserPromptSubmit hook")
 	}
 }
 

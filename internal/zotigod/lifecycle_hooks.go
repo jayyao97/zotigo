@@ -63,13 +63,7 @@ func (h *handler) sessionEndTelemetry(session Session) (string, *hooks.UsagePayl
 	}
 	var payload *hooks.UsagePayload
 	if usage.TotalTokens != 0 {
-		payload = &hooks.UsagePayload{
-			InputTokens:              usage.InputTokens,
-			OutputTokens:             usage.OutputTokens,
-			TotalTokens:              usage.TotalTokens,
-			CacheCreationInputTokens: usage.CacheCreationInputTokens,
-			CacheReadInputTokens:     usage.CacheReadInputTokens,
-		}
+		payload = usagePayload(usage)
 	}
 
 	model := session.Model
@@ -85,6 +79,17 @@ func (h *handler) sessionEndTelemetry(session Session) (string, *hooks.UsagePayl
 		model = profile.Model
 	}
 	return model, payload, nil
+}
+
+func usagePayload(usage protocol.Usage) *hooks.UsagePayload {
+	usage = usage.Normalized()
+	return &hooks.UsagePayload{
+		InputTokens:              usage.InputTokens,
+		OutputTokens:             usage.OutputTokens,
+		TotalTokens:              usage.TotalTokens,
+		CacheCreationInputTokens: usage.CacheCreationInputTokens,
+		CacheReadInputTokens:     usage.CacheReadInputTokens,
+	}
 }
 
 func (h *handler) newSessionHookEvent(eventName hooks.EventName, session Session) hooks.Event {

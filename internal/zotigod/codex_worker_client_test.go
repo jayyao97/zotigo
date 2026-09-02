@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
@@ -105,13 +106,75 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
 	if err := runtime.handleNotification(context.Background(), codexapp.Message{
 		Method: "thread/tokenUsage/updated",
-		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000},"last":{"totalTokens":2400},"modelContextWindow":128000}}`),
+		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000,"inputTokens":6500,"cachedInputTokens":4000,"cacheWriteInputTokens":500,"outputTokens":1500},"last":{"totalTokens":2400},"modelContextWindow":128000}}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-usage")
 	if err != nil || len(items) != 1 || items[0].ContextUsage == nil || items[0].ContextUsage.Tokens != 2400 || items[0].ContextUsage.Window != 128000 {
 		t.Fatalf("context usage items = %#v, err=%v", items, err)
+	}
+	if got, want := runtime.totalUsage, (protocol.Usage{
+		InputTokens: 2000, OutputTokens: 1500, TotalTokens: 8000, CacheCreationInputTokens: 500, CacheReadInputTokens: 4000,
+	}); got != want {
+		t.Fatalf("total usage = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexWorkerDoesNotAttributeUsageFromAnotherTurn(t *testing.T) {
+	runtime := &codexWorkerRuntime{threadID: "thread-1", activeTurnID: "turn-active"}
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+		Method: "thread/tokenUsage/updated",
+		Params: []byte(`{"threadId":"thread-1","turnId":"turn-stale","tokenUsage":{"total":{"totalTokens":20,"inputTokens":15,"outputTokens":5},"last":{"totalTokens":20,"inputTokens":15,"outputTokens":5}}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.turnUsage != (protocol.Usage{}) {
+		t.Fatalf("turn usage = %#v", runtime.turnUsage)
+	}
+	if runtime.totalUsage.TotalTokens != 20 || !runtime.hasTotalUsage {
+		t.Fatalf("cumulative usage baseline = %#v, known=%v", runtime.totalUsage, runtime.hasTotalUsage)
+	}
+}
+
+func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-prompts", Model: "gpt-5.6-luna", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	hookDispatcher := &capturingHookDispatcher{}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
+		store: store, app: &codexWorkerRPC{}, threadID: "thread-1", messages: make(map[string]string), hooks: hookDispatcher,
+	}
+	if err := runtime.handleCommand(context.Background(), commandResponse{
+		ID: "message-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "first"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.handleCommand(context.Background(), commandResponse{
+		ID: "steering-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "correction"},
+	}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(hookDispatcher.events) != 3 {
+		t.Fatalf("hook events = %#v", hookDispatcher.events)
+	}
+	if hookDispatcher.events[0].EventName != hooks.TurnStart || hookDispatcher.events[0].TurnID != "turn-1" || hookDispatcher.events[0].Turn == nil || hookDispatcher.events[0].Turn.Model != "gpt-5.6-luna" {
+		t.Fatalf("TurnStart event = %#v", hookDispatcher.events[0])
+	}
+	for index, text := range []string{"first", "correction"} {
+		event := hookDispatcher.events[index+1]
+		if event.EventName != hooks.UserPromptSubmit || event.TurnID != "turn-1" || event.Prompt == nil || event.Prompt.Text != text {
+			t.Fatalf("prompt event %d = %#v", index, event)
+		}
 	}
 }
 
@@ -127,7 +190,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 8), done: make(chan struct{})}
+	writer := &workerClientWriter{sendCh: make(chan workerMessage, 16), done: make(chan struct{})}
 	hookDispatcher := &capturingHookDispatcher{}
 	runtime := &codexWorkerRuntime{
 		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-items"}}, store: store, writer: writer,
@@ -141,6 +204,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		{Method: "item/commandExecution/outputDelta", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","itemId":"tool-1","delta":"# Instructions\n"}`)},
 		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":3,"item":{"type":"commandExecution","id":"tool-1","command":"sed -n '1,20p' AGENTS.md","cwd":"/tmp/workspace","status":"completed","commandActions":[{"type":"read","command":"sed -n '1,20p' AGENTS.md","name":"AGENTS.md","path":"/tmp/workspace/AGENTS.md"}],"aggregatedOutput":"# Instructions\n","exitCode":0,"durationMs":12}}`)},
 		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":4,"item":{"type":"reasoning","id":"reasoning-1","summary":["The instructions apply."],"content":[]}}`)},
+		{Method: "thread/tokenUsage/updated", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":30,"inputTokens":24,"cachedInputTokens":10,"cacheWriteInputTokens":4,"outputTokens":6},"last":{"totalTokens":30,"inputTokens":24,"cachedInputTokens":10,"cacheWriteInputTokens":4,"outputTokens":6},"modelContextWindow":128000}}`)},
 		{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-1","status":"completed","durationMs":20}}`)},
 	}
 	for _, notification := range notifications {
@@ -152,7 +216,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 5 {
+	if len(items) != 6 {
 		t.Fatalf("display items = %#v", items)
 	}
 	if items[0].ID != "message-1" || items[0].Content[0].Text != "Checking files." {
@@ -169,15 +233,21 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if items[3].Content[0].Type != string(protocol.ContentTypeReasoning) || items[3].Content[0].Text != "The instructions apply." {
 		t.Fatalf("reasoning item = %#v", items[3])
 	}
-	if items[4].Type != zotigosession.DisplayItemTurnCompleted {
-		t.Fatalf("turn item = %#v", items[4])
+	if items[5].Type != zotigosession.DisplayItemTurnCompleted {
+		t.Fatalf("turn item = %#v", items[5])
 	}
-	if len(hookDispatcher.events) != 1 {
+	if len(hookDispatcher.events) != 2 {
 		t.Fatalf("hook events = %#v", hookDispatcher.events)
 	}
 	hookEvent := hookDispatcher.events[0]
 	if hookEvent.EventName != hooks.PostToolUse || hookEvent.Tool == nil || hookEvent.Tool.Name != "read_file" || hookEvent.Tool.NativeName != "commandExecution" || hookEvent.Tool.Result == nil || hookEvent.Tool.Result.Status != "succeeded" {
 		t.Fatalf("PostToolUse event = %#v", hookEvent)
+	}
+	turnEnd := hookDispatcher.events[1]
+	if turnEnd.EventName != hooks.TurnEnd || turnEnd.Turn == nil || turnEnd.Turn.Status != "completed" || turnEnd.Turn.Usage == nil ||
+		turnEnd.Turn.Usage.InputTokens != 10 || turnEnd.Turn.Usage.OutputTokens != 6 || turnEnd.Turn.Usage.TotalTokens != 30 ||
+		turnEnd.Turn.Usage.CacheCreationInputTokens != 4 || turnEnd.Turn.Usage.CacheReadInputTokens != 10 {
+		t.Fatalf("TurnEnd event = %#v", turnEnd)
 	}
 	firstDelta := nextWorkerDelta(t, writer.sendCh)
 	secondDelta := nextWorkerDelta(t, writer.sendCh)
@@ -273,6 +343,11 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 	request := params.(map[string]any)
 	if method == "thread/resume" {
 		r.resumeApproval, _ = request["approvalPolicy"].(string)
+	}
+	if method == "turn/start" && r.err == nil {
+		if err := sonic.Unmarshal([]byte(`{"turn":{"id":"turn-1"}}`), result); err != nil {
+			return err
+		}
 	}
 	return r.err
 }

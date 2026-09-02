@@ -292,6 +292,16 @@ func prepareEvent(event *Event) error {
 			return fmt.Errorf("tool event requires call_id and name")
 		}
 	}
+	if event.EventName == TurnStart || event.EventName == TurnEnd {
+		if event.TurnID == "" || event.Turn == nil {
+			return fmt.Errorf("turn event requires turn_id and turn payload")
+		}
+	}
+	if event.EventName == UserPromptSubmit {
+		if event.TurnID == "" || event.Prompt == nil {
+			return fmt.Errorf("user prompt event requires turn_id and prompt payload")
+		}
+	}
 	return nil
 }
 
@@ -305,7 +315,7 @@ func marshalEvent(event Event) ([]byte, error) {
 
 func defaultTimeout(eventName EventName) time.Duration {
 	switch eventName {
-	case SessionEnd:
+	case SessionEnd, TurnEnd:
 		return 1500 * time.Millisecond
 	case PreToolUse:
 		return 5 * time.Second

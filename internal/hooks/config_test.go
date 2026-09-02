@@ -66,6 +66,35 @@ hooks:
 	}
 }
 
+func TestLoadFileAcceptsTurnEventsAndRejectsTheirMatchers(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ConfigFileName)
+	data := []byte(`version: 1
+hooks:
+  TurnStart:
+    - command: /tmp/turn-start
+  UserPromptSubmit:
+    - command: /tmp/prompt
+  TurnEnd:
+    - command: /tmp/turn-end
+    - command: /tmp/invalid
+      matchers: [shell]
+`)
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	config, issues, err := LoadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(config.Hooks[TurnStart]) != 1 || len(config.Hooks[UserPromptSubmit]) != 1 || len(config.Hooks[TurnEnd]) != 1 {
+		t.Fatalf("turn handlers = %#v", config.Hooks)
+	}
+	if len(issues) != 1 {
+		t.Fatalf("issues = %v", issues)
+	}
+}
+
 func TestLoadFileMissingIsEmpty(t *testing.T) {
 	config, issues, err := LoadFile(filepath.Join(t.TempDir(), "missing.yaml"))
 	if err != nil || len(issues) != 0 || config.Version != ConfigVersion || len(config.Hooks) != 0 {

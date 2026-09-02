@@ -324,12 +324,14 @@ type workerRuntime struct {
 	storeMu          sync.Mutex
 	profileMu        sync.Mutex
 	profileEpoch     uint64
+	hookModel        string
 	profileOrderMu   sync.Mutex
 	profileOrderTail <-chan struct{}
 	fatalCh          chan error
 	fatalMu          sync.Mutex
 	fatalErr         error
 	notifyIdle       func(context.Context, workerIdle) error
+	hooks            hookEventDispatcher
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
@@ -538,6 +540,8 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		runtimeWAL: runtimeWAL,
 		fatalCh:    make(chan error, 1),
 		notifyIdle: cfg.NotifyIdle,
+		hooks:      hookDispatcher,
+		hookModel:  profile.Model,
 	}
 	if runtimeWAL != nil {
 		runtimeWAL.onError = func(err error) {
@@ -816,7 +820,7 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 		from := r.agent.ActiveProfileName()
 		commitCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
 		defer cancel()
-		return r.commitLatestProfileSwitch(commitCtx, epoch, commandID, from, target)
+		return r.commitLatestProfileSwitch(commitCtx, epoch, commandID, from, target, profile.Model)
 	}
 	result := r.agent.QueueRuntimeProfile(runtimeProfile)
 	go r.finishProfileSwitch(predecessor, ordered, commandID, target, result, completion)
@@ -847,18 +851,27 @@ func (r *workerRuntime) nextProfileEpoch() (uint64, error) {
 	return r.profileEpoch, nil
 }
 
-func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uint64, commandID string, from string, target string) error {
+func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uint64, commandID string, from string, target string, model string) error {
 	r.profileMu.Lock()
 	defer r.profileMu.Unlock()
 	if r.profileEpoch != epoch {
 		return agent.ErrRuntimeProfileSuperseded
 	}
 	err := r.commitProfileSwitch(ctx, commandID, from, target)
+	if err == nil {
+		r.hookModel = model
+	}
 	var uncertain *profileStateUncertainError
 	if errors.As(err, &uncertain) {
 		r.fail(uncertain)
 	}
 	return err
+}
+
+func (r *workerRuntime) turnHookModel() string {
+	r.profileMu.Lock()
+	defer r.profileMu.Unlock()
+	return r.hookModel
 }
 
 func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered chan struct{}, commandID string, target string, result <-chan error, completion chan<- error) {
@@ -1051,6 +1064,7 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandR
 		}
 		return err
 	}
+	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, currentTurnID, payload.Text)
 	snapshot := r.agent.Snapshot()
 	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
 		if err := r.beginRuntimeWAL(ctx); err != nil {
@@ -1098,16 +1112,27 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		r.finishTurn()
 		return fmt.Errorf("begin runtime WAL: %w", err)
 	}
+	model := r.turnHookModel()
+	usageBefore := r.agent.Snapshot().CumulativeUsage
+	dispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
+	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
 	go func() {
-		err := r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
-		if err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, zotigotransport.ErrTransportClosed) {
-			_ = r.display.Fail(context.Background(), err)
+		runErr := r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
+		if runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, zotigotransport.ErrTransportClosed) {
+			_ = r.display.Fail(context.Background(), runErr)
 		}
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
 		snapshot := r.snapshotAfterTurn(turnID)
 		saveErr := r.saveSnapshot(context.Background(), snapshot)
 		if saveErr != nil {
 			r.fail(fmt.Errorf("persist terminal turn state: %w", saveErr))
+		} else {
+			status, terminal := r.display.TerminalStatus(turnID)
+			if !terminal {
+				r.fail(fmt.Errorf("terminal display state missing for turn %s", turnID))
+			} else {
+				dispatchTurnEndHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, status, model, turnUsageDelta(usageBefore, snapshot.CumulativeUsage))
+			}
 		}
 		sequence := r.turnSequence()
 		r.finishTurn()

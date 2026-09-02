@@ -123,7 +123,7 @@ func decodeHandler(eventName EventName, node yaml.Node) (Handler, error) {
 	if raw.TimeoutMS != nil && *raw.TimeoutMS <= 0 {
 		return Handler{}, fmt.Errorf("timeout_ms must be greater than zero")
 	}
-	if (eventName == SessionStart || eventName == SessionEnd) && len(raw.Matchers) > 0 {
+	if eventName != PreToolUse && eventName != PostToolUse && len(raw.Matchers) > 0 {
 		return Handler{}, fmt.Errorf("matchers are only valid for tool events")
 	}
 	if eventName == PreToolUse && raw.Async != nil && *raw.Async {

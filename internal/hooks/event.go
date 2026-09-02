@@ -11,16 +11,19 @@ import (
 type EventName string
 
 const (
-	SessionStart EventName = "SessionStart"
-	SessionEnd   EventName = "SessionEnd"
-	PreToolUse   EventName = "PreToolUse"
-	PostToolUse  EventName = "PostToolUse"
+	SessionStart     EventName = "SessionStart"
+	SessionEnd       EventName = "SessionEnd"
+	TurnStart        EventName = "TurnStart"
+	UserPromptSubmit EventName = "UserPromptSubmit"
+	TurnEnd          EventName = "TurnEnd"
+	PreToolUse       EventName = "PreToolUse"
+	PostToolUse      EventName = "PostToolUse"
 )
 
 func ParseEventName(value string) (EventName, bool) {
 	name := EventName(strings.TrimSpace(value))
 	switch name {
-	case SessionStart, SessionEnd, PreToolUse, PostToolUse:
+	case SessionStart, SessionEnd, TurnStart, UserPromptSubmit, TurnEnd, PreToolUse, PostToolUse:
 		return name, true
 	default:
 		return "", false
@@ -37,6 +40,8 @@ type Event struct {
 	Agent         string          `json:"agent"`
 	CWD           string          `json:"cwd"`
 	Session       *SessionPayload `json:"session,omitempty"`
+	Turn          *TurnPayload    `json:"turn,omitempty"`
+	Prompt        *PromptPayload  `json:"prompt,omitempty"`
 	Tool          *ToolPayload    `json:"tool,omitempty"`
 }
 
@@ -54,6 +59,17 @@ type UsagePayload struct {
 	TotalTokens              int `json:"total_tokens"`
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens,omitempty"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens,omitempty"`
+}
+
+type TurnPayload struct {
+	Status string `json:"status,omitempty"`
+	// Model is the model selected when the turn started.
+	Model string        `json:"model,omitempty"`
+	Usage *UsagePayload `json:"usage,omitempty"`
+}
+
+type PromptPayload struct {
+	Text string `json:"text"`
 }
 
 type ToolPayload struct {
