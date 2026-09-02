@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,64 @@ func TestHostCannotRestartAfterClose(t *testing.T) {
 	}
 	if _, _, err := host.Ensure(context.Background()); err == nil || !strings.Contains(err.Error(), "closed") {
 		t.Fatalf("Ensure after Close error = %v", err)
+	}
+}
+
+func TestDiscoverUsesConfiguredBinary(t *testing.T) {
+	binaryPath := filepath.Join(t.TempDir(), "codex")
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\necho codex-test-version\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexBinaryEnv, binaryPath)
+	t.Setenv("PATH", "")
+
+	discoveredPath, version, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discoveredPath != binaryPath || version != "codex-test-version" {
+		t.Fatalf("Discover() = path:%q version:%q", discoveredPath, version)
+	}
+}
+
+func TestDiscoverUsesChatGPTAppBinaryOutsidePATH(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("ChatGPT.app discovery is macOS-specific")
+	}
+	home := t.TempDir()
+	binaryPath := filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(binaryPath, []byte("#!/bin/sh\necho codex-app-version\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexBinaryEnv, "")
+	t.Setenv("PATH", "")
+	t.Setenv("HOME", home)
+
+	discoveredPath, version, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discoveredPath != binaryPath || version != "codex-app-version" {
+		t.Fatalf("Discover() = path:%q version:%q", discoveredPath, version)
+	}
+}
+
+func TestFirstExecutableSkipsNonExecutableCandidate(t *testing.T) {
+	dir := t.TempDir()
+	nonExecutable := filepath.Join(dir, "non-executable")
+	if err := os.WriteFile(nonExecutable, []byte("not executable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(dir, "executable")
+	if err := os.WriteFile(executable, []byte("#!/bin/sh\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := firstExecutable(nonExecutable, executable); got != executable {
+		t.Fatalf("firstExecutable() = %q, want %q", got, executable)
 	}
 }
 
