@@ -47,7 +47,11 @@ func (l *Lease) Release() (err error) {
 	if l == nil {
 		return nil
 	}
-	l.once.Do(func() { err = l.release() })
+	l.once.Do(func() {
+		if l.release != nil {
+			err = l.release()
+		}
+	})
 	return err
 }
 

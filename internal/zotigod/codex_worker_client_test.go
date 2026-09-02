@@ -178,6 +178,52 @@ func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing
 	}
 }
 
+func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-steering", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rpc := &codexWorkerRPC{}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-steering"}},
+		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
+	}
+	command := commandResponse{
+		ID: "steering-1", Type: sessionCommandSteering, CreatedAt: now,
+		Steering: &steeringCommandPayload{Text: "use lite_downgrade", TurnID: "turn-1"},
+	}
+	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-steering")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("display items = %#v", items)
+	}
+	item := items[0]
+	if item.ID != command.ID || item.Type != zotigosession.DisplayItemSteeringMessage || item.Role != string(protocol.RoleUser) {
+		t.Fatalf("steering item = %#v", item)
+	}
+	if item.Turn == nil || item.Turn.ID != "turn-1" || len(item.Content) != 1 || item.Content[0].Text != "use lite_downgrade" {
+		t.Fatalf("steering content = %#v", item)
+	}
+	if item.Command == nil || item.Command.Type != sessionCommandSteering || item.Command.Text != "use lite_downgrade" {
+		t.Fatalf("steering command = %#v", item.Command)
+	}
+	if got := fmt.Sprint(rpc.methods); got != "[turn/steer]" {
+		t.Fatalf("methods = %s", got)
+	}
+}
+
 func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {

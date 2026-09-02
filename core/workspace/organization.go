@@ -39,9 +39,9 @@ func (s *Store) AssignSession(ctx context.Context, sessionID string, workspaceID
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO session_organization(
 			session_id, project_id, workspace_id, workspace_position,
-			created_at, updated_at
-		) VALUES(?, ?, ?, ?, ?, ?)
-	`, sessionID, projectID, workspaceID, position, unixMillis(now), unixMillis(now)); err != nil {
+			created_at, activity_at, updated_at
+		) VALUES(?, ?, ?, ?, ?, ?, ?)
+	`, sessionID, projectID, workspaceID, position, unixMillis(now), unixMillis(now), unixMillis(now)); err != nil {
 		if isConstraintError(err) {
 			return SessionOrganization{}, fmt.Errorf("%w: session is already organized", ErrConflict)
 		}
@@ -61,9 +61,9 @@ func (s *Store) EnsureSessionOrganization(ctx context.Context, sessionID string)
 	}
 	now := time.Now().UTC()
 	if _, err := s.db.ExecContext(ctx, `
-		INSERT INTO session_organization(session_id, created_at, updated_at)
-		VALUES(?, ?, ?) ON CONFLICT(session_id) DO NOTHING
-	`, sessionID, unixMillis(now), unixMillis(now)); err != nil {
+		INSERT INTO session_organization(session_id, created_at, activity_at, updated_at)
+		VALUES(?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING
+	`, sessionID, unixMillis(now), unixMillis(now), unixMillis(now)); err != nil {
 		return SessionOrganization{}, err
 	}
 	return s.GetSessionOrganization(ctx, sessionID)
@@ -121,9 +121,6 @@ func (s *Store) SetSessionPinned(ctx context.Context, sessionID string, pinned b
 }
 
 func (s *Store) SetSessionPosition(ctx context.Context, sessionID string, position int64) (SessionOrganization, error) {
-	if position < 0 {
-		return SessionOrganization{}, ErrInvalid
-	}
 	organization, err := s.GetSessionOrganization(ctx, sessionID)
 	if err != nil {
 		return SessionOrganization{}, err
@@ -132,6 +129,61 @@ func (s *Store) SetSessionPosition(ctx context.Context, sessionID string, positi
 		return SessionOrganization{}, fmt.Errorf("%w: unassigned session has no workspace position", ErrConflict)
 	}
 	return s.updateOrganization(ctx, sessionID, `workspace_position = ?`, position)
+}
+
+func (s *Store) RecordSessionActivity(ctx context.Context, sessionID string, activityAt time.Time) (SessionOrganization, error) {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return SessionOrganization{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var position sql.NullInt64
+	var previousActivity int64
+	if err := tx.QueryRowContext(ctx, `
+		SELECT workspace_position, activity_at FROM session_organization WHERE session_id = ?
+	`, sessionID).Scan(&position, &previousActivity); err != nil {
+		if err == sql.ErrNoRows {
+			return SessionOrganization{}, ErrNotFound
+		}
+		return SessionOrganization{}, err
+	}
+	activityMillis := unixMillis(activityAt)
+	if activityMillis <= previousActivity {
+		if err := tx.Commit(); err != nil {
+			return SessionOrganization{}, err
+		}
+		return s.GetSessionOrganization(ctx, sessionID)
+	}
+	if position.Valid {
+		// Positions sort ascending, so deriving the active position from its
+		// timestamp makes ordering independent of refresh/caller order.
+		position.Int64 = -activityMillis
+	}
+	result, err := tx.ExecContext(ctx, `
+		UPDATE session_organization
+		SET workspace_position = ?, revision = revision + 1,
+			activity_at = ?, updated_at = MAX(updated_at, ?)
+		WHERE session_id = ?
+	`, nullableInt64(position), activityMillis, activityMillis, sessionID)
+	if err != nil {
+		return SessionOrganization{}, err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return SessionOrganization{}, err
+	} else if count == 0 {
+		return SessionOrganization{}, ErrNotFound
+	}
+	if err := tx.Commit(); err != nil {
+		return SessionOrganization{}, err
+	}
+	return s.GetSessionOrganization(ctx, sessionID)
+}
+
+func nullableInt64(value sql.NullInt64) any {
+	if !value.Valid {
+		return nil
+	}
+	return value.Int64
 }
 
 func (s *Store) SetSessionArchived(ctx context.Context, sessionID string, archived bool) (SessionOrganization, error) {
@@ -194,7 +246,7 @@ func (s *Store) updateOrganization(ctx context.Context, sessionID string, assign
 const organizationSelect = `
 	SELECT session_id, project_id, workspace_id, title, pinned_at,
 	       pinned_position, workspace_position, self_archived_at,
-	       workspace_archived_at, revision, created_at, updated_at
+	       workspace_archived_at, revision, created_at, activity_at, updated_at
 	FROM session_organization`
 
 func scanOrganization(row scanner) (SessionOrganization, error) {
@@ -202,10 +254,10 @@ func scanOrganization(row scanner) (SessionOrganization, error) {
 	var projectID, workspaceID, title sql.NullString
 	var pinnedAt, pinnedPosition, workspacePosition sql.NullInt64
 	var selfArchivedAt, workspaceArchivedAt sql.NullInt64
-	var createdAt, updatedAt int64
+	var createdAt, activityAt, updatedAt int64
 	if err := row.Scan(&organization.SessionID, &projectID, &workspaceID, &title,
 		&pinnedAt, &pinnedPosition, &workspacePosition, &selfArchivedAt,
-		&workspaceArchivedAt, &organization.Revision, &createdAt, &updatedAt); err != nil {
+		&workspaceArchivedAt, &organization.Revision, &createdAt, &activityAt, &updatedAt); err != nil {
 		return SessionOrganization{}, scanError("session organization", err)
 	}
 	organization.ProjectID = nullStringPointer(projectID)
@@ -217,6 +269,7 @@ func scanOrganization(row scanner) (SessionOrganization, error) {
 	organization.SelfArchivedAt = nullableTime(selfArchivedAt)
 	organization.WorkspaceArchivedAt = nullableTime(workspaceArchivedAt)
 	organization.CreatedAt = fromUnixMillis(createdAt)
+	organization.ActivityAt = fromUnixMillis(activityAt)
 	organization.UpdatedAt = fromUnixMillis(updatedAt)
 	return organization, nil
 }

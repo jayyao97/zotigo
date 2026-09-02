@@ -30,6 +30,16 @@ type sessionPositionRequest struct {
 	Position int64 `json:"position"`
 }
 
+type sessionSyncDiagnostic struct {
+	Code    string `json:"code"`
+	Message string `json:"message"`
+}
+
+type catalogSessionListResponse struct {
+	Sessions    []sessionProjection     `json:"sessions"`
+	Diagnostics []sessionSyncDiagnostic `json:"diagnostics,omitempty"`
+}
+
 func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) {
 	if !h.requireCatalog(w) {
 		return
@@ -39,6 +49,7 @@ func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	diagnostics := h.codexSyncDiagnostics(r.Context(), r.URL.Query().Get("sync_codex") == "true")
 	projections, err := h.listSessionProjections(r.Context())
 	if err != nil {
 		h.writeCatalogError(w, err)
@@ -65,7 +76,20 @@ func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) 
 		}
 		filtered = append(filtered, projection)
 	}
-	writeAPIJSON(w, http.StatusOK, map[string][]sessionProjection{"sessions": filtered})
+	writeAPIJSON(w, http.StatusOK, catalogSessionListResponse{Sessions: filtered, Diagnostics: diagnostics})
+}
+
+func (h *handler) codexSyncDiagnostics(ctx context.Context, requested bool) []sessionSyncDiagnostic {
+	if !requested || h.codexSync == nil {
+		return nil
+	}
+	if err := h.codexSync.Sync(ctx); err != nil {
+		if h.logger != nil {
+			h.logger.Printf("Codex session sync failed: %v", err)
+		}
+		return []sessionSyncDiagnostic{{Code: "codex_sync_failed", Message: "Codex history refresh failed"}}
+	}
+	return nil
 }
 
 func (h *handler) handleCatalogSession(w http.ResponseWriter, r *http.Request, id string) {
@@ -432,13 +456,14 @@ func (h *handler) ensureSessionActivatable(ctx context.Context, id string) (stri
 }
 
 func projectionUpdatedAt(projection sessionProjection) time.Time {
+	updatedAt := time.Time{}
 	if projection.Organization != nil {
-		return projection.Organization.UpdatedAt
+		updatedAt = projection.Organization.UpdatedAt
 	}
-	if projection.Runtime != nil {
-		return projection.Runtime.CreatedAt
+	if projection.Runtime != nil && projection.Runtime.UpdatedAt.After(updatedAt) {
+		updatedAt = projection.Runtime.UpdatedAt
 	}
-	return time.Time{}
+	return updatedAt
 }
 
 func projectionID(projection sessionProjection) string {

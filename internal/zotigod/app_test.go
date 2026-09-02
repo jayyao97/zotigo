@@ -1064,6 +1064,9 @@ func TestSessionsCreateAndList(t *testing.T) {
 	if created.CreatedAt.IsZero() {
 		t.Fatal("expected created_at")
 	}
+	if !created.UpdatedAt.Equal(created.CreatedAt) {
+		t.Fatalf("updated_at = %s, want created_at %s", created.UpdatedAt, created.CreatedAt)
+	}
 	if created.StartedAt != nil {
 		t.Fatalf("expected no started_at, got %v", created.StartedAt)
 	}

@@ -10,18 +10,20 @@ import (
 
 // Metadata holds the summary info for listing/indexing.
 type Metadata struct {
-	ID               string               `json:"id"`
-	WorkingDirectory string               `json:"working_directory"` // The project path this session belongs to
-	Agent            string               `json:"agent,omitempty"`
-	ProfileName      string               `json:"profile_name,omitempty"`
-	Model            string               `json:"model,omitempty"`
-	ReasoningEffort  string               `json:"reasoning_effort,omitempty"`
-	ConversationID   string               `json:"conversation_id,omitempty"`
-	BackendVersion   string               `json:"backend_version,omitempty"`
-	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy,omitempty"`
-	LastPrompt       string               `json:"last_prompt"` // Preview of the last user interaction
-	CreatedAt        time.Time            `json:"created_at"`
-	UpdatedAt        time.Time            `json:"updated_at"`
+	ID                 string               `json:"id"`
+	WorkingDirectory   string               `json:"working_directory"` // The project path this session belongs to
+	Agent              string               `json:"agent,omitempty"`
+	ProfileName        string               `json:"profile_name,omitempty"`
+	Model              string               `json:"model,omitempty"`
+	ReasoningEffort    string               `json:"reasoning_effort,omitempty"`
+	ConversationID     string               `json:"conversation_id,omitempty"`
+	BackendVersion     string               `json:"backend_version,omitempty"`
+	BackendUpdatedAt   time.Time            `json:"backend_updated_at,omitempty"`
+	BackendSyncVersion int                  `json:"backend_sync_version,omitempty"`
+	ApprovalPolicy     agent.ApprovalPolicy `json:"approval_policy,omitempty"`
+	LastPrompt         string               `json:"last_prompt"` // Preview of the last user interaction
+	CreatedAt          time.Time            `json:"created_at"`
+	UpdatedAt          time.Time            `json:"updated_at"`
 }
 
 // Session represents the full state on disk.

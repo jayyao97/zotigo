@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -32,6 +33,14 @@ func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	}
 	if organization.WorkspaceID == nil || *organization.WorkspaceID != workspace.ID {
 		t.Fatalf("organization = %+v", organization)
+	}
+	organization, err = catalog.RecordSessionActivity(context.Background(), session.ID, time.Now().UTC().Add(time.Minute))
+	if err != nil || organization.WorkspacePosition == nil || *organization.WorkspacePosition >= 0 {
+		t.Fatalf("activity organization = %+v, err=%v", organization, err)
+	}
+	position := requestCatalog(t, handler, http.MethodPut, "/sessions/"+session.ID+"/position", fmt.Sprintf(`{"position":%d}`, *organization.WorkspacePosition+1))
+	if position.Code != http.StatusOK {
+		t.Fatalf("set signed position status = %d: %s", position.Code, position.Body.String())
 	}
 
 	conflict := requestCatalog(t, handler, http.MethodPost, "/sessions",

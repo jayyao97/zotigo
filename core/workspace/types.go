@@ -179,6 +179,7 @@ type SessionOrganization struct {
 	WorkspaceArchivedAt *time.Time `json:"workspace_archived_at"`
 	Revision            int64      `json:"revision"`
 	CreatedAt           time.Time  `json:"created_at"`
+	ActivityAt          time.Time  `json:"activity_at"`
 	UpdatedAt           time.Time  `json:"updated_at"`
 }
 

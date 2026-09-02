@@ -134,8 +134,9 @@ func (s *FileStore) Put(ctx context.Context, sess *Session) error {
 // UpdateProfile updates only profile metadata and restores every persisted view
 // if a derived index or legacy registry write fails.
 func (s *FileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
-	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+	return s.updateMetadata(ctx, id, func(sess *Session) metadataUpdatePlan {
 		sess.ProfileName = profileName
+		sess.UpdatedAt = updatedAt
 		return metadataUpdatePlan{restoreAuthoritativeOnFailure: true}
 	})
 }
@@ -143,9 +144,10 @@ func (s *FileStore) UpdateProfile(ctx context.Context, id string, profileName st
 // UpdateApprovalPolicy updates approval policy metadata in a fail-safe order so
 // interrupted writes can only make derived views overestimate runtime access.
 func (s *FileStore) UpdateApprovalPolicy(ctx context.Context, id string, policy agent.ApprovalPolicy, updatedAt time.Time) error {
-	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+	return s.updateMetadata(ctx, id, func(sess *Session) metadataUpdatePlan {
 		loweringPermissions := sess.ApprovalPolicy == agent.ApprovalPolicyBypass && policy == agent.ApprovalPolicyAuto
 		sess.ApprovalPolicy = policy
+		sess.UpdatedAt = updatedAt
 		// During upgrades, publish the more-dangerous derived view before the
 		// authoritative runtime value. During downgrades, do the reverse. A crash
 		// can therefore only make clients overestimate the effective permission.
@@ -154,9 +156,25 @@ func (s *FileStore) UpdateApprovalPolicy(ctx context.Context, id string, policy 
 }
 
 func (s *FileStore) UpdateCodexSettings(ctx context.Context, id string, model string, reasoningEffort string, updatedAt time.Time) error {
-	return s.updateMetadata(ctx, id, updatedAt, func(sess *Session) metadataUpdatePlan {
+	return s.updateMetadata(ctx, id, func(sess *Session) metadataUpdatePlan {
 		sess.Model = model
 		sess.ReasoningEffort = reasoningEffort
+		sess.UpdatedAt = updatedAt
+		return metadataUpdatePlan{restoreAuthoritativeOnFailure: true}
+	})
+}
+
+func (s *FileStore) UpdateBackendActivity(ctx context.Context, id string, updatedAt time.Time, syncVersion int) error {
+	return s.updateMetadata(ctx, id, func(sess *Session) metadataUpdatePlan {
+		if updatedAt.After(sess.BackendUpdatedAt) {
+			sess.BackendUpdatedAt = updatedAt
+		}
+		if syncVersion > sess.BackendSyncVersion {
+			sess.BackendSyncVersion = syncVersion
+		}
+		if updatedAt.After(sess.UpdatedAt) {
+			sess.UpdatedAt = updatedAt
+		}
 		return metadataUpdatePlan{restoreAuthoritativeOnFailure: true}
 	})
 }
@@ -225,7 +243,7 @@ type metadataUpdatePlan struct {
 	restoreAuthoritativeOnFailure bool
 }
 
-func (s *FileStore) updateMetadata(ctx context.Context, id string, updatedAt time.Time, update func(*Session) metadataUpdatePlan) error {
+func (s *FileStore) updateMetadata(ctx context.Context, id string, update func(*Session) metadataUpdatePlan) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -247,7 +265,6 @@ func (s *FileStore) updateMetadata(ctx context.Context, id string, updatedAt tim
 	}
 	updatedSession := *previousSession
 	plan := update(&updatedSession)
-	updatedSession.UpdatedAt = updatedAt
 	data, err := json.MarshalIndent(&updatedSession, "", "  ")
 	if err != nil {
 		return fmt.Errorf("marshal updated session: %w", err)
