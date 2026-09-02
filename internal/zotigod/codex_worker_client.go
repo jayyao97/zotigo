@@ -227,6 +227,7 @@ type codexWorkerRuntime struct {
 
 type codexThreadItem struct {
 	ID               string               `json:"id"`
+	ClientID         *string              `json:"clientId,omitempty"`
 	Type             string               `json:"type"`
 	Text             string               `json:"text,omitempty"`
 	Summary          []string             `json:"summary,omitempty"`
@@ -380,8 +381,21 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		}, &response); err != nil {
 			return err
 		}
+		images := make([]messageImage, 0, len(command.Steering.Images))
+		for _, image := range command.Steering.Images {
+			images = append(images, messageImage{
+				MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath,
+			})
+		}
+		item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
+		item.ID = command.ID
+		item.CreatedAt = command.CreatedAt
+		item.Turn = &zotigosession.DisplayTurn{ID: r.activeTurnID}
+		item.Command = &zotigosession.DisplayCommand{
+			Type: sessionCommandSteering, Text: command.Steering.Text, Images: displayCommandImages(images), TurnID: r.activeTurnID,
+		}
 		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Steering.Text)
-		return nil
+		return r.append(item)
 	default:
 		return fmt.Errorf("codex runtime does not support command %q", command.Type)
 	}

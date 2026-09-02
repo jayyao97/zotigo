@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 5
+const schemaVersion = 6
 
 type Store struct {
 	db          *sql.DB
@@ -203,6 +203,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			workspace_archived_at INTEGER,
 			revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
 			created_at INTEGER NOT NULL,
+			activity_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			CHECK((project_id IS NULL) = (workspace_id IS NULL)),
 			CHECK((pinned_at IS NULL) = (pinned_position IS NULL))
@@ -348,6 +349,25 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 		version = 5
+	}
+	if version == 5 {
+		var hasActivityAt bool
+		if err := tx.QueryRowContext(ctx, `
+			SELECT EXISTS(
+				SELECT 1 FROM pragma_table_info('session_organization') WHERE name = 'activity_at'
+			)
+		`).Scan(&hasActivityAt); err != nil {
+			return fmt.Errorf("inspect session activity timestamp schema: %w", err)
+		}
+		if !hasActivityAt {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE session_organization ADD COLUMN activity_at INTEGER NOT NULL DEFAULT 0`); err != nil {
+				return fmt.Errorf("migrate session activity timestamp: %w", err)
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE session_organization SET activity_at = updated_at WHERE activity_at = 0`); err != nil {
+			return fmt.Errorf("backfill session activity timestamp: %w", err)
+		}
+		version = 6
 	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)

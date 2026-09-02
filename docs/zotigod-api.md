@@ -453,6 +453,26 @@ snapshot or display log. Live `working` and `active_tool` values come from the
 in-memory runtime registry. Clients that need history-derived context usage or
 other detail for the selected session should use `GET /sessions/{id}`.
 
+Desktop may request an on-demand best-effort refresh of externally changed
+Codex histories with `GET /sessions?sync_codex=true` or the catalog projection
+`GET /catalog/sessions?sync_codex=true`. The daemon reads the
+saved Codex conversation IDs, merges completed turns into each session display
+log, and returns the normal session list. A refresh failure does not hide the
+list; the response `data` includes a `diagnostics` array such as:
+
+```json
+{
+  "sessions": [],
+  "diagnostics": [
+    {"code": "codex_sync_failed", "message": "Codex history refresh failed"}
+  ]
+}
+```
+
+Successful checks are throttled briefly. Failed checks are not throttled, so a
+later request can retry. The daemon never starts a session worker to perform
+this refresh and skips sessions that are active or locked by another process.
+
 `live: false` means desktop may render history but should not show turn-scoped
 controls as usable. Sending a new message or explicitly starting the session can
 make it live again. Stored-only sessions are never reported as `running`;

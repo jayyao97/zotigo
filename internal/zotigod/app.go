@@ -58,6 +58,7 @@ type Session struct {
 	ReasoningEffort  string               `json:"reasoning_effort,omitempty"`
 	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy"`
 	CreatedAt        time.Time            `json:"created_at"`
+	UpdatedAt        time.Time            `json:"updated_at"`
 	StartedAt        *time.Time           `json:"started_at,omitempty"`
 	EndedAt          *time.Time           `json:"ended_at,omitempty"`
 	Error            string               `json:"error,omitempty"`
@@ -131,6 +132,9 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 	session.Live = true
 	if session.CreatedAt.IsZero() {
 		session.CreatedAt = time.Now().UTC()
+	}
+	if session.UpdatedAt.IsZero() {
+		session.UpdatedAt = session.CreatedAt
 	}
 	session.seq = r.nextID
 	r.sessions[session.ID] = session
@@ -399,6 +403,7 @@ type handler struct {
 	events               *displayEventBroker
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
+	codexSync            *codexSessionSyncer
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 	skillsMu             sync.Mutex
@@ -551,6 +556,7 @@ func Run(args []string) int {
 		Handler: newDefaultHandler(handlerOptions{
 			launcher:        launcher,
 			runtimes:        runtimes,
+			codexHost:       codexHost,
 			publicAuthToken: publicAuthToken,
 			workerAuthToken: workerAuthToken,
 			logger:          logger,
@@ -613,6 +619,7 @@ type handlerOptions struct {
 	workerAuthToken      string
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
+	codexHost            codexapp.HostProvider
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 }
@@ -736,6 +743,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		catalogErr:           options.catalogErr,
 		logger:               options.logger,
 		hooks:                options.hooks,
+	}
+	if options.codexHost != nil && options.store != nil {
+		handler.codexSync = newCodexSessionSyncer(options.codexHost, options.store, items, options.catalog, registry, options.sessionOps)
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
 	handler.workers.SetMessageHandler(func(sessionID string, generation string, msg workerMessage) {
@@ -893,12 +903,16 @@ func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
+		diagnostics := h.codexSyncDiagnostics(r.Context(), r.URL.Query().Get("sync_codex") == "true")
 		sessions, err := h.listSessions(r.Context())
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("list sessions: %v", err))
 			return
 		}
-		writeAPIJSON(w, http.StatusOK, map[string][]Session{"sessions": sessions})
+		writeAPIJSON(w, http.StatusOK, struct {
+			Sessions    []Session               `json:"sessions"`
+			Diagnostics []sessionSyncDiagnostic `json:"diagnostics,omitempty"`
+		}{Sessions: sessions, Diagnostics: diagnostics})
 	case http.MethodPost:
 		var req createSessionRequest
 		if err := readOptionalJSON(r, &req); err != nil {
@@ -1107,6 +1121,7 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 			sessions[idx].Model = meta.Model
 			sessions[idx].ReasoningEffort = meta.ReasoningEffort
 			sessions[idx].ApprovalPolicy = meta.ApprovalPolicy
+			sessions[idx].UpdatedAt = meta.UpdatedAt
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -1138,6 +1153,7 @@ func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live b
 		ReasoningEffort:  meta.ReasoningEffort,
 		ApprovalPolicy:   approvalPolicy,
 		CreatedAt:        meta.CreatedAt,
+		UpdatedAt:        meta.UpdatedAt,
 	}
 }
 
