@@ -127,7 +127,7 @@ func ToolCallFromContext(ctx context.Context) (ToolCallContext, bool) {
 // Middleware is a tool-call wrapper in the HTTP-handler-middleware
 // style: given the next link, it returns a new link that does whatever
 // wrapping work it likes. To short-circuit (rate limit, cache hit,
-// dry-run, tracker refusal), simply don't call next. The returned
+// dry-run, permission refusal), simply don't call next. The returned
 // (result, err) tuple is what outer middleware and ultimately the
 // agent see.
 type Middleware func(next Next) Next

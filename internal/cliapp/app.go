@@ -24,7 +24,6 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/internal/wiring"
 )
@@ -164,8 +163,6 @@ func Run(args []string) int {
 	home, _ := os.UserHomeDir()
 	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
 
-	readTracker := tools.NewReadTracker(cwd)
-
 	sm, err := wiring.NewSkillManager(cwd)
 	if err != nil {
 		fmt.Printf("Warning: failed to load skills: %v\n", err)
@@ -213,14 +210,9 @@ func Run(args []string) int {
 		ApprovalPolicy:     approvalPolicy,
 		TranscriptDir:      transcriptDir,
 		Observer:           observer,
-		// ToolSpan goes outermost so it observes every tool call,
-		// including ones that ReadTracker short-circuits with a
-		// "file changed on disk" rejection — without seeing those,
-		// the trace tree skips the rejected call and the next-gen
-		// "retry after error" looks unmotivated.
+		// ToolSpan goes outermost so it observes every tool call.
 		Middleware: []agent.Middleware{
 			middleware.ToolSpan(observer),
-			middleware.ReadTracker(readTracker),
 		},
 		ConfigureClassifier: true,
 	})

@@ -24,7 +24,6 @@ import (
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/lsp"
-	"github.com/jayyao97/zotigo/core/middleware"
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
@@ -34,7 +33,6 @@ import (
 	"github.com/jayyao97/zotigo/core/runner"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
-	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/hooks"
@@ -383,7 +381,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "executor", stepStarted)
 
-	readTracker := tools.NewReadTracker(cwd)
 	stepStarted = time.Now()
 	skills, err := wiring.NewSkillManager(cwd)
 	if err != nil {
@@ -474,7 +471,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		Observer:            observer,
 		ConfigureClassifier: true,
 		Middleware: []agent.Middleware{
-			middleware.ReadTracker(readTracker),
 			hooks.ToolMiddleware(hookDispatcher, hooks.ToolContext{
 				SessionID: cfg.SessionID,
 				Agent:     "zotigo",

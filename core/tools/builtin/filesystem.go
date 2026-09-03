@@ -121,7 +121,7 @@ type WriteFileTool struct{}
 
 func (t *WriteFileTool) Name() string { return "write_file" }
 func (t *WriteFileTool) Description() string {
-	return "Write content to a file (overwrites existing). When the file already exists you must call read_file first so the overwrite is based on the real contents, not a guess."
+	return "Write content to a file (overwrites existing). When the file already exists, prefer reading it first so the overwrite is based on the real contents, not a guess."
 }
 
 func (t *WriteFileTool) Schema() any {

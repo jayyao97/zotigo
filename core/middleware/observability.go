@@ -17,7 +17,7 @@ import (
 // actually get emitted.
 //
 // IMPORTANT: register this OUTERMOST in the middleware chain (i.e.
-// before any short-circuiting middleware like ReadTracker). Inner
+// before any short-circuiting middleware). Inner
 // middleware that returns (nil, err) without calling next would
 // otherwise bypass StartTool/EndTool entirely, leaving the trace
 // with a "phantom" tool call the model retried after but no

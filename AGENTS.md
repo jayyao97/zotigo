@@ -45,7 +45,7 @@ Inside `core/`:
 - `agent/` — conversation loop, tool dispatch, safety classifier, approval flow; `agent/prompt/` builds system prompts and reminders
 - `providers/{openai,anthropic,gemini}/` — LLM adapters; openai has `chat_provider.go` (Chat Completions) and `response_provider.go` (Responses API for gpt‑5 / o‑series)
 - `tools/` — `tools.Tool` interface + `builtin/` implementations
-- `middleware/` — agent‑level tool‑call middleware (read tracker, etc.)
+- `middleware/` — agent‑level tool‑call middleware (observability, etc.)
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
 - `transport/` — IO abstraction (channel, ACP, stdio)
 - `executor/` — filesystem + shell abstraction; `LocalExecutor` (and ACP `RemoteExecutor` lives in `core/acp/`)
@@ -123,7 +123,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - After touching `core/agent/...` or `core/runner/...`, run **both**: `go test ./core/agent/... ./core/runner/... -count=1`.
 - After touching a provider, run that provider's package + `./tests/e2e/... -tags=e2e` if you have a config (see `E2E_TESTING.md`). E2E is opt‑in; don't add new tests that require live API keys to the default test path.
 - After touching a tool or middleware, run `go test ./core/tools/... ./core/middleware/... -count=1`.
-- Prefer a `LocalExecutor` against `t.TempDir()` over mocking the executor — the read‑tracker middleware needs real `Stat` results.
+- Prefer a `LocalExecutor` against `t.TempDir()` over mocking the executor.
 - The full preflight is `make check`.
 
 ## Commit and PR Conventions

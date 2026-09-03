@@ -13,7 +13,7 @@ and this doc is the short explanation of which one to reach for.
 | **Signature** | `func(next Next) Next` — chain wrapper | `func(payload)` — one-shot callback |
 | **Control flow** | Can short-circuit, rewrite args, change results | Observational only; return values ignored, panics swallowed |
 | **Registration** | `agent.WithMiddleware(mw)` on the agent | `runner.WithListeners(ls)` on the runner |
-| **Typical use** | read-before-edit check, safety gates, tool-arg rewriting, caching | session persistence, TUI updates, logging, metrics |
+| **Typical use** | path validation, safety gates, tool-arg rewriting, caching | session persistence, TUI updates, logging, metrics |
 
 ## When to use Middleware
 
@@ -23,14 +23,18 @@ HTTP-handler style (`Next func(ctx, *ToolCall) (any, error)`). Returning
 without calling `next` short-circuits the tool; returning an error
 surfaces to the agent exactly as if the tool itself had failed.
 
-Example — the read-before-edit check in `core/middleware/tracker.go`:
-it intercepts every `edit` / `write_file` call, verifies the agent
-`read_file`'d the target first and that the file hasn't changed on
-disk since, and returns an error (skipping execution entirely) if not.
+Example — blocking write operations outside the working directory:
 
 ```go
 ag, _ := agent.New(profile, exec,
-    agent.WithMiddleware(middleware.ReadTracker(readTracker)),
+    agent.WithMiddleware(func(next agent.Next) agent.Next {
+        return func(ctx context.Context, call *agent.ToolCall) (any, error) {
+            if call.Name == "write_file" && isOutsideWorkDir(call.Arguments) {
+                return nil, fmt.Errorf("refusing write outside working directory")
+            }
+            return next(ctx, call)
+        }
+    }),
 )
 ```
 
