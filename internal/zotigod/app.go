@@ -65,14 +65,17 @@ type Session struct {
 	ErrorCode        string               `json:"error_code,omitempty"`
 	Working          bool                 `json:"working"`
 	ActiveTool       string               `json:"active_tool,omitempty"`
-	ContextUsage     *SessionContextUsage `json:"context_usage,omitempty"`
+	ContextUsage     *SessionContextUsage `json:"context_usage"`
 	seq              uint64
 	activationSource string
 }
 
 type SessionContextUsage struct {
-	Tokens int `json:"tokens"`
-	Window int `json:"window"`
+	Tokens    int       `json:"tokens,omitempty"`
+	Window    int       `json:"window,omitempty"`
+	Status    string    `json:"status"`
+	Source    string    `json:"source,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 var (
@@ -135,6 +138,9 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 	}
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = session.CreatedAt
+	}
+	if session.ContextUsage == nil {
+		session.ContextUsage = unavailableSessionContextUsage()
 	}
 	session.seq = r.nextID
 	r.sessions[session.ID] = session
@@ -1154,6 +1160,7 @@ func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live b
 		ApprovalPolicy:   approvalPolicy,
 		CreatedAt:        meta.CreatedAt,
 		UpdatedAt:        meta.UpdatedAt,
+		ContextUsage:     unavailableSessionContextUsage(),
 	}
 }
 
@@ -1497,6 +1504,7 @@ func (h *handler) sessionWithStoredMetadata(ctx context.Context, session Session
 }
 
 func (h *handler) decorateSession(ctx context.Context, session Session, stored *zotigosession.Session) Session {
+	session.ContextUsage = unavailableSessionContextUsage()
 	items, _, err := h.items.LoadItems(ctx, session.ID)
 	if err == nil {
 		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePaused {
@@ -1507,13 +1515,25 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 			session.ActiveTool = ""
 		}
 		for idx := len(items) - 1; idx >= 0; idx-- {
-			if items[idx].ContextUsage != nil {
-				session.ContextUsage = &SessionContextUsage{Tokens: items[idx].ContextUsage.Tokens, Window: items[idx].ContextUsage.Window}
+			if usage := items[idx].ContextUsage; usage != nil && usage.Tokens > 0 && usage.Window > 0 {
+				status := usage.Status
+				if status == "" {
+					status = "available"
+				}
+				source := usage.Source
+				if source == "" {
+					source = "provider"
+				}
+				updatedAt := usage.UpdatedAt
+				if updatedAt.IsZero() {
+					updatedAt = items[idx].CreatedAt
+				}
+				session.ContextUsage = &SessionContextUsage{Tokens: usage.Tokens, Window: usage.Window, Status: status, Source: source, UpdatedAt: updatedAt}
 				break
 			}
 		}
 	}
-	if stored == nil || zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex || session.ContextUsage != nil {
+	if stored == nil || zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex || session.ContextUsage.Status == "available" {
 		return session
 	}
 	usage, ok := protocol.LastTurnUsage(stored.AgentSnapshot.History)
@@ -1532,8 +1552,27 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	if contextWindow <= 0 {
 		contextWindow = config.DefaultContextWindow
 	}
-	session.ContextUsage = &SessionContextUsage{Tokens: usage.Normalized().TotalTokens, Window: contextWindow}
+	updatedAt := session.UpdatedAt
+	for idx := len(stored.AgentSnapshot.History) - 1; idx >= 0; idx-- {
+		message := stored.AgentSnapshot.History[idx]
+		if message.Role == protocol.RoleAssistant && message.Metadata != nil && message.Metadata.Usage != nil {
+			updatedAt = message.CreatedAt
+			if message.FinishedAt != nil {
+				updatedAt = *message.FinishedAt
+			}
+			break
+		}
+	}
+	inputTokens := usage.TotalInput()
+	if inputTokens <= 0 {
+		return session
+	}
+	session.ContextUsage = &SessionContextUsage{Tokens: inputTokens, Window: contextWindow, Status: "available", Source: "provider", UpdatedAt: updatedAt}
 	return session
+}
+
+func unavailableSessionContextUsage() *SessionContextUsage {
+	return &SessionContextUsage{Status: "unavailable"}
 }
 
 func activeToolName(items []zotigosession.DisplayItem) string {

@@ -245,6 +245,8 @@ type codexThreadItem struct {
 	Tool             string               `json:"tool,omitempty"`
 	Arguments        any                  `json:"arguments,omitempty"`
 	Result           any                  `json:"result,omitempty"`
+	RevisedPrompt    *string              `json:"revisedPrompt,omitempty"`
+	SavedPath        *string              `json:"savedPath,omitempty"`
 	Error            *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
@@ -467,14 +469,16 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 		r.totalUsage = totalUsage
 		r.hasTotalUsage = true
-		if updated.TokenUsage.ModelContextWindow <= 0 {
+		if updated.TokenUsage.ModelContextWindow <= 0 || updated.TokenUsage.Last.InputTokens <= 0 {
 			return nil
 		}
+		now := time.Now().UTC()
 		return r.append(zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemContextUsageUpdated,
 			ContextUsage: &zotigosession.DisplayContextUsage{
-				Tokens: updated.TokenUsage.Last.TotalTokens,
+				Tokens: updated.TokenUsage.Last.InputTokens,
 				Window: updated.TokenUsage.ModelContextWindow,
+				Status: "available", Source: "provider", UpdatedAt: now,
 			},
 		})
 	case "item/agentMessage/delta":
@@ -566,15 +570,39 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 				ID: completed.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeReasoning), Text: text}},
 			})
+		case "imageGeneration":
+			if !codexImageGenerationCompleted(completed.Item) {
+				return nil
+			}
+			item, cleanup, err := codexGeneratedImageDisplayItem(context.Background(), r.store, r.cfg.SessionStoreRoot, r.cfg.SessionID, completed.TurnID, completed.Item, time.Now().UTC())
+			if err != nil {
+				if errors.Is(err, errCodexImageUnavailable) {
+					return r.append(codexUnavailableImageDisplayItem(completed.Item.ID, completed.TurnID, time.Now().UTC()))
+				}
+				return err
+			}
+			if err := r.append(item); err != nil {
+				cleanup()
+				return err
+			}
+			return nil
 		default:
-			result, ok := codexToolResult(completed.Item, r.toolNames[completed.Item.ID])
+			result, ok, err := codexToolResult(completed.Item, r.toolNames[completed.Item.ID])
+			if err != nil {
+				return err
+			}
 			if !ok {
 				return nil
+			}
+			cleanup, err := persistCodexToolResultMedia(context.Background(), r.store, r.cfg.SessionStoreRoot, r.cfg.SessionID, result)
+			if err != nil {
+				return err
 			}
 			if err := r.append(zotigosession.DisplayItem{
 				Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
 			}); err != nil {
+				cleanup()
 				return err
 			}
 			r.dispatchPostToolUse(ctx, completed.Item.ID, result, codexToolResultStatus(completed.Item.Status, result))
@@ -844,12 +872,12 @@ func codexCommandTool(item codexThreadItem) (string, any) {
 	}
 }
 
-func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayToolResult, bool) {
+func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayToolResult, bool, error) {
 	if name == "" {
 		name, _, _, _ = codexToolCall(item)
 	}
 	if name == "" {
-		return nil, false
+		return nil, false, nil
 	}
 	result := &zotigosession.DisplayToolResult{ToolCallID: item.ID, ToolName: name, ResultType: "text"}
 	switch item.Type {
@@ -864,7 +892,16 @@ func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayT
 		result.Text = item.Status
 		result.IsError = strings.EqualFold(item.Status, "failed") || strings.EqualFold(item.Status, "declined")
 	case "mcpToolCall":
-		result.JSON = item.Result
+		content, err := codexMCPToolResultContent(item.Result)
+		result.Content = content
+		if len(result.Content) > 0 {
+			result.JSON = codexMCPResultWithoutContent(item.Result)
+		} else {
+			result.JSON = item.Result
+		}
+		if err != nil {
+			result.Reason = err.Error()
+		}
 		result.IsError = codexFailedStatus(item.Status)
 		if item.Error != nil {
 			result.Text = item.Error.Message
@@ -872,15 +909,18 @@ func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayT
 			result.IsError = true
 		}
 	case "dynamicToolCall":
-		result.JSON = item.ContentItems
+		result.Content = codexDynamicToolResultContent(item.ContentItems)
+		if len(result.Content) == 0 {
+			result.JSON = item.ContentItems
+		}
 		result.IsError = codexFailedStatus(item.Status) || item.Success != nil && !*item.Success
 	case "collabAgentToolCall":
 		result.JSON = map[string]any{"receiver_thread_ids": item.ReceiverThreadIDs, "agents_states": item.AgentsStates, "status": item.Status}
 		result.IsError = codexFailedStatus(item.Status)
 	default:
-		return nil, false
+		return nil, false, nil
 	}
-	return result, true
+	return result, true, nil
 }
 
 func codexFailedStatus(status string) bool {

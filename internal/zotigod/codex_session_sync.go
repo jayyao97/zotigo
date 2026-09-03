@@ -18,7 +18,7 @@ import (
 
 const (
 	codexSessionSyncInterval = 10 * time.Second
-	codexSessionSyncVersion  = 2
+	codexSessionSyncVersion  = 3
 )
 
 type codexSessionSyncer struct {
@@ -503,6 +503,30 @@ func syncCompletedCodexItem(ctx context.Context, items displayItemSource, sessio
 			Turn:      &zotigosession.DisplayTurn{ID: turnID},
 			CreatedAt: createdAt,
 		}, seen)
+	case "imageGeneration":
+		if seen.itemIDs[item.ID] {
+			return nil
+		}
+		if !codexImageGenerationCompleted(item) {
+			seen.itemIDs[item.ID] = true
+			return nil
+		}
+		store := codexSessionStoreFromItems(items)
+		if store == nil {
+			return errors.New("codex image sync requires a session store")
+		}
+		displayItem, cleanup, err := codexGeneratedImageDisplayItem(ctx, store, codexSessionStoreRoot(store), sessionID, turnID, item, createdAt)
+		if err != nil {
+			if errors.Is(err, errCodexImageUnavailable) {
+				return appendIndexedCodexItem(ctx, items, sessionID, codexUnavailableImageDisplayItem(item.ID, turnID, createdAt), seen)
+			}
+			return err
+		}
+		if err := appendIndexedCodexItem(ctx, items, sessionID, displayItem, seen); err != nil {
+			cleanup()
+			return err
+		}
+		return nil
 	case "contextCompaction":
 		if seen.itemIDs[item.ID] {
 			return nil
@@ -565,15 +589,26 @@ func syncCompletedCodexTool(ctx context.Context, items displayItemSource, sessio
 	if seen.toolResults[item.ID] {
 		return nil
 	}
-	result, ok := codexToolResult(item, name)
+	result, ok, err := codexToolResult(item, name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
+	}
+	cleanup := func() {}
+	if store := codexSessionStoreFromItems(items); store != nil {
+		cleanup, err = persistCodexToolResultMedia(ctx, store, codexSessionStoreRoot(store), sessionID, result)
+		if err != nil {
+			return err
+		}
 	}
 	if err := appendSyncedCodexItem(ctx, items, sessionID, zotigosession.DisplayItem{
 		ID: "codex-tool-result-" + item.ID, Type: zotigosession.DisplayItemAssistantMessage,
 		Role: string(protocol.RoleAssistant), Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
 		Turn: &zotigosession.DisplayTurn{ID: turnID}, CreatedAt: createdAt,
 	}); err != nil {
+		cleanup()
 		return err
 	}
 	seen.toolResults[item.ID] = true

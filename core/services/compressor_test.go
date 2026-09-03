@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -26,13 +27,11 @@ func TestCompressor_DefaultTriggerRatio(t *testing.T) {
 	}
 }
 
-func TestCompressor_EstimatePromptTokens_AnchorsOnLastAssistantUsage(t *testing.T) {
+func TestCompressor_EstimatePromptTokensUsesProjectedLocalEstimate(t *testing.T) {
 	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
 
-	// 10k user prompt + assistant reply that the provider says totalled
-	// 12,500 prompt + 500 output = 13,000 tokens of context-after-reply.
-	// Adding a tiny user follow-up should land near 13,000, NOT 13,000 +
-	// the cost of re-tokenizing the whole 10k user prompt.
+	// The provider snapshot deliberately disagrees with the locally projected
+	// prompt; next-request estimation must not reuse that historical value.
 	bigUserPrompt := strings.Repeat("word ", 2500) // ~12.5k chars ~ 3.1k local tokens
 	history := []protocol.Message{
 		{
@@ -63,21 +62,12 @@ func TestCompressor_EstimatePromptTokens_AnchorsOnLastAssistantUsage(t *testing.
 	}
 
 	got := c.EstimatePromptTokens(history)
-	if got < 13_000 || got > 13_050 {
-		t.Errorf("EstimatePromptTokens = %d, expected ~13,000 (anchor=13,000 + tiny delta); raw count would be much smaller and ignore the API truth",
-			got)
+	if got >= 13_000 || got != c.CountTokens(history) {
+		t.Errorf("EstimatePromptTokens = %d, want projected local count %d without provider anchor", got, c.CountTokens(history))
 	}
 }
 
-// Reviewer-flagged regression: NeedsCompression uses the anchored
-// estimate, but Compress() also has its own threshold check. If that
-// inner check still used raw countTokens, a session where the provider
-// says "over threshold" but the local tokenizer underestimates would
-// no-op out of Compress and keep sending an over-budget prompt.
-func TestCompressor_Compress_HonorsAnchorWhenLocalTokenizerUnderestimates(t *testing.T) {
-	// Threshold = 100k * 0.7 = 70k. Anchor (provider) says 80k. Local
-	// tokenizer over the same history would say a few hundred (only a
-	// short "ok" message). Compress must still proceed to compaction.
+func TestCompressor_StaleProviderAnchorDoesNotTriggerCompression(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		ContextWindowSize: 100_000,
 		TriggerRatio:      0.7,
@@ -100,27 +90,23 @@ func TestCompressor_Compress_HonorsAnchorWhenLocalTokenizerUnderestimates(t *tes
 		{Role: protocol.RoleUser, Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "next question"}}},
 	}
 
-	if !c.NeedsCompression(history) {
-		t.Fatal("setup error: anchored NeedsCompression should report true at 80k > 70k threshold")
-	}
-	if raw := c.CountTokens(history); raw > 70_000 {
-		t.Fatalf("setup error: raw count %d should be well below threshold 70_000 to exercise the bug", raw)
+	if c.NeedsCompression(history) {
+		t.Fatal("stale provider snapshot triggered compression of a small projected prompt")
 	}
 
 	_, result, err := c.Compress(context.Background(), history)
 	if err != nil {
 		t.Fatalf("Compress error: %v", err)
 	}
-	if !result.Compressed {
-		t.Errorf("Compress returned Compressed=false despite anchor being over threshold; raw inner check defeated the anchored trigger")
+	if result.Compressed {
+		t.Errorf("Compress returned Compressed=true for stale provider snapshot: %#v", result)
 	}
 }
 
-func TestCompressor_EstimatePromptTokens_FallsBackWithoutAnchor(t *testing.T) {
+func TestCompressor_EstimatePromptTokensWithoutProviderSnapshot(t *testing.T) {
 	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
 
-	// First turn: no assistant message yet → must fall back to raw
-	// local tokenization rather than returning 0.
+	// First turn: local projection must still produce a positive estimate.
 	history := []protocol.Message{
 		{
 			Role: protocol.RoleUser,
@@ -133,8 +119,7 @@ func TestCompressor_EstimatePromptTokens_FallsBackWithoutAnchor(t *testing.T) {
 		t.Errorf("EstimatePromptTokens with no anchor returned %d, want positive fallback", got)
 	}
 
-	// Assistant present but missing Usage metadata (e.g. legacy save):
-	// also falls back.
+	// Assistant usage metadata does not affect the local estimate.
 	history = append(history, protocol.Message{
 		Role:    protocol.RoleAssistant,
 		Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "ok"}},
@@ -337,6 +322,169 @@ func TestCompressor_TruncateToolResults(t *testing.T) {
 
 	if len(resultText) >= len(longResult) {
 		t.Error("Result should be shorter")
+	}
+}
+
+func TestCompressor_ProjectPromptOmitsInlineImageAndPreservesStructuredMedia(t *testing.T) {
+	c := NewCompressor(CompressorConfig{TokenCounter: estimateTokens})
+	image := &protocol.MediaPart{URL: "artifact://generated.png", MediaType: "image/png"}
+	dataURL := "data:image/png;base64," + strings.Repeat("A", 4<<20)
+	messages := []protocol.Message{{
+		Role: protocol.RoleTool,
+		Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{
+			ToolCallID: "imagegen-1", Type: protocol.ToolResultTypeContent, Text: dataURL,
+			Content: []protocol.ToolResultContentPart{{Type: protocol.ContentTypeImage, Image: image}},
+		}}},
+	}}
+
+	projected := c.ProjectPrompt(messages, 2_000)
+	result := projected[0].Content[0].ToolResult
+	if strings.Contains(result.Text, "base64,") || len(result.Text) > 100 {
+		t.Fatalf("inline image payload remained in prompt projection: %d bytes", len(result.Text))
+	}
+	if len(result.Content) != 1 || result.Content[0].Image == nil || result.Content[0].Image.URL != image.URL {
+		t.Fatalf("structured image was lost during projection: %#v", result.Content)
+	}
+	if tokens := c.CountTokens(projected); tokens >= 2_000 {
+		t.Fatalf("projected image payload counted as text: %d tokens", tokens)
+	}
+}
+
+func TestCompressor_ProjectPromptBoundsJSONToolResult(t *testing.T) {
+	c := NewCompressor(CompressorConfig{TokenCounter: estimateTokens, ToolOutputThreshold: 2_000})
+	dataURL := "data:image/png;base64," + strings.Repeat("A", 2<<20)
+	payload := map[string]any{"image": dataURL, "output": strings.Repeat("x", 4<<20)}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if estimateTokens(string(encoded)) < 1_000_000 {
+		t.Fatal("fixture must exceed one million raw estimated tokens")
+	}
+	history := []protocol.Message{protocol.NewToolMessage([]protocol.ToolResult{{
+		ToolCallID: "json-1", Type: protocol.ToolResultTypeJSON, JSON: payload,
+	}})}
+
+	projected := c.ProjectPrompt(history, 2_000)
+	result := projected[0].Content[0].ToolResult
+	if result.JSON != nil || result.Type != protocol.ToolResultTypeText {
+		t.Fatalf("large JSON result was not converted to bounded text: %#v", result)
+	}
+	if strings.Contains(result.Text, "base64,") || estimateTokens(result.Text) > 2_100 {
+		t.Fatalf("large JSON result remained unbounded: %d tokens", estimateTokens(result.Text))
+	}
+	if got := c.CountTokens(history); got > 2_100 {
+		t.Fatalf("CountTokens bypassed JSON projection: %d", got)
+	}
+}
+
+func TestCompressor_512KPromptProjectsLargeToolOutputsBeforeCompaction(t *testing.T) {
+	const contextWindow = 512_000
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: contextWindow, TriggerRatio: 0.8, TargetRatio: 0.5, PreserveRatio: 0.3,
+		TokenCounter: estimateTokens,
+	})
+	history := make([]protocol.Message, 0, 900)
+	for index := 0; index < 300; index++ {
+		callID := fmt.Sprintf("call-%d", index)
+		assistant := protocol.NewAssistantMessage("")
+		assistant.AddToolCall(protocol.ToolCall{ID: callID, Name: "read", Arguments: `{}`})
+		history = append(history, assistant, protocol.NewToolMessage([]protocol.ToolResult{{
+			ToolCallID: callID, Type: protocol.ToolResultTypeText, Text: strings.Repeat("x", 16_000),
+		}}), protocol.NewUserMessage("continue"))
+	}
+	raw := 0
+	for _, message := range history {
+		for _, part := range message.Content {
+			if part.ToolResult != nil {
+				raw += estimateTokens(part.ToolResult.Text)
+			}
+		}
+	}
+	if raw < 1_000_000 {
+		t.Fatalf("fixture must model multi-megabyte persisted history: %d tokens", raw)
+	}
+	projected := c.ProjectPrompt(history, 2_000)
+	compressed, result, err := c.Compress(context.Background(), projected)
+	if err != nil || !result.Compressed {
+		t.Fatalf("projected prompt was not compacted: result=%#v err=%v", result, err)
+	}
+	if result.OriginalTokens >= 1_000_000 {
+		t.Fatalf("before tokens counted untruncated disk payload: %d", result.OriginalTokens)
+	}
+	if result.CompressedTokens >= contextWindow || c.CountTokens(compressed) >= contextWindow {
+		t.Fatalf("compacted provider prompt exceeds window: result=%#v count=%d", result, c.CountTokens(compressed))
+	}
+}
+
+func TestCompressor_CompressionRetainsProviderUsageSnapshot(t *testing.T) {
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 100_000, TriggerRatio: 0.7, PreserveRatio: 0.3,
+		TokenCounter: estimateTokens,
+	})
+	history := make([]protocol.Message, 0, 21)
+	for index := 0; index < 10; index++ {
+		history = append(history,
+			protocol.NewUserMessage(strings.Repeat("old context ", 4_000)),
+			protocol.NewAssistantMessage("old answer"),
+		)
+	}
+	history = append(history, protocol.NewUserMessage("continue"))
+	history[len(history)-2].Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 80_000, TotalTokens: 80_100}}
+
+	compressed, result, err := c.Compress(context.Background(), history)
+	if err != nil || !result.Compressed {
+		t.Fatalf("compression failed: result=%#v err=%v", result, err)
+	}
+	retainedUsage := false
+	for _, message := range compressed {
+		if message.Metadata != nil && message.Metadata.Usage != nil {
+			retainedUsage = true
+		}
+	}
+	if !retainedUsage {
+		t.Fatal("compaction discarded the last provider usage snapshot")
+	}
+	if c.NeedsCompression(compressed) {
+		t.Fatalf("rewritten prompt immediately requested another compaction: %d tokens", c.EstimatePromptTokens(compressed))
+	}
+}
+
+func TestCompressor_IgnoresProviderUsageSnapshotForNextPrompt(t *testing.T) {
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 512000,
+		TokenCounter:      func(text string) int { return len(text) / 4 },
+	})
+	history := []protocol.Message{
+		protocol.NewUserMessage("small prompt"),
+		{
+			Role:    protocol.RoleAssistant,
+			Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "answer"}},
+			Metadata: &protocol.MessageMetadata{Usage: &protocol.Usage{
+				InputTokens: 2_000_000, TotalTokens: 2_050_000,
+			}},
+		},
+	}
+	if got := c.EstimatePromptTokens(history); got >= 512000 {
+		t.Fatalf("impossible provider anchor was treated as context occupancy: %d", got)
+	}
+	if c.NeedsCompression(history) {
+		t.Fatal("impossible provider anchor triggered compaction")
+	}
+}
+
+func TestCompressor_NoEventShapeWhenCompressionDoesNotShrinkPrompt(t *testing.T) {
+	c := NewCompressor(CompressorConfig{
+		ContextWindowSize: 10, TriggerRatio: 0.1, PreserveRatio: 0.9,
+		TokenCounter: func(string) int { return 1 },
+	})
+	history := []protocol.Message{protocol.NewUserMessage("one"), protocol.NewAssistantMessage("two")}
+	compressed, result, err := c.Compress(context.Background(), history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Compressed || len(compressed) != len(history) || result.MessagesBefore != result.MessagesAfter {
+		t.Fatalf("non-shrinking compaction must be a no-op: %#v", result)
 	}
 }
 
@@ -1075,7 +1223,7 @@ func TestCompressor_TranscriptContent_Fidelity(t *testing.T) {
 			{Type: protocol.ContentTypeText, Text: "System"},
 		}},
 		{Role: protocol.RoleUser, Content: []protocol.ContentPart{
-			{Type: protocol.ContentTypeText, Text: strings.Repeat("user text ", 30)},
+			{Type: protocol.ContentTypeText, Text: strings.Repeat("user text with distinct details 12345 ", 300)},
 		}},
 		{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{
 			{Type: protocol.ContentTypeToolCall, ToolCall: &protocol.ToolCall{
@@ -1084,7 +1232,7 @@ func TestCompressor_TranscriptContent_Fidelity(t *testing.T) {
 		}},
 		{Role: protocol.RoleTool, Content: []protocol.ContentPart{
 			{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{
-				ToolCallID: "call_1", Type: protocol.ToolResultTypeText, Text: strings.Repeat("file content ", 30),
+				ToolCallID: "call_1", Type: protocol.ToolResultTypeText, Text: strings.Repeat("file content with distinct details 67890 ", 300),
 			}},
 		}},
 		{Role: protocol.RoleUser, Content: []protocol.ContentPart{

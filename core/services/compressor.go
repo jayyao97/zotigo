@@ -149,89 +149,36 @@ type CompressionResult struct {
 	TranscriptPath   string // Path to the saved transcript file, empty if not saved
 }
 
-// NeedsCompression checks if the messages need compression. Uses the
-// anchored estimator (see EstimatePromptTokens) so the trigger reflects
-// the actual upcoming prompt size as reported by the provider, not a
-// local-tokenizer guess that drifts by 10–40% across model families.
+// NeedsCompression checks the same bounded prompt projection that will be
+// dispatched to the provider.
 func (c *Compressor) NeedsCompression(messages []protocol.Message) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
-	tokens := c.estimatePromptTokens(messages)
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
+	tokens := c.countTokens(messages)
 	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
 	return tokens > threshold
 }
 
-// CountTokens returns a raw local-tokenizer estimate over every
-// message. Use this when you need a hypothetical-history count (e.g.
-// post-compression sizing, /stats display); use EstimatePromptTokens
-// when you want "how big is the prompt I'm about to send".
+// CountTokens returns a bounded local-tokenizer estimate over the model-visible
+// parts of every message. Inline media is omitted, structured media receives a
+// nominal cost, and tool-result text observes ToolOutputThreshold.
 func (c *Compressor) CountTokens(messages []protocol.Message) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
 	return c.countTokens(messages)
 }
 
-// EstimatePromptTokens estimates the prompt size that would be sent
-// on the next API call by anchoring on the last assistant turn's
-// recorded usage and tokenizing only what's been appended since.
-//
-// Anchor + delta beats raw local tokenization because:
-//  1. The anchor is provider-reported truth, not a guess — collapses
-//     tokenizer error from "X% × whole history" to "X% × delta", and
-//     deltas are usually small (one user message, maybe a tool output).
-//  2. The local tokenizer (cl100k_base) is only accurate for the
-//     OpenAI GPT-3/4 family; Claude is roughly correct, gpt-4o needs
-//     o200k_base, Gemini uses an entirely different tokenizer family,
-//     and local llama / qwen drift further still. The anchor sidesteps
-//     all of that for the bulk of the count.
-//
-// Falls back to full local tokenization when:
-//   - There's no assistant turn yet (cold start)
-//   - The last assistant has no Usage metadata (provider didn't report,
-//     or the message was loaded from a pre-Usage save format)
-//
-// Caveat: directly after Compress() rewrites history, the preserved
-// assistant's recorded Usage reflects the PRE-compaction prompt size,
-// making the anchor temporarily stale until the next API response
-// refreshes it. Both NeedsCompression and Compress consult this same
-// estimator, so the inflated anchor can trigger one spurious follow-up
-// compaction on the turn after compaction. We accept that cost (a
-// single extra summarize call) because the alternative — reverting to
-// raw counts here — silently lets over-budget prompts through whenever
-// the local tokenizer under-estimates (Gemini / gpt-4o on cl100k_base /
-// local llama), which is a far more common and impactful failure.
+// EstimatePromptTokens returns the local estimate for the exact bounded prompt
+// projection. Provider usage is a historical snapshot and is intentionally not
+// used as an anchor for a rewritten next request.
 func (c *Compressor) EstimatePromptTokens(messages []protocol.Message) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
-	return c.estimatePromptTokens(messages)
-}
-
-func (c *Compressor) estimatePromptTokens(messages []protocol.Message) int {
-	anchorIdx := -1
-	var anchor int
-	for i := len(messages) - 1; i >= 0; i-- {
-		m := messages[i]
-		if m.Role != protocol.RoleAssistant {
-			continue
-		}
-		if m.Metadata == nil || m.Metadata.Usage == nil {
-			continue
-		}
-		anchor = m.Metadata.Usage.Normalized().TotalTokens
-		anchorIdx = i
-		break
-	}
-
-	if anchorIdx == -1 {
-		return c.countTokens(messages)
-	}
-
-	delta := 0
-	for i := anchorIdx + 1; i < len(messages); i++ {
-		delta += c.countSingleMessage(messages[i])
-	}
-	return anchor + delta
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
+	return c.countTokens(messages)
 }
 
 // Compress compresses the messages if they exceed the threshold.
@@ -239,18 +186,14 @@ func (c *Compressor) estimatePromptTokens(messages []protocol.Message) int {
 func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
 
-	// Trigger decision must use the anchored estimate to stay in sync
-	// with NeedsCompression. Without using the anchor here, a session
-	// where NeedsCompression said yes (provider truth: over threshold)
-	// but the local tokenizer under-estimates would short-circuit to
-	// no-op and the agent would still send the over-budget prompt.
 	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
-	if c.estimatePromptTokens(messages) <= threshold {
-		raw := c.countTokens(messages)
+	if c.countTokens(messages) <= threshold {
+		estimated := c.countTokens(messages)
 		return messages, CompressionResult{
-			OriginalTokens:   raw,
-			CompressedTokens: raw,
+			OriginalTokens:   estimated,
+			CompressedTokens: estimated,
 			MessagesBefore:   len(messages),
 			MessagesAfter:    len(messages),
 			Compressed:       false,
@@ -268,6 +211,7 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 func (c *Compressor) ForceCompress(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
 	return c.compressLocked(ctx, messages)
 }
 
@@ -302,6 +246,10 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	// Calculate how many tokens to preserve (30% of conversation)
 	conversationTokens := c.countTokens(conversationMsgs)
 	preserveTokens := int(float64(conversationTokens) * c.config.PreserveRatio)
+	targetTokens := int(float64(c.config.ContextWindowSize) * c.config.TargetRatio)
+	if preserveTokens > targetTokens {
+		preserveTokens = targetTokens
+	}
 
 	// Find safe partition point (doesn't break tool call chains)
 	partitionIdx := c.findSafePartitionPoint(conversationMsgs, preserveTokens)
@@ -368,7 +316,13 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	result.Summary = summary
 	result.CompressedTokens = c.countTokens(compressed)
 	result.MessagesAfter = len(compressed)
-	result.Compressed = true
+	result.Compressed = result.CompressedTokens < result.OriginalTokens && result.MessagesAfter < result.MessagesBefore
+	if !result.Compressed {
+		result.Compressed = false
+		result.CompressedTokens = result.OriginalTokens
+		result.MessagesAfter = len(messages)
+		return messages, result, nil
+	}
 
 	return compressed, result, nil
 }
@@ -506,41 +460,137 @@ func (c *Compressor) summarizeToolOutputs(ctx context.Context, messages []protoc
 
 // TruncateToolResults is a simpler version that just truncates without LLM
 func (c *Compressor) TruncateToolResults(messages []protocol.Message, maxResultTokens int) []protocol.Message {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.truncateToolResults(messages, maxResultTokens)
+}
+
+// ProjectPrompt applies the same bounded representation used immediately
+// before provider dispatch. Media stays structured while inline data URLs are
+// replaced with a marker and oversized textual tool output is truncated.
+func (c *Compressor) ProjectPrompt(messages []protocol.Message, maxResultTokens int) []protocol.Message {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.truncateToolResults(messages, maxResultTokens)
+}
+
+func (c *Compressor) truncateToolResults(messages []protocol.Message, maxResultTokens int) []protocol.Message {
 	if maxResultTokens <= 0 {
 		maxResultTokens = c.config.ToolOutputThreshold
 	}
 
 	result := make([]protocol.Message, len(messages))
 	copy(result, messages)
-
 	for i, msg := range result {
-		if msg.Role == protocol.RoleTool {
-			newContent := make([]protocol.ContentPart, 0, len(msg.Content))
-			for _, part := range msg.Content {
-				if part.Type == protocol.ContentTypeToolResult && part.ToolResult != nil {
-					text := part.ToolResult.Text
-					tokens := c.counter(text)
-					if tokens > maxResultTokens {
-						truncated := c.truncateText(text, maxResultTokens)
-						newPart := part
-						newPart.ToolResult = &protocol.ToolResult{
-							ToolCallID: part.ToolResult.ToolCallID,
-							ToolName:   part.ToolResult.ToolName,
-							Type:       part.ToolResult.Type,
-							Text:       truncated + "\n\n[... truncated ...]",
-							IsError:    part.ToolResult.IsError,
-						}
-						newContent = append(newContent, newPart)
-						continue
+		content := make([]protocol.ContentPart, len(msg.Content))
+		copy(content, msg.Content)
+		for partIndex, part := range content {
+			switch part.Type {
+			case protocol.ContentTypeText, protocol.ContentTypeReasoning:
+				text := omitInlineMediaPayloads(part.Text)
+				if text != part.Text {
+					part.Text = text
+					content[partIndex] = part
+				}
+			case protocol.ContentTypeToolCall:
+				if part.ToolCall != nil {
+					args := omitInlineMediaPayloads(part.ToolCall.Arguments)
+					if args != part.ToolCall.Arguments {
+						tc := *part.ToolCall
+						tc.Arguments = args
+						part.ToolCall = &tc
+						content[partIndex] = part
 					}
 				}
-				newContent = append(newContent, part)
+			case protocol.ContentTypeToolResult:
+				if part.ToolResult != nil {
+					toolResult := *part.ToolResult
+					changed := false
+					if toolResult.JSON != nil {
+						if encoded, err := json.Marshal(toolResult.JSON); err == nil {
+							text, bounded := c.boundToolText(string(encoded), maxResultTokens)
+							if bounded {
+								toolResult.JSON = nil
+								toolResult.Text = text
+								if toolResult.Type == protocol.ToolResultTypeErrorJSON {
+									toolResult.Type = protocol.ToolResultTypeErrorText
+								} else {
+									toolResult.Type = protocol.ToolResultTypeText
+								}
+								changed = true
+							}
+						}
+					} else if text, bounded := c.boundToolText(toolResult.Text, maxResultTokens); bounded {
+						toolResult.Text = text
+						changed = true
+					}
+					if len(toolResult.Content) > 0 {
+						trContent := make([]protocol.ToolResultContentPart, len(toolResult.Content))
+						copy(trContent, toolResult.Content)
+						for cpIdx, cp := range trContent {
+							if cp.Type == protocol.ContentTypeText {
+								if text, bounded := c.boundToolText(cp.Text, maxResultTokens); bounded {
+									cp.Text = text
+									trContent[cpIdx] = cp
+									changed = true
+								}
+							}
+						}
+						if changed {
+							toolResult.Content = trContent
+						}
+					}
+					if changed {
+						part.ToolResult = &toolResult
+						content[partIndex] = part
+					}
+				}
 			}
-			result[i].Content = newContent
 		}
+		result[i].Content = content
 	}
-
 	return result
+}
+
+func (c *Compressor) boundToolText(text string, maxTokens int) (string, bool) {
+	projected := omitInlineMediaPayloads(text)
+	if len(projected) > maxTokens*4 || c.counter(projected) > maxTokens {
+		return c.truncateText(projected, maxTokens) + "\n\n[... truncated ...]", true
+	}
+	return projected, projected != text
+}
+
+func omitInlineMediaPayloads(text string) string {
+	const marker = "[inline media payload omitted]"
+	for searchFrom := 0; searchFrom < len(text); {
+		dataIndex := strings.Index(text[searchFrom:], "data:")
+		if dataIndex < 0 {
+			break
+		}
+		dataIndex += searchFrom
+		commaOffset := strings.Index(text[dataIndex:], ";base64,")
+		if commaOffset < 0 {
+			searchFrom = dataIndex + len("data:")
+			continue
+		}
+		payloadStart := dataIndex + commaOffset + len(";base64,")
+		payloadEnd := payloadStart
+		for payloadEnd < len(text) && isBase64Byte(text[payloadEnd]) {
+			payloadEnd++
+		}
+		if payloadEnd == payloadStart {
+			searchFrom = payloadStart
+			continue
+		}
+		text = text[:dataIndex] + marker + text[payloadEnd:]
+		searchFrom = dataIndex + len(marker)
+	}
+	return text
+}
+
+func isBase64Byte(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' ||
+		value >= '0' && value <= '9' || value == '+' || value == '/' || value == '='
 }
 
 // countTokens estimates the total token count for messages
@@ -559,19 +609,45 @@ func (c *Compressor) countSingleMessage(msg protocol.Message) int {
 	for _, part := range msg.Content {
 		switch part.Type {
 		case protocol.ContentTypeText, protocol.ContentTypeReasoning:
-			total += c.counter(part.Text)
+			total += c.counter(omitInlineMediaPayloads(part.Text))
 		case protocol.ContentTypeToolCall:
 			if part.ToolCall != nil {
 				total += c.counter(part.ToolCall.Name)
-				total += c.counter(part.ToolCall.Arguments)
+				total += c.counter(omitInlineMediaPayloads(part.ToolCall.Arguments))
 			}
 		case protocol.ContentTypeToolResult:
 			if part.ToolResult != nil {
-				total += c.counter(part.ToolResult.Text)
+				text := part.ToolResult.Text
+				if part.ToolResult.JSON != nil {
+					if encoded, err := json.Marshal(part.ToolResult.JSON); err == nil {
+						text = string(encoded)
+					}
+				}
+				text = omitInlineMediaPayloads(text)
+				total += c.counter(text)
+				for _, cp := range part.ToolResult.Content {
+					switch cp.Type {
+					case protocol.ContentTypeText:
+						total += c.counter(omitInlineMediaPayloads(cp.Text))
+					case protocol.ContentTypeImage:
+						total += nominalMediaTokens(cp.Image)
+					}
+				}
 			}
+		case protocol.ContentTypeImage:
+			total += nominalMediaTokens(part.Image)
+		case protocol.ContentTypeAudio:
+			total += nominalMediaTokens(part.Audio)
 		}
 	}
 	return total
+}
+
+func nominalMediaTokens(media *protocol.MediaPart) int {
+	if media == nil {
+		return 0
+	}
+	return 256
 }
 
 // summaryData holds extracted facts from a conversation for template rendering.

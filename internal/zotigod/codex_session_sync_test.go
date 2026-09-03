@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -750,5 +751,109 @@ func TestSyncCompletedCodexTurnsDoesNotDuplicateLocalUserPrompt(t *testing.T) {
 	}
 	if len(items) != 5 || items[3].ID != "assistant-1" || items[4].Type != zotigosession.DisplayItemTurnCompleted {
 		t.Fatalf("display items = %#v", items)
+	}
+}
+
+func TestSyncCompletedCodexTurnsPersistsGeneratedImage(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-image-sync", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	startedAt := now.Unix()
+	completedAt := now.Add(time.Second).Unix()
+	source := storedDisplayItemSource{store: store}
+	turns := []codexTurn{{
+		ID: "turn-image", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
+		Items: []codexThreadItem{{ID: "image-sync-1", Type: "imageGeneration", Status: "completed", Result: tinyPNGBase64()}},
+	}}
+	for range 2 {
+		if err := syncCompletedCodexTurns(context.Background(), source, "session-image-sync", turns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-image-sync")
+	if err != nil {
+		t.Fatal(err)
+	}
+	imageItems := 0
+	for _, item := range items {
+		if item.ID != "image-sync-1" {
+			continue
+		}
+		imageItems++
+		if len(item.Content) != 1 || item.Content[0].Image == nil || item.Content[0].Image.URL == "" || item.Content[0].Image.MediaType != "image/png" {
+			t.Fatalf("synced image item = %#v", item)
+		}
+	}
+	if imageItems != 1 {
+		t.Fatalf("generated image sync was not idempotent: %d items", imageItems)
+	}
+}
+
+func TestCodexSessionSyncContinuesPastUnavailableHistoricalImage(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	meta := zotigosession.Metadata{
+		ID: "session-missing-image", Agent: "codex", ConversationID: "thread-missing-image",
+		CreatedAt: now, UpdatedAt: now,
+	}
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
+		t.Fatal(err)
+	}
+	missingPath := filepath.Join(root, "already-deleted.png")
+	completedAt := now.Add(time.Minute).Unix()
+	startedAt := now.Unix()
+	rpc := &codexSyncRPC{thread: codexThread{
+		ID: meta.ConversationID, UpdatedAt: completedAt,
+		Turns: []codexTurn{{
+			ID: "turn-1", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
+			Items: []codexThreadItem{
+				{ID: "missing-image", Type: "imageGeneration", Status: "completed", SavedPath: &missingPath},
+				{ID: "no-source-image", Type: "imageGeneration", Status: "completed"},
+				{ID: "bad-tool-image", Type: "dynamicToolCall", Tool: "image_tool", Status: "completed", ContentItems: []any{
+					map[string]any{"type": "inputImage", "imageUrl": "data:image/png;base64,not-valid!"},
+				}},
+				{ID: "later-message", Type: "agentMessage", Text: "sync still progresses"},
+			},
+		}},
+	}}
+	syncer := &codexSessionSyncer{store: store, items: storedDisplayItemSource{store: store}}
+	if err := syncer.syncSession(context.Background(), rpc, meta); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unavailable := 0
+	foundLater := false
+	foundToolPlaceholder := false
+	for _, item := range items {
+		if (item.ID == "missing-image" || item.ID == "no-source-image") && item.Type == zotigosession.DisplayItemError {
+			unavailable++
+		}
+		foundLater = foundLater || item.ID == "later-message"
+		if item.ID == "codex-tool-result-bad-tool-image" && len(item.Content) == 1 && item.Content[0].ToolResult != nil {
+			content := item.Content[0].ToolResult.Content
+			foundToolPlaceholder = len(content) == 1 && content[0].Text == "[image content is unavailable]"
+		}
+	}
+	if unavailable != 2 || !foundToolPlaceholder || !foundLater {
+		t.Fatalf("sync items after unavailable image: %#v", items)
+	}
+	stored, err := store.Get(context.Background(), meta.ID)
+	if err != nil || stored.BackendSyncVersion != codexSessionSyncVersion || stored.BackendUpdatedAt.Unix() != completedAt {
+		t.Fatalf("sync checkpoint = %#v, err=%v", stored, err)
 	}
 }

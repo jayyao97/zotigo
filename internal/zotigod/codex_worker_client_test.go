@@ -2,8 +2,13 @@ package zotigod
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -106,18 +111,262 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
 	if err := runtime.handleNotification(context.Background(), codexapp.Message{
 		Method: "thread/tokenUsage/updated",
-		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000,"inputTokens":6500,"cachedInputTokens":4000,"cacheWriteInputTokens":500,"outputTokens":1500},"last":{"totalTokens":2400},"modelContextWindow":128000}}`),
+		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000,"inputTokens":6500,"cachedInputTokens":4000,"cacheWriteInputTokens":500,"outputTokens":1500},"last":{"totalTokens":2400,"inputTokens":2200,"outputTokens":200},"modelContextWindow":128000}}`),
 	}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-usage")
-	if err != nil || len(items) != 1 || items[0].ContextUsage == nil || items[0].ContextUsage.Tokens != 2400 || items[0].ContextUsage.Window != 128000 {
+	if err != nil || len(items) != 1 || items[0].ContextUsage == nil || items[0].ContextUsage.Tokens != 2200 || items[0].ContextUsage.Window != 128000 || items[0].ContextUsage.Source != "provider" {
 		t.Fatalf("context usage items = %#v, err=%v", items, err)
 	}
 	if got, want := runtime.totalUsage, (protocol.Usage{
 		InputTokens: 2000, OutputTokens: 1500, TotalTokens: 8000, CacheCreationInputTokens: 500, CacheReadInputTokens: 4000,
 	}); got != want {
 		t.Fatalf("total usage = %#v, want %#v", got, want)
+	}
+}
+
+func TestCodexWorkerMissingUsageFieldsDoNotReplaceLastValidSnapshot(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage-stable", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage-stable"}}, store: store, threadID: "thread-1"}
+	for _, params := range []string{
+		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":900,"inputTokens":800,"outputTokens":100},"modelContextWindow":512000}}`,
+		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":200},"modelContextWindow":null}}`,
+	} {
+		if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "thread/tokenUsage/updated", Params: []byte(params)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-usage-stable")
+	if err != nil || len(items) != 1 || items[0].ContextUsage == nil || items[0].ContextUsage.Tokens != 800 {
+		t.Fatalf("last valid context snapshot was replaced: items=%#v err=%v", items, err)
+	}
+}
+
+func TestCodexWorkerPersistsGeneratedImageAcrossReload(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-image"}, SessionStoreRoot: root},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1",
+	}
+	generatedPath := filepath.Join(t.TempDir(), "codex-generated.png")
+	generatedBytes, _ := base64.StdEncoding.DecodeString(tinyPNGBase64())
+	if err := os.WriteFile(generatedPath, generatedBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-1","type":"imageGeneration","status":"completed","savedPath":%q,"revisedPrompt":"a blue circle"}}`, generatedPath)
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-image")
+	if err != nil || len(items) != 1 || len(items[0].Content) != 1 || items[0].Content[0].Image == nil {
+		t.Fatalf("generated image display item = %#v, err=%v", items, err)
+	}
+	image := items[0].Content[0].Image
+	if image.MediaType != "image/png" || image.URL == "" || len(image.Data) != 0 {
+		t.Fatalf("generated image was not externalized: %#v", image)
+	}
+	public := publicDisplayItem(items[0])
+	if public.Content[0].Image == nil || public.Content[0].Image.URL != image.URL || public.Content[0].Image.MediaType != "image/png" {
+		t.Fatalf("sessions/items projection lost generated image: %#v", public)
+	}
+	name := filepath.Base(image.URL)
+	ref, ok, err := store.GetImageRef(context.Background(), "session-image", name)
+	if err != nil || !ok {
+		t.Fatalf("generated image reference missing: %#v, %v", ref, err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	replayed, _, err := reopened.ListDisplayItems(context.Background(), "session-image")
+	if err != nil || len(replayed) != 1 || replayed[0].Content[0].Image.URL != image.URL {
+		t.Fatalf("reloaded image display item = %#v, err=%v", replayed, err)
+	}
+	data, err := os.ReadFile(filepath.Join(root, ref.BlobPath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, _ := base64.StdEncoding.DecodeString(tinyPNGBase64())
+	if string(data) != string(want) {
+		t.Fatal("reloaded generated image bytes differ")
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: reopened}, handlerOptions{store: reopened})
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, image.URL, nil))
+	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "image/png" || recorder.Body.String() != string(want) {
+		t.Fatalf("reloaded image endpoint: status=%d type=%q bytes=%d", recorder.Code, recorder.Header().Get("Content-Type"), recorder.Body.Len())
+	}
+}
+
+func TestCodexWorkerExternalizesDynamicToolImageContent(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-tool-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-tool-image"}, SessionStoreRoot: root},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-1": "image_tool"},
+	}
+	dataURL := "data:image/png;base64," + tinyPNGBase64()
+	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"tool-1","type":"dynamicToolCall","tool":"image_tool","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":%q}]}}`, dataURL)
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-tool-image")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("tool image items=%#v err=%v", items, err)
+	}
+	result := items[0].Content[0].ToolResult
+	if result == nil || len(result.Content) != 1 || result.Content[0].Image == nil || strings.HasPrefix(result.Content[0].Image.URL, "data:") {
+		t.Fatalf("tool image was not stored as structured media: %#v", result)
+	}
+	encoded, err := sonic.Marshal(items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), tinyPNGBase64()) || strings.Contains(string(encoded), "data:image") {
+		t.Fatalf("tool image payload remained inline in WAL item: %s", encoded)
+	}
+}
+
+func TestCodexWorkerExternalizesMCPImageContent(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-mcp-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-mcp-image"}, SessionStoreRoot: root},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"mcp-1": "image_tool"},
+	}
+	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"mcp-1","type":"mcpToolCall","tool":"image_tool","status":"completed","result":{"content":[{"type":"image","data":%q,"mimeType":"image/png"}],"isError":false}}}`, tinyPNGBase64())
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-mcp-image")
+	if err != nil || len(items) != 1 {
+		t.Fatalf("MCP image items=%#v err=%v", items, err)
+	}
+	result := items[0].Content[0].ToolResult
+	if result == nil || len(result.Content) != 1 || result.Content[0].Image == nil || result.Content[0].Image.MediaType != "image/png" {
+		t.Fatalf("MCP image was not stored as structured media: %#v", result)
+	}
+	encoded, err := sonic.Marshal(items[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), tinyPNGBase64()) {
+		t.Fatalf("MCP image payload remained inline in WAL item: %s", encoded)
+	}
+}
+
+func TestCodexImagePayloadsRejectOversizedBase64(t *testing.T) {
+	oversized := strings.Repeat("A", base64.StdEncoding.EncodedLen(maxMessageTotalImageBytes+1))
+	if _, err := codexGeneratedImageBytes(codexThreadItem{ID: "large-image", Result: oversized}); err == nil {
+		t.Fatal("imageGeneration accepted oversized encoded payload")
+	}
+	content, err := codexMCPToolResultContent(map[string]any{"content": []any{
+		map[string]any{"type": "text", "text": "valid text"},
+		map[string]any{"type": "image", "data": oversized, "mimeType": "image/png"},
+	}})
+	if err == nil {
+		t.Fatal("MCP image accepted oversized encoded payload")
+	}
+	if len(content) != 2 || content[0].Text != "valid text" || content[1].Text != "[image content is unavailable]" {
+		t.Fatalf("MCP valid content was not preserved: %#v", content)
+	}
+}
+
+func TestCodexWorkerContinuesPastUnavailableDynamicToolImage(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-bad-tool-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-bad-tool-image"}, SessionStoreRoot: root},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-bad-image": "image_tool"},
+	}
+	badTool := `{"threadId":"thread-1","turnId":"turn-1","item":{"id":"tool-bad-image","type":"dynamicToolCall","tool":"image_tool","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,not-valid!"}]}}`
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(badTool)}); err != nil {
+		t.Fatal(err)
+	}
+	later := `{"threadId":"thread-1","turnId":"turn-1","item":{"id":"after-bad-image","type":"agentMessage","text":"still running"}}`
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(later)}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-bad-tool-image")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("items after invalid tool media = %#v, err=%v", items, err)
+	}
+	result := items[0].Content[0].ToolResult
+	if result == nil || len(result.Content) != 1 || result.Content[0].Text != "[image content is unavailable]" || items[1].ID != "after-bad-image" {
+		t.Fatalf("invalid tool media degradation = %#v", items)
+	}
+}
+
+func TestCodexWorkerContinuesPastUnavailableGeneratedImage(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-image-missing", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-image-missing"}},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1",
+	}
+	missingPath := filepath.Join(t.TempDir(), "missing.png")
+	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-missing","type":"imageGeneration","status":"completed","savedPath":%q}}`, missingPath)
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-no-source","type":"imageGeneration","status":"completed"}}`)}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-image-missing")
+	if err != nil || len(items) != 2 || items[0].Type != zotigosession.DisplayItemError || items[1].Type != zotigosession.DisplayItemError || runtime.activeTurnID != "turn-1" {
+		t.Fatalf("runtime after unavailable image: items=%#v turn=%q err=%v", items, runtime.activeTurnID, err)
 	}
 }
 
@@ -348,7 +597,10 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 			if err != nil || !ok || name != test.toolName {
 				t.Fatalf("tool call = name %q, ok %v, err %v", name, ok, err)
 			}
-			result, ok := codexToolResult(test.item, name)
+			result, ok, err := codexToolResult(test.item, name)
+			if err != nil {
+				t.Fatal(err)
+			}
 			if !ok || result.ToolName != test.toolName || result.IsError != test.isError {
 				t.Fatalf("tool result = %#v, ok=%v", result, ok)
 			}
@@ -373,7 +625,10 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 	if err != nil || !strings.Contains(arguments, `"description":"review code"`) {
 		t.Fatalf("spawn arguments = %q, err=%v", arguments, err)
 	}
-	result, ok := codexToolResult(spawn, "spawn_agent")
+	result, ok, err := codexToolResult(spawn, "spawn_agent")
+	if err != nil {
+		t.Fatal(err)
+	}
 	resultJSON, isMap := result.JSON.(map[string]any)
 	if !ok || !isMap || resultJSON["agents_states"] == nil || result.Metadata != nil {
 		t.Fatalf("spawn result = %#v, ok=%v", result, ok)

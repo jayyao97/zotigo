@@ -444,9 +444,24 @@ return it as offline:
   "live": false,
   "working_directory": "/Users/me/workspace/project",
   "approval_policy": "auto",
+  "context_usage": {
+    "tokens": 82416,
+    "window": 512000,
+    "status": "available",
+    "source": "provider",
+    "updated_at": "2026-01-02T03:04:05Z"
+  },
   "created_at": "2026-01-02T03:04:05Z"
 }
 ```
+
+`context_usage.tokens` is the latest provider-reported prompt/input occupancy,
+not cumulative session usage or the size of unprocessed history. The last valid
+snapshot survives later notifications that omit usage fields and daemon
+restart. When no reliable snapshot exists, `context_usage` is still present as
+`{"status":"unavailable"}`; clients must not infer zero usage. `source` and
+`updated_at` identify the measurement origin and age. Existing clients may
+ignore these additive fields.
 
 `GET /sessions` is an index-backed catalog read: it does not load each session
 snapshot or display log. Live `working` and `active_tool` values come from the
@@ -679,7 +694,8 @@ Lifecycle confirmation still comes from explicit turn items such as
 `turn_interrupted`.
 
 Message content parts are zotigod display DTOs, not runtime protocol structs.
-Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
+Current part types include `text`, `reasoning`, `image`, `tool_call`, and
+`tool_result`.
 For structured parts such as `tool_call` and `tool_result`, desktop clients
 should use the structured `tool_call` and `tool_result` objects for rendering,
 state, filtering, and details. `text` is reserved for actual text content parts.
@@ -688,6 +704,13 @@ runtime events finish, rather than waiting for the whole turn. A single model
 turn may therefore produce multiple ordered `assistant_message` items. Text and
 reasoning are persisted once per completed content block instead of creating
 one durable item per token.
+
+Completed Codex `imageGeneration` items and image-bearing dynamic/MCP tool
+results are copied into the session image store. Their display items contain a
+stable session image URL plus `media_type`, dimensions, and byte size; inline
+Base64/data URLs are not retained in the display WAL. The same media reference
+is returned by live events and `/sessions/{id}/items`, including after a daemon
+restart or Codex history synchronization.
 
 Completed `spawn` results may include `tool_result.metadata.subagent` with the
 child name, type, workdir, description, status, usage, and public message

@@ -28,6 +28,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/runner"
+	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
@@ -1379,6 +1380,12 @@ func TestSessionsGetByID(t *testing.T) {
 	}
 	if got.ID != created.ID || got.State != SessionStateCreated {
 		t.Fatalf("unexpected session: %#v", got)
+	}
+	if got.ContextUsage == nil || got.ContextUsage.Status != "unavailable" {
+		t.Fatalf("new session context usage = %#v", got.ContextUsage)
+	}
+	if strings.Contains(getRec.Body.String(), `"context_usage":null`) {
+		t.Fatalf("session response returned null context usage: %s", getRec.Body.String())
 	}
 }
 
@@ -7581,4 +7588,109 @@ func assertItemSequences(t *testing.T, items []itemResponse, expected []uint64) 
 			t.Fatalf("item %d: expected sequence %d, got %d", idx, sequence, items[idx].Sequence)
 		}
 	}
+}
+
+func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
+	root := t.TempDir()
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	meta := zotigosession.Metadata{ID: "session-context-lifecycle", Agent: "codex", CreatedAt: now, UpdatedAt: now}
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
+		t.Fatal(err)
+	}
+	source := storedDisplayItemSource{store: store}
+	h := &handler{store: store, items: source}
+	if got := h.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage; got == nil || got.Status != "unavailable" {
+		t.Fatalf("new session context usage = %#v", got)
+	}
+	if _, err := source.AppendItem(context.Background(), meta.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemContextUsageUpdated,
+		ContextUsage: &zotigosession.DisplayContextUsage{
+			Tokens: 12345, Window: 512000, Status: "available", Source: "provider", UpdatedAt: now,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.AppendItem(context.Background(), meta.ID, zotigosession.DisplayItem{Type: zotigosession.DisplayItemAssistantMessage}); err != nil {
+		t.Fatal(err)
+	}
+	got := h.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateRunning, true), nil).ContextUsage
+	if got == nil || got.Status != "available" || got.Source != "provider" || got.Tokens != 12345 || got.Window != 512000 {
+		t.Fatalf("running session context usage = %#v", got)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reloadedHandler := &handler{store: reopened, items: storedDisplayItemSource{store: reopened}}
+	reloaded := reloadedHandler.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage
+	if reloaded == nil || *reloaded != *got {
+		t.Fatalf("reloaded context usage = %#v, want %#v", reloaded, got)
+	}
+}
+
+func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
+	root := t.TempDir()
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
+	compressor := services.NewCompressor(services.CompressorConfig{
+		ContextWindowSize: 100_000, TriggerRatio: 0.7, PreserveRatio: 0.3,
+		TokenCounter: func(text string) int { return (len(text) + 3) / 4 },
+	})
+	history := make([]protocol.Message, 0, 21)
+	for range 10 {
+		history = append(history,
+			protocol.NewUserMessage(strings.Repeat("old context ", 4_000)),
+			protocol.NewAssistantMessage("old answer"),
+		)
+	}
+	history[len(history)-1].Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 80_000, TotalTokens: 80_100}}
+	compressed, result, err := compressor.Compress(context.Background(), history)
+	if err != nil || !result.Compressed {
+		t.Fatalf("compress history: result=%#v err=%v", result, err)
+	}
+
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	stored := &zotigosession.Session{
+		Metadata: zotigosession.Metadata{
+			ID: "native-compacted", Agent: "zotigo", ProfileName: "test", WorkingDirectory: workDir,
+			CreatedAt: now, UpdatedAt: now,
+		},
+		AgentSnapshot: agent.Snapshot{History: compressed},
+	}
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	assertUsage := func(handler *handler, saved *zotigosession.Session) {
+		t.Helper()
+		got := handler.decorateSession(context.Background(), sessionFromMetadata(saved.Metadata, SessionStateOffline, false), saved).ContextUsage
+		if got == nil || got.Status != "available" || got.Source != "provider" || got.Tokens != 80_000 {
+			t.Fatalf("context usage after compaction = %#v", got)
+		}
+	}
+	assertUsage(&handler{store: store, items: storedDisplayItemSource{store: store}}, stored)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	reloaded, err := reopened.Get(context.Background(), stored.ID)
+	if err != nil || reloaded == nil {
+		t.Fatalf("reload compacted session: %#v %v", reloaded, err)
+	}
+	assertUsage(&handler{store: reopened, items: storedDisplayItemSource{store: reopened}}, reloaded)
 }
