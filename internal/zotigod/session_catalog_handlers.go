@@ -31,8 +31,9 @@ type sessionPositionRequest struct {
 }
 
 type sessionSyncDiagnostic struct {
-	Code    string `json:"code"`
-	Message string `json:"message"`
+	SessionID string `json:"session_id,omitempty"`
+	Code      string `json:"code"`
+	Message   string `json:"message"`
 }
 
 type catalogSessionListResponse struct {
@@ -87,9 +88,37 @@ func (h *handler) codexSyncDiagnostics(ctx context.Context, requested bool) []se
 		if h.logger != nil {
 			h.logger.Printf("Codex session sync failed: %v", err)
 		}
-		return []sessionSyncDiagnostic{{Code: "codex_sync_failed", Message: "Codex history refresh failed"}}
+		return codexSyncErrorDiagnostics(err)
 	}
 	return nil
+}
+
+func codexSyncErrorDiagnostics(err error) []sessionSyncDiagnostic {
+	diagnostics := make([]sessionSyncDiagnostic, 0)
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, nested := range joined.Unwrap() {
+				visit(nested)
+			}
+			return
+		}
+		var failure *codexSessionSyncFailure
+		if errors.As(current, &failure) {
+			code := "codex_history_sync_failed"
+			if errors.Is(failure.err, errCodexHistoryAPIUnsupported) {
+				code = "codex_history_api_unsupported"
+			}
+			diagnostics = append(diagnostics, sessionSyncDiagnostic{SessionID: failure.sessionID, Code: code, Message: "Codex history refresh failed"})
+			return
+		}
+		diagnostics = append(diagnostics, sessionSyncDiagnostic{Code: "codex_history_sync_failed", Message: "Codex history refresh failed"})
+	}
+	visit(err)
+	return diagnostics
 }
 
 func (h *handler) handleCatalogSession(w http.ResponseWriter, r *http.Request, id string) {
@@ -477,7 +506,7 @@ func projectionID(projection sessionProjection) string {
 }
 
 func sessionIsActive(session Session) bool {
-	return session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePaused
+	return session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePausing || session.State == SessionStatePaused
 }
 
 func sameFilesystemPath(left string, right string) bool {

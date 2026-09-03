@@ -18,8 +18,21 @@ import (
 
 const (
 	codexSessionSyncInterval = 10 * time.Second
-	codexSessionSyncVersion  = 2
+	codexSessionSyncVersion  = 3
 )
+
+var errCodexHistoryAPIUnsupported = errors.New("codex history API is unsupported")
+
+type codexSessionSyncFailure struct {
+	sessionID string
+	err       error
+}
+
+func (e *codexSessionSyncFailure) Error() string {
+	return fmt.Sprintf("sync session %s: %v", e.sessionID, e.err)
+}
+
+func (e *codexSessionSyncFailure) Unwrap() error { return e.err }
 
 type codexSessionSyncer struct {
 	host       codexapp.HostProvider
@@ -70,6 +83,7 @@ type codexTurn struct {
 	DurationMS  *int64            `json:"durationMs"`
 	Error       *codexTurnError   `json:"error"`
 	Items       []codexThreadItem `json:"items"`
+	ItemsView   string            `json:"itemsView,omitempty"`
 }
 
 type codexTurnError struct {
@@ -133,7 +147,7 @@ func (s *codexSessionSyncer) Sync(ctx context.Context) error {
 			continue
 		}
 		if err := s.syncCandidate(ctx, lease.RPC, meta); err != nil {
-			syncErrors = append(syncErrors, fmt.Errorf("sync session %s: %w", meta.ID, err))
+			syncErrors = append(syncErrors, &codexSessionSyncFailure{sessionID: meta.ID, err: err})
 		}
 	}
 	result := errors.Join(syncErrors...)
@@ -143,24 +157,23 @@ func (s *codexSessionSyncer) Sync(ctx context.Context) error {
 	return result
 }
 
-func (s *codexSessionSyncer) syncCandidate(ctx context.Context, rpc codexapp.RPC, meta zotigosession.Metadata) (returnErr error) {
+func (s *codexSessionSyncer) syncCandidate(ctx context.Context, rpc codexapp.RPC, meta zotigosession.Metadata) error {
 	unlockOperation := func() {}
 	if s.sessionOps != nil {
 		unlockOperation = s.sessionOps.lock(meta.ID)
 	}
 	defer unlockOperation()
-	if s.registry != nil {
-		if runtime, ok := s.registry.Get(meta.ID); ok && sessionIsActive(runtime) {
-			return nil
-		}
+	locker, ok := s.store.(interface {
+		LockHistorySync(context.Context, string) (func(), error)
+	})
+	if !ok {
+		return errors.New("session store does not support isolated history sync locking")
 	}
-	if err := s.store.Lock(ctx, meta.ID); err != nil {
-		if errors.Is(err, zotigosession.ErrSessionLocked) {
-			return nil
-		}
-		return fmt.Errorf("lock session for sync: %w", err)
+	unlock, err := locker.LockHistorySync(ctx, meta.ID)
+	if err != nil {
+		return fmt.Errorf("lock session history sync: %w", err)
 	}
-	defer func() { returnErr = errors.Join(returnErr, s.store.Unlock(context.Background(), meta.ID)) }()
+	defer unlock()
 	return s.syncSession(ctx, rpc, meta)
 }
 
@@ -201,29 +214,16 @@ func (s *codexSessionSyncer) syncSession(ctx context.Context, rpc codexapp.RPC, 
 }
 
 func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID string) ([]codexTurn, error) {
-	turns := make([]codexTurn, 0)
-	var cursor string
-	for {
-		params := map[string]any{"threadId": threadID, "limit": 100, "sortDirection": "asc", "itemsView": "notLoaded"}
-		if cursor != "" {
-			params["cursor"] = cursor
-		}
-		var response codexTurnList
-		if err := rpc.Call(ctx, "thread/turns/list", params, &response); err != nil {
-			return nil, fmt.Errorf("list Codex thread turns: %w", err)
-		}
-		turns = append(turns, response.Data...)
-		if response.NextCursor == nil || *response.NextCursor == "" {
-			break
-		}
-		cursor = *response.NextCursor
+	turns, err := listCodexThreadTurns(ctx, rpc, threadID, "notLoaded")
+	if err != nil {
+		return nil, err
 	}
 	turnByID := make(map[string]*codexTurn, len(turns))
 	for index := range turns {
 		turnByID[turns[index].ID] = &turns[index]
 		turns[index].Items = nil
 	}
-	cursor = ""
+	var cursor string
 	for {
 		params := map[string]any{"threadId": threadID, "limit": 100, "sortDirection": "asc"}
 		if cursor != "" {
@@ -231,6 +231,9 @@ func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID stri
 		}
 		var response codexThreadItemList
 		if err := rpc.Call(ctx, "thread/items/list", params, &response); err != nil {
+			if isCodexMethodUnsupported(err) {
+				return listCodexThreadTurns(ctx, rpc, threadID, "full")
+			}
 			return nil, fmt.Errorf("list Codex thread items: %w", err)
 		}
 		for _, entry := range response.Data {
@@ -245,6 +248,34 @@ func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID stri
 		}
 		cursor = *response.NextCursor
 	}
+}
+
+func listCodexThreadTurns(ctx context.Context, rpc codexapp.RPC, threadID string, itemsView string) ([]codexTurn, error) {
+	turns := make([]codexTurn, 0)
+	var cursor string
+	for {
+		params := map[string]any{"threadId": threadID, "limit": 100, "sortDirection": "asc", "itemsView": itemsView}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		var response codexTurnList
+		if err := rpc.Call(ctx, "thread/turns/list", params, &response); err != nil {
+			if isCodexMethodUnsupported(err) {
+				return nil, fmt.Errorf("%w: thread/turns/list", errCodexHistoryAPIUnsupported)
+			}
+			return nil, fmt.Errorf("list Codex thread turns: %w", err)
+		}
+		turns = append(turns, response.Data...)
+		if response.NextCursor == nil || *response.NextCursor == "" {
+			return turns, nil
+		}
+		cursor = *response.NextCursor
+	}
+}
+
+func isCodexMethodUnsupported(err error) bool {
+	var rpcErr *codexapp.RPCError
+	return errors.As(err, &rpcErr) && rpcErr.Code == -32601
 }
 
 func listCodexThreadActivity(ctx context.Context, rpc codexapp.RPC, candidates []zotigosession.Metadata) (map[string]time.Time, error) {
@@ -301,6 +332,61 @@ type codexTerminalState struct {
 	hasCompletedAt bool
 }
 
+type codexSyncBuffer struct {
+	source           displayItemSource
+	expectedSequence uint64
+	pending          []zotigosession.DisplayItem
+	cleanups         []func()
+}
+
+func (b *codexSyncBuffer) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
+	items, exists, err := b.source.LoadItems(ctx, sessionID)
+	return append(items, b.pending...), exists, err
+}
+
+func (b *codexSyncBuffer) AppendItem(_ context.Context, _ string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	b.pending = append(b.pending, item)
+	return item, nil
+}
+
+func (b *codexSyncBuffer) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
+	items, _, err := b.LoadItems(ctx, sessionID)
+	if err != nil {
+		return zotigosession.DisplayItem{}, err
+	}
+	if condition != nil {
+		if err := condition(items); err != nil {
+			return zotigosession.DisplayItem{}, err
+		}
+	}
+	return b.AppendItem(ctx, sessionID, item)
+}
+
+func (b *codexSyncBuffer) commit(ctx context.Context, sessionID string) error {
+	batch, ok := b.source.(batchDisplayItemSource)
+	if !ok {
+		b.cleanup()
+		return errors.New("codex history sync requires atomic display append")
+	}
+	stored, err := batch.AppendItemsAfter(ctx, sessionID, b.expectedSequence, b.pending)
+	if err != nil {
+		b.cleanup()
+		return fmt.Errorf("append complete Codex turn: %w", err)
+	}
+	if len(stored) > 0 {
+		b.expectedSequence = stored[len(stored)-1].Sequence
+	}
+	b.cleanups = nil
+	return nil
+}
+
+func (b *codexSyncBuffer) cleanup() {
+	for index := len(b.cleanups) - 1; index >= 0; index-- {
+		b.cleanups[index]()
+	}
+	b.cleanups = nil
+}
+
 func (s codexTerminalState) matches(desired codexTerminalState) bool {
 	if s.itemType != desired.itemType || s.status != desired.status || s.durationMS != desired.durationMS || s.errorText != desired.errorText {
 		return false
@@ -315,13 +401,18 @@ func syncCompletedCodexTurns(ctx context.Context, items displayItemSource, sessi
 	}
 	seen := indexCodexDisplayItems(existing)
 	associatePendingCodexUsers(&seen, turns)
+	expectedSequence := uint64(0)
+	if len(existing) > 0 {
+		expectedSequence = existing[len(existing)-1].Sequence
+	}
 	for _, turn := range turns {
 		if turn.Status == "inProgress" {
 			continue
 		}
+		buffer := &codexSyncBuffer{source: items, expectedSequence: expectedSequence}
 		createdAt := codexUnixTime(turn.StartedAt)
 		if !seen.startedTurns[turn.ID] {
-			if err := appendSyncedCodexItem(ctx, items, sessionID, zotigosession.DisplayItem{
+			if err := appendSyncedCodexItem(ctx, buffer, sessionID, zotigosession.DisplayItem{
 				ID: "codex-turn-started-" + turn.ID, Type: zotigosession.DisplayItemTurnStarted,
 				Turn: &zotigosession.DisplayTurn{ID: turn.ID, Status: "in_progress"}, CreatedAt: createdAt,
 			}); err != nil {
@@ -330,7 +421,8 @@ func syncCompletedCodexTurns(ctx context.Context, items displayItemSource, sessi
 			seen.startedTurns[turn.ID] = true
 		}
 		for _, item := range turn.Items {
-			if err := syncCompletedCodexItem(ctx, items, sessionID, turn.ID, createdAt, item, &seen); err != nil {
+			if err := syncCompletedCodexItem(ctx, buffer, sessionID, turn.ID, createdAt, item, &seen); err != nil {
+				buffer.cleanup()
 				return err
 			}
 		}
@@ -357,21 +449,25 @@ func syncCompletedCodexTurns(ctx context.Context, items displayItemSource, sessi
 			desiredTerminal.completedAt = *turn.CompletedAt
 			desiredTerminal.hasCompletedAt = true
 		}
-		if seen.finishedTurns[turn.ID].matches(desiredTerminal) {
-			continue
+		if !seen.finishedTurns[turn.ID].matches(desiredTerminal) {
+			terminalID := "codex-turn-finished-" + turn.ID
+			if seen.finishedTurns[turn.ID].itemType != "" {
+				terminalID += "-" + strings.ToLower(turn.Status)
+			}
+			if err := appendSyncedCodexItem(ctx, buffer, sessionID, zotigosession.DisplayItem{
+				ID: terminalID, Type: itemType, Error: errorText,
+				Turn:      &zotigosession.DisplayTurn{ID: turn.ID, Status: strings.ToLower(turn.Status), DurationMS: duration},
+				CreatedAt: codexUnixTime(turn.CompletedAt),
+			}); err != nil {
+				buffer.cleanup()
+				return err
+			}
+			seen.finishedTurns[turn.ID] = desiredTerminal
 		}
-		terminalID := "codex-turn-finished-" + turn.ID
-		if seen.finishedTurns[turn.ID].itemType != "" {
-			terminalID += "-" + strings.ToLower(turn.Status)
-		}
-		if err := appendSyncedCodexItem(ctx, items, sessionID, zotigosession.DisplayItem{
-			ID: terminalID, Type: itemType, Error: errorText,
-			Turn:      &zotigosession.DisplayTurn{ID: turn.ID, Status: strings.ToLower(turn.Status), DurationMS: duration},
-			CreatedAt: codexUnixTime(turn.CompletedAt),
-		}); err != nil {
+		if err := buffer.commit(ctx, sessionID); err != nil {
 			return err
 		}
-		seen.finishedTurns[turn.ID] = desiredTerminal
+		expectedSequence = buffer.expectedSequence
 	}
 	return nil
 }
@@ -503,6 +599,33 @@ func syncCompletedCodexItem(ctx context.Context, items displayItemSource, sessio
 			Turn:      &zotigosession.DisplayTurn{ID: turnID},
 			CreatedAt: createdAt,
 		}, seen)
+	case "imageGeneration":
+		if seen.itemIDs[item.ID] {
+			return nil
+		}
+		if !codexImageGenerationCompleted(item) {
+			seen.itemIDs[item.ID] = true
+			return nil
+		}
+		store := codexSessionStoreFromItems(items)
+		if store == nil {
+			return errors.New("codex image sync requires a session store")
+		}
+		displayItem, cleanup, err := codexGeneratedImageDisplayItem(ctx, store, codexSessionStoreRoot(store), sessionID, turnID, item, createdAt)
+		if err != nil {
+			if errors.Is(err, errCodexImageUnavailable) {
+				return appendIndexedCodexItem(ctx, items, sessionID, codexUnavailableImageDisplayItem(item.ID, turnID, createdAt), seen)
+			}
+			return err
+		}
+		if err := appendIndexedCodexItem(ctx, items, sessionID, displayItem, seen); err != nil {
+			cleanup()
+			return err
+		}
+		if buffer, ok := items.(*codexSyncBuffer); ok {
+			buffer.cleanups = append(buffer.cleanups, cleanup)
+		}
+		return nil
 	case "contextCompaction":
 		if seen.itemIDs[item.ID] {
 			return nil
@@ -565,16 +688,30 @@ func syncCompletedCodexTool(ctx context.Context, items displayItemSource, sessio
 	if seen.toolResults[item.ID] {
 		return nil
 	}
-	result, ok := codexToolResult(item, name)
+	result, ok, err := codexToolResult(item, name)
+	if err != nil {
+		return err
+	}
 	if !ok {
 		return nil
+	}
+	cleanup := func() {}
+	if store := codexSessionStoreFromItems(items); store != nil {
+		cleanup, err = persistCodexToolResultMedia(ctx, store, codexSessionStoreRoot(store), sessionID, result)
+		if err != nil {
+			return err
+		}
 	}
 	if err := appendSyncedCodexItem(ctx, items, sessionID, zotigosession.DisplayItem{
 		ID: "codex-tool-result-" + item.ID, Type: zotigosession.DisplayItemAssistantMessage,
 		Role: string(protocol.RoleAssistant), Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
 		Turn: &zotigosession.DisplayTurn{ID: turnID}, CreatedAt: createdAt,
 	}); err != nil {
+		cleanup()
 		return err
+	}
+	if buffer, ok := items.(*codexSyncBuffer); ok {
+		buffer.cleanups = append(buffer.cleanups, cleanup)
 	}
 	seen.toolResults[item.ID] = true
 	return nil

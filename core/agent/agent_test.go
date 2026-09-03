@@ -1922,6 +1922,112 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 	}
 }
 
+func TestAgentStaleUsageAnchorDoesNotTriggerCompaction(t *testing.T) {
+	provider := &ContextCaptureProvider{}
+	providers.Register("compaction-anchor-reset", func(config.ProfileConfig) (providers.Provider, error) {
+		return provider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "compaction-anchor-reset", ContextWindow: 100_000}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := buildSeedHistory(40)
+	for index := len(history) - 1; index >= 0; index-- {
+		if history[index].Role != protocol.RoleAssistant {
+			continue
+		}
+		history[index].Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 90_000, TotalTokens: 90_100}}
+		break
+	}
+	ag.Restore(agent.Snapshot{History: history})
+
+	compactions := make([]int, 0, 2)
+	for _, promptText := range []string{"first continuation", "second continuation"} {
+		events, err := ag.Run(context.Background(), promptText)
+		if err != nil {
+			t.Fatal(err)
+		}
+		count := 0
+		for event := range events {
+			if event.Type == protocol.EventTypeContextCompacted {
+				count++
+			}
+		}
+		compactions = append(compactions, count)
+	}
+	if compactions[0] != 0 || compactions[1] != 0 {
+		t.Fatalf("stale provider snapshot triggered compaction: %v", compactions)
+	}
+}
+
+func TestAgent_512KProfileWithMultiMegabytePayloadDoesNotInflateTokensOrRepeatCompaction(t *testing.T) {
+	provider := &ContextCaptureProvider{}
+	providers.Register("compaction-512k-megabyte", func(config.ProfileConfig) (providers.Provider, error) {
+		return provider, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	const contextWindow = 512_000
+	ag, err := agent.New(config.ProfileConfig{Provider: "compaction-512k-megabyte", ContextWindow: contextWindow}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// One payload is enough to exceed the window before projection: the same
+	// 3 MiB data URL appears in the legacy text field and structured media.
+	dataURL := "data:image/png;base64," + strings.Repeat("B", 3<<20)
+	callID := "call-0"
+	asst := protocol.NewAssistantMessage("running tool")
+	asst.AddToolCall(protocol.ToolCall{ID: callID, Name: "exec", Arguments: "{}"})
+	history := []protocol.Message{
+		protocol.NewUserMessage("step 0"),
+		asst,
+		protocol.NewToolMessage([]protocol.ToolResult{{
+			ToolCallID: callID,
+			Type:       protocol.ToolResultTypeContent,
+			Text:       dataURL,
+			Content: []protocol.ToolResultContentPart{{
+				Type: protocol.ContentTypeImage, Image: &protocol.MediaPart{URL: dataURL, MediaType: "image/png"},
+			}},
+		}}),
+	}
+	ag.Restore(agent.Snapshot{History: history})
+
+	// Across multiple continuation turns:
+	// 1. Context tokens must never be reported as millions of tokens.
+	// 2. Compaction should not run repeatedly if prompt is within budget.
+	compactionCount := 0
+	for turn := 0; turn < 2; turn++ {
+		events, err := ag.Run(context.Background(), fmt.Sprintf("continue %d", turn))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for event := range events {
+			if event.Type == protocol.EventTypeContextCompacted {
+				compactionCount++
+				if event.ContextCompaction != nil {
+					if event.ContextCompaction.OriginalTokens >= 1_000_000 {
+						t.Fatalf("OriginalTokens inflated to %d, want < 1,000,000", event.ContextCompaction.OriginalTokens)
+					}
+					if event.ContextCompaction.MessagesBefore <= event.ContextCompaction.MessagesAfter {
+						t.Fatalf("compaction event emitted with no message reduction: before=%d after=%d",
+							event.ContextCompaction.MessagesBefore, event.ContextCompaction.MessagesAfter)
+					}
+				}
+			}
+		}
+	}
+	if compactionCount > 1 {
+		t.Fatalf("repeated compaction triggered on consecutive turns: count = %d", compactionCount)
+	}
+}
+
 func TestAgentResetLoopDetector(t *testing.T) {
 	providers.Register("mock-loop", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &StatsMockProvider{}, nil

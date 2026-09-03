@@ -106,12 +106,12 @@ func TestListenAddressNeedsAuth(t *testing.T) {
 		addr string
 		want bool
 	}{
-		{addr: "127.0.0.1:8765", want: false},
-		{addr: "localhost:8765", want: false},
-		{addr: "[::1]:8765", want: false},
-		{addr: "10.20.30.40:8765", want: true},
-		{addr: "0.0.0.0:8765", want: true},
-		{addr: ":8765", want: true},
+		{addr: "127.0.0.1:8766", want: false},
+		{addr: "localhost:8766", want: false},
+		{addr: "[::1]:8766", want: false},
+		{addr: "10.20.30.40:8766", want: true},
+		{addr: "0.0.0.0:8766", want: true},
+		{addr: ":8766", want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.addr, func(t *testing.T) {
@@ -129,12 +129,12 @@ func TestResolveWorkerDaemonURL(t *testing.T) {
 		explicit string
 		want     string
 	}{
-		{name: "loopback", addr: "127.0.0.1:8765", want: "http://127.0.0.1:8765"},
-		{name: "ipv4 wildcard", addr: "0.0.0.0:8765", want: "http://127.0.0.1:8765"},
-		{name: "empty wildcard", addr: ":8765", want: "http://127.0.0.1:8765"},
-		{name: "ipv6 wildcard", addr: "[::]:8765", want: "http://[::1]:8765"},
-		{name: "scoped ipv6", addr: "[fe80::1%en0]:8765", want: "http://[fe80::1%25en0]:8765"},
-		{name: "explicit wins", addr: "0.0.0.0:8765", explicit: "http://10.20.30.40:9000/", want: "http://10.20.30.40:9000"},
+		{name: "loopback", addr: "127.0.0.1:8766", want: "http://127.0.0.1:8766"},
+		{name: "ipv4 wildcard", addr: "0.0.0.0:8766", want: "http://127.0.0.1:8766"},
+		{name: "empty wildcard", addr: ":8766", want: "http://127.0.0.1:8766"},
+		{name: "ipv6 wildcard", addr: "[::]:8766", want: "http://[::1]:8766"},
+		{name: "scoped ipv6", addr: "[fe80::1%en0]:8766", want: "http://[fe80::1%25en0]:8766"},
+		{name: "explicit wins", addr: "0.0.0.0:8766", explicit: "http://10.20.30.40:9000/", want: "http://10.20.30.40:9000"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -150,7 +150,7 @@ func TestResolveWorkerDaemonURL(t *testing.T) {
 }
 
 func TestResolveWorkerDaemonURLRejectsEmptyQuery(t *testing.T) {
-	if _, err := resolveWorkerDaemonURL("127.0.0.1:8765", "http://127.0.0.1:8765?"); err == nil {
+	if _, err := resolveWorkerDaemonURL("127.0.0.1:8766", "http://127.0.0.1:8766?"); err == nil {
 		t.Fatal("resolveWorkerDaemonURL accepted an empty query")
 	}
 }

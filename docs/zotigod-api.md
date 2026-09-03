@@ -1,7 +1,7 @@
 # zotigod HTTP API
 
 `zotigod` exposes a small HTTP API for desktop clients. It listens on
-`127.0.0.1:8765` by default. Desktop may cache responses locally, but zotigo
+`127.0.0.1:8766` by default. Desktop may cache responses locally, but zotigo
 remains the source of truth for session state and display history.
 
 ## Remote access and authentication
@@ -13,7 +13,7 @@ the daemon host and start zotigod on a concrete private address:
 umask 077
 openssl rand -base64 32 > ~/.zotigo/daemon.token
 zotigod \
-  --addr 10.20.30.40:8765 \
+  --addr 10.20.30.40:8766 \
   --auth-token-file ~/.zotigo/daemon.token
 ```
 
@@ -28,6 +28,10 @@ Authorization: Bearer <token>
 unreachable daemon from an authentication failure. Its data includes
 `status: "ok"` and `protocol_version: "1"`. All other public endpoints return
 `401` with code `unauthorized` when the token is missing or incorrect.
+Clients that discover an occupied daemon address must validate this complete
+health envelope; an arbitrary HTTP `200` is not a compatible zotigod. Starting
+on an address owned by another service fails immediately with
+`daemon_port_occupied` in the daemon log.
 
 Plain HTTP authenticates the caller but does not hide tokens, prompts, or
 results from the network. Use a trusted private network, a VPN, or an HTTPS
@@ -44,9 +48,9 @@ listen address, for example:
 
 ```sh
 zotigod \
-  --addr 0.0.0.0:8765 \
+  --addr 0.0.0.0:8766 \
   --auth-token-file ~/.zotigo/daemon.token \
-  --worker-daemon-url http://127.0.0.1:8765
+  --worker-daemon-url http://127.0.0.1:8766
 ```
 
 ## Public endpoints
@@ -165,7 +169,9 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
-`runtime_occupied`, `service_unavailable`, and `internal_error`.
+`active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`,
+`command_pending`, `no_active_turn`, `service_unavailable`, and
+`internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -444,9 +450,24 @@ return it as offline:
   "live": false,
   "working_directory": "/Users/me/workspace/project",
   "approval_policy": "auto",
+  "context_usage": {
+    "tokens": 82416,
+    "window": 512000,
+    "status": "available",
+    "source": "provider",
+    "updated_at": "2026-01-02T03:04:05Z"
+  },
   "created_at": "2026-01-02T03:04:05Z"
 }
 ```
+
+`context_usage.tokens` is the latest provider-reported prompt/input occupancy,
+not cumulative session usage or the size of unprocessed history. The last valid
+snapshot survives later notifications that omit usage fields and daemon
+restart. When no reliable snapshot exists, `context_usage` is still present as
+`{"status":"unavailable"}`; clients must not infer zero usage. `source` and
+`updated_at` identify the measurement origin and age. Existing clients may
+ignore these additive fields.
 
 `GET /sessions` is an index-backed catalog read: it does not load each session
 snapshot or display log. Live `working` and `active_tool` values come from the
@@ -464,14 +485,27 @@ list; the response `data` includes a `diagnostics` array such as:
 {
   "sessions": [],
   "diagnostics": [
-    {"code": "codex_sync_failed", "message": "Codex history refresh failed"}
+    {
+      "session_id": "sess_8f0e12ab34cd56ef",
+      "code": "codex_history_sync_failed",
+      "message": "Codex history refresh failed"
+    }
   ]
 }
 ```
 
 Successful checks are throttled briefly. Failed checks are not throttled, so a
 later request can retry. The daemon never starts a session worker to perform
-this refresh and skips sessions that are active or locked by another process.
+this refresh. Read-only history refresh is allowed while a Codex thread has an
+external active writer and while the Zotigo runtime is active; only Zotigo's
+isolated per-session history-sync lock or a concurrent display-log append can
+defer the commit, in which case the response contains a retryable per-session
+diagnostic instead of reporting false success.
+If `thread/items/list` is not supported, zotigod falls back to
+`thread/turns/list` with full items and atomically imports only completed turn
+boundaries. Failures use `codex_history_sync_failed`, or
+`codex_history_api_unsupported` when neither history API is available, and do
+not change the existing session state or backend checkpoint.
 
 `live: false` means desktop may render history but should not show turn-scoped
 controls as usable. Sending a new message or explicitly starting the session can
@@ -485,7 +519,9 @@ and waits for that worker to connect. It does not append a user message.
 
 `POST /sessions/{id}/messages` also resumes an offline session before accepting
 the message. Desktop's normal chat flow can call `messages` directly instead of
-calling `start` first.
+calling `start` first. While a prior turn is stopping, an accepted message gets
+`202`, remains durable and replayable, and starts after the worker's turn-done
+barrier; its command cursor is not advanced before `turn_started`.
 
 Worker lifetime is independent of Desktop lifetime. Runtime adapters declare an
 idle policy: Codex workers are released shortly after a completed turn so the
@@ -516,6 +552,13 @@ stored-only session they return `409` with `code: "session_not_live"`.
 session. This log is a persistent read model for CLI and desktop replay; it is
 not `AgentSnapshot.History`, and desktop clients must not read `.zotigo/sessions`
 directly.
+
+Codex `fileChange` records use `apply_patch` as a backwards-compatible display
+tool name, not as an executable Zotigo core method. The durable tool result
+keeps `json.changes` entries with `path`, `kind`, and `diff`. The public tool-call
+arguments expose only scalar `files` and `change_count` summary fields, avoiding
+JavaScript object coercion such as `[object Object]`; richer clients should build
+file-level diff views from the structured tool result.
 
 The current file-store implementation reads the per-session append log before
 applying pagination, so `limit` bounds the HTTP response size but is not yet a
@@ -679,7 +722,8 @@ Lifecycle confirmation still comes from explicit turn items such as
 `turn_interrupted`.
 
 Message content parts are zotigod display DTOs, not runtime protocol structs.
-Current part types include `text`, `reasoning`, `tool_call`, and `tool_result`.
+Current part types include `text`, `reasoning`, `image`, `tool_call`, and
+`tool_result`.
 For structured parts such as `tool_call` and `tool_result`, desktop clients
 should use the structured `tool_call` and `tool_result` objects for rendering,
 state, filtering, and details. `text` is reserved for actual text content parts.
@@ -688,6 +732,13 @@ runtime events finish, rather than waiting for the whole turn. A single model
 turn may therefore produce multiple ordered `assistant_message` items. Text and
 reasoning are persisted once per completed content block instead of creating
 one durable item per token.
+
+Completed Codex `imageGeneration` items and image-bearing dynamic/MCP tool
+results are copied into the session image store. Their display items contain a
+stable session image URL plus `media_type`, dimensions, and byte size; inline
+Base64/data URLs are not retained in the display WAL. The same media reference
+is returned by live events and `/sessions/{id}/items`, including after a daemon
+restart or Codex history synchronization.
 
 Completed `spawn` results may include `tool_result.metadata.subagent` with the
 child name, type, workdir, description, status, usage, and public message
@@ -881,14 +932,16 @@ later profile changes reuse that observer, so one session keeps a consistent
 trace lineage across model changes. Without configured credentials the shared
 observer is a no-op.
 
-Worker startup also acquires the same per-session file lock used by the CLI
-session manager. If another CLI, daemon worker, or local process already owns
-that session lock, the worker exits instead of reusing the session concurrently.
-The worker stores a per-session command cursor under `.zotigo/sessions` and uses
-it to avoid replaying old accepted commands after restart. Cursor writes are
-atomic rename operations. If the cursor file is corrupt, the bundled worker only
-recovers past commands whose application is visible in the display log; pending
-accepted commands are replayed rather than skipped.
+Native worker startup also acquires the same per-session file lock used by the
+CLI session manager. If another CLI, daemon worker, or local process already
+owns that session lock, the worker exits instead of reusing the session
+concurrently. Codex workers retain this runtime session lock and also respect
+the app-server thread writer lease; read-only Codex history refresh uses a
+separate history-sync lock. Native workers store a per-session command cursor
+under `.zotigo/sessions`; cursor writes are atomic renames. Codex workers
+recover their applied sequence from durable display lifecycle markers. In both
+runtimes, pending accepted commands are replayed rather than skipped after
+restart.
 
 Workers attach a live control channel by dialing:
 
@@ -898,9 +951,11 @@ This is a WebSocket endpoint. zotigod keeps one active worker connection per
 session ID, so multiple sessions can run concurrently on independent worker
 processes. Reconnecting the same session replaces the old connection.
 Connecting a `starting` session transitions it to `running`; `running` and
-`paused` sessions may reconnect. `created`, `ended`, and `failed` sessions are
-rejected. A worker WebSocket disconnect only removes that live connection; it
-does not by itself end the session.
+`pausing` or `paused` sessions may reconnect. `pausing` means the previous turn
+is still stopping and remains `working: true`; it becomes `running` and idle
+only after the worker reports the runtime stopped. `created`, `ended`, and
+`failed` sessions are rejected. A worker WebSocket disconnect only removes that
+live connection; it does not by itself end the session.
 
 zotigod sends WebSocket ping frames to workers and expects pong responses. A
 worker connection that stops responding is closed and unregistered, so later
@@ -925,6 +980,12 @@ handlers from changing execution order through WebSocket scheduling. The
 buffer is intentionally bounded at 32 items; if it fills, the worker treats
 itself as unhealthy and exits instead of staying connected but not applying
 control commands.
+
+After a queued message has durably produced `turn_started`, workers send an
+explicit `working` lifecycle notification. This is the only signal that moves a
+session from `pausing` back to `running`; ordinary output wakes and deltas do not
+guess that transition. Failure to deliver this advisory notification never
+cancels an already-durable turn.
 
 If the daemon process restarts, old workers are not treated as still live.
 Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or
@@ -1036,7 +1097,9 @@ payloads from becoming part of the transcript API.
 `POST /sessions/{id}/messages` starts or resumes the session when needed, then
 requires no currently open turn and no pending message command that has not yet
 started a turn. If a turn is active, desktop should use
-`POST /sessions/{id}/steering` instead of submitting a new message.
+`POST /sessions/{id}/steering` instead of submitting a new message. The exception
+is `pausing`: one normal message may be durably queued and returns `202`; a
+second one returns `command_pending` until the queued message starts.
 
 Response data:
 
@@ -1248,7 +1311,8 @@ Response data:
 
 Status codes:
 
-- `202`: pause or live profile command accepted.
+- `202`: pause, a message queued behind a stopping turn, or live profile command
+  accepted.
 - `201`: message or steering command created, or worker lifecycle confirmation
   appended.
 - `200`: internal command list returned, or an offline/created profile change
@@ -1257,11 +1321,11 @@ Status codes:
   steering text, unknown profile, or invalid command query.
 - `413`: message or steering request body exceeds the public API size limit.
 - `404`: session not found.
-- `409`: command submitted to a non-running session, message submitted during an
-  active turn, turn-scoped command submitted to an offline session, pause/steering
-  submitted without an active turn, or a lifecycle, pause, or steering `turn_id`
-  does not match the active turn. Offline turn-scoped commands use
-  `code: "session_not_live"`.
+- `409`: command submitted in an incompatible state or with a mismatched
+  `turn_id`. Stable state codes are `active_turn`, `approval_pending`,
+  `runtime_occupied`, `turn_stopping`, `command_pending`, and `no_active_turn`.
+  Offline turn-scoped commands use `session_not_live`. Clients should only
+  convert a normal message to steering for `active_turn`.
 - `503`: zotigod could not start or reconnect a worker before accepting the
   command.
 - `405`: method not allowed.

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
@@ -27,6 +28,11 @@ type displayItemSource interface {
 
 type offsetDisplayItemSource interface {
 	LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
+}
+
+type batchDisplayItemSource interface {
+	AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
+	AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
 }
 
 type storedDisplayItemSource struct {
@@ -62,6 +68,30 @@ func (s eventingDisplayItemSource) AppendItem(ctx context.Context, sessionID str
 func (s eventingDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
 	stored, err := s.source.AppendItemIf(ctx, sessionID, item, condition)
 	if err == nil {
+		s.events.Wake(sessionID)
+	}
+	return stored, err
+}
+
+func (s eventingDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	batch, ok := s.source.(batchDisplayItemSource)
+	if !ok {
+		return nil, errors.New("display item source does not support atomic append")
+	}
+	stored, err := batch.AppendItems(ctx, sessionID, items)
+	if err == nil && len(stored) > 0 {
+		s.events.Wake(sessionID)
+	}
+	return stored, err
+}
+
+func (s eventingDisplayItemSource) AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	batch, ok := s.source.(batchDisplayItemSource)
+	if !ok {
+		return nil, errors.New("display item source does not support atomic append")
+	}
+	stored, err := batch.AppendItemsAfter(ctx, sessionID, expectedSequence, items)
+	if err == nil && len(stored) > 0 {
 		s.events.Wake(sessionID)
 	}
 	return stored, err
@@ -110,6 +140,34 @@ func (s storedDisplayItemSource) AppendItemIf(ctx context.Context, sessionID str
 		}
 	}
 	return s.store.AppendDisplayItem(ctx, sessionID, item)
+}
+
+func (s storedDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	type batchStore interface {
+		AppendDisplayItems(context.Context, string, []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
+	}
+	store, ok := s.store.(batchStore)
+	if !ok {
+		return nil, errors.New("session store does not support atomic display append")
+	}
+	return store.AppendDisplayItems(ctx, sessionID, items)
+}
+
+func (s storedDisplayItemSource) AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return nil, err
+	}
+	type batchStore interface {
+		AppendDisplayItemsAfter(context.Context, string, uint64, []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
+	}
+	store, ok := s.store.(batchStore)
+	if !ok {
+		return nil, errors.New("session store does not support conditional atomic display append")
+	}
+	return store.AppendDisplayItemsAfter(ctx, sessionID, expectedSequence, items)
 }
 
 func (s storedDisplayItemSource) ensureSession(ctx context.Context, sessionID string) error {
@@ -451,8 +509,43 @@ func publicDisplayToolCall(call *zotigosession.DisplayToolCall) *itemToolCallRes
 	return &itemToolCallResponse{
 		ID:        call.ID,
 		Name:      call.Name,
-		Arguments: call.Arguments,
+		Arguments: publicToolCallArguments(call.Name, call.Arguments),
 	}
+}
+
+func publicToolCallArguments(name string, arguments string) string {
+	if name != "apply_patch" {
+		return arguments
+	}
+	var input map[string]any
+	if err := json.Unmarshal([]byte(arguments), &input); err != nil || input["patch"] != nil {
+		return arguments
+	}
+	changes, ok := input["changes"]
+	if !ok {
+		return arguments
+	}
+	var files []struct {
+		Path string `json:"path"`
+	}
+	data, err := json.Marshal(changes)
+	if err != nil || json.Unmarshal(data, &files) != nil || len(files) == 0 {
+		return arguments
+	}
+	paths := make([]string, 0, len(files))
+	for _, file := range files {
+		if path := strings.TrimSpace(file.Path); path != "" {
+			paths = append(paths, path)
+		}
+	}
+	if len(paths) == 0 {
+		return arguments
+	}
+	encoded, err := json.Marshal(map[string]any{"change_count": len(files), "files": strings.Join(paths, ", ")})
+	if err != nil {
+		return arguments
+	}
+	return string(encoded)
 }
 
 func publicDisplayToolResult(result *zotigosession.DisplayToolResult) *itemToolResultResponse {

@@ -61,8 +61,11 @@ type DisplayToolExecution struct {
 }
 
 type DisplayContextUsage struct {
-	Tokens int `json:"tokens"`
-	Window int `json:"window"`
+	Tokens    int       `json:"tokens"`
+	Window    int       `json:"window"`
+	Status    string    `json:"status,omitempty"`
+	Source    string    `json:"source,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
 }
 
 type DisplayToolResultContentPart struct {

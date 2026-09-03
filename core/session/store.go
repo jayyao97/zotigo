@@ -8,6 +8,9 @@ import (
 // ErrSessionLocked indicates that another process owns the session runtime.
 var ErrSessionLocked = errors.New("session is locked")
 
+// ErrDisplayLogChanged indicates that an atomic append projection is stale.
+var ErrDisplayLogChanged = errors.New("display log changed")
+
 // ErrProfileStateUncertain indicates that a profile metadata update failed and
 // at least one persisted view could not be rolled back.
 var ErrProfileStateUncertain = errors.New("profile state is uncertain")

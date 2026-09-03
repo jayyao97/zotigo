@@ -139,6 +139,8 @@ func (e *LocalExecutor) Exec(ctx context.Context, cmdStr string, opts ExecOption
 	}
 
 	cmd := exec.CommandContext(ctx, shell, shellArg, cmdStr)
+	prepareCommandForCancellation(cmd)
+	cmd.WaitDelay = 2 * time.Second
 
 	// Set working directory
 	if opts.WorkDir != "" {

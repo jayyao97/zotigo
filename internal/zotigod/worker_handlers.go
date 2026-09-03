@@ -29,7 +29,7 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch session.State {
-	case SessionStateStarting, SessionStateRunning, SessionStatePaused:
+	case SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused:
 	default:
 		writeAPIError(w, http.StatusConflict, "worker connect requires a live session")
 		return
@@ -45,7 +45,7 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	unlock := h.sessionOps.lock(sessionID)
 	defer unlock()
 	session, ok = h.registry.Get(sessionID)
-	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused) || h.workers.Has(sessionID) {
+	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused) || h.workers.Has(sessionID) {
 		_ = conn.Close()
 		return
 	}

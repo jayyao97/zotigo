@@ -2269,29 +2269,14 @@ func isZeroUsage(usage protocol.Usage) bool {
 }
 
 func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction, error) {
-	var msgs []protocol.Message
+	msgs := a.systemPromptMessages()
 	var compaction *protocol.ContextCompaction
+	history := a.projectPromptHistory(a.conversation.history)
 
-	pctx := prompt.PromptContext{
-		WorkDir:  a.executor.WorkDir(),
-		Platform: a.executor.Platform(),
-		Model:    a.cfg.Model,
-	}
-
-	// System prompt messages. The first block is the stable product prompt; any
-	// system-scoped dynamic capability context, such as available skills, stays
-	// in later system blocks. Project/environment/date context is already
-	// persisted in history at real user boundaries.
-	if a.promptBuilder != nil {
-		for _, text := range a.promptBuilder.BuildMessages(pctx) {
-			msgs = append(msgs, protocol.NewSystemMessage(text))
-		}
-	}
-
-	history := a.conversation.history
-
-	// Check if compression is needed
-	if a.compressor != nil && a.compressor.NeedsCompression(history) {
+	// Compression and dispatch use the same bounded prompt projection, including
+	// system messages. This keeps the trigger and before/after numbers tied to
+	// what the provider is actually about to receive.
+	if a.compressor != nil && a.compressor.NeedsCompression(appendPrompt(msgs, history)) {
 		result, err := a.compressHistoryLocked(context.Background(), false)
 		if err != nil {
 			if errors.Is(err, ErrHistoryRecord) {
@@ -2300,7 +2285,7 @@ func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction,
 			debug.Logf("agent proactive compression failed, continuing uncompressed: %v", err)
 		}
 		if err == nil && result.Compressed {
-			history = a.conversation.history
+			history = a.projectPromptHistory(a.conversation.history)
 			compaction = &protocol.ContextCompaction{
 				OriginalTokens:   result.OriginalTokens,
 				CompressedTokens: result.CompressedTokens,
@@ -2310,13 +2295,33 @@ func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction,
 		}
 	}
 
-	// Truncate long tool results
-	if a.compressor != nil {
-		history = a.compressor.TruncateToolResults(history, 2000)
-	}
-
 	msgs = append(msgs, history...)
 	return msgs, compaction, nil
+}
+
+func (a *Agent) systemPromptMessages() []protocol.Message {
+	var messages []protocol.Message
+	if a.promptBuilder == nil {
+		return messages
+	}
+	for _, text := range a.promptBuilder.BuildMessages(a.promptContext()) {
+		messages = append(messages, protocol.NewSystemMessage(text))
+	}
+	return messages
+}
+
+func (a *Agent) projectPromptHistory(history []protocol.Message) []protocol.Message {
+	if a.compressor == nil {
+		return history
+	}
+	return a.compressor.ProjectPrompt(history, 2000)
+}
+
+func appendPrompt(prefix, history []protocol.Message) []protocol.Message {
+	promptMessages := make([]protocol.Message, 0, len(prefix)+len(history))
+	promptMessages = append(promptMessages, prefix...)
+	promptMessages = append(promptMessages, history...)
+	return promptMessages
 }
 
 func (a *Agent) applyPendingTurnUserInput(ctx context.Context, outCh chan<- protocol.Event) (bool, error) {
@@ -2428,29 +2433,43 @@ func (a *Agent) compressHistoryLocked(
 	ctx context.Context,
 	force bool,
 ) (services.CompressionResult, error) {
+	history := a.projectPromptHistory(a.conversation.history)
+	prefix := a.systemPromptMessages()
+	promptBefore := appendPrompt(prefix, history)
+	if !force && !a.compressor.NeedsCompression(promptBefore) {
+		tokens := a.compressor.EstimatePromptTokens(promptBefore)
+		return services.CompressionResult{
+			OriginalTokens: tokens, CompressedTokens: tokens,
+			MessagesBefore: len(history), MessagesAfter: len(history),
+		}, nil
+	}
+
 	var (
 		compressed []protocol.Message
 		result     services.CompressionResult
 		err        error
 	)
-	if force {
-		compressed, result, err = a.compressor.ForceCompress(ctx, a.conversation.history)
-	} else {
-		compressed, result, err = a.compressor.Compress(ctx, a.conversation.history)
-	}
+	compressed, result, err = a.compressor.ForceCompress(ctx, history)
 	if err != nil || !result.Compressed {
 		return result, err
 	}
+	result.OriginalTokens = a.compressor.CountTokens(promptBefore)
 
 	rebased, state, err := a.rebaseUserContext(compressed)
 	if err != nil {
 		return services.CompressionResult{}, err
 	}
+	result.MessagesAfter = len(rebased)
+	result.CompressedTokens = a.compressor.CountTokens(appendPrompt(prefix, a.projectPromptHistory(rebased)))
+	if result.CompressedTokens >= result.OriginalTokens || result.MessagesAfter >= result.MessagesBefore {
+		result.Compressed = false
+		result.CompressedTokens = result.OriginalTokens
+		result.MessagesAfter = result.MessagesBefore
+		return result, nil
+	}
 	if err := a.conversation.replace(rebased, state); err != nil {
 		return services.CompressionResult{}, fmt.Errorf("record compressed history: %w", err)
 	}
-	result.MessagesAfter = len(rebased)
-	result.CompressedTokens = a.compressor.CountTokens(rebased)
 	return result, nil
 }
 
