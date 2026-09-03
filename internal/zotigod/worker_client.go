@@ -46,6 +46,8 @@ const workerHTTPTimeout = 10 * time.Second
 
 const workerDialErrorBodyLimit = 4 * 1024
 
+var errActiveTurn = errors.New("active_turn: a turn is already active")
+
 const (
 	defaultWorkerClientPingInterval = 15 * time.Second
 	defaultWorkerClientPongWait     = 45 * time.Second
@@ -153,7 +155,8 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		NotifyApprovalResolved: func(ctx context.Context, approval approvalRequestResponse) {
 			_ = clientWriter.SendApprovalResult(ctx, workerApprovalResult{Approval: &approval})
 		},
-		NotifyIdle: clientWriter.SendIdle,
+		NotifyIdle:    clientWriter.SendIdle,
+		NotifyWorking: clientWriter.SendWorking,
 	})
 	if err != nil {
 		return err
@@ -254,6 +257,7 @@ type workerRuntimeConfig struct {
 	NotifyApproval         func(context.Context, approvalRequestResponse)
 	NotifyApprovalResolved func(context.Context, approvalRequestResponse)
 	NotifyIdle             func(context.Context, workerIdle) error
+	NotifyWorking          func(context.Context) error
 	HookDispatcher         *hooks.Dispatcher
 }
 
@@ -333,11 +337,13 @@ type workerRuntime struct {
 	fatalMu          sync.Mutex
 	fatalErr         error
 	notifyIdle       func(context.Context, workerIdle) error
+	notifyWorking    func(context.Context) error
 	hooks            hookEventDispatcher
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
 	turnActive          bool
+	turnStopping        bool
 	turnReady           chan struct{}
 	turnDone            chan struct{}
 	readyDone           bool
@@ -532,19 +538,20 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
 	transport.notifyApprovalResolved = cfg.NotifyApprovalResolved
 	runtime := &workerRuntime{
-		sessionID:  cfg.SessionID,
-		workDir:    cwd,
-		skills:     skills,
-		store:      cfg.Store,
-		agent:      ag,
-		transport:  transport,
-		display:    display,
-		observer:   observer,
-		runtimeWAL: runtimeWAL,
-		fatalCh:    make(chan error, 1),
-		notifyIdle: cfg.NotifyIdle,
-		hooks:      hookDispatcher,
-		hookModel:  profile.Model,
+		sessionID:     cfg.SessionID,
+		workDir:       cwd,
+		skills:        skills,
+		store:         cfg.Store,
+		agent:         ag,
+		transport:     transport,
+		display:       display,
+		observer:      observer,
+		runtimeWAL:    runtimeWAL,
+		fatalCh:       make(chan error, 1),
+		notifyIdle:    cfg.NotifyIdle,
+		notifyWorking: cfg.NotifyWorking,
+		hooks:         hookDispatcher,
+		hookModel:     profile.Model,
 	}
 	if runtimeWAL != nil {
 		runtimeWAL.onError = func(err error) {
@@ -1020,7 +1027,17 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayl
 	if command.TurnID != "" && command.TurnID != currentTurnID {
 		return nil
 	}
-	_, err := r.transport.interruptTurn(ctx, currentTurnID, command.Reason, r.cancelCurrentTurn)
+	r.mu.Lock()
+	if r.turnActive {
+		r.turnStopping = true
+	}
+	r.mu.Unlock()
+	interrupted, err := r.transport.interruptTurn(ctx, currentTurnID, command.Reason, r.cancelCurrentTurn)
+	if err != nil || !interrupted {
+		r.mu.Lock()
+		r.turnStopping = false
+		r.mu.Unlock()
+	}
 	return err
 }
 
@@ -1091,14 +1108,27 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		return err
 	}
 
-	r.mu.Lock()
-	if r.turnActive {
+	for {
+		r.mu.Lock()
+		if !r.turnActive {
+			break
+		}
+		if !r.turnStopping || r.turnDone == nil {
+			r.mu.Unlock()
+			return errActiveTurn
+		}
+		done := r.turnDone
 		r.mu.Unlock()
-		return nil
+		select {
+		case <-done:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	turnCtx, cancel := context.WithCancel(context.Background())
 	r.turnCancel = cancel
 	r.turnActive = true
+	r.turnStopping = false
 	r.turnReady = make(chan struct{})
 	r.turnDone = make(chan struct{})
 	r.readyDone = false
@@ -1114,6 +1144,9 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	if err := r.beginRuntimeWAL(ctx); err != nil {
 		r.finishTurn()
 		return fmt.Errorf("begin runtime WAL: %w", err)
+	}
+	if r.notifyWorking != nil {
+		_ = r.notifyWorking(ctx)
 	}
 	model := r.turnHookModel()
 	usageBefore := r.agent.Snapshot().CumulativeUsage
@@ -1261,6 +1294,7 @@ func (r *workerRuntime) finishTurn() {
 	r.closeTurnDoneLocked()
 	r.turnCancel = nil
 	r.turnActive = false
+	r.turnStopping = false
 	r.turnReady = nil
 	r.turnDone = nil
 }
@@ -1912,6 +1946,20 @@ func (w *workerClientWriter) SendIdle(ctx context.Context, idle workerIdle) erro
 	select {
 	case <-idleCtx.Done():
 		return idleCtx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendWorking(ctx context.Context) error {
+	workingCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+	defer cancel()
+	msg := workerMessage{Type: workerMessageWorking}
+	select {
+	case <-workingCtx.Done():
+		return workingCtx.Err()
 	case <-w.done:
 		return errors.New("worker connection is closed")
 	case w.sendCh <- msg:

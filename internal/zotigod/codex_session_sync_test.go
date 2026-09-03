@@ -43,8 +43,9 @@ func (h *codexSyncHost) Acquire(context.Context) (*codexapp.Lease, error) {
 }
 
 type codexSyncRPC struct {
-	thread codexThread
-	calls  []string
+	thread           codexThread
+	calls            []string
+	itemsUnsupported bool
 }
 
 func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result any) error {
@@ -67,12 +68,18 @@ func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result
 	case "thread/turns/list":
 		r.calls = append(r.calls, "turns")
 		turns := append([]codexTurn(nil), r.thread.Turns...)
-		for index := range turns {
-			turns[index].Items = nil
+		request := params.(map[string]any)
+		if request["itemsView"] != "full" {
+			for index := range turns {
+				turns[index].Items = nil
+			}
 		}
 		payload = codexTurnList{Data: turns}
 	case "thread/items/list":
 		r.calls = append(r.calls, "items")
+		if r.itemsUnsupported {
+			return &codexapp.RPCError{Code: -32601, Message: "thread/items/list is not supported yet"}
+		}
 		entries := make([]codexThreadItemEntry, 0)
 		for _, turn := range r.thread.Turns {
 			for _, item := range turn.Items {
@@ -91,6 +98,150 @@ func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result
 }
 
 func (*codexSyncRPC) Notify(string, any) error { return nil }
+
+func TestCodexSessionSyncFallsBackWhenItemsListUnsupportedWhileRuntimeActive(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	meta := zotigosession.Metadata{ID: "session-active", Agent: "codex", ConversationID: "thread-active", CreatedAt: now, UpdatedAt: now}
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Lock(context.Background(), meta.ID); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Unlock(context.Background(), meta.ID) })
+	completedAt := now.Add(time.Minute).Unix()
+	startedAt := now.Unix()
+	rpc := &codexSyncRPC{itemsUnsupported: true, thread: codexThread{
+		ID: meta.ConversationID, UpdatedAt: completedAt,
+		Turns: []codexTurn{{
+			ID: "turn-latest", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
+			Items: []codexThreadItem{{ID: "latest-message", Type: "agentMessage", Text: "latest history"}},
+		}},
+	}}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: meta.ID, Agent: "codex", State: SessionStateRunning, CreatedAt: now, UpdatedAt: now})
+	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, storedDisplayItemSource{store: store}, nil, registry, newSessionOperationLocks())
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(rpc.calls) != "[list read turns items turns]" {
+		t.Fatalf("RPC fallback calls = %v", rpc.calls)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, item := range items {
+		found = found || item.ID == "latest-message"
+	}
+	if !found {
+		t.Fatalf("latest fallback history missing: %#v", items)
+	}
+	stored, err := store.Get(context.Background(), meta.ID)
+	if err != nil || stored.BackendUpdatedAt.Unix() != completedAt || stored.BackendSyncVersion != codexSessionSyncVersion {
+		t.Fatalf("backend checkpoint = %#v, err=%v", stored, err)
+	}
+	active, _ := registry.Get(meta.ID)
+	if active.State != SessionStateRunning {
+		t.Fatalf("history sync changed runtime state: %#v", active)
+	}
+	before := len(items)
+	syncer.lastCheck = time.Time{}
+	if err := syncer.Sync(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err = store.ListDisplayItems(context.Background(), meta.ID)
+	if err != nil || len(items) != before {
+		t.Fatalf("repeated fallback sync duplicated items: before=%d after=%d err=%v", before, len(items), err)
+	}
+}
+
+func TestSyncCompletedCodexTurnsDoesNotExposePartialTurnOnAppendFailure(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	appendCount := 0
+	source.appendErr = func(string, zotigosession.DisplayItem) error {
+		appendCount++
+		if appendCount == 2 {
+			return errors.New("injected batch failure")
+		}
+		return nil
+	}
+	completedAt := time.Now().Unix()
+	startedAt := completedAt - 1
+	err := syncCompletedCodexTurns(context.Background(), source, "session-atomic", []codexTurn{{
+		ID: "turn-atomic", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
+		Items: []codexThreadItem{{ID: "message-atomic", Type: "agentMessage", Text: "must stay hidden"}},
+	}})
+	if err == nil || !strings.Contains(err.Error(), "injected batch failure") {
+		t.Fatalf("sync error = %v", err)
+	}
+	items, _, loadErr := source.LoadItems(context.Background(), "session-atomic")
+	if loadErr != nil || len(items) != 0 {
+		t.Fatalf("partial turn became visible: %#v, err=%v", items, loadErr)
+	}
+}
+
+func TestSyncCompletedCodexTurnsRejectsConcurrentLiveAppend(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	injected := false
+	source.appendErr = func(sessionID string, _ zotigosession.DisplayItem) error {
+		if injected {
+			return nil
+		}
+		injected = true
+		source.mu.Lock()
+		source.items[sessionID] = append(source.items[sessionID], zotigosession.DisplayItem{
+			ID: "live-item", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage,
+		})
+		source.mu.Unlock()
+		return nil
+	}
+	completedAt := time.Now().Unix()
+	err := syncCompletedCodexTurns(context.Background(), source, "session-race", []codexTurn{{
+		ID: "turn-race", Status: "completed", CompletedAt: &completedAt,
+		Items: []codexThreadItem{{ID: "synced-item", Type: "agentMessage", Text: "history"}},
+	}})
+	if !errors.Is(err, zotigosession.ErrDisplayLogChanged) {
+		t.Fatalf("concurrent append error = %v", err)
+	}
+	items, _, loadErr := source.LoadItems(context.Background(), "session-race")
+	if loadErr != nil || len(items) != 1 || items[0].ID != "live-item" {
+		t.Fatalf("sync interleaved with live append: %#v, err=%v", items, loadErr)
+	}
+}
+
+func TestCodexSessionSyncReportsConcurrentHistoryCommitInsteadOfFalseSuccess(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	meta := zotigosession.Metadata{ID: "session-locked", Agent: "codex", ConversationID: "thread-locked", CreatedAt: now, UpdatedAt: now}
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
+		t.Fatal(err)
+	}
+	unlock, err := store.LockHistorySync(context.Background(), meta.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(unlock)
+	rpc := &codexSyncRPC{thread: codexThread{ID: meta.ConversationID, UpdatedAt: now.Add(time.Minute).Unix()}}
+	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, storedDisplayItemSource{store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err = syncer.Sync(ctx)
+	diagnostics := codexSyncErrorDiagnostics(err)
+	if len(diagnostics) != 1 || diagnostics[0].SessionID != meta.ID || diagnostics[0].Code != "codex_history_sync_failed" {
+		t.Fatalf("locked sync diagnostics = %#v, err=%v", diagnostics, err)
+	}
+}
 
 func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
@@ -511,7 +662,7 @@ func TestListCodexThreadActivityIncludesArchivedWithoutCWDFilter(t *testing.T) {
 	}
 }
 
-func TestCodexSyncCandidateHoldsOperationAndSessionLocks(t *testing.T) {
+func TestCodexSyncCandidateHoldsOperationAndHistorySyncLocks(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -551,8 +702,14 @@ func TestCodexSyncCandidateHoldsOperationAndSessionLocks(t *testing.T) {
 	go func() { done <- syncer.syncCandidate(context.Background(), rpc, meta) }()
 	<-readStarted
 	locked, err := store.IsLocked(context.Background(), meta.ID)
-	if err != nil || !locked {
-		t.Fatalf("session lock = %v, err=%v", locked, err)
+	if err != nil || locked {
+		t.Fatalf("history sync took runtime writer lock = %v, err=%v", locked, err)
+	}
+	lockCtx, cancelLock := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancelLock()
+	if unlock, err := store.LockHistorySync(lockCtx, meta.ID); err == nil {
+		unlock()
+		t.Fatal("competing history sync acquired lock")
 	}
 	operationAcquired := make(chan struct{})
 	go func() {
@@ -702,12 +859,28 @@ func TestCatalogSessionListReportsCodexSyncDiagnostic(t *testing.T) {
 		if err := decodeAPIData(t, recorder.Body.Bytes(), &envelope); err != nil {
 			t.Fatal(err)
 		}
-		if len(envelope.Diagnostics) != 1 || envelope.Diagnostics[0].Code != "codex_sync_failed" {
+		if len(envelope.Diagnostics) != 1 || envelope.Diagnostics[0].Code != "codex_history_sync_failed" {
 			t.Fatalf("%s diagnostics = %#v, body=%s", path, envelope.Diagnostics, recorder.Body.String())
 		}
 		if strings.Contains(recorder.Body.String(), privatePath) {
 			t.Fatalf("%s leaked private path: %s", path, recorder.Body.String())
 		}
+	}
+}
+
+func TestCodexSyncDiagnosticsIdentifyUnsupportedHistoryAPIBySession(t *testing.T) {
+	diagnostics := codexSyncErrorDiagnostics(errors.Join(
+		&codexSessionSyncFailure{sessionID: "session-unsupported", err: fmt.Errorf("read history: %w", errCodexHistoryAPIUnsupported)},
+		&codexSessionSyncFailure{sessionID: "session-failed", err: errors.New("connection closed")},
+	))
+	if len(diagnostics) != 2 {
+		t.Fatalf("diagnostics = %#v", diagnostics)
+	}
+	if diagnostics[0].SessionID != "session-unsupported" || diagnostics[0].Code != "codex_history_api_unsupported" {
+		t.Fatalf("unsupported diagnostic = %#v", diagnostics[0])
+	}
+	if diagnostics[1].SessionID != "session-failed" || diagnostics[1].Code != "codex_history_sync_failed" {
+		t.Fatalf("failed diagnostic = %#v", diagnostics[1])
 	}
 }
 

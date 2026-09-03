@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"strings"
 	"sync"
@@ -35,6 +36,55 @@ func TestManagerAppendDisplayItemAssignsMonotonicSequence(t *testing.T) {
 	}
 	if first.CreatedAt.IsZero() || second.CreatedAt.IsZero() {
 		t.Fatal("expected created_at")
+	}
+}
+
+func TestFileStoreAppendDisplayItemsAssignsOneContiguousBatch(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored, err := store.AppendDisplayItems(context.Background(), sess.ID, []DisplayItem{
+		{Type: DisplayItemTurnStarted},
+		{Type: DisplayItemAssistantMessage},
+		{Type: DisplayItemTurnCompleted},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 3 || stored[0].Sequence != 1 || stored[1].Sequence != 2 || stored[2].Sequence != 3 {
+		t.Fatalf("stored batch = %#v", stored)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), sess.ID)
+	if err != nil || len(items) != 3 {
+		t.Fatalf("display batch = %#v, err=%v", items, err)
+	}
+}
+
+func TestFileStoreAppendDisplayItemsAfterRejectsStaleProjection(t *testing.T) {
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AppendDisplayItemsAfter(context.Background(), sess.ID, 0, []DisplayItem{{Type: DisplayItemTurnStarted}}); !errors.Is(err, ErrDisplayLogChanged) {
+		t.Fatalf("stale append error = %v", err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), sess.ID)
+	if err != nil || len(items) != 1 || items[0].Type != DisplayItemUserMessage {
+		t.Fatalf("stale batch changed display log: %#v, err=%v", items, err)
 	}
 }
 

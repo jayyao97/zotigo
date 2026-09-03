@@ -23,6 +23,7 @@ type workerMessageType string
 
 const (
 	workerMessageCommand                 workerMessageType = "command"
+	workerMessageWorking                 workerMessageType = "working"
 	workerMessageDelta                   workerMessageType = "display_delta"
 	workerMessageDisplayWake             workerMessageType = "display_wake"
 	workerMessageDisplayBarrier          workerMessageType = "display_barrier"
@@ -175,12 +176,12 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 	return worker.send(command)
 }
 
-func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle workerIdle, timeout time.Duration) {
+func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle workerIdle, timeout time.Duration) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	if worker == nil || worker.closing || worker.generation != generation || worker.lastCommandSequence > idle.CommandSequence {
 		r.mu.Unlock()
-		return
+		return false
 	}
 	if worker.idleTimer != nil {
 		worker.idleTimer.Stop()
@@ -190,7 +191,7 @@ func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle
 		worker.closing = true
 		r.mu.Unlock()
 		worker.close()
-		return
+		return true
 	}
 	worker.idleEpoch++
 	idleEpoch := worker.idleEpoch
@@ -198,6 +199,7 @@ func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle
 		r.closeIdleWorker(worker, idleEpoch, idle.CommandSequence)
 	})
 	r.mu.Unlock()
+	return true
 }
 
 func (r *workerRegistry) closeIdleWorker(worker *workerConnection, idleEpoch uint64, commandSequence uint64) {

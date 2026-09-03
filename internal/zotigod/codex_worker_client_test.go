@@ -23,6 +23,7 @@ import (
 type codexWorkerRPC struct {
 	methods        []string
 	resumeApproval string
+	turnID         string
 	err            error
 }
 
@@ -635,6 +636,36 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 	}
 }
 
+func TestCodexFileChangePreservesStructuredChanges(t *testing.T) {
+	item := codexThreadItem{
+		ID: "file-1", Type: "fileChange",
+		Changes: []any{
+			map[string]any{"path": "a.go", "kind": map[string]any{"type": "update"}, "diff": "*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End Patch"},
+			map[string]any{"path": "b.go", "kind": map[string]any{"type": "add"}, "diff": "*** Begin Patch\n*** Add File: b.go\n+package b\n*** End Patch"},
+		},
+	}
+	name, arguments, ok, err := codexToolCall(item)
+	if err != nil || !ok || name != "apply_patch" {
+		t.Fatalf("tool call = %q %q ok=%v err=%v", name, arguments, ok, err)
+	}
+	var input map[string]any
+	if err := sonic.UnmarshalString(arguments, &input); err != nil {
+		t.Fatal(err)
+	}
+	changes, exists := input["changes"].([]any)
+	if !exists || len(changes) != 2 {
+		t.Fatalf("structured file changes missing from arguments: %#v", input)
+	}
+	result, ok, err := codexToolResult(item, name)
+	if err != nil || !ok {
+		t.Fatalf("file change result ok=%v err=%v", ok, err)
+	}
+	resultJSON, ok := result.JSON.(map[string]any)
+	if !ok || resultJSON["changes"] == nil {
+		t.Fatalf("structured file changes missing from tool result: %#v", result)
+	}
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func stringPointer(value string) *string { return &value }
@@ -646,11 +677,141 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 		r.resumeApproval, _ = request["approvalPolicy"].(string)
 	}
 	if method == "turn/start" && r.err == nil {
-		if err := sonic.Unmarshal([]byte(`{"turn":{"id":"turn-1"}}`), result); err != nil {
+		turnID := r.turnID
+		if turnID == "" {
+			turnID = "turn-1"
+		}
+		payload, err := sonic.Marshal(map[string]any{"turn": map[string]any{"id": turnID}})
+		if err != nil {
+			return err
+		}
+		if err := sonic.Unmarshal(payload, result); err != nil {
 			return err
 		}
 	}
 	return r.err
+}
+
+func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-pause-message", Agent: "codex", ConversationID: "thread-1", Model: "gpt-test", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	rpc := &codexWorkerRPC{turnID: "turn-new"}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-pause-message"}},
+		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-old", turnStarted: now,
+		messages: make(map[string]string), toolNames: make(map[string]string), toolArguments: make(map[string]string),
+		toolNativeNames: make(map[string]string),
+	}
+	pause := commandResponse{ID: "pause", Sequence: 2, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}}
+	if err := runtime.handleCommand(context.Background(), pause, nil); err != nil {
+		t.Fatal(err)
+	}
+	message := commandResponse{ID: "message", Sequence: 3, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "continue"}}
+	if runtime.canApplyCommand(message) || runtime.commandSequence != pause.Sequence {
+		t.Fatalf("message applied before turn barrier: runtime=%#v", runtime)
+	}
+	runtime.messagePending = true
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+		Method: "turn/completed",
+		Params: []byte(`{"turn":{"id":"turn-old","status":"interrupted","durationMs":10}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !runtime.canApplyCommand(message) || runtime.commandSequence != pause.Sequence {
+		t.Fatalf("turn barrier advanced pending message cursor: runtime=%#v", runtime)
+	}
+	if err := runtime.handleCommand(context.Background(), message, nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.activeTurnID != "turn-new" || runtime.commandSequence != message.Sequence {
+		t.Fatalf("pending message did not start after barrier: runtime=%#v", runtime)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-pause-message")
+	if err != nil || len(items) != 2 || items[0].Type != zotigosession.DisplayItemTurnInterrupted || items[1].Type != zotigosession.DisplayItemTurnStarted {
+		t.Fatalf("display lifecycle = %#v, err=%v", items, err)
+	}
+}
+
+func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-replay", Agent: "codex", ConversationID: "thread-1", Model: "gpt-test", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	for _, item := range []zotigosession.DisplayItem{
+		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-old"}, CreatedAt: now},
+		{ID: "pause", Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandPause, TurnID: "turn-old"}},
+		{ID: "message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "replay me"}},
+	} {
+		if _, err := store.AppendDisplayItem(context.Background(), "session-replay", item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = sonic.ConfigDefault.NewEncoder(w).Encode(commandsResponse{Commands: []commandResponse{
+			{ID: "pause", Sequence: 2, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}},
+			{ID: "message", Sequence: 3, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "replay me"}},
+		}})
+	}))
+	defer server.Close()
+	cursor, err := recoverWorkerCommandCursor(context.Background(), store, "session-replay")
+	if err != nil || cursor.Sequence != 0 {
+		t.Fatalf("recovered cursor = %#v, err=%v", cursor, err)
+	}
+	pending, err := loadCodexPendingCommands(context.Background(), server.Client(), server.URL, "session-replay", cursor.Sequence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 2 || pending[0].ID != "pause" || pending[1].ID != "message" {
+		t.Fatalf("pending commands = %#v", pending)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-replay")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rpc := &codexWorkerRPC{turnID: "turn-new"}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-replay"}},
+		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string),
+		toolNames: make(map[string]string), toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
+	}
+	runtime.activeTurnID, runtime.turnStarted = lastOpenTurn(items)
+	if runtime.activeTurnID != "turn-old" {
+		t.Fatalf("open turn was not restored: %#v", runtime)
+	}
+	if err := runtime.handleCommand(context.Background(), pending[0], nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.canApplyCommand(pending[1]) {
+		t.Fatal("replayed message bypassed open turn barrier")
+	}
+	runtime.messagePending = true
+	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+		Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-old","status":"interrupted"}}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := runtime.handleCommand(context.Background(), pending[1], nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.commandSequence != 3 || runtime.activeTurnID != "turn-new" || fmt.Sprint(rpc.methods) != "[turn/interrupt turn/start]" {
+		t.Fatalf("replayed runtime = %#v, methods=%v", runtime, rpc.methods)
+	}
 }
 
 func TestResumeCodexThreadClassifiesAnotherAppOwnership(t *testing.T) {

@@ -272,6 +272,57 @@ func (s *fakeDisplayItemSource) AppendItemIf(ctx context.Context, sessionID stri
 	return item, nil
 }
 
+func (s *fakeDisplayItemSource) AppendItems(_ context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	return s.appendItemsAfter(sessionID, nil, items)
+}
+
+func (s *fakeDisplayItemSource) AppendItemsAfter(_ context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	return s.appendItemsAfter(sessionID, &expectedSequence, items)
+}
+
+func (s *fakeDisplayItemSource) appendItemsAfter(sessionID string, expectedSequence *uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	for _, item := range items {
+		if s.appendErr != nil {
+			if err := s.appendErr(sessionID, item); err != nil {
+				return nil, err
+			}
+		}
+	}
+	s.mu.Lock()
+	latest := uint64(0)
+	if existing := s.items[sessionID]; len(existing) > 0 {
+		latest = existing[len(existing)-1].Sequence
+	}
+	if expectedSequence != nil && latest != *expectedSequence {
+		s.mu.Unlock()
+		return nil, zotigosession.ErrDisplayLogChanged
+	}
+	if s.items == nil {
+		s.items = make(map[string][]zotigosession.DisplayItem)
+	}
+	stored := append([]zotigosession.DisplayItem(nil), items...)
+	for index := range stored {
+		stored[index].Sequence = uint64(len(s.items[sessionID]) + 1)
+		if stored[index].ID == "" {
+			stored[index].ID = fmt.Sprintf("item_%s_%d", sessionID, stored[index].Sequence)
+		}
+		if stored[index].CreatedAt.IsZero() {
+			stored[index].CreatedAt = time.Now().UTC()
+		}
+		s.items[sessionID] = append(s.items[sessionID], stored[index])
+	}
+	s.mu.Unlock()
+	if s.appendHook != nil {
+		for _, item := range stored {
+			s.appendHook(sessionID, item)
+		}
+	}
+	return stored, nil
+}
+
 func createSession(t *testing.T, handler http.Handler) Session {
 	t.Helper()
 
@@ -1822,6 +1873,35 @@ func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
 	}
 	if call.ID != "call-1" || call.Name != "shell" || call.Arguments != `{"command":"git status"}` {
 		t.Fatalf("unexpected tool call: %#v", call)
+	}
+}
+
+func TestSessionItemsNormalizesHistoricalCodexFileChangeArguments(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	created := createSession(t, handler)
+	source.items[created.ID] = []zotigosession.DisplayItem{{
+		ID: "item_file_change", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage,
+		Content: []zotigosession.DisplayContentPart{{
+			Type: string(protocol.ContentTypeToolCall),
+			ToolCall: &zotigosession.DisplayToolCall{
+				ID: "file-1", Name: "apply_patch",
+				Arguments: `{"changes":[{"path":"a.go","kind":{"type":"update"},"diff":"*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End Patch"}]}`,
+			},
+		}}, CreatedAt: time.Now().UTC(),
+	}}
+
+	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	call := resp.Items[0].Content[0].ToolCall
+	var input map[string]any
+	if call == nil {
+		t.Fatal("missing tool call")
+	}
+	if err := json.Unmarshal([]byte(call.Arguments), &input); err != nil {
+		t.Fatal(err)
+	}
+	if input["files"] != "a.go" || input["change_count"] != float64(1) || input["changes"] != nil {
+		t.Fatalf("historical apply_patch arguments = %#v", input)
 	}
 }
 
@@ -4871,6 +4951,7 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
 	}
+	assertAPIError(t, rec, http.StatusConflict, "command_pending", "already pending")
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || len(commands.Commands[0].Message.Images) != 1 ||
@@ -5239,6 +5320,7 @@ func TestSessionMessageRejectsActiveTurn(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
 	}
+	assertAPIError(t, rec, http.StatusConflict, "active_turn", "use steering")
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
 	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
@@ -5270,6 +5352,7 @@ func TestSessionMessageRejectsPendingMessageCommand(t *testing.T) {
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
 	}
+	assertAPIError(t, rec, http.StatusConflict, "command_pending", "already pending")
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
 	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != sessionCommandMessage {
@@ -5648,7 +5731,8 @@ func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
 
 func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	handler := newHandler(newSessionRegistry(), source)
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -5675,8 +5759,8 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	if command.Type != sessionCommandPause || command.TurnID != "turn-1" || command.Reason != userPauseReason {
 		t.Fatalf("unexpected pause command: %#v", command)
 	}
-	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
-		t.Fatalf("expected session to remain %q, got %q", SessionStateRunning, got.State)
+	if got := getSession(t, handler, created.ID); got.State != SessionStatePausing || !got.Working {
+		t.Fatalf("expected session to be pausing and working, got %#v", got)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
@@ -5690,6 +5774,186 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandPause {
 		t.Fatalf("expected one pause command, got %#v", commands)
+	}
+
+	secondPause := httptest.NewRecorder()
+	handler.ServeHTTP(secondPause, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
+	assertAPIError(t, secondPause, http.StatusConflict, "turn_stopping", "already stopping")
+	steering := httptest.NewRecorder()
+	handler.ServeHTTP(steering, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", nil))
+	assertAPIError(t, steering, http.StatusConflict, "turn_stopping", "is stopping")
+
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnInterrupted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Status: "interrupted", Reason: userPauseReason},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registry.MarkIdle(created.ID)
+	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning || got.Working {
+		t.Fatalf("worker idle did not complete pausing state: %#v", got)
+	}
+}
+
+func TestMessageQueuedWhileTurnIsStoppingRemainsReplayable(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	appendTurnStarted(t, source, created.ID, "turn-old")
+
+	pause := httptest.NewRecorder()
+	handler.ServeHTTP(pause, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
+	if pause.Code != http.StatusAccepted {
+		t.Fatalf("pause status = %d: %s", pause.Code, pause.Body.String())
+	}
+	message := httptest.NewRecorder()
+	handler.ServeHTTP(message, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"run after pause"}`)))
+	if message.Code != http.StatusAccepted {
+		t.Fatalf("queued message status = %d: %s", message.Code, message.Body.String())
+	}
+
+	items, _, err := source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 3 || items[2].Command == nil || items[2].Command.Type != sessionCommandMessage || !hasPendingMessageCommand(items) {
+		t.Fatalf("queued message is not durable: %#v", items)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: items[1].Sequence}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageDisplayWake}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got, _ := registry.Get(created.ID); got.State != SessionStatePausing || !got.Working {
+		t.Fatalf("stale idle or display wake cleared stopping state: %#v", got)
+	}
+	if cursor := recoverAppliedCommandSequence(items); cursor != 0 {
+		t.Fatalf("cursor advanced before pause or message applied: %d", cursor)
+	}
+	_, err = source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnInterrupted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-old", Status: "interrupted"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, _, err = source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPendingMessageCommand(items) {
+		t.Fatalf("old turn completion cleared pending message: %#v", items)
+	}
+	if cursor := recoverAppliedCommandSequence(items); cursor != items[1].Sequence {
+		t.Fatalf("cursor = %d, want applied pause sequence %d", cursor, items[1].Sequence)
+	}
+	_, err = source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-new", Status: "in_progress"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, _, err = source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasPendingMessageCommand(items) || recoverAppliedCommandSequence(items) != items[2].Sequence {
+		t.Fatalf("message was not acknowledged by turn_started: %#v", items)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageWorking}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		got, _ := registry.Get(created.ID)
+		if got.State == SessionStateRunning && got.Working {
+			return
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got, _ := registry.Get(created.ID)
+	t.Fatalf("explicit working barrier did not finish stopping state: %#v", got)
+}
+
+func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
+	runtime := &workerRuntime{turnActive: true, turnDone: make(chan struct{})}
+	err := runtime.startMessageTurn(context.Background(), "message", 1, &messageCommandPayload{Text: "queued"})
+	if !errors.Is(err, errActiveTurn) {
+		t.Fatalf("start message error = %v, want active_turn", err)
+	}
+}
+
+func TestStartMessageTurnWaitsForStoppingTurnBeforeAcknowledging(t *testing.T) {
+	const providerName = "zotigod-stopping-turn-test"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "sess-stopping", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	localExecutor, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localExecutor.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, localExecutor)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	transport := zotigotransport.NewChannelTransport(4)
+	defer transport.Close()
+	runtime := &workerRuntime{
+		sessionID: "sess-stopping", store: store, agent: ag,
+		display:    newWorkerDisplayLog("sess-stopping", source),
+		turnActive: true, turnStopping: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}), fatalCh: make(chan error, 1),
+	}
+	working := make(chan struct{}, 1)
+	runtime.notifyWorking = func(context.Context) error {
+		working <- struct{}{}
+		return errors.New("injected working notification failure")
+	}
+	runtime.runner = runner.New(ag, transport)
+	defer runtime.Close()
+	done := make(chan error, 1)
+	go func() {
+		done <- runtime.startMessageTurn(context.Background(), "message-pending", 2, &messageCommandPayload{Text: "run next"})
+	}()
+	select {
+	case err := <-done:
+		t.Fatalf("pending message acknowledged before old turn stopped: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	runtime.finishTurn()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("durably started message failed with best-effort working notification: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("pending message did not start after old turn stopped")
+	}
+	select {
+	case <-working:
+	case <-time.After(time.Second):
+		t.Fatal("native worker did not publish the explicit working barrier")
+	}
+	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
+	if err != nil || len(items) == 0 || items[0].Type != zotigosession.DisplayItemTurnStarted {
+		t.Fatalf("pending message did not produce turn_started: %#v err=%v", items, err)
 	}
 }
 

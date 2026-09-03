@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -29,7 +30,7 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
-const defaultAddr = "127.0.0.1:8765"
+const defaultAddr = "127.0.0.1:8766"
 
 const defaultWorkerConnectTimeout = 3 * time.Second
 
@@ -41,6 +42,7 @@ const (
 	SessionStateCreated  SessionState = "created"
 	SessionStateStarting SessionState = "starting"
 	SessionStateRunning  SessionState = "running"
+	SessionStatePausing  SessionState = "pausing"
 	SessionStatePaused   SessionState = "paused"
 	SessionStateOffline  SessionState = "offline"
 	SessionStateEnded    SessionState = "ended"
@@ -196,7 +198,7 @@ func (r *sessionRegistry) MarkWorking(id string, activeTool string) {
 	defer r.mu.Unlock()
 
 	session, ok := r.sessions[id]
-	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused) {
+	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused) {
 		return
 	}
 	changed := !session.Working
@@ -217,8 +219,11 @@ func (r *sessionRegistry) MarkIdle(id string) {
 	defer r.mu.Unlock()
 
 	session, ok := r.sessions[id]
-	if !ok || (!session.Working && session.ActiveTool == "") {
+	if !ok || (!session.Working && session.ActiveTool == "" && session.State != SessionStatePausing) {
 		return
+	}
+	if session.State == SessionStatePausing {
+		session.State = SessionStateRunning
 	}
 	session.Working = false
 	session.ActiveTool = ""
@@ -244,7 +249,7 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 }
 
 func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateStarting
 		session.activationSource = "restart"
 	})
@@ -262,20 +267,34 @@ func (r *sessionRegistry) Pause(id string) (Session, error) {
 	})
 }
 
+func (r *sessionRegistry) BeginStopping(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStateRunning}, func(session *Session) {
+		session.State = SessionStatePausing
+		session.Working = true
+	})
+}
+
+func (r *sessionRegistry) FinishStopping(id string) (Session, error) {
+	return r.transition(id, []SessionState{SessionStatePausing}, func(session *Session) {
+		session.State = SessionStateRunning
+		session.Working = true
+	})
+}
+
 func (r *sessionRegistry) UpdateProfile(id string, profileName string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.ProfileName = profileName
 	})
 }
 
 func (r *sessionRegistry) UpdateApprovalPolicy(id string, policy agent.ApprovalPolicy) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.ApprovalPolicy = policy
 	})
 }
 
 func (r *sessionRegistry) UpdateCodexSettings(id string, model string, reasoningEffort string) (Session, error) {
-	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateCreated, SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.Model = model
 		session.ReasoningEffort = reasoningEffort
 	})
@@ -283,7 +302,7 @@ func (r *sessionRegistry) UpdateCodexSettings(id string, model string, reasoning
 
 func (r *sessionRegistry) End(id string) (Session, error) {
 	now := time.Now().UTC()
-	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateEnded
 		session.EndedAt = &now
 	})
@@ -295,7 +314,7 @@ func (r *sessionRegistry) Fail(id string, message string) (Session, error) {
 
 func (r *sessionRegistry) FailWithCode(id string, code string, message string) (Session, error) {
 	now := time.Now().UTC()
-	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePaused}, func(session *Session) {
+	return r.transition(id, []SessionState{SessionStateStarting, SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateFailed
 		session.EndedAt = &now
 		session.Error = message
@@ -370,7 +389,7 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 		return Session{}, errInvalidSessionTransition
 	}
 	apply(&session)
-	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused {
+	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 		session.Working = false
 		session.ActiveTool = ""
 	}
@@ -508,6 +527,18 @@ func Run(args []string) int {
 		logger.Printf("Authentication configuration failed: non-loopback listen address requires --auth-token-file")
 		return 1
 	}
+	listener, listenErr := net.Listen("tcp", *addr)
+	if listenErr != nil {
+		if errors.Is(listenErr, syscall.EADDRINUSE) {
+			compatible, healthErr := compatibleZotigodAt(context.Background(), *addr)
+			if compatible {
+				logger.Printf("Compatible zotigod already listening on http://%s; reusing it", *addr)
+				return 0
+			}
+			logger.Printf("daemon_port_occupied: listen address %s: 该端口上的服务不是 zotigod (health check: %v)", *addr, healthErr)
+			return 1
+		}
+	}
 	workerAuthToken, err := generateAuthToken()
 	if err != nil {
 		logger.Printf("Worker authentication initialization failed: %v", err)
@@ -526,6 +557,12 @@ func Run(args []string) int {
 	if created {
 		logger.Printf("Created default config template at %s. Add a profile, set default_profile, and configure its API key before creating sessions.", configPath)
 	}
+	if listenErr != nil {
+		logger.Printf("Listening on http://%s", *addr)
+		logger.Printf("Server failed: %v", listenErr)
+		return 1
+	}
+	defer func() { _ = listener.Close() }()
 	hookDispatcher, hookErr := hooks.LoadDefault(logger)
 	if hookErr != nil {
 		logger.Printf("Hook configuration failed; hooks disabled: %v", hookErr)
@@ -577,7 +614,7 @@ func Run(args []string) int {
 	errCh := make(chan error, 1)
 	go func() {
 		logger.Printf("Listening on http://%s", *addr)
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 			return
 		}
@@ -604,6 +641,41 @@ func Run(args []string) int {
 		}
 		return 0
 	}
+}
+
+func compatibleZotigodAt(ctx context.Context, addr string) (bool, error) {
+	baseURL, err := resolveWorkerDaemonURL(addr, "")
+	if err != nil {
+		return false, err
+	}
+	ctx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/health", nil)
+	if err != nil {
+		return false, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false, err
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("health returned %s", resp.Status)
+	}
+	var envelope struct {
+		Code string `json:"code"`
+		Data struct {
+			Status          string `json:"status"`
+			ProtocolVersion string `json:"protocol_version"`
+		} `json:"data"`
+	}
+	if err := sonic.ConfigDefault.NewDecoder(io.LimitReader(resp.Body, 4096)).Decode(&envelope); err != nil {
+		return false, fmt.Errorf("decode health response: %w", err)
+	}
+	if envelope.Code != "ok" || envelope.Data.Status != "ok" || envelope.Data.ProtocolVersion != apiProtocolVersion {
+		return false, fmt.Errorf("incompatible health response")
+	}
+	return true, nil
 }
 
 func NewHandler() http.Handler {
@@ -767,6 +839,12 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageDisplayWake:
 			handler.events.Wake(sessionID)
+		case workerMessageWorking:
+			if session, ok := handler.registry.Get(sessionID); ok && session.State == SessionStatePausing {
+				_, _ = handler.registry.FinishStopping(sessionID)
+			} else {
+				handler.registry.MarkWorking(sessionID, "")
+			}
 		case workerMessageDisplayBarrier:
 			if msg.DisplayBarrier != nil && msg.DisplayBarrier.ID != "" {
 				handler.events.WakeBarrier(sessionID)
@@ -788,8 +866,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
 		case workerMessageIdle:
 			if msg.Idle != nil {
-				handler.registry.MarkIdle(sessionID)
-				handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle)
+				if handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle) {
+					handler.registry.MarkIdle(sessionID)
+				}
 			}
 		}
 	})
@@ -1356,7 +1435,7 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 		switch session.State {
 		case SessionStateCreated:
 			return errWorkerDisconnectedBeforeReady
-		case SessionStateRunning:
+		case SessionStateRunning, SessionStatePausing:
 			if h.workers.Has(id) {
 				return nil
 			}
@@ -1397,7 +1476,7 @@ func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Se
 		}
 
 		switch session.State {
-		case SessionStateRunning:
+		case SessionStateRunning, SessionStatePausing:
 			if h.workers.Has(id) || !h.sessionUsesWorker(session) {
 				return session, false, nil
 			}
@@ -1507,8 +1586,8 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	session.ContextUsage = unavailableSessionContextUsage()
 	items, _, err := h.items.LoadItems(ctx, session.ID)
 	if err == nil {
-		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePaused {
-			session.Working = lastOpenTurnID(items) != ""
+		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePausing || session.State == SessionStatePaused {
+			session.Working = session.State == SessionStatePausing || lastOpenTurnID(items) != ""
 			session.ActiveTool = activeToolName(items)
 		} else {
 			session.Working = false
@@ -1751,7 +1830,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		}
 		h.writeTransition(w, session, err)
 		return
-	case SessionStateRunning:
+	case SessionStateRunning, SessionStatePausing:
 		writeAPIJSON(w, http.StatusOK, session)
 		h.closeReadyWorkerWhenIdle(r.Context(), session, req.Generation)
 	case SessionStatePaused:
@@ -1769,10 +1848,10 @@ func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session,
 	h.closeWorkerWhenIdle(session.ID, generation, workerIdle{CommandSequence: latestCommandSequence(items)})
 }
 
-func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle workerIdle) {
+func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle workerIdle) bool {
 	session, ok := h.registry.Get(sessionID)
 	if !ok {
-		return
+		return false
 	}
 	kind := zotigoruntime.AgentKind(session.Agent)
 	if kind == "" {
@@ -1780,9 +1859,9 @@ func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle 
 	}
 	adapter, err := h.runtimes.adapter(kind)
 	if err != nil {
-		return
+		return false
 	}
-	h.workers.CloseWhenIdle(sessionID, generation, idle, adapter.WorkerLifecycle().IdleTimeout)
+	return h.workers.CloseWhenIdle(sessionID, generation, idle, adapter.WorkerLifecycle().IdleTimeout)
 }
 
 func (h *handler) handleWorkerDisconnect(id string) {
@@ -1797,7 +1876,7 @@ func (h *handler) handleWorkerDisconnect(id string) {
 }
 
 func (h *handler) reconcileApprovalState(ctx context.Context, id string, session Session) (Session, error) {
-	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePaused {
+	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 		return session, nil
 	}
 	items, _, err := h.items.LoadItems(ctx, id)

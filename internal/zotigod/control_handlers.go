@@ -193,17 +193,29 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 			selectedNames[index] = skill.Name
 		}
 	}
-	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
-		h.writeEnsureRunningError(w, err)
-		return
+	session, live := h.registry.Get(id)
+	stopping := live && session.State == SessionStatePausing
+	if !stopping {
+		if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
+			h.writeEnsureRunningError(w, err)
+			return
+		}
 	}
 	items, _, err := h.items.LoadItems(r.Context(), id)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
-	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
-		writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
+	if hasPendingMessageCommand(items) {
+		writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
+		return
+	}
+	if lastOpenTurnID(items) != "" && !stopping {
+		if hasPendingApproval(items) {
+			writeAPIErrorCode(w, http.StatusConflict, "approval_pending", "message cannot start while approval is pending")
+			return
+		}
+		writeAPIErrorCode(w, http.StatusConflict, "active_turn", "message requires an idle session; use steering for the active turn")
 		return
 	}
 	if !h.ensureWorkerOnline(r.Context(), id) {
@@ -222,15 +234,15 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		if !ok {
 			return zotigosession.DisplayItem{}, errSessionNotFound
 		}
-		if session.State != SessionStateRunning && session.State != SessionStatePaused {
+		if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 			return zotigosession.DisplayItem{}, errInvalidSessionTransition
 		}
-		return h.appendMessageCommand(r.Context(), id, text, images, selectedNames)
+		return h.appendMessageCommand(r.Context(), id, text, images, selectedNames, session.State == SessionStatePausing)
 	}()
 	if err != nil {
 		switch {
 		case errors.Is(err, errSessionBusy):
-			writeAPIError(w, http.StatusConflict, "message requires an idle session; use steering for an active turn")
+			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
 		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			h.writeEnsureRunningError(w, err)
 		default:
@@ -248,7 +260,11 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	if !h.sendCommand(r.Context(), id, command) {
 		h.registry.MarkIdle(id)
 	}
-	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
+	status := http.StatusCreated
+	if stopping {
+		status = http.StatusAccepted
+	}
+	writeAPIJSON(w, status, publicCommandFromCommand(command))
 }
 
 func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id string, name string) {
@@ -313,7 +329,7 @@ var (
 	errApprovalPending = errors.New("approval is pending")
 )
 
-func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage, selectedSkills []string) (zotigosession.DisplayItem, error) {
+func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage, selectedSkills []string, allowStoppingTurn bool) (zotigosession.DisplayItem, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
 		return zotigosession.DisplayItem{}, err
@@ -334,7 +350,16 @@ func (h *handler) appendMessageCommand(ctx context.Context, id string, text stri
 		Images: displayCommandImages(images),
 		Skills: append([]string(nil), selectedSkills...),
 	}
-	item, err = h.items.AppendItemIf(ctx, id, item, requireIdleSession)
+	condition := requireIdleSession
+	if allowStoppingTurn {
+		condition = func(items []zotigosession.DisplayItem) error {
+			if hasPendingMessageCommand(items) {
+				return errSessionBusy
+			}
+			return nil
+		}
+	}
+	item, err = h.items.AppendItemIf(ctx, id, item, condition)
 	if err != nil {
 		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
 		cleanupMessageImageBlobs(images)
@@ -451,7 +476,11 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if session.State != SessionStateRunning {
-		writeAPIError(w, http.StatusConflict, "pause requires a running session")
+		if session.State == SessionStatePausing {
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is already stopping")
+			return
+		}
+		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires a running session")
 		return
 	}
 	var req pauseSessionRequest
@@ -468,7 +497,7 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 	}
 	openTurnID := lastOpenTurnID(items)
 	if openTurnID == "" {
-		writeAPIError(w, http.StatusConflict, "pause requires an active turn")
+		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires an active turn")
 		return
 	}
 	if turnID == "" {
@@ -499,7 +528,25 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	item, err := h.appendPauseCommand(r.Context(), id, turnID)
+	item, err := func() (zotigosession.DisplayItem, error) {
+		unlock := h.sessionOps.lock(id)
+		defer unlock()
+		current, ok := h.registry.Get(id)
+		if !ok {
+			return zotigosession.DisplayItem{}, errSessionNotFound
+		}
+		if current.State != SessionStateRunning {
+			return zotigosession.DisplayItem{}, errSessionBusy
+		}
+		item, err := h.appendPauseCommand(r.Context(), id, turnID)
+		if err != nil {
+			return zotigosession.DisplayItem{}, err
+		}
+		if _, err := h.registry.BeginStopping(id); err != nil {
+			return zotigosession.DisplayItem{}, err
+		}
+		return item, nil
+	}()
 	if err != nil {
 		if errors.Is(err, errSessionBusy) {
 			writeAPIError(w, http.StatusConflict, "pause requires an active turn")
@@ -512,7 +559,6 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append pause command: %v", err))
 		return
 	}
-
 	command := pauseCommandFromItem(item)
 	h.sendCommand(r.Context(), id, command)
 	writeAPIJSON(w, http.StatusAccepted, publicCommandFromCommand(command))
@@ -542,7 +588,11 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	if session.State != SessionStateRunning {
-		writeAPIError(w, http.StatusConflict, "steering requires a running session")
+		if session.State == SessionStatePausing {
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
+			return
+		}
+		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires a running session")
 		return
 	}
 
@@ -572,7 +622,7 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 	}
 	turnID := lastOpenTurnID(items)
 	if turnID == "" {
-		writeAPIError(w, http.StatusConflict, "steering requires an active turn")
+		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		return
 	}
 	if expected := strings.TrimSpace(req.TurnID); expected != "" && expected != turnID {
@@ -1206,8 +1256,6 @@ func hasPendingMessageCommand(items []zotigosession.DisplayItem) bool {
 		}
 		switch item.Type {
 		case zotigosession.DisplayItemTurnStarted:
-			pending = false
-		case zotigosession.DisplayItemTurnCompleted, zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
 			pending = false
 		}
 	}

@@ -385,6 +385,86 @@ func (s *FileStore) AppendDisplayItem(ctx context.Context, id string, item Displ
 	return s.appendDisplayItemLocked(ctx, id, item, nil)
 }
 
+// AppendDisplayItems appends a group as one rollback-safe display-log write.
+func (s *FileStore) AppendDisplayItems(ctx context.Context, id string, items []DisplayItem) ([]DisplayItem, error) {
+	return s.appendDisplayItems(ctx, id, nil, items)
+}
+
+// AppendDisplayItemsAfter appends a group only if the display projection is still current.
+func (s *FileStore) AppendDisplayItemsAfter(ctx context.Context, id string, expectedSequence uint64, items []DisplayItem) ([]DisplayItem, error) {
+	return s.appendDisplayItems(ctx, id, &expectedSequence, items)
+}
+
+func (s *FileStore) appendDisplayItems(ctx context.Context, id string, expectedSequence *uint64, items []DisplayItem) ([]DisplayItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(items) == 0 {
+		return nil, nil
+	}
+	if _, err := os.Stat(s.sessionPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("session not found: %s", id)
+		}
+		return nil, fmt.Errorf("stat session file: %w", err)
+	}
+	displayLogAppendMu.Lock()
+	defer displayLogAppendMu.Unlock()
+	unlock, err := s.lockDisplayLogAppendLocked(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+	lastSequence, completeEndOffset, err := s.lastDisplaySequenceLocked(id)
+	if err != nil {
+		return nil, err
+	}
+	if completeEndOffset >= 0 {
+		if err := s.truncateDisplayLogTailLocked(id, completeEndOffset); err != nil {
+			return nil, err
+		}
+	}
+	if expectedSequence != nil && lastSequence != *expectedSequence {
+		return nil, ErrDisplayLogChanged
+	}
+	stored := append([]DisplayItem(nil), items...)
+	var data bytes.Buffer
+	for index := range stored {
+		stored[index].Sequence = lastSequence + uint64(index) + 1
+		if stored[index].ID == "" {
+			stored[index].ID = fmt.Sprintf("item_%s_%d", id, stored[index].Sequence)
+		}
+		if stored[index].CreatedAt.IsZero() {
+			stored[index].CreatedAt = time.Now().UTC()
+		}
+		encoded, err := sonic.Marshal(stored[index])
+		if err != nil {
+			return nil, fmt.Errorf("marshal display item: %w", err)
+		}
+		data.Write(encoded)
+		data.WriteByte('\n')
+	}
+	path := s.displayLogPath(id)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		return nil, fmt.Errorf("open display log: %w", err)
+	}
+	originalSize, err := file.Seek(0, io.SeekEnd)
+	if err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("seek display log: %w", err)
+	}
+	if _, err := file.Write(data.Bytes()); err != nil {
+		_ = file.Truncate(originalSize)
+		_ = file.Close()
+		return nil, fmt.Errorf("write display log batch: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Truncate(path, originalSize)
+		return nil, fmt.Errorf("close display log batch: %w", err)
+	}
+	return stored, nil
+}
+
 func (s *FileStore) AppendDisplayItemIf(ctx context.Context, id string, item DisplayItem, condition func([]DisplayItem) error) (DisplayItem, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -667,6 +747,10 @@ func (s *FileStore) displayLogAppendLockPath(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".display.lock")
 }
 
+func (s *FileStore) historySyncLockPath(id string) string {
+	return filepath.Join(s.rootDir, "sessions", id+".history-sync.lock")
+}
+
 func (s *FileStore) imageBlobDir(id string) string {
 	return filepath.Join(s.rootDir, "sessions", id+".images")
 }
@@ -676,10 +760,18 @@ func (s *FileStore) lockPath(id string) string {
 }
 
 func (s *FileStore) lockDisplayLogAppendLocked(ctx context.Context, id string) (func(), error) {
+	return lockPIDFile(ctx, s.displayLogAppendLockPath(id), "display log append")
+}
+
+// LockHistorySync serializes history projections without taking runtime writer ownership.
+func (s *FileStore) LockHistorySync(ctx context.Context, id string) (func(), error) {
+	return lockPIDFile(ctx, s.historySyncLockPath(id), "history sync")
+}
+
+func lockPIDFile(ctx context.Context, lockPath string, operation string) (func(), error) {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	lockPath := s.displayLogAppendLockPath(id)
 	pid := fmt.Sprintf("%d", os.Getpid())
 	for {
 		select {
@@ -693,11 +785,11 @@ func (s *FileStore) lockDisplayLogAppendLocked(ctx context.Context, id string) (
 			if _, err := file.WriteString(pid); err != nil {
 				_ = file.Close()
 				_ = os.Remove(lockPath)
-				return nil, fmt.Errorf("write display log append lock: %w", err)
+				return nil, fmt.Errorf("write %s lock: %w", operation, err)
 			}
 			if err := file.Close(); err != nil {
 				_ = os.Remove(lockPath)
-				return nil, fmt.Errorf("close display log append lock: %w", err)
+				return nil, fmt.Errorf("close %s lock: %w", operation, err)
 			}
 			return func() {
 				_ = os.Remove(lockPath)

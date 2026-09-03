@@ -2,6 +2,8 @@ package zotigod
 
 import (
 	"io"
+	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +11,50 @@ import (
 
 	"github.com/jayyao97/zotigo/core/config"
 )
+
+func TestDefaultDaemonAddressUses8766(t *testing.T) {
+	if defaultAddr != "127.0.0.1:8766" {
+		t.Fatalf("default address = %q", defaultAddr)
+	}
+}
+
+func TestRunFailsFastWhenPortBelongsToAnotherService(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	output := captureStderr(t, func() {
+		if code := Run([]string{"--addr", listener.Addr().String()}); code != 1 {
+			t.Fatalf("Run exit code = %d, want 1", code)
+		}
+	})
+	if !strings.Contains(output, "daemon_port_occupied") || !strings.Contains(output, listener.Addr().String()) || !strings.Contains(output, "该端口上的服务不是 zotigod") {
+		t.Fatalf("startup output = %q", output)
+	}
+}
+
+func TestRunReusesCompatibleZotigod(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &http.Server{Handler: NewHandler()}
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(func() { _ = server.Close() })
+
+	output := captureStderr(t, func() {
+		if code := Run([]string{"--addr", listener.Addr().String()}); code != 0 {
+			t.Fatalf("Run exit code = %d, want 0", code)
+		}
+	})
+	if !strings.Contains(output, "Compatible zotigod already listening") {
+		t.Fatalf("startup output = %q", output)
+	}
+}
 
 func TestRunCreatesMissingConfigAndContinuesStartup(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "new-home")
@@ -34,7 +80,7 @@ func TestRunCreatesMissingConfigAndContinuesStartup(t *testing.T) {
 func TestRunRejectsNonLoopbackAddressWithoutAuthToken(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	output := captureStderr(t, func() {
-		if code := Run([]string{"--addr", "0.0.0.0:8765"}); code != 1 {
+		if code := Run([]string{"--addr", "0.0.0.0:8766"}); code != 1 {
 			t.Fatalf("Run exit code = %d, want authentication failure code 1", code)
 		}
 	})

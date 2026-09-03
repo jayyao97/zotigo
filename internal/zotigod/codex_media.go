@@ -257,6 +257,8 @@ func codexSessionStoreRoot(store zotigosession.Store) string {
 
 func codexSessionStoreFromItems(items displayItemSource) zotigosession.Store {
 	switch source := items.(type) {
+	case *codexSyncBuffer:
+		return codexSessionStoreFromItems(source.source)
 	case storedDisplayItemSource:
 		return source.store
 	case eventingDisplayItemSource:

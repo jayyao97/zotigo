@@ -152,7 +152,33 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	runtime.toolNames = make(map[string]string)
 	runtime.toolArguments = make(map[string]string)
 	runtime.toolNativeNames = make(map[string]string)
+	if cfg.ThreadID != "" {
+		items, _, err := store.ListDisplayItems(ctx, cfg.SessionID)
+		if err != nil {
+			return fmt.Errorf("restore Codex display turn: %w", err)
+		}
+		runtime.activeTurnID, runtime.turnStarted = lastOpenTurn(items)
+	}
+	cursor, err := recoverWorkerCommandCursor(ctx, store, cfg.SessionID)
+	if err != nil {
+		return err
+	}
+	runtime.commandSequence = cursor.Sequence
+	pendingCommands, err := loadCodexPendingCommands(ctx, httpClient, daemonURL, cfg.SessionID, cursor.Sequence)
+	if err != nil {
+		return err
+	}
 	for {
+		if len(pendingCommands) > 0 && runtime.canApplyCommand(pendingCommands[0]) {
+			command := pendingCommands[0]
+			if err := runtime.handleCommand(ctx, command, channels.boundResults); err != nil {
+				runErr = err
+				return err
+			}
+			pendingCommands = pendingCommands[1:]
+			continue
+		}
+		runtime.messagePending = len(pendingCommands) > 0 && pendingCommands[0].Type == sessionCommandMessage
 		select {
 		case err := <-channels.errors:
 			runErr = err
@@ -165,10 +191,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 				runErr = errors.New("codex worker command channel closed")
 				return runErr
 			}
-			if err := runtime.handleCommand(ctx, command, channels.boundResults); err != nil {
-				runErr = err
-				return err
-			}
+			pendingCommands = enqueueCodexCommand(pendingCommands, runtime.commandSequence, command)
 		case message, ok := <-appClient.Notifications():
 			if !ok {
 				runErr = errors.New("codex app-server connection closed")
@@ -184,6 +207,37 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 			}
 		}
 	}
+}
+
+func loadCodexPendingCommands(ctx context.Context, client *http.Client, daemonURL, sessionID string, appliedSequence uint64) ([]commandResponse, error) {
+	pending := make([]commandResponse, 0)
+	cursor := workerCommandCursor{}
+	for {
+		previousOffset := cursor.Offset
+		commands, err := fetchWorkerCommands(ctx, client, daemonURL, sessionID, cursor)
+		if err != nil {
+			return nil, fmt.Errorf("load Codex worker commands: %w", err)
+		}
+		for _, command := range commands.Commands {
+			pending = enqueueCodexCommand(pending, appliedSequence, command)
+		}
+		cursor.Offset = commands.NextOffset
+		if commands.NextOffset == previousOffset || len(commands.Commands) < maxCommandsLimit {
+			return pending, nil
+		}
+	}
+}
+
+func enqueueCodexCommand(pending []commandResponse, appliedSequence uint64, command commandResponse) []commandResponse {
+	if command.Sequence > 0 && command.Sequence <= appliedSequence {
+		return pending
+	}
+	for _, queued := range pending {
+		if (command.Sequence > 0 && queued.Sequence == command.Sequence) || (command.ID != "" && queued.ID == command.ID) {
+			return pending
+		}
+	}
+	return append(pending, command)
 }
 
 func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) error {
@@ -208,6 +262,7 @@ type codexWorkerRuntime struct {
 	threadID        string
 	activeTurnID    string
 	commandSequence uint64
+	messagePending  bool
 	turnStarted     time.Time
 	turnModel       string
 	turnUsage       protocol.Usage
@@ -316,13 +371,10 @@ func (r *codexWorkerRuntime) Close() error {
 }
 
 func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) error {
-	if command.Sequence > r.commandSequence {
-		r.commandSequence = command.Sequence
-	}
 	switch command.Type {
 	case sessionCommandMessage:
 		if r.activeTurnID != "" {
-			return fmt.Errorf("codex session already has an active turn")
+			return errActiveTurn
 		}
 		if command.Message == nil {
 			return fmt.Errorf("codex message payload is missing")
@@ -364,13 +416,23 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		}
 		dispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, r.turnModel)
 		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Message.Text)
+		r.acknowledgeCommand(command.Sequence)
+		r.messagePending = false
+		if r.writer != nil {
+			_ = r.writer.SendWorking(ctx)
+		}
 		return nil
 	case sessionCommandPause:
 		if r.activeTurnID == "" {
+			r.acknowledgeCommand(command.Sequence)
 			return nil
 		}
 		var response any
-		return r.app.Call(ctx, "turn/interrupt", map[string]any{"threadId": r.threadID, "turnId": r.activeTurnID}, &response)
+		if err := r.app.Call(ctx, "turn/interrupt", map[string]any{"threadId": r.threadID, "turnId": r.activeTurnID}, &response); err != nil {
+			return err
+		}
+		r.acknowledgeCommand(command.Sequence)
+		return nil
 	case sessionCommandSteering:
 		if r.activeTurnID == "" || command.Steering == nil {
 			return fmt.Errorf("codex steering requires an active turn")
@@ -397,9 +459,23 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 			Type: sessionCommandSteering, Text: command.Steering.Text, Images: displayCommandImages(images), TurnID: r.activeTurnID,
 		}
 		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Steering.Text)
-		return r.append(item)
+		if err := r.append(item); err != nil {
+			return err
+		}
+		r.acknowledgeCommand(command.Sequence)
+		return nil
 	default:
 		return fmt.Errorf("codex runtime does not support command %q", command.Type)
+	}
+}
+
+func (r *codexWorkerRuntime) canApplyCommand(command commandResponse) bool {
+	return command.Type != sessionCommandMessage || r.activeTurnID == ""
+}
+
+func (r *codexWorkerRuntime) acknowledgeCommand(sequence uint64) {
+	if sequence > r.commandSequence {
+		r.commandSequence = sequence
 	}
 }
 
@@ -671,7 +747,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.toolArguments = make(map[string]string)
 		r.toolNativeNames = make(map[string]string)
 		r.toolOrder = nil
-		if r.writer != nil {
+		if r.writer != nil && !r.messagePending {
 			if err := r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence}); err != nil {
 				return err
 			}
