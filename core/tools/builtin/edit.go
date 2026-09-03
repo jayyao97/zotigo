@@ -18,7 +18,7 @@ func (t *EditTool) Name() string { return "edit" }
 func (t *EditTool) Description() string {
 	return `Perform exact string replacements in files. Use old_string to specify the text to replace and new_string for the replacement.
 The old_string must be unique in the file unless replace_all is true.
-Always read the file first before editing to ensure correct content matching.`
+Prefer reading the file first before editing to ensure correct content matching.`
 }
 
 func (t *EditTool) Schema() any {
