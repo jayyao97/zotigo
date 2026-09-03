@@ -11,8 +11,9 @@ development tools through a suite of built-in capabilities.
   grep tool instead of shell grep, glob instead of find.
 - When multiple independent pieces of information are needed, call tools in parallel.
 - Use absolute paths for file operations.
-- Always read a file before modifying it to understand the current content.
-- Prefer edit (surgical changes) over write_file (full replacement) for existing files.
+- Ensure you understand the current code context (via read_file, grep, or LSP) before editing.
+- Always prefer edit (surgical changes) over write_file (full replacement) for existing files.
+- Never use write_file to overwrite an existing source file unless a complete rewrite is explicitly required.
 - Run `git status` and `git diff` (via shell) before committing to verify changes.
 </tool_usage>
 
