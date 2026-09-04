@@ -1621,6 +1621,9 @@ func TestSessionRegistryActivityClearsWhenIdleOrTerminal(t *testing.T) {
 func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "sess-disconnect", State: SessionStateRunning, Working: true, ActiveTool: "shell"})
+	if err := registry.SetWorkerGeneration("sess-disconnect", "worker-1"); err != nil {
+		t.Fatal(err)
+	}
 	handler := &handler{
 		registry:   registry,
 		items:      &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
@@ -1628,10 +1631,34 @@ func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
 		sessionOps: newSessionOperationLocks(),
 	}
 
-	handler.handleWorkerDisconnect("sess-disconnect")
+	handler.handleWorkerDisconnect("sess-disconnect", "worker-1")
 	session, _ := registry.Get("sess-disconnect")
 	if session.Working || session.ActiveTool != "" {
 		t.Fatalf("disconnected activity = %#v", session)
+	}
+}
+
+func TestStaleWorkerDisconnectDoesNotResetRestartedSession(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess-stale-disconnect", State: SessionStateRunning})
+	if err := registry.SetWorkerGeneration("sess-stale-disconnect", "worker-old"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.RestartWorker("sess-stale-disconnect"); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetWorkerGeneration("sess-stale-disconnect", "worker-new"); err != nil {
+		t.Fatal(err)
+	}
+	handler := &handler{
+		registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		events: newDisplayEventBroker(), sessionOps: newSessionOperationLocks(),
+	}
+
+	handler.handleWorkerDisconnect("sess-stale-disconnect", "worker-old")
+	session, _ := registry.Get("sess-stale-disconnect")
+	if session.State != SessionStateStarting || !registry.WorkerGenerationMatches(session.ID, "worker-new") {
+		t.Fatalf("stale disconnect changed restarted session: %#v", session)
 	}
 }
 
@@ -4471,6 +4498,141 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	}
 }
 
+func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create session store: %v", err)
+	}
+	defer store.Close()
+
+	const sessionID = "sess-first-codex-message"
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: sessionID, Agent: "codex", WorkingDirectory: t.TempDir(), CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatalf("put session: %v", err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID: sessionID, State: SessionStateRunning, Agent: "codex",
+		WorkingDirectory: t.TempDir(), CreatedAt: now,
+	})
+	source := storedDisplayItemSource{store: store}
+	handler := newHandler(registry, source, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	worker := dialWorker(t, server, sessionID)
+	defer worker.Close()
+
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+sessionID+"/messages", strings.NewReader(`{"text":"first message","client_message_id":"client-first"}`)))
+		messageDone <- rec
+	}()
+
+	input := readWorkerMessage(t, worker)
+	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", input)
+	}
+	if err := worker.WriteJSON(workerMessage{
+		Type:              workerMessageConversationBound,
+		ConversationBound: &workerConversationBound{ConversationID: "thread-first"},
+	}); err != nil {
+		t.Fatalf("send conversation binding: %v", err)
+	}
+	if err := worker.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	bound := readWorkerMessage(t, worker)
+	if bound.Type != workerMessageConversationBoundResult || bound.ConversationBoundResult == nil || bound.ConversationBoundResult.ErrorCode != "" {
+		t.Fatalf("expected successful conversation binding, got %#v", bound)
+	}
+	if err := worker.SetReadDeadline(time.Time{}); err != nil {
+		t.Fatal(err)
+	}
+
+	accepted, err := appendAcceptedSessionInput(context.Background(), source, sessionID, input.InputRequest.Command)
+	if err != nil {
+		t.Fatalf("append accepted input: %v", err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: input.InputRequest.RequestID, Command: &accepted,
+	}}); err != nil {
+		t.Fatalf("send input result: %v", err)
+	}
+
+	response := <-messageDone
+	if response.Code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", response.Code, response.Body.String())
+	}
+	stored, err := store.Get(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("load bound session: %v", err)
+	}
+	if stored.ConversationID != "thread-first" {
+		t.Fatalf("conversation id = %q, want thread-first", stored.ConversationID)
+	}
+	items, _, err := source.LoadItems(context.Background(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 1 || items[0].ID != "client-first" {
+		t.Fatalf("accepted items = %#v, want one client-first command", items)
+	}
+}
+
+func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"message before approval"}`)))
+		messageDone <- rec
+	}()
+	input := readWorkerMessage(t, worker)
+	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", input)
+	}
+	if err := worker.WriteJSON(workerMessage{
+		Type:            workerMessageApprovalRequest,
+		ApprovalRequest: &approvalRequestResponse{ID: "approval-during-input", Status: approvalStatusPending},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); ; {
+		if session, _ := registry.Get(created.ID); session.State == SessionStatePaused {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("approval callback did not acquire the session lock during input admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, input.InputRequest.Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: input.InputRequest.RequestID, Command: &accepted,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if response := <-messageDone; response.Code != http.StatusCreated {
+		t.Fatalf("message status = %d: %s", response.Code, response.Body.String())
+	}
+}
+
 func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 	store, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -5266,8 +5428,8 @@ func TestSessionMessageDoesNotReturnAcceptedWhenWorkerDisconnectsBeforeAdmission
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"persist this"}`))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusInternalServerError {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusServiceUnavailable, rec.Code, rec.Body.String())
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
@@ -5331,6 +5493,63 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
 	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "before finish" {
 		t.Fatalf("expected pending message command after rejected finish, got %#v", commands)
+	}
+}
+
+func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"accept after cancel","client_message_id":"cancel-once"}`)).WithContext(ctx)
+		handler.ServeHTTP(rec, req)
+		messageDone <- rec
+	}()
+	input := readWorkerMessage(t, worker)
+	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", input)
+	}
+	cancel()
+	if response := <-messageDone; response.Code != http.StatusInternalServerError {
+		t.Fatalf("canceled message status = %d: %s", response.Code, response.Body.String())
+	}
+
+	finishDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/finish", nil))
+		finishDone <- rec
+	}()
+	select {
+	case finish := <-finishDone:
+		t.Fatalf("finish bypassed canceled input lease: %d: %s", finish.Code, finish.Body.String())
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, input.InputRequest.Command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: input.InputRequest.RequestID, Command: &accepted,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if finish := <-finishDone; finish.Code != http.StatusConflict {
+		t.Fatalf("finish status = %d: %s", finish.Code, finish.Body.String())
+	}
+	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
+	if len(items.Items) != 1 || items.Items[0].ID != "cancel-once" {
+		t.Fatalf("accepted items = %#v, want one cancel-once command", items.Items)
 	}
 }
 

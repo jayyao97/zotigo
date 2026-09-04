@@ -80,33 +80,30 @@ func (h *handler) handleConversationBound(sessionID string, generation string, r
 		return
 	}
 	result := workerConversationBoundResult{ConversationID: request.ConversationID}
-	unlock := h.sessionOps.lock(sessionID)
-	defer unlock()
-	if !h.workers.Matches(sessionID, generation) {
-		result.ErrorCode = "stale_worker"
-		result.Error = "worker connection is stale"
-		h.workers.SendConversationBoundResult(sessionID, generation, result)
-		return
-	}
-	stored, err := h.store.Get(context.Background(), sessionID)
-	if err != nil || stored == nil {
-		result.ErrorCode = "backend_binding_failed"
-		result.Error = "load session binding"
-		h.workers.SendConversationBoundResult(sessionID, generation, result)
-		return
-	}
-	store, ok := h.store.(backendBindingStore)
-	if !ok {
-		result.ErrorCode = "backend_binding_failed"
-		result.Error = "session store does not support backend binding"
-		h.workers.SendConversationBoundResult(sessionID, generation, result)
-		return
-	}
-	if err := store.UpdateBackendBinding(context.Background(), sessionID, stored.Agent, stored.ConversationID, request.ConversationID, ""); err != nil {
-		result.ErrorCode = "backend_binding_conflict"
-		result.Error = err.Error()
-		h.workers.SendConversationBoundResult(sessionID, generation, result)
-		return
-	}
+	func() {
+		unlock := h.sessionOps.lockWorkerCallback(sessionID)
+		defer unlock()
+		if !h.workers.Matches(sessionID, generation) {
+			result.ErrorCode = "stale_worker"
+			result.Error = "worker connection is stale"
+			return
+		}
+		stored, err := h.store.Get(context.Background(), sessionID)
+		if err != nil || stored == nil {
+			result.ErrorCode = "backend_binding_failed"
+			result.Error = "load session binding"
+			return
+		}
+		store, ok := h.store.(backendBindingStore)
+		if !ok {
+			result.ErrorCode = "backend_binding_failed"
+			result.Error = "session store does not support backend binding"
+			return
+		}
+		if err := store.UpdateBackendBinding(context.Background(), sessionID, stored.Agent, stored.ConversationID, request.ConversationID, ""); err != nil {
+			result.ErrorCode = "backend_binding_conflict"
+			result.Error = err.Error()
+		}
+	}()
 	h.workers.SendConversationBoundResult(sessionID, generation, result)
 }

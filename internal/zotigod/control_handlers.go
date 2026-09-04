@@ -214,6 +214,8 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
 		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			h.writeEnsureRunningError(w, err)
+		case errors.Is(err, errWorkerOffline):
+			writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
 		default:
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append session input command: %v", err))
 		}
@@ -324,26 +326,47 @@ func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, com
 
 func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool) (commandResponse, error) {
 	unlock := h.sessionOps.lock(id)
-	defer unlock()
 	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
+		unlock()
 		return commandResponse{}, fmt.Errorf("check session availability: %w", err)
 	} else if unavailable != "" {
+		unlock()
 		return commandResponse{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
 	}
 	session, ok := h.registry.Get(id)
 	if !ok {
+		unlock()
 		return commandResponse{}, errSessionNotFound
 	}
 	if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
+		unlock()
 		return commandResponse{}, errInvalidSessionTransition
 	}
 	command, storedImages, refs, err := h.prepareSessionInputCommand(ctx, id, commandID, text, images, selectedSkills, steeringOnly)
 	if err != nil {
+		unlock()
 		return commandResponse{}, err
 	}
-	accepted, err := h.workers.SubmitInput(ctx, id, workerInputRequest{
+	if err := ctx.Err(); err != nil {
+		unlock()
+		_ = h.deleteMessageImageRefs(context.Background(), id, imageRefNames(refs))
+		cleanupMessageImageBlobs(storedImages)
+		return commandResponse{}, err
+	}
+	submission, err := h.workers.BeginInput(id, workerInputRequest{
 		Command: command, SteeringOnly: steeringOnly, ExpectedTurnID: expectedTurnID,
 	})
+	if err != nil {
+		unlock()
+		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
+		cleanupMessageImageBlobs(storedImages)
+		return commandResponse{}, err
+	}
+	releaseAdmission := h.sessionOps.reserveInput(id)
+	submission.OnFinish(releaseAdmission)
+	unlock()
+
+	accepted, err := submission.Await(ctx)
 	if err != nil {
 		var inputErr *workerInputError
 		if errors.As(err, &inputErr) {
@@ -634,6 +657,8 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 	if err != nil {
 		switch {
 		case errors.Is(err, errNoActiveTurn):
+			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
+		case errors.Is(err, errWorkerOffline):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		case errors.Is(err, errTurnMismatch):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "expected_turn_id does not match active turn")
