@@ -70,6 +70,7 @@ type Session struct {
 	ContextUsage     *SessionContextUsage `json:"context_usage"`
 	seq              uint64
 	activationSource string
+	workerGeneration string
 }
 
 type SessionContextUsage struct {
@@ -235,6 +236,7 @@ func (r *sessionRegistry) Start(id string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateCreated}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.workerGeneration = ""
 		session.StartedAt = &now
 		if session.activationSource == "" {
 			session.activationSource = "start"
@@ -251,6 +253,7 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.workerGeneration = ""
 		session.activationSource = "restart"
 	})
 }
@@ -345,6 +348,7 @@ func (r *sessionRegistry) RetryOccupiedWorker(id string) (Session, error) {
 		session.Error = ""
 		session.ErrorCode = ""
 		session.activationSource = "restart"
+		session.workerGeneration = ""
 	})
 }
 
@@ -366,7 +370,41 @@ func (r *sessionRegistry) ReleaseIdleWorker(id string) (Session, error) {
 		session.Error = ""
 		session.ErrorCode = ""
 		session.activationSource = "resume"
+		session.workerGeneration = ""
 	})
+}
+
+func (r *sessionRegistry) SetWorkerGeneration(id string, generation string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	session, ok := r.sessions[id]
+	if !ok {
+		return errSessionNotFound
+	}
+	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
+		return errInvalidSessionTransition
+	}
+	session.workerGeneration = generation
+	r.sessions[id] = session
+	return nil
+}
+
+func (r *sessionRegistry) WorkerGenerationMatches(id string, generation string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	session, ok := r.sessions[id]
+	return ok && generation != "" && session.workerGeneration == generation
+}
+
+func (r *sessionRegistry) ClearWorkerGeneration(id string, generation string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	session, ok := r.sessions[id]
+	if !ok || session.workerGeneration != generation {
+		return
+	}
+	session.workerGeneration = ""
+	r.sessions[id] = session
 }
 
 func isRuntimeOccupiedSession(session Session) bool {
@@ -392,6 +430,7 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 		session.Working = false
 		session.ActiveTool = ""
+		session.workerGeneration = ""
 	}
 	r.sessions[id] = session
 	r.notifyChangedLocked()
@@ -852,13 +891,13 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageApprovalRequest:
 			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == approvalStatusPending {
-				unlock := handler.sessionOps.lock(sessionID)
+				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.Pause(sessionID)
 				unlock()
 			}
 		case workerMessageApprovalResult:
 			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == approvalStatusResolved {
-				unlock := handler.sessionOps.lock(sessionID)
+				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.ResumeAfterApproval(sessionID)
 				unlock()
 			}
@@ -1864,15 +1903,19 @@ func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle 
 	return h.workers.CloseWhenIdle(sessionID, generation, idle, adapter.WorkerLifecycle().IdleTimeout)
 }
 
-func (h *handler) handleWorkerDisconnect(id string) {
-	h.events.WakeBarrier(id)
+func (h *handler) handleWorkerDisconnect(id string, generation string) {
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
+	if !h.registry.WorkerGenerationMatches(id, generation) {
+		return
+	}
+	h.events.WakeBarrier(id)
 	if session, ok := h.registry.Get(id); ok {
 		_, _ = h.reconcileApprovalState(context.Background(), id, session)
 	}
 	h.registry.MarkIdle(id)
 	_, _ = h.registry.ResetStarting(id)
+	h.registry.ClearWorkerGeneration(id, generation)
 }
 
 func (h *handler) reconcileApprovalState(ctx context.Context, id string, session Session) (Session, error) {

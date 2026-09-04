@@ -49,5 +49,9 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		_ = conn.Close()
 		return
 	}
+	if err := h.registry.SetWorkerGeneration(sessionID, generation); err != nil {
+		_ = conn.Close()
+		return
+	}
 	h.workers.Register(sessionID, generation, conn)
 }

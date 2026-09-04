@@ -289,6 +289,51 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	}
 }
 
+func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
+	createdAt := time.Now().UTC()
+	registry := newSessionRegistry()
+	session := registry.Add(Session{
+		ID: "sess-codex-immediate-idle", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
+		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
+	})
+	workers := newWorkerRegistry()
+	fakeRuntime := &fakeCodexRuntime{}
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fakeRuntime.server = server
+	t.Cleanup(server.Close)
+
+	worker, generation := connectWorker(t, server, session.ID)
+	t.Cleanup(func() { _ = worker.Close() })
+	markWorkerReady(t, server, session.ID, generation)
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
+			Command:      commandResponse{ID: "command-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "hello"}},
+			SteeringOnly: true,
+		})
+		resultCh <- err
+	}()
+	request := readWorkerMessage(t, worker)
+	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", request)
+	}
+	if !workers.CloseWhenIdle(session.ID, generation, workerIdle{}, 0) {
+		t.Fatal("defer immediate idle close")
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: request.InputRequest.RequestID, ErrorCode: "no_active_turn", Error: "steering requires an active turn",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+		t.Fatalf("expected no active turn result before disconnect, got %v", err)
+	}
+}
+
 func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 	createdAt := time.Now().UTC()
 	registry := newSessionRegistry()
