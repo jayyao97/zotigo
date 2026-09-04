@@ -325,46 +325,53 @@ func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, com
 }
 
 func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool) (commandResponse, error) {
-	unlock := h.sessionOps.lock(id)
-	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
-		unlock()
-		return commandResponse{}, fmt.Errorf("check session availability: %w", err)
-	} else if unavailable != "" {
-		unlock()
-		return commandResponse{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
-	}
-	session, ok := h.registry.Get(id)
-	if !ok {
-		unlock()
-		return commandResponse{}, errSessionNotFound
-	}
-	if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
-		unlock()
-		return commandResponse{}, errInvalidSessionTransition
-	}
-	command, storedImages, refs, err := h.prepareSessionInputCommand(ctx, id, commandID, text, images, selectedSkills, steeringOnly)
+	var command commandResponse
+	var storedImages []messageImage
+	var refs []zotigosession.ImageRef
+	var submission *workerInputSubmission
+	err := func() error {
+		unlock := h.sessionOps.lock(id)
+		defer unlock()
+
+		if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
+			return fmt.Errorf("check session availability: %w", err)
+		} else if unavailable != "" {
+			return fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
+		}
+		session, ok := h.registry.Get(id)
+		if !ok {
+			return errSessionNotFound
+		}
+		if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
+			return errInvalidSessionTransition
+		}
+		var err error
+		command, storedImages, refs, err = h.prepareSessionInputCommand(ctx, id, commandID, text, images, selectedSkills, steeringOnly)
+		if err != nil {
+			return err
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		submission, err = h.workers.BeginInput(id, workerInputRequest{
+			Command: command, SteeringOnly: steeringOnly, ExpectedTurnID: expectedTurnID,
+		})
+		if err != nil {
+			return err
+		}
+		releaseAdmission := h.sessionOps.reserveInput(id)
+		submission.OnFinish(releaseAdmission)
+		return nil
+	}()
 	if err != nil {
-		unlock()
-		return commandResponse{}, err
-	}
-	if err := ctx.Err(); err != nil {
-		unlock()
-		_ = h.deleteMessageImageRefs(context.Background(), id, imageRefNames(refs))
+		cleanupCtx := ctx
+		if cleanupCtx.Err() != nil {
+			cleanupCtx = context.Background()
+		}
+		_ = h.deleteMessageImageRefs(cleanupCtx, id, imageRefNames(refs))
 		cleanupMessageImageBlobs(storedImages)
 		return commandResponse{}, err
 	}
-	submission, err := h.workers.BeginInput(id, workerInputRequest{
-		Command: command, SteeringOnly: steeringOnly, ExpectedTurnID: expectedTurnID,
-	})
-	if err != nil {
-		unlock()
-		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
-		cleanupMessageImageBlobs(storedImages)
-		return commandResponse{}, err
-	}
-	releaseAdmission := h.sessionOps.reserveInput(id)
-	submission.OnFinish(releaseAdmission)
-	unlock()
 
 	accepted, err := submission.Await(ctx)
 	if err != nil {
