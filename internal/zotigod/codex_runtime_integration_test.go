@@ -18,9 +18,10 @@ import (
 )
 
 type fakeCodexRuntime struct {
-	launches  chan zotigoruntime.WorkerLaunchSpec
-	server    *httptest.Server
-	connected chan *websocket.Conn
+	launches    chan zotigoruntime.WorkerLaunchSpec
+	server      *httptest.Server
+	connected   chan *websocket.Conn
+	idleTimeout time.Duration
 }
 
 func (*fakeCodexRuntime) Kind() zotigoruntime.AgentKind { return zotigoruntime.AgentCodex }
@@ -50,8 +51,12 @@ func (f *fakeCodexRuntime) StartWorker(_ context.Context, spec zotigoruntime.Wor
 	return nil
 }
 
-func (*fakeCodexRuntime) WorkerLifecycle() zotigoruntime.WorkerLifecycle {
-	return zotigoruntime.WorkerLifecycle{IdleTimeout: 25 * time.Millisecond}
+func (f *fakeCodexRuntime) WorkerLifecycle() zotigoruntime.WorkerLifecycle {
+	timeout := f.idleTimeout
+	if timeout == 0 {
+		timeout = 25 * time.Millisecond
+	}
+	return zotigoruntime.WorkerLifecycle{IdleTimeout: timeout}
 }
 
 func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) {
@@ -90,6 +95,274 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	}
 	if workers.Has(session.ID) {
 		t.Fatal("Codex worker remained connected after reporting idle")
+	}
+}
+
+func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
+	createdAt := time.Now().UTC()
+	registry := newSessionRegistry()
+	session := registry.Add(Session{
+		ID: "sess-codex-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
+		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
+	})
+	workers := newWorkerRegistry()
+	fakeRuntime := &fakeCodexRuntime{}
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fakeRuntime.server = server
+	t.Cleanup(server.Close)
+
+	worker, generation := connectWorker(t, server, session.ID)
+	t.Cleanup(func() { _ = worker.Close() })
+	markWorkerReady(t, server, session.ID, generation)
+	registry.MarkWorking(session.ID, "tool")
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
+			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		})
+		resultCh <- err
+	}()
+	request := readWorkerMessage(t, worker)
+	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", request)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{}}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		current, _ := registry.Get(session.ID)
+		if !current.Working && current.ActiveTool == "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	current, _ := registry.Get(session.ID)
+	if current.Working || current.ActiveTool != "" {
+		t.Fatal("accepted idle notification did not update session state during input submission")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !workers.Has(session.ID) {
+		t.Fatal("idle notification closed a worker while input submission was in progress")
+	}
+	command := request.InputRequest.Command
+	command.Sequence = 1
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: request.InputRequest.RequestID, Command: &command,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resultCh; err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !workers.Has(session.ID) {
+		t.Fatal("stale idle notification closed a worker after it accepted newer input")
+	}
+}
+
+func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
+	createdAt := time.Now().UTC()
+	registry := newSessionRegistry()
+	session := registry.Add(Session{
+		ID: "sess-codex-canceled-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
+		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
+	})
+	workers := newWorkerRegistry()
+	fakeRuntime := &fakeCodexRuntime{}
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fakeRuntime.server = server
+	t.Cleanup(server.Close)
+
+	worker, generation := connectWorker(t, server, session.ID)
+	t.Cleanup(func() { _ = worker.Close() })
+	markWorkerReady(t, server, session.ID, generation)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := workers.SubmitInput(ctx, session.ID, workerInputRequest{
+			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		})
+		resultCh <- err
+	}()
+	request := readWorkerMessage(t, worker)
+	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", request)
+	}
+	cancel()
+	if err := <-resultCh; !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected canceled caller, got %v", err)
+	}
+	if !workers.CloseWhenIdle(session.ID, generation, workerIdle{}, 25*time.Millisecond) {
+		t.Fatal("idle notification was not retained while the worker resolved canceled input")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !workers.Has(session.ID) {
+		t.Fatal("worker closed before resolving input from a canceled caller")
+	}
+	command := request.InputRequest.Command
+	command.Sequence = 1
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: request.InputRequest.RequestID, Command: &command,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if !workers.Has(session.ID) {
+		t.Fatal("stale idle notification closed worker after canceled input was accepted")
+	}
+}
+
+func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
+	createdAt := time.Now().UTC()
+	registry := newSessionRegistry()
+	session := registry.Add(Session{
+		ID: "sess-codex-rejected-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
+		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
+	})
+	workers := newWorkerRegistry()
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fakeRuntime.server = server
+	t.Cleanup(server.Close)
+
+	worker, generation := connectWorker(t, server, session.ID)
+	t.Cleanup(func() { _ = worker.Close() })
+	markWorkerReady(t, server, session.ID, generation)
+	registry.MarkWorking(session.ID, "tool")
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
+			Command:      commandResponse{ID: "command-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "hello"}},
+			SteeringOnly: true,
+		})
+		resultCh <- err
+	}()
+	request := readWorkerMessage(t, worker)
+	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", request)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{}}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		current, _ := registry.Get(session.ID)
+		if !current.Working && current.ActiveTool == "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	current, _ := registry.Get(session.ID)
+	if current.Working || current.ActiveTool != "" {
+		t.Fatal("rejected input's pending idle did not update session state")
+	}
+	if !workers.Has(session.ID) {
+		t.Fatal("pending idle closed worker before rejected input resolved")
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: request.InputRequest.RequestID, ErrorCode: "no_active_turn", Error: "steering requires an active turn",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+		t.Fatalf("expected no active turn, got %v", err)
+	}
+	if current, _ := registry.Get(session.ID); current.Working || current.ActiveTool != "" {
+		t.Fatal("session returned to working after rejected input")
+	}
+	for deadline := time.Now().Add(time.Second); workers.Has(session.ID) && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if workers.Has(session.ID) {
+		t.Fatal("Codex worker remained connected after rejected input restored its idle release")
+	}
+}
+
+func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
+	createdAt := time.Now().UTC()
+	registry := newSessionRegistry()
+	session := registry.Add(Session{
+		ID: "sess-codex-duplicate-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
+		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
+	})
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+		session.ID: {
+			{ID: "command-1", Sequence: 1, Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "hello"}},
+			{Sequence: 2, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
+			{Sequence: 3, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
+		},
+	}}
+	workers := newWorkerRegistry()
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
+	handler := newHandler(registry, source, handlerOptions{
+		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fakeRuntime.server = server
+	t.Cleanup(server.Close)
+
+	worker, generation := connectWorker(t, server, session.ID)
+	t.Cleanup(func() { _ = worker.Close() })
+	markWorkerReady(t, server, session.ID, generation)
+	registry.MarkWorking(session.ID, "tool")
+
+	resultCh := make(chan error, 1)
+	go func() {
+		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
+			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		})
+		resultCh <- err
+	}()
+	request := readWorkerMessage(t, worker)
+	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", request)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: 1}}); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
+		current, _ := registry.Get(session.ID)
+		if !current.Working && current.ActiveTool == "" {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	current, _ := registry.Get(session.ID)
+	if current.Working || current.ActiveTool != "" {
+		t.Fatal("duplicate input's pending idle did not update session state")
+	}
+	if !workers.Has(session.ID) {
+		t.Fatal("pending idle closed worker before duplicate input resolved")
+	}
+	existing := request.InputRequest.Command
+	existing.Sequence = 1
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: request.InputRequest.RequestID, Command: &existing,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := <-resultCh; err != nil {
+		t.Fatal(err)
+	}
+	if current, _ := registry.Get(session.ID); current.Working || current.ActiveTool != "" {
+		t.Fatal("session returned to working after duplicate input")
+	}
+	for deadline := time.Now().Add(time.Second); workers.Has(session.ID) && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if workers.Has(session.ID) {
+		t.Fatal("Codex worker remained connected after duplicate input restored its idle release")
 	}
 }
 
