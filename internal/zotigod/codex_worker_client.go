@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -33,6 +34,7 @@ type codexWorkerConfig struct {
 
 type codexWorkerChannels struct {
 	commands     <-chan commandResponse
+	inputs       <-chan workerInputRequest
 	boundResults <-chan workerConversationBoundResult
 	errors       <-chan error
 }
@@ -192,13 +194,23 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 				return runErr
 			}
 			pendingCommands = enqueueCodexCommand(pendingCommands, runtime.commandSequence, command)
+		case request, ok := <-channels.inputs:
+			if !ok {
+				runErr = errors.New("codex worker input channel closed")
+				return runErr
+			}
+			result := runtime.AcceptInput(ctx, request, channels.boundResults, appClient.Notifications())
+			if !writer.SendInputResult(ctx, result) {
+				runErr = fmt.Errorf("send input result: worker websocket closed")
+				return runErr
+			}
 		case message, ok := <-appClient.Notifications():
 			if !ok {
 				runErr = errors.New("codex app-server connection closed")
 				return runErr
 			}
 			if len(message.ID) > 0 && message.Method != "" {
-				_ = appClient.RespondError(message.ID, -32601, "approval forwarding is not available in this version")
+				respondUnsupportedCodexRequest(appClient, message)
 				continue
 			}
 			if err := runtime.handleNotification(ctx, message); err != nil {
@@ -370,58 +382,237 @@ func (r *codexWorkerRuntime) Close() error {
 	return errors.Join(interruptErr, appendErr)
 }
 
+func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request workerInputRequest, boundResults <-chan workerConversationBoundResult, notifications <-chan codexapp.Message) workerInputResult {
+	result := workerInputResult{RequestID: request.RequestID}
+	command, err := r.acceptInput(ctx, request, boundResults, notifications)
+	if err != nil {
+		result.ErrorCode, result.Error = workerInputErrorDetails(err)
+		return result
+	}
+	result.Command = &command
+	return result
+}
+
+func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request workerInputRequest, boundResults <-chan workerConversationBoundResult, notifications <-chan codexapp.Message) (commandResponse, error) {
+	source := storedDisplayItemSource{store: r.store}
+	if existing, found, err := findExistingSessionInput(ctx, source, r.cfg.SessionID, request.Command, r.cfg.SessionStoreRoot); err != nil {
+		return commandResponse{}, err
+	} else if found {
+		if request.SteeringOnly && existing.Type != sessionCommandSteering {
+			return commandResponse{}, errCommandIDConflict
+		}
+		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
+			return commandResponse{}, errCommandIDConflict
+		}
+		return existing, nil
+	}
+
+	activeTurnID := r.activeTurnID
+	if request.ExpectedTurnID != "" && request.ExpectedTurnID != activeTurnID {
+		return commandResponse{}, errTurnMismatch
+	}
+	if request.SteeringOnly {
+		if activeTurnID == "" {
+			return commandResponse{}, errNoActiveTurn
+		}
+		command := steeringCommandForRequest(request, activeTurnID)
+		if err := r.callTurnSteer(ctx, command, activeTurnID); err != nil {
+			return commandResponse{}, r.classifyTurnSteerError(ctx, activeTurnID, err)
+		}
+		stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, command)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		if err := r.persistSteering(stored, activeTurnID); err != nil {
+			return commandResponse{}, err
+		}
+		r.acknowledgeCommand(stored.Sequence)
+		return stored, nil
+	}
+
+	message := messageCommandForRequest(request)
+	turnID, model, err := r.callTurnStart(ctx, message, boundResults)
+	if err != nil {
+		return commandResponse{}, err
+	}
+	if activeTurnID != "" && turnID == activeTurnID {
+		steering := steeringCommandForRequest(request, activeTurnID)
+		stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, steering)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		if err := r.persistSteering(stored, activeTurnID); err != nil {
+			return commandResponse{}, err
+		}
+		r.acknowledgeCommand(stored.Sequence)
+		return stored, nil
+	}
+	if activeTurnID != "" {
+		if err := r.consumeThroughTurnCompletion(ctx, activeTurnID, notifications); err != nil {
+			return commandResponse{}, err
+		}
+	}
+	stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, message)
+	if err != nil {
+		return commandResponse{}, err
+	}
+	if err := r.recordTurnStarted(ctx, stored, turnID, model); err != nil {
+		return commandResponse{}, err
+	}
+	return stored, nil
+}
+
+func (r *codexWorkerRuntime) classifyTurnSteerError(ctx context.Context, expectedTurnID string, steerErr error) error {
+	var rpcErr *codexapp.RPCError
+	if !errors.As(steerErr, &rpcErr) || rpcErr.Code != -32600 {
+		return steerErr
+	}
+	turns, err := listCodexThreadTurns(ctx, r.app, r.threadID, "notLoaded")
+	if err != nil {
+		return steerErr
+	}
+	activeTurnID := ""
+	for index := len(turns) - 1; index >= 0; index-- {
+		if turns[index].Status == "inProgress" {
+			activeTurnID = turns[index].ID
+			break
+		}
+	}
+	if activeTurnID == "" {
+		return errNoActiveTurn
+	}
+	if activeTurnID != expectedTurnID {
+		return errTurnMismatch
+	}
+	return steerErr
+}
+
+func (r *codexWorkerRuntime) callTurnStart(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) (string, string, error) {
+	if command.Message == nil {
+		return "", "", fmt.Errorf("codex message payload is missing")
+	}
+	if r.threadID == "" {
+		if err := r.startThread(ctx, boundResults); err != nil {
+			return "", "", err
+		}
+	}
+	stored, err := r.store.Get(ctx, r.cfg.SessionID)
+	if err != nil || stored == nil {
+		return "", "", fmt.Errorf("load codex turn settings: %w", err)
+	}
+	inputs, err := r.codexInputs(command.Message.Text, command.Message.Images, command.Message.Skills)
+	if err != nil {
+		return "", "", err
+	}
+	var response struct {
+		Turn struct {
+			ID string `json:"id"`
+		} `json:"turn"`
+	}
+	err = r.app.Call(ctx, "turn/start", map[string]any{
+		"threadId": r.threadID, "clientUserMessageId": command.ID, "input": inputs,
+		"cwd": r.cfg.WorkingDirectory, "model": stored.Model, "effort": stored.ReasoningEffort,
+	}, &response)
+	if err != nil {
+		return "", "", fmt.Errorf("start codex turn: %w", err)
+	}
+	return response.Turn.ID, stored.Model, nil
+}
+
+func (r *codexWorkerRuntime) callTurnSteer(ctx context.Context, command commandResponse, turnID string) error {
+	if command.Steering == nil {
+		return fmt.Errorf("codex steering payload is missing")
+	}
+	var response struct {
+		TurnID string `json:"turnId"`
+	}
+	if err := r.app.Call(ctx, "turn/steer", map[string]any{
+		"threadId": r.threadID, "expectedTurnId": turnID,
+		"clientUserMessageId": command.ID,
+		"input":               codexInputs(command.Steering.Text, command.Steering.Images),
+	}, &response); err != nil {
+		return err
+	}
+	if response.TurnID != "" && response.TurnID != turnID {
+		return errTurnMismatch
+	}
+	return nil
+}
+
+func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command commandResponse, turnID string, model string) error {
+	r.activeTurnID = turnID
+	r.turnStarted = time.Now()
+	r.turnModel = model
+	r.turnUsage = protocol.Usage{}
+	if err := r.append(zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnStarted,
+		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "in_progress"},
+	}); err != nil {
+		return err
+	}
+	dispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, model)
+	dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Message.Text)
+	r.acknowledgeCommand(command.Sequence)
+	r.messagePending = false
+	if r.writer != nil {
+		_ = r.writer.SendWorking(ctx)
+	}
+	return nil
+}
+
+func (r *codexWorkerRuntime) persistSteering(command commandResponse, turnID string) error {
+	images := displayImagesFromCommand(command.Steering.Images)
+	item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
+	item.ID = command.ID
+	item.CreatedAt = command.CreatedAt
+	item.Turn = &zotigosession.DisplayTurn{ID: turnID}
+	item.Command = &zotigosession.DisplayCommand{
+		Type: sessionCommandSteering, Text: command.Steering.Text, Images: displayCommandImages(images), Skills: append([]string(nil), command.Steering.Skills...), TurnID: turnID,
+	}
+	dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Steering.Text)
+	return r.append(item)
+}
+
+func (r *codexWorkerRuntime) consumeThroughTurnCompletion(ctx context.Context, turnID string, notifications <-chan codexapp.Message) error {
+	for r.activeTurnID == turnID {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case message, ok := <-notifications:
+			if !ok {
+				return errors.New("codex app-server connection closed")
+			}
+			if len(message.ID) > 0 && message.Method != "" {
+				respondUnsupportedCodexRequest(r.app, message)
+				continue
+			}
+			if err := r.handleNotification(ctx, message); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+func respondUnsupportedCodexRequest(app any, message codexapp.Message) {
+	if responder, ok := app.(interface {
+		RespondError(json.RawMessage, int, string) error
+	}); ok {
+		_ = responder.RespondError(message.ID, -32601, "approval forwarding is not available in this version")
+	}
+}
+
 func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) error {
 	switch command.Type {
 	case sessionCommandMessage:
 		if r.activeTurnID != "" {
 			return errActiveTurn
 		}
-		if command.Message == nil {
-			return fmt.Errorf("codex message payload is missing")
-		}
-		if r.threadID == "" {
-			if err := r.startThread(ctx, boundResults); err != nil {
-				return err
-			}
-		}
-		stored, err := r.store.Get(ctx, r.cfg.SessionID)
-		if err != nil || stored == nil {
-			return fmt.Errorf("load codex turn settings: %w", err)
-		}
-		inputs, err := r.codexInputs(command.Message.Text, command.Message.Images, command.Message.Skills)
+		turnID, model, err := r.callTurnStart(ctx, command, boundResults)
 		if err != nil {
 			return err
 		}
-		var response struct {
-			Turn struct {
-				ID string `json:"id"`
-			} `json:"turn"`
-		}
-		params := map[string]any{
-			"threadId": r.threadID, "clientUserMessageId": command.ID, "input": inputs,
-			"cwd": r.cfg.WorkingDirectory, "model": stored.Model, "effort": stored.ReasoningEffort,
-		}
-		if err := r.app.Call(ctx, "turn/start", params, &response); err != nil {
-			return fmt.Errorf("start codex turn: %w", err)
-		}
-		r.activeTurnID = response.Turn.ID
-		r.turnStarted = time.Now()
-		r.turnModel = stored.Model
-		r.turnUsage = protocol.Usage{}
-		if err := r.append(zotigosession.DisplayItem{
-			Type: zotigosession.DisplayItemTurnStarted,
-			Turn: &zotigosession.DisplayTurn{ID: r.activeTurnID, Status: "in_progress"},
-		}); err != nil {
-			return err
-		}
-		dispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, r.turnModel)
-		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Message.Text)
-		r.acknowledgeCommand(command.Sequence)
-		r.messagePending = false
-		if r.writer != nil {
-			_ = r.writer.SendWorking(ctx)
-		}
-		return nil
+		return r.recordTurnStarted(ctx, command, turnID, model)
 	case sessionCommandPause:
 		if r.activeTurnID == "" {
 			r.acknowledgeCommand(command.Sequence)
@@ -437,29 +628,14 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		if r.activeTurnID == "" || command.Steering == nil {
 			return fmt.Errorf("codex steering requires an active turn")
 		}
-		var response any
-		if err := r.app.Call(ctx, "turn/steer", map[string]any{
-			"threadId": r.threadID, "expectedTurnId": r.activeTurnID,
-			"clientUserMessageId": command.ID,
-			"input":               codexInputs(command.Steering.Text, command.Steering.Images),
-		}, &response); err != nil {
+		if command.Steering.TurnID != "" && command.Steering.TurnID != r.activeTurnID {
+			return nil
+		}
+		targetTurnID := r.activeTurnID
+		if err := r.callTurnSteer(ctx, command, targetTurnID); err != nil {
 			return err
 		}
-		images := make([]messageImage, 0, len(command.Steering.Images))
-		for _, image := range command.Steering.Images {
-			images = append(images, messageImage{
-				MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath,
-			})
-		}
-		item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
-		item.ID = command.ID
-		item.CreatedAt = command.CreatedAt
-		item.Turn = &zotigosession.DisplayTurn{ID: r.activeTurnID}
-		item.Command = &zotigosession.DisplayCommand{
-			Type: sessionCommandSteering, Text: command.Steering.Text, Images: displayCommandImages(images), TurnID: r.activeTurnID,
-		}
-		dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, command.Steering.Text)
-		if err := r.append(item); err != nil {
+		if err := r.persistSteering(command, targetTurnID); err != nil {
 			return err
 		}
 		r.acknowledgeCommand(command.Sequence)
@@ -1120,10 +1296,12 @@ func (r *codexWorkerRuntime) cleanupSkillFiles() error {
 
 func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 	commands := make(chan commandResponse, workerCommandBufferSize)
+	inputs := make(chan workerInputRequest, workerCommandBufferSize)
 	boundResults := make(chan workerConversationBoundResult, 1)
 	errorsCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
+		defer close(inputs)
 		defer close(boundResults)
 		for {
 			_, data, err := conn.ReadMessage()
@@ -1141,6 +1319,10 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 				if message.Command != nil {
 					commands <- *message.Command
 				}
+			case workerMessageInputRequest:
+				if message.InputRequest != nil {
+					inputs <- *message.InputRequest
+				}
 			case workerMessageConversationBoundResult:
 				if message.ConversationBoundResult != nil {
 					boundResults <- *message.ConversationBoundResult
@@ -1148,5 +1330,5 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 			}
 		}
 	}()
-	return codexWorkerChannels{commands: commands, boundResults: boundResults, errors: errorsCh}
+	return codexWorkerChannels{commands: commands, inputs: inputs, boundResults: boundResults, errors: errorsCh}
 }

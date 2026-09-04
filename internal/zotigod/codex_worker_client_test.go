@@ -25,6 +25,116 @@ type codexWorkerRPC struct {
 	resumeApproval string
 	turnID         string
 	err            error
+	methodErrors   map[string]error
+	activeTurnID   string
+}
+
+func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*codexWorkerRuntime, *zotigosession.FileStore) {
+	t.Helper()
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: sessionID, Agent: "codex", ConversationID: "thread-1", Model: "gpt-test", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	return &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}, SessionStoreRoot: store.RootDir()},
+		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string), toolNames: make(map[string]string),
+		toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
+	}, store
+}
+
+func TestCodexAcceptInputUsesTurnStartForAtomicStartOrSteer(t *testing.T) {
+	rpc := &codexWorkerRPC{turnID: "turn-active"}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-steer", rpc)
+	runtime.activeTurnID = "turn-active"
+	request := workerInputRequest{Command: commandResponse{
+		ID: "client-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "change direction"},
+	}}
+	result := runtime.AcceptInput(context.Background(), request, nil, nil)
+	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != "turn-active" {
+		t.Fatalf("input result = %#v", result)
+	}
+	result = runtime.AcceptInput(context.Background(), request, nil, nil)
+	if result.Error != "" || result.Command == nil || result.Command.ID != "client-1" {
+		t.Fatalf("idempotent result = %#v", result)
+	}
+	if got := fmt.Sprint(rpc.methods); got != "[turn/start]" {
+		t.Fatalf("RPC methods = %s", got)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-steer")
+	if err != nil || len(items) != 2 || items[0].Command == nil || items[0].Command.Type != sessionCommandSteering || items[1].Type != zotigosession.DisplayItemSteeringMessage {
+		t.Fatalf("accepted steering items = %#v, err=%v", items, err)
+	}
+}
+
+func TestCodexAcceptInputStartsMessageAfterConcurrentCompletion(t *testing.T) {
+	rpc := &codexWorkerRPC{turnID: "turn-new"}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-start", rpc)
+	runtime.activeTurnID = "turn-old"
+	runtime.turnStarted = time.Now().UTC()
+	notifications := make(chan codexapp.Message, 1)
+	notifications <- codexapp.Message{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-old","status":"completed"}}`)}
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+		ID: "client-2", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "next work"},
+	}}, nil, notifications)
+	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandMessage || runtime.activeTurnID != "turn-new" {
+		t.Fatalf("input result = %#v, active=%q", result, runtime.activeTurnID)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-start")
+	if err != nil {
+		t.Fatal(err)
+	}
+	messageCount := 0
+	for _, item := range items {
+		if item.ID == "client-2" && item.Command != nil && item.Command.Type == sessionCommandMessage {
+			messageCount++
+		}
+	}
+	if messageCount != 1 {
+		t.Fatalf("message accepted %d times: %#v", messageCount, items)
+	}
+}
+
+func TestCodexExplicitSteeringChecksExpectedTurnBeforeDelivery(t *testing.T) {
+	rpc := &codexWorkerRPC{}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-mismatch", rpc)
+	runtime.activeTurnID = "turn-current"
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{
+		Command:      commandResponse{ID: "client-3", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "wrong"}},
+		SteeringOnly: true, ExpectedTurnID: "turn-old",
+	}, nil, nil)
+	if result.ErrorCode != "turn_mismatch" || len(rpc.methods) != 0 {
+		t.Fatalf("input result = %#v, methods=%#v", result, rpc.methods)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-mismatch")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("mismatched input was persisted: %#v, err=%v", items, err)
+	}
+}
+
+func TestCodexExplicitSteeringReportsCompletionRaceStructurally(t *testing.T) {
+	rpc := &codexWorkerRPC{methodErrors: map[string]error{
+		"turn/steer": &codexapp.RPCError{Code: -32600, Message: "invalid request"},
+	}}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-race", rpc)
+	runtime.activeTurnID = "turn-current"
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{
+		Command:      commandResponse{ID: "client-4", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "too late"}},
+		SteeringOnly: true, ExpectedTurnID: "turn-current",
+	}, nil, nil)
+	if result.ErrorCode != "no_active_turn" || fmt.Sprint(rpc.methods) != "[turn/steer thread/turns/list]" {
+		t.Fatalf("input result = %#v, methods=%#v", result, rpc.methods)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-race")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("failed steering was persisted: %#v, err=%v", items, err)
+	}
 }
 
 func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
@@ -672,6 +782,9 @@ func stringPointer(value string) *string { return &value }
 
 func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, result any) error {
 	r.methods = append(r.methods, method)
+	if err := r.methodErrors[method]; err != nil {
+		return err
+	}
 	request := params.(map[string]any)
 	if method == "thread/resume" {
 		r.resumeApproval, _ = request["approvalPolicy"].(string)
@@ -682,6 +795,19 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 			turnID = "turn-1"
 		}
 		payload, err := sonic.Marshal(map[string]any{"turn": map[string]any{"id": turnID}})
+		if err != nil {
+			return err
+		}
+		if err := sonic.Unmarshal(payload, result); err != nil {
+			return err
+		}
+	}
+	if method == "thread/turns/list" {
+		turns := make([]codexTurn, 0, 1)
+		if r.activeTurnID != "" {
+			turns = append(turns, codexTurn{ID: r.activeTurnID, Status: "inProgress"})
+		}
+		payload, err := sonic.Marshal(codexTurnList{Data: turns})
 		if err != nil {
 			return err
 		}

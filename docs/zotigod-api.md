@@ -170,8 +170,8 @@ Current error codes include `unauthorized`, `invalid_request`, `not_found`,
 `method_not_allowed`, `conflict`, `request_too_large`,
 `session_not_live`, `session_in_use`, `profile_not_found`,
 `active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`,
-`command_pending`, `no_active_turn`, `service_unavailable`, and
-`internal_error`.
+`command_pending`, `no_active_turn`, `turn_mismatch`, `command_id_conflict`,
+`service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except
 `GET /internal/sessions/{id}/commands` successful responses. The commands
@@ -901,19 +901,16 @@ Status codes:
 
 ## Submit, pause, and steering
 
-Desktop can submit a new user message, request a running session to pause the
-current turn, or add steering text for the worker to apply at the next provider
-interruption point. zotigod makes sure a worker is online before accepting these
-requests. Messages and pauses are durable commands. Steering is sent directly
-over the internal worker WebSocket and is intentionally best-effort until the
-worker applies and persists it.
+Desktop can submit user input, request a running session to pause the current
+turn, or explicitly add steering text for the worker to apply at the next
+provider interruption point. zotigod makes sure a worker is online before
+accepting these requests. Messages, pauses, and steering are durable commands.
 
-The display-log append and WebSocket write are not a single transaction. zotigod
-tries to start a missing worker before appending durable commands; after such a
-command is appended, the command log is the recovery source of truth. Steering
-is the exception: a successful response means the live worker accepted the
-best-effort frame, not that steering is durable. If the worker exits before
-applying it, the correction can be lost.
+zotigod first ensures that the session worker owner is online, then sends one
+input-admission request to that owner. The owner chooses message or steering and
+durably records the accepted command before acknowledging the HTTP request.
+After a command is recorded, the command log is the recovery source of truth;
+workers replay both message and steering commands after reconnecting.
 
 Starting a session launches an internal worker process from the current
 `zotigod` executable. The worker connects back over WebSocket; connecting a
@@ -981,10 +978,9 @@ buffer is intentionally bounded at 32 items; if it fills, the worker treats
 itself as unhealthy and exits instead of staying connected but not applying
 control commands.
 
-After a queued message has durably produced `turn_started`, workers send an
-explicit `working` lifecycle notification. This is the only signal that moves a
-session from `pausing` back to `running`; ordinary output wakes and deltas do not
-guess that transition. Failure to deliver this advisory notification never
+After a durable message has produced `turn_started`, workers send an explicit
+`working` lifecycle notification. Ordinary output wakes and deltas do not guess
+lifecycle transitions. Failure to deliver this advisory notification never
 cancels an already-durable turn.
 
 If the daemon process restarts, old workers are not treated as still live.
@@ -1094,12 +1090,21 @@ accepted. Missing sessions, unknown image names, unreferenced blob files, and
 deleted blobs return `404`. This keeps `/items` small and prevents base64 image
 payloads from becoming part of the transcript API.
 
-`POST /sessions/{id}/messages` starts or resumes the session when needed, then
-requires no currently open turn and no pending message command that has not yet
-started a turn. If a turn is active, desktop should use
-`POST /sessions/{id}/steering` instead of submitting a new message. The exception
-is `pausing`: one normal message may be durably queued and returns `202`; a
-second one returns `command_pending` until the queued message starts.
+`POST /sessions/{id}/messages` is the normal start-or-steer input endpoint. It
+starts or resumes the session when needed, then atomically derives the command
+type inside the session worker owner that also owns the live runtime. Native
+workers make the admission decision under the agent state lock. Codex workers
+make one `turn/start` call and use app-server's start-or-steer admission result.
+If there is no active turn, zotigod records one `message` command. If a turn is
+active, including while paused for approval or while pausing, zotigod records
+one `steering` command tied to that turn. The endpoint no longer returns
+`active_turn` merely because a turn is open. A pending message that has not yet
+started still returns `command_pending`; this endpoint does not model a queue.
+
+Clients that retry a submission may include `client_message_id`. Reusing the
+same ID with the same input returns the original command response without
+appending or dispatching another command. Reusing it for different input
+returns `409 command_id_conflict`.
 
 Response data:
 
@@ -1167,7 +1172,7 @@ Submit steering input:
       "data_base64": "..."
     }
   ],
-  "turn_id": "turn_123"
+  "expected_turn_id": "turn_123"
 }
 ```
 
@@ -1177,19 +1182,21 @@ same limits and accepted MIME types as normal message images. Public responses
 and display items only include image metadata and image read URLs; worker
 commands hydrate the original image bytes.
 
-`turn_id` is optional. When present, it must match the currently open display-log
-turn. When omitted, zotigod uses the currently open turn. Steering without an
-open turn is rejected; desktop should use `POST /sessions/{id}/messages` for a
-new normal turn. Steering also requires the session registry state to be
-`running`; paused approval sessions reject steering until the approval is
-resolved and the live worker resumes.
+`expected_turn_id` is optional. When present, it must match the currently open
+display-log turn or the request returns `409 turn_mismatch`. The legacy
+`turn_id` field remains accepted as the same precondition for compatibility.
+When both are supplied, they must match. When neither is supplied, zotigod uses
+the currently open turn. Steering without an open turn returns structured
+`409 no_active_turn`. An open turn remains steerable while paused for approval
+or while pausing. Explicit steering also accepts `client_message_id` with the
+same idempotency semantics as `/messages`.
 
 Response data:
 
 ```json
 {
   "id": "cmd_8f0e12ab34cd56ef",
-  "sequence": 0,
+  "sequence": 5,
   "type": "steering",
   "turn_id": "turn_123",
   "text": "Use the smaller fix and avoid changing the parser.",
@@ -1206,10 +1213,16 @@ Response data:
 }
 ```
 
-Workers poll durable commands with a display-log cursor. Steering is not part of
-this replay stream. `after` is a sequence cursor
-kept for compatibility; workers should prefer the byte `offset` cursor because
-it avoids re-reading the full display log on long sessions.
+Workers poll durable commands with a display-log cursor. Pending steering is
+stored as an internal `session_command`; once applied, the worker appends the
+visible `steering_message` with the same command ID. Applied steering display
+items are not replayed as commands. `after` is a sequence cursor kept for
+compatibility; workers should prefer the byte `offset` cursor because it avoids
+re-reading the full display log on long sessions.
+
+Queueing is intentionally separate from steering. A future queue feature should
+use its own durable model and API for input that runs after the current turn;
+ordinary `/messages` input while a turn is open remains start-or-steer.
 
 `GET /internal/sessions/{id}/commands?after=0&limit=200`
 
@@ -1311,8 +1324,7 @@ Response data:
 
 Status codes:
 
-- `202`: pause, a message queued behind a stopping turn, or live profile command
-  accepted.
+- `202`: pause or live profile command accepted.
 - `201`: message or steering command created, or worker lifecycle confirmation
   appended.
 - `200`: internal command list returned, or an offline/created profile change
@@ -1321,11 +1333,12 @@ Status codes:
   steering text, unknown profile, or invalid command query.
 - `413`: message or steering request body exceeds the public API size limit.
 - `404`: session not found.
-- `409`: command submitted in an incompatible state or with a mismatched
-  `turn_id`. Stable state codes are `active_turn`, `approval_pending`,
-  `runtime_occupied`, `turn_stopping`, `command_pending`, and `no_active_turn`.
-  Offline turn-scoped commands use `session_not_live`. Clients should only
-  convert a normal message to steering for `active_turn`.
+- `409`: command submitted in an incompatible state, a reused client message ID
+  has different input, or an explicit steering precondition mismatches. Stable
+  state codes include `runtime_occupied`, `turn_stopping`, `command_pending`,
+  `no_active_turn`, `turn_mismatch`, and `command_id_conflict`. `active_turn`
+  remains a legacy daemon response code; current `/messages` requests are
+  atomically converted to steering instead.
 - `503`: zotigod could not start or reconnect a worker before accepting the
   command.
 - `405`: method not allowed.

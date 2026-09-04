@@ -172,6 +172,60 @@ func TestFileStoreAppendDisplayItemSerializesAcrossStoreInstances(t *testing.T) 
 	}
 }
 
+func TestFileStoreAppendDisplayItemAtomicallySerializesDecisionWithTurnBoundary(t *testing.T) {
+	root := t.TempDir()
+	inputStore, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	turnStore, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := NewManagerWithStore(inputStore)
+	sess, err := manager.CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	inputDone := make(chan error, 1)
+	go func() {
+		_, _, err := inputStore.AppendDisplayItemAtomically(context.Background(), sess.ID, func(items []DisplayItem) (DisplayItem, bool, error) {
+			if len(items) != 0 {
+				t.Errorf("atomic decision saw unexpected items: %#v", items)
+			}
+			close(entered)
+			<-release
+			return DisplayItem{Type: DisplayItemUserMessage}, true, nil
+		})
+		inputDone <- err
+	}()
+	<-entered
+	turnDone := make(chan error, 1)
+	go func() {
+		_, err := turnStore.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{
+			Type: DisplayItemTurnStarted,
+			Turn: &DisplayTurn{ID: "turn-1"},
+		})
+		turnDone <- err
+	}()
+	close(release)
+	if err := <-inputDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-turnDone; err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := manager.ListDisplayItems(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 || items[0].Type != DisplayItemUserMessage || items[1].Type != DisplayItemTurnStarted {
+		t.Fatalf("atomic input and turn boundary were not serialized: %#v", items)
+	}
+}
+
 func TestManagerListDisplayItemsIgnoresPartialFinalLine(t *testing.T) {
 	store, err := NewFileStore(t.TempDir())
 	if err != nil {

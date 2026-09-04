@@ -23,6 +23,8 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
+var ErrNotRunning = errors.New("agent is not running")
+
 // Agent orchestrates provider, tools, and conversation history.
 type Agent struct {
 	cfg                 config.ProfileConfig
@@ -448,6 +450,13 @@ func (a *Agent) QueueTurnUserInput(text string) error {
 
 // QueueTurnUserMessage queues structured user input for the active turn.
 func (a *Agent) QueueTurnUserMessage(msg protocol.Message) error {
+	return a.QueueTurnUserMessageWithAdmission(msg, nil)
+}
+
+// QueueTurnUserMessageWithAdmission commits admission while holding the same
+// lock that decides whether the active turn can still accept input. The admit
+// callback must not call back into Agent methods.
+func (a *Agent) QueueTurnUserMessageWithAdmission(msg protocol.Message, admit func() error) error {
 	msg, err := normalizeQueuedTurnUserMessage(msg)
 	if err != nil {
 		return err
@@ -455,7 +464,13 @@ func (a *Agent) QueueTurnUserMessage(msg protocol.Message) error {
 	a.mu.Lock()
 	if a.state != StateRunning && a.state != StatePaused {
 		a.mu.Unlock()
-		return fmt.Errorf("agent is not running")
+		return ErrNotRunning
+	}
+	if admit != nil {
+		if err := admit(); err != nil {
+			a.mu.Unlock()
+			return err
+		}
 	}
 	a.pendingTurnUser = append(a.pendingTurnUser, msg)
 	var cancel context.CancelFunc

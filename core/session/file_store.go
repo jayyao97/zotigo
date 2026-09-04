@@ -472,6 +472,39 @@ func (s *FileStore) AppendDisplayItemIf(ctx context.Context, id string, item Dis
 	return s.appendDisplayItemLocked(ctx, id, item, condition)
 }
 
+// AppendDisplayItemAtomically derives and appends one item while holding the
+// same per-session lock used by every display-log writer. Returning appendItem
+// false lets callers implement idempotent replay without adding another line.
+func (s *FileStore) AppendDisplayItemAtomically(ctx context.Context, id string, build func([]DisplayItem) (item DisplayItem, appendItem bool, err error)) (DisplayItem, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, err := os.Stat(s.sessionPath(id)); err != nil {
+		if os.IsNotExist(err) {
+			return DisplayItem{}, false, fmt.Errorf("session not found: %s", id)
+		}
+		return DisplayItem{}, false, fmt.Errorf("stat session file: %w", err)
+	}
+	displayLogAppendMu.Lock()
+	defer displayLogAppendMu.Unlock()
+	unlock, err := s.lockDisplayLogAppendLocked(ctx, id)
+	if err != nil {
+		return DisplayItem{}, false, err
+	}
+	defer unlock()
+
+	items, err := s.readDisplayItemsLocked(id)
+	if err != nil {
+		return DisplayItem{}, false, err
+	}
+	item, appendItem, err := build(items)
+	if err != nil || !appendItem {
+		return item, false, err
+	}
+	stored, err := s.appendDisplayItemDataLocked(id, item)
+	return stored, err == nil, err
+}
+
 func (s *FileStore) appendDisplayItemLocked(ctx context.Context, id string, item DisplayItem, condition func([]DisplayItem) error) (DisplayItem, error) {
 	if _, err := os.Stat(s.sessionPath(id)); err != nil {
 		if os.IsNotExist(err) {
@@ -497,6 +530,10 @@ func (s *FileStore) appendDisplayItemLocked(ctx context.Context, id string, item
 		}
 	}
 
+	return s.appendDisplayItemDataLocked(id, item)
+}
+
+func (s *FileStore) appendDisplayItemDataLocked(id string, item DisplayItem) (DisplayItem, error) {
 	lastSequence, completeEndOffset, err := s.lastDisplaySequenceLocked(id)
 	if err != nil {
 		return DisplayItem{}, err
