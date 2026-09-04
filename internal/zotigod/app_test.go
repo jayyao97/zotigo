@@ -272,6 +272,39 @@ func (s *fakeDisplayItemSource) AppendItemIf(ctx context.Context, sessionID stri
 	return item, nil
 }
 
+func (s *fakeDisplayItemSource) AppendItemAtomically(_ context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
+	if s.err != nil {
+		return zotigosession.DisplayItem{}, false, s.err
+	}
+	s.mu.Lock()
+	items := append([]zotigosession.DisplayItem(nil), s.items[sessionID]...)
+	item, appendItem, err := build(items)
+	if err != nil || !appendItem {
+		s.mu.Unlock()
+		return item, false, err
+	}
+	if s.appendErr != nil {
+		if err := s.appendErr(sessionID, item); err != nil {
+			s.mu.Unlock()
+			return zotigosession.DisplayItem{}, false, err
+		}
+	}
+	next := uint64(len(s.items[sessionID]) + 1)
+	item.Sequence = next
+	if item.ID == "" {
+		item.ID = fmt.Sprintf("item_%s_%d", sessionID, next)
+	}
+	if item.CreatedAt.IsZero() {
+		item.CreatedAt = time.Now().UTC()
+	}
+	s.items[sessionID] = append(s.items[sessionID], item)
+	s.mu.Unlock()
+	if s.appendHook != nil {
+		s.appendHook(sessionID, item)
+	}
+	return item, true, nil
+}
+
 func (s *fakeDisplayItemSource) AppendItems(_ context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
 	return s.appendItemsAfter(sessionID, nil, items)
 }
@@ -2687,6 +2720,7 @@ func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
 		t.Fatalf("expected state %q before ready, got %q", SessionStateStarting, got.State)
 	}
 	markWorkerReady(t, server, created.ID, generation)
+	requests := serveTestWorkerInputs(t, worker, source, created.ID)
 
 	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
 		t.Fatalf("expected state %q, got %q", SessionStateRunning, got.State)
@@ -2694,23 +2728,11 @@ func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
 	appendTurnStarted(t, source, created.ID, "turn-1")
 
 	postSteering(t, handler, created.ID, "use the smaller fix")
-	msg := readWorkerMessage(t, worker)
-	if msg.Type != workerMessageCommand || msg.Command == nil {
-		t.Fatalf("expected command message, got %#v", msg)
-	}
-	if msg.Command.Type != sessionCommandSteering || msg.Command.Steering == nil || msg.Command.Steering.Text != "use the smaller fix" {
-		t.Fatalf("unexpected steering command: %#v", msg.Command)
+	request := <-requests
+	if !request.SteeringOnly || request.Command.Steering == nil || request.Command.Steering.Text != "use the smaller fix" {
+		t.Fatalf("unexpected steering input request: %#v", request)
 	}
 
-	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
-	}
-	msg = readWorkerMessage(t, worker)
-	if msg.Type != workerMessageCommand || msg.Command == nil || msg.Command.Type != sessionCommandPause {
-		t.Fatalf("expected pause command, got %#v", msg)
-	}
 }
 
 func TestWorkerHeartbeatUnregistersUnresponsiveConnection(t *testing.T) {
@@ -2837,7 +2859,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, _, errCh := readWorkerMessages(clientConn, nil)
+	_, _, _, errCh := readWorkerMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
 		msg := workerMessage{
 			Type: workerMessageCommand,
@@ -3126,6 +3148,23 @@ func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 	}
 	if cursor.Sequence != 0 || cursor.Offset != 0 {
 		t.Fatalf("expected steering display item to be ignored, got %#v", cursor)
+	}
+}
+
+func TestRecoverWorkerCommandCursorTracksDurableSteeringApplication(t *testing.T) {
+	items := []zotigosession.DisplayItem{
+		{Sequence: 1, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
+		{ID: "steer-1", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "change", TurnID: "turn-1"}},
+	}
+	if got := recoverAppliedCommandSequence(items); got != 0 {
+		t.Fatalf("pending steering advanced cursor to %d", got)
+	}
+	items = append(items, zotigosession.DisplayItem{
+		ID: "steer-1", Sequence: 3, Type: zotigosession.DisplayItemSteeringMessage,
+		Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "change", TurnID: "turn-1"},
+	})
+	if got := recoverAppliedCommandSequence(items); got != 2 {
+		t.Fatalf("applied steering cursor = %d, want 2", got)
 	}
 }
 
@@ -4399,6 +4438,7 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, source, created.ID)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"build the runtime"}`))
@@ -4414,9 +4454,9 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 		t.Fatalf("unexpected message command: %#v", command)
 	}
 
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Type != sessionCommandMessage || msg.Command.Message == nil || msg.Command.Message.Text != "build the runtime" {
-		t.Fatalf("unexpected worker message command: %#v", msg)
+	input := <-requests
+	if input.Command.Type != sessionCommandMessage || input.Command.Message == nil || input.Command.Message.Text != "build the runtime" {
+		t.Fatalf("unexpected worker input request: %#v", input)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
@@ -4450,6 +4490,7 @@ func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 				workerReady <- nil
 				return
 			}
+			serveTestWorkerInputs(t, conn, storedDisplayItemSource{store: store}, sessionID)
 			workerReady <- conn
 		}()
 		return nil
@@ -4477,10 +4518,6 @@ func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 		t.Fatal("expected worker websocket connection")
 	}
 	defer worker.Close()
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Message == nil || msg.Command.Message.Text != "continue this session" {
-		t.Fatalf("unexpected worker command: %#v", msg)
-	}
 
 	got := getSession(t, handler, "sess-stored")
 	if got.State != SessionStateRunning || !got.Live {
@@ -4543,6 +4580,7 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 				workerReady <- nil
 				return
 			}
+			serveTestWorkerInputs(t, conn, storedDisplayItemSource{store: store}, sessionID)
 			workerReady <- conn
 		}()
 		return nil
@@ -4567,10 +4605,6 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 		t.Fatal("expected worker websocket connection")
 	}
 	defer worker.Close()
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Message == nil || msg.Command.Message.Text != "continue after restart" {
-		t.Fatalf("unexpected worker command: %#v", msg)
-	}
 
 	items := getItems(t, handler, "/sessions/sess-stored/items?limit=10")
 	if len(items.Items) != 3 {
@@ -4600,6 +4634,7 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -4624,11 +4659,11 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 		t.Fatalf("public message response leaked image payload: %s", rec.Body.String())
 	}
 
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Message == nil || len(msg.Command.Message.Images) != 1 {
-		t.Fatalf("expected worker image command, got %#v", msg)
+	input := <-requests
+	if input.Command.Message == nil || len(input.Command.Message.Images) != 1 {
+		t.Fatalf("expected worker image command, got %#v", input)
 	}
-	if msg.Command.Message.Images[0].DataBase64 == "" {
+	if input.Command.Message.Images[0].DataBase64 == "" {
 		t.Fatalf("worker command did not include image data")
 	}
 
@@ -4688,6 +4723,7 @@ func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -4709,15 +4745,15 @@ func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
 		t.Fatalf("expected one public image metadata, got %#v", publicCommand.Images)
 	}
 
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Message == nil {
-		t.Fatalf("expected worker message command, got %#v", msg)
+	input := <-requests
+	if input.Command.Message == nil {
+		t.Fatalf("expected worker message command, got %#v", input)
 	}
-	if msg.Command.Message.Text != "" {
-		t.Fatalf("expected empty worker text, got %q", msg.Command.Message.Text)
+	if input.Command.Message.Text != "" {
+		t.Fatalf("expected empty worker text, got %q", input.Command.Message.Text)
 	}
-	if len(msg.Command.Message.Images) != 1 || msg.Command.Message.Images[0].DataBase64 == "" {
-		t.Fatalf("expected worker image payload, got %#v", msg.Command.Message.Images)
+	if len(input.Command.Message.Images) != 1 || input.Command.Message.Images[0].DataBase64 == "" {
+		t.Fatalf("expected worker image payload, got %#v", input.Command.Message.Images)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
@@ -4890,6 +4926,7 @@ func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -4899,8 +4936,6 @@ func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	_ = readWorkerMessage(t, worker)
-
 	rawLog, err := os.ReadFile(filepath.Join(root, "sessions", created.ID+".display.jsonl"))
 	if err != nil {
 		t.Fatalf("read display log: %v", err)
@@ -4935,6 +4970,7 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
 	rec := httptest.NewRecorder()
@@ -4943,8 +4979,6 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	_ = readWorkerMessage(t, worker)
-
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(body))
 	handler.ServeHTTP(rec, req)
@@ -4974,6 +5008,7 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
 	rec := httptest.NewRecorder()
@@ -4982,8 +5017,6 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	_ = readWorkerMessage(t, worker)
-
 	if err := os.RemoveAll(filepath.Join(root, "sessions", created.ID+".images")); err != nil {
 		t.Fatalf("remove image dir: %v", err)
 	}
@@ -5128,6 +5161,7 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
 	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
@@ -5158,22 +5192,22 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 		t.Fatalf("public steering response leaked image payload: %s", rec.Body.String())
 	}
 
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Steering == nil || len(msg.Command.Steering.Images) != 1 {
-		t.Fatalf("expected worker steering image command, got %#v", msg)
+	input := <-requests
+	if input.Command.Steering == nil || len(input.Command.Steering.Images) != 1 {
+		t.Fatalf("expected worker steering image command, got %#v", input)
 	}
-	if msg.Command.Steering.Images[0].DataBase64 == "" {
+	if input.Command.Steering.Images[0].DataBase64 == "" {
 		t.Fatalf("worker steering command did not include image data")
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
-		t.Fatalf("steering was persisted before the worker applied it: %#v", items.Items)
+	if len(items.Items) != 2 || items.Items[1].Type != string(zotigosession.DisplayItemSessionCommand) {
+		t.Fatalf("steering command was not persisted: %#v", items.Items)
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 0 {
-		t.Fatalf("steering must not enter the durable command queue: %#v", commands)
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandSteering {
+		t.Fatalf("steering did not enter the durable command queue: %#v", commands)
 	}
 
 	imageRec := httptest.NewRecorder()
@@ -5209,7 +5243,7 @@ func TestSessionSteeringRejectsOversizedRequestBody(t *testing.T) {
 	}
 }
 
-func TestSessionMessageReturnsAcceptedWhenWorkerDisconnectsAfterAppend(t *testing.T) {
+func TestSessionMessageDoesNotReturnAcceptedWhenWorkerDisconnectsBeforeAdmission(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	registry := newSessionRegistry()
@@ -5222,30 +5256,27 @@ func TestSessionMessageReturnsAcceptedWhenWorkerDisconnectsAfterAppend(t *testin
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
 
-	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
-		if sessionID != created.ID || item.Command == nil || item.Command.Type != sessionCommandMessage {
-			return
+	go func() {
+		var message workerMessage
+		if worker.ReadJSON(&message) == nil && message.Type == workerMessageInputRequest {
+			_ = worker.Close()
 		}
-		_ = worker.Close()
-		for deadline := time.Now().Add(time.Second); workers.Has(created.ID) && time.Now().Before(deadline); {
-			time.Sleep(10 * time.Millisecond)
-		}
-	}
+	}()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"persist this"}`))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusCreated {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusInternalServerError, rec.Code, rec.Body.String())
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "persist this" {
-		t.Fatalf("expected durable message command, got %#v", commands)
+	if len(commands.Commands) != 0 {
+		t.Fatalf("unexpected command accepted before worker admission: %#v", commands)
 	}
 	session, _ := registry.Get(created.ID)
-	if session.Working || session.ActiveTool != "" {
-		t.Fatalf("failed dispatch activity = %#v", session)
+	if session.State != SessionStateRunning {
+		t.Fatalf("worker disconnect rewrote lifecycle state: %#v", session)
 	}
 }
 
@@ -5258,6 +5289,7 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
@@ -5302,7 +5334,7 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 	}
 }
 
-func TestSessionMessageRejectsActiveTurn(t *testing.T) {
+func TestSessionMessageSteersActiveTurn(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
@@ -5312,19 +5344,26 @@ func TestSessionMessageRejectsActiveTurn(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 	appendTurnStarted(t, source, created.ID, "turn-1")
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"second message"}`))
 	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
-	assertAPIError(t, rec, http.StatusConflict, "active_turn", "use steering")
+	var command publicCommandResponse
+	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.Type != sessionCommandSteering || command.TurnID != "turn-1" {
+		t.Fatalf("message was not routed to steering: %#v", command)
+	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
-		t.Fatalf("expected no message command to be appended, got %#v", items.Items)
+	if len(items.Items) != 2 || items.Items[1].Command == nil || items.Items[1].Command.Type != sessionCommandSteering {
+		t.Fatalf("expected one steering command, got %#v", items.Items)
 	}
 }
 
@@ -5338,6 +5377,7 @@ func TestSessionMessageRejectsPendingMessageCommand(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"first message"}`))
@@ -5385,6 +5425,7 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 
 	results := make(chan int, 2)
 	postMessage := func(text string) {
@@ -5422,6 +5463,55 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
 	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != sessionCommandMessage {
 		t.Fatalf("expected one message command, got %#v", items.Items)
+	}
+}
+
+func TestSessionMessageClientIDIsIdempotent(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
+
+	post := func() publicCommandResponse {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"once","client_message_id":"client-1"}`)))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("message status = %d: %s", rec.Code, rec.Body.String())
+		}
+		var command publicCommandResponse
+		if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
+			t.Fatal(err)
+		}
+		return command
+	}
+	first := post()
+	appendTurnStarted(t, source, created.ID, "turn-finished")
+	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnCompleted,
+		Turn: &zotigosession.DisplayTurn{ID: "turn-finished", Status: "completed"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	registry.MarkIdle(created.ID)
+	second := post()
+	if first.ID != "client-1" || second.ID != first.ID || second.Sequence != first.Sequence || second.Type != first.Type {
+		t.Fatalf("idempotent responses differ: first=%#v second=%#v", first, second)
+	}
+	conflict := httptest.NewRecorder()
+	handler.ServeHTTP(conflict, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"different","client_message_id":"client-1"}`)))
+	assertAPIError(t, conflict, http.StatusConflict, "command_id_conflict", "different input")
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 1 || commands.Commands[0].ID != "client-1" {
+		t.Fatalf("duplicate client ID created commands: %#v", commands)
+	}
+	if session := getSession(t, handler, created.ID); session.Working {
+		t.Fatalf("idempotent retry marked completed session working: %#v", session)
 	}
 }
 
@@ -5661,6 +5751,169 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 	}
 }
 
+func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
+	const providerName = "zotigod-paused-input-test"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &noopProvider{}, nil
+	})
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-paused-input", source)
+	turnID, err := display.StartTurn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	localExec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, localExec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag.Restore(agent.Snapshot{State: agent.StatePaused})
+	ready := make(chan struct{})
+	close(ready)
+	runtime := &workerRuntime{
+		sessionID: "sess-paused-input", agent: ag, display: display,
+		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true,
+	}
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+		ID: "paused-steering", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "change direction"},
+	}})
+	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != turnID {
+		t.Fatalf("input result = %#v", result)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-paused-input")
+	if err != nil || len(items) != 2 || items[1].ID != "paused-steering" || items[1].Command == nil || items[1].Command.Type != sessionCommandSteering {
+		t.Fatalf("durable paused steering = %#v, err=%v", items, err)
+	}
+}
+
+func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
+	const providerName = "zotigod-starting-input-test"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-starting-input", source)
+	turnID, err := display.StartTurn(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	localExec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, localExec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag.Restore(agent.Snapshot{State: agent.StateRunning})
+	runtime := &workerRuntime{
+		sessionID: "sess-starting-input", agent: ag, display: display,
+		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}),
+	}
+	result := make(chan workerInputResult, 1)
+	go func() {
+		result <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+			ID: "starting-steering", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "add this"},
+		}})
+	}()
+	select {
+	case got := <-result:
+		t.Fatalf("input admitted before turn readiness: %#v", got)
+	case <-time.After(20 * time.Millisecond):
+	}
+	runtime.markTurnReady()
+	got := <-result
+	if got.Error != "" || got.Command == nil || got.Command.Type != sessionCommandSteering || got.Command.Steering.TurnID != turnID {
+		t.Fatalf("input result = %#v", got)
+	}
+	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
+	if err != nil || len(items) != 2 || items[1].ID != "starting-steering" || items[1].Command.Type != sessionCommandSteering {
+		t.Fatalf("accepted input = %#v, err=%v", items, err)
+	}
+}
+
+func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T) {
+	const providerName = "zotigod-completion-input-test"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "sess-completion-input", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	localExec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer localExec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, localExec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-completion-input", source)
+	if _, err := display.StartTurn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ready := make(chan struct{})
+	close(ready)
+	transport := zotigotransport.NewChannelTransport(4)
+	defer transport.Close()
+	runtime := &workerRuntime{
+		sessionID: "sess-completion-input", store: store, agent: ag, display: display,
+		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true, fatalCh: make(chan error, 1),
+	}
+	runtime.runner = runner.New(ag, transport)
+	result := make(chan workerInputResult, 1)
+	go func() {
+		result <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+			ID: "boundary-message", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "next turn"},
+		}})
+	}()
+	deadline := time.Now().Add(time.Second)
+	for {
+		items, _, loadErr := source.LoadItems(context.Background(), runtime.sessionID)
+		if loadErr != nil {
+			t.Fatal(loadErr)
+		}
+		if len(items) == 2 && items[1].ID == "boundary-message" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("message was not durably admitted at completion boundary: %#v", items)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := display.HandleEvent(context.Background(), protocol.NewFinishEvent(protocol.FinishReasonStop)); err != nil {
+		t.Fatal(err)
+	}
+	runtime.finishTurn()
+	got := <-result
+	if got.Error != "" || got.Command == nil || got.Command.Type != sessionCommandMessage || got.Command.ID != "boundary-message" {
+		t.Fatalf("input result = %#v", got)
+	}
+	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	count := 0
+	for _, item := range items {
+		if item.ID == "boundary-message" && item.Command != nil {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("message accepted %d times: %#v", count, items)
+	}
+	runtime.Close()
+}
+
 func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 	providers.Register("zotigod-stale-steering-test", func(config.ProfileConfig) (providers.Provider, error) {
 		return &noopProvider{}, nil
@@ -5689,6 +5942,19 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		turnReady:  ready,
 		turnDone:   make(chan struct{}),
 		readyDone:  true,
+	}
+
+	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
+		ID:       "steering-durable",
+		Sequence: 2,
+		Type:     sessionCommandSteering,
+		Steering: &steeringCommandPayload{
+			TurnID: turnID,
+			Text:   "must remain pending",
+		},
+	})
+	if err != nil {
+		t.Fatalf("accepted durable steering should not poison replay: %v", err)
 	}
 
 	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
@@ -5740,6 +6006,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
@@ -5780,8 +6047,10 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	handler.ServeHTTP(secondPause, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
 	assertAPIError(t, secondPause, http.StatusConflict, "turn_stopping", "already stopping")
 	steering := httptest.NewRecorder()
-	handler.ServeHTTP(steering, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", nil))
-	assertAPIError(t, steering, http.StatusConflict, "turn_stopping", "is stopping")
+	handler.ServeHTTP(steering, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(`{"text":"one more correction"}`)))
+	if steering.Code != http.StatusCreated {
+		t.Fatalf("steering during pause status = %d: %s", steering.Code, steering.Body.String())
+	}
 
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
@@ -5795,7 +6064,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	}
 }
 
-func TestMessageQueuedWhileTurnIsStoppingRemainsReplayable(t *testing.T) {
+func TestMessageWhileTurnIsStoppingBecomesDurableSteering(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
@@ -5806,6 +6075,7 @@ func TestMessageQueuedWhileTurnIsStoppingRemainsReplayable(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
 	appendTurnStarted(t, source, created.ID, "turn-old")
 
 	pause := httptest.NewRecorder()
@@ -5815,73 +6085,24 @@ func TestMessageQueuedWhileTurnIsStoppingRemainsReplayable(t *testing.T) {
 	}
 	message := httptest.NewRecorder()
 	handler.ServeHTTP(message, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"run after pause"}`)))
-	if message.Code != http.StatusAccepted {
-		t.Fatalf("queued message status = %d: %s", message.Code, message.Body.String())
+	if message.Code != http.StatusCreated {
+		t.Fatalf("steering message status = %d: %s", message.Code, message.Body.String())
+	}
+	var command publicCommandResponse
+	if err := decodeAPIData(t, message.Body.Bytes(), &command); err != nil {
+		t.Fatal(err)
+	}
+	if command.Type != sessionCommandSteering || command.TurnID != "turn-old" {
+		t.Fatalf("message was not routed to the stopping turn: %#v", command)
 	}
 
 	items, _, err := source.LoadItems(context.Background(), created.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[2].Command == nil || items[2].Command.Type != sessionCommandMessage || !hasPendingMessageCommand(items) {
-		t.Fatalf("queued message is not durable: %#v", items)
+	if len(items) != 3 || items[2].Command == nil || items[2].Command.Type != sessionCommandSteering || items[2].Command.TurnID != "turn-old" {
+		t.Fatalf("steering message is not durable: %#v", items)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: items[1].Sequence}}); err != nil {
-		t.Fatal(err)
-	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageDisplayWake}); err != nil {
-		t.Fatal(err)
-	}
-	time.Sleep(20 * time.Millisecond)
-	if got, _ := registry.Get(created.ID); got.State != SessionStatePausing || !got.Working {
-		t.Fatalf("stale idle or display wake cleared stopping state: %#v", got)
-	}
-	if cursor := recoverAppliedCommandSequence(items); cursor != 0 {
-		t.Fatalf("cursor advanced before pause or message applied: %d", cursor)
-	}
-	_, err = source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemTurnInterrupted,
-		Turn: &zotigosession.DisplayTurn{ID: "turn-old", Status: "interrupted"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, _, err = source.LoadItems(context.Background(), created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !hasPendingMessageCommand(items) {
-		t.Fatalf("old turn completion cleared pending message: %#v", items)
-	}
-	if cursor := recoverAppliedCommandSequence(items); cursor != items[1].Sequence {
-		t.Fatalf("cursor = %d, want applied pause sequence %d", cursor, items[1].Sequence)
-	}
-	_, err = source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemTurnStarted,
-		Turn: &zotigosession.DisplayTurn{ID: "turn-new", Status: "in_progress"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	items, _, err = source.LoadItems(context.Background(), created.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if hasPendingMessageCommand(items) || recoverAppliedCommandSequence(items) != items[2].Sequence {
-		t.Fatalf("message was not acknowledged by turn_started: %#v", items)
-	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageWorking}); err != nil {
-		t.Fatal(err)
-	}
-	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
-		got, _ := registry.Get(created.ID)
-		if got.State == SessionStateRunning && got.Working {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	got, _ := registry.Get(created.ID)
-	t.Fatalf("explicit working barrier did not finish stopping state: %#v", got)
 }
 
 func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
@@ -5892,7 +6113,7 @@ func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
 	}
 }
 
-func TestStartMessageTurnWaitsForStoppingTurnBeforeAcknowledging(t *testing.T) {
+func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T) {
 	const providerName = "zotigod-stopping-turn-test"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
 	store, err := zotigosession.NewFileStore(t.TempDir())
@@ -5919,7 +6140,7 @@ func TestStartMessageTurnWaitsForStoppingTurnBeforeAcknowledging(t *testing.T) {
 	runtime := &workerRuntime{
 		sessionID: "sess-stopping", store: store, agent: ag,
 		display:    newWorkerDisplayLog("sess-stopping", source),
-		turnActive: true, turnStopping: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}), fatalCh: make(chan error, 1),
+		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}), fatalCh: make(chan error, 1),
 	}
 	working := make(chan struct{}, 1)
 	runtime.notifyWorking = func(context.Context) error {
@@ -6160,7 +6381,7 @@ func TestWorkerTurnInterruptedRejectsMissingOrStaleTurn(t *testing.T) {
 	}
 }
 
-func TestSessionSteeringForwardsWithoutPersistingCommand(t *testing.T) {
+func TestSessionSteeringPersistsAndForwardsCommand(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
@@ -6170,6 +6391,7 @@ func TestSessionSteeringForwardsWithoutPersistingCommand(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, source, created.ID)
 	appendTurnStarted(t, source, created.ID, "turn-1")
 
 	rec := httptest.NewRecorder()
@@ -6185,23 +6407,23 @@ func TestSessionSteeringForwardsWithoutPersistingCommand(t *testing.T) {
 	if command.Type != sessionCommandSteering || command.Text != "use the smaller fix" || command.TurnID != "turn-1" {
 		t.Fatalf("unexpected steering command: %#v", command)
 	}
-	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.ID != command.ID || msg.Command.Sequence != 0 || msg.Command.Steering == nil || msg.Command.Steering.Text != "use the smaller fix" {
-		t.Fatalf("unexpected worker steering command: %#v", msg)
+	input := <-requests
+	if input.Command.ID != command.ID || input.Command.Steering == nil || input.Command.Steering.Text != "use the smaller fix" {
+		t.Fatalf("unexpected worker steering input: %#v", input)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemTurnStarted) {
-		t.Fatalf("steering was persisted before the worker applied it: %#v", items.Items)
+	if len(items.Items) != 2 || items.Items[1].Type != string(zotigosession.DisplayItemSessionCommand) {
+		t.Fatalf("steering command was not persisted: %#v", items.Items)
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 0 {
-		t.Fatalf("steering entered the durable command queue: %#v", commands)
+	if len(commands.Commands) != 1 || commands.Commands[0].ID != command.ID || commands.Commands[0].Type != sessionCommandSteering {
+		t.Fatalf("steering command was not replayable: %#v", commands)
 	}
 }
 
-func TestSessionSteeringRejectsPendingApprovalBeforeRegistryPause(t *testing.T) {
+func TestSessionSteeringRequiresActiveTurn(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
@@ -6210,22 +6432,61 @@ func TestSessionSteeringRejectsPendingApprovalBeforeRegistryPause(t *testing.T) 
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	appendTurnStarted(t, source, created.ID, "turn-1")
-	appendPendingApprovalTurn(t, source, created.ID, "turn-1", "approval-1")
+	serveTestWorkerInputs(t, worker, source, created.ID)
 
 	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(`{"text":"use another command"}`))
-	handler.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(`{"text":"late"}`)))
+	assertAPIError(t, rec, http.StatusConflict, "no_active_turn", "requires an active turn")
+}
+
+func TestSessionSteeringExpectedTurnMismatchDoesNotDeliver(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
+	appendTurnStarted(t, source, created.ID, "turn-current")
+
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/steering", strings.NewReader(`{"text":"wrong turn","expected_turn_id":"turn-old"}`)))
+	assertAPIError(t, rec, http.StatusConflict, "turn_mismatch", "does not match")
+	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
+	if len(commands.Commands) != 0 {
+		t.Fatalf("mismatched steering was delivered: %#v", commands)
 	}
-	if !strings.Contains(rec.Body.String(), "approval is pending") {
-		t.Fatalf("expected pending approval conflict, got %q", rec.Body.String())
+}
+
+func TestSessionMessageSteersPausedApprovalTurn(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	serveTestWorkerInputs(t, worker, source, created.ID)
+	appendTurnStarted(t, source, created.ID, "turn-1")
+	appendPendingApprovalTurn(t, source, created.ID, "turn-1", "approval-1")
+	if _, err := registry.Pause(created.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"use another command"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusCreated, rec.Code, rec.Body.String())
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 3 {
-		t.Fatalf("expected no steering item to be appended, got %#v", items.Items)
+	if len(items.Items) != 4 || items.Items[3].Command == nil || items.Items[3].Command.Type != sessionCommandSteering {
+		t.Fatalf("expected durable steering after pending approval, got %#v", items.Items)
 	}
 }
 
@@ -6401,7 +6662,7 @@ func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
 	rec = httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/steering", strings.NewReader(`{"text":"adjust"}`))
 	handler.ServeHTTP(rec, req)
-	assertAPIError(t, rec, http.StatusConflict, "session_not_live", "steering requires a live session")
+	assertAPIError(t, rec, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 }
 
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
@@ -7730,6 +7991,107 @@ func readWorkerMessage(t *testing.T, conn *websocket.Conn) workerMessage {
 		t.Fatalf("read worker message: %v", err)
 	}
 	return msg
+}
+
+func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayItemSource, sessionID string) <-chan workerInputRequest {
+	t.Helper()
+	requests := make(chan workerInputRequest, 8)
+	go func() {
+		defer close(requests)
+		for {
+			var message workerMessage
+			if err := conn.ReadJSON(&message); err != nil {
+				return
+			}
+			if message.Type != workerMessageInputRequest || message.InputRequest == nil {
+				continue
+			}
+			request := *message.InputRequest
+			requests <- request
+			result := workerInputResult{RequestID: request.RequestID}
+			existing, found, err := findExistingSessionInput(context.Background(), source, sessionID, request.Command, "")
+			if err == nil && found {
+				result.Command = &existing
+				if err := conn.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &result}); err != nil {
+					return
+				}
+				continue
+			}
+			items, _, loadErr := source.LoadItems(context.Background(), sessionID)
+			if err == nil {
+				err = loadErr
+			}
+			if err == nil {
+				turnID := lastOpenTurnID(items)
+				switch {
+				case request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID:
+					err = errTurnMismatch
+				case request.SteeringOnly && turnID == "":
+					err = errNoActiveTurn
+				case turnID != "":
+					command := steeringCommandForRequest(request, turnID)
+					var stored commandResponse
+					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					if err == nil {
+						result.Command = &stored
+					}
+				case hasPendingMessageCommand(items):
+					err = errSessionBusy
+				default:
+					command := messageCommandForRequest(request)
+					var stored commandResponse
+					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					if err == nil {
+						result.Command = &stored
+					}
+				}
+			}
+			if err != nil {
+				result.ErrorCode, result.Error = workerInputErrorDetails(err)
+				if errors.Is(err, errSessionBusy) {
+					result.ErrorCode = "command_pending"
+				}
+			}
+			if err := conn.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &result}); err != nil {
+				return
+			}
+		}
+	}()
+	return requests
+}
+
+func serveTestWorkerConnectionInputs(connection *workerConnection, source displayItemSource, sessionID string) {
+	go func() {
+		for {
+			select {
+			case <-connection.doneCh:
+				return
+			case message := <-connection.sendCh:
+				if message.Type != workerMessageInputRequest || message.InputRequest == nil {
+					continue
+				}
+				request := *message.InputRequest
+				result := workerInputResult{RequestID: request.RequestID}
+				items, _, err := source.LoadItems(context.Background(), sessionID)
+				if err == nil {
+					turnID := lastOpenTurnID(items)
+					command := messageCommandForRequest(request)
+					if turnID != "" {
+						command = steeringCommandForRequest(request, turnID)
+					}
+					var stored commandResponse
+					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					if err == nil {
+						result.Command = &stored
+					}
+				}
+				if err != nil {
+					result.ErrorCode, result.Error = workerInputErrorDetails(err)
+				}
+				connection.resolveInput(result)
+			}
+		}
+	}()
 }
 
 func postSteering(t *testing.T, handler http.Handler, sessionID string, text string) {

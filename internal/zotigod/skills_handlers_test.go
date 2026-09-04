@@ -101,6 +101,7 @@ func TestSessionMessageValidatesAndPersistsSelectedSkills(t *testing.T) {
 	startSession(t, handler, session.ID)
 	worker := dialWorker(t, server, session.ID)
 	defer worker.Close()
+	requests := serveTestWorkerInputs(t, worker, source, session.ID)
 
 	recorder := httptest.NewRecorder()
 	body := `{"text":"review this","skills":["review-taste","review-taste"]}`
@@ -108,9 +109,9 @@ func TestSessionMessageValidatesAndPersistsSelectedSkills(t *testing.T) {
 	if recorder.Code != http.StatusCreated {
 		t.Fatalf("message = %d: %s", recorder.Code, recorder.Body.String())
 	}
-	message := readWorkerMessage(t, worker)
-	if message.Command == nil || message.Command.Message == nil || len(message.Command.Message.Skills) != 1 || message.Command.Message.Skills[0] != "review-taste" {
-		t.Fatalf("worker command = %#v", message)
+	request := <-requests
+	if request.Command.Message == nil || len(request.Command.Message.Skills) != 1 || request.Command.Message.Skills[0] != "review-taste" {
+		t.Fatalf("worker input = %#v", request)
 	}
 	replayed := getCommands(t, handler, "/internal/sessions/"+session.ID+"/commands?after=0")
 	if len(replayed.Commands) != 1 || len(replayed.Commands[0].Message.Skills) != 1 || replayed.Commands[0].Message.Skills[0] != "review-taste" {

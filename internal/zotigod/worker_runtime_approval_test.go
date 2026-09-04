@@ -152,6 +152,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 	ready := make(chan struct{})
 	close(ready)
 	runtime := &workerRuntime{
+		sessionID:  sessionID,
 		agent:      ag,
 		transport:  transport,
 		display:    display,
@@ -160,15 +161,11 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 		turnDone:   make(chan struct{}),
 		readyDone:  true,
 	}
-	if err := runtime.queueTurnUserInput(context.Background(), commandResponse{
-		ID:   "steering-1",
-		Type: sessionCommandSteering,
-		Steering: &steeringCommandPayload{
-			TurnID: turnID,
-			Text:   "skip this tool",
-		},
-	}); err != nil {
-		t.Fatalf("queue steering: %v", err)
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+		ID: "steering-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "skip this tool"},
+	}})
+	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != turnID {
+		t.Fatalf("accept steering: %#v", result)
 	}
 	results, err := transport.RequestApproval(context.Background(), []zotigotransport.PendingToolCall{{
 		ID:        "call-1",

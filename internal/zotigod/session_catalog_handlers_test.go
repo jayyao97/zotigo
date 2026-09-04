@@ -139,7 +139,9 @@ func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
 	if _, err := registry.MarkRunning(session.ID); err != nil {
 		t.Fatal(err)
 	}
-	workers.workers[session.ID] = newWorkerConnection(session.ID, "generation-1", nil, workers)
+	connection := newWorkerConnection(session.ID, "generation-1", nil, workers)
+	workers.workers[session.ID] = connection
+	serveTestWorkerConnectionInputs(connection, source, session.ID)
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {

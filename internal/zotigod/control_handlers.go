@@ -42,16 +42,19 @@ type pauseSessionRequest struct {
 }
 
 type submitMessageRequest struct {
-	Text   string                      `json:"text"`
-	Images []submitMessageImageRequest `json:"images,omitempty"`
-	Skills []string                    `json:"skills,omitempty"`
-	Path   json.RawMessage             `json:"path,omitempty"`
+	Text            string                      `json:"text"`
+	Images          []submitMessageImageRequest `json:"images,omitempty"`
+	Skills          []string                    `json:"skills,omitempty"`
+	ClientMessageID string                      `json:"client_message_id,omitempty"`
+	Path            json.RawMessage             `json:"path,omitempty"`
 }
 
 type steeringRequest struct {
-	Text   string                      `json:"text"`
-	Images []submitMessageImageRequest `json:"images,omitempty"`
-	TurnID string                      `json:"turn_id,omitempty"`
+	Text            string                      `json:"text"`
+	Images          []submitMessageImageRequest `json:"images,omitempty"`
+	TurnID          string                      `json:"turn_id,omitempty"`
+	ExpectedTurnID  string                      `json:"expected_turn_id,omitempty"`
+	ClientMessageID string                      `json:"client_message_id,omitempty"`
 }
 
 type interruptTurnRequest struct {
@@ -94,6 +97,7 @@ type messageCommandPayload struct {
 type steeringCommandPayload struct {
 	Text   string             `json:"text"`
 	Images []commandImageData `json:"images,omitempty"`
+	Skills []string           `json:"skills,omitempty"`
 	TurnID string             `json:"turn_id,omitempty"`
 }
 
@@ -116,7 +120,7 @@ type commandImageData struct {
 	Width      int    `json:"width,omitempty"`
 	Height     int    `json:"height,omitempty"`
 	DataBase64 string `json:"data_base64,omitempty"`
-	BlobPath   string `json:"-"`
+	BlobPath   string `json:"blob_path,omitempty"`
 }
 
 type publicCommandResponse struct {
@@ -193,78 +197,29 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 			selectedNames[index] = skill.Name
 		}
 	}
-	session, live := h.registry.Get(id)
-	stopping := live && session.State == SessionStatePausing
-	if !stopping {
-		if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
-			h.writeEnsureRunningError(w, err)
-			return
-		}
-	}
-	items, _, err := h.items.LoadItems(r.Context(), id)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
-		return
-	}
-	if hasPendingMessageCommand(items) {
-		writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
-		return
-	}
-	if lastOpenTurnID(items) != "" && !stopping {
-		if hasPendingApproval(items) {
-			writeAPIErrorCode(w, http.StatusConflict, "approval_pending", "message cannot start while approval is pending")
-			return
-		}
-		writeAPIErrorCode(w, http.StatusConflict, "active_turn", "message requires an idle session; use steering for the active turn")
+	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
+		h.writeEnsureRunningError(w, err)
 		return
 	}
 	if !h.ensureWorkerOnline(r.Context(), id) {
 		writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
 		return
 	}
-	item, err := func() (zotigosession.DisplayItem, error) {
-		unlock := h.sessionOps.lock(id)
-		defer unlock()
-		if unavailable, availabilityErr := h.ensureSessionActivatable(r.Context(), id); availabilityErr != nil {
-			return zotigosession.DisplayItem{}, fmt.Errorf("check session availability: %w", availabilityErr)
-		} else if unavailable != "" {
-			return zotigosession.DisplayItem{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
-		}
-		session, ok := h.registry.Get(id)
-		if !ok {
-			return zotigosession.DisplayItem{}, errSessionNotFound
-		}
-		if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
-			return zotigosession.DisplayItem{}, errInvalidSessionTransition
-		}
-		return h.appendMessageCommand(r.Context(), id, text, images, selectedNames, session.State == SessionStatePausing)
-	}()
+	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", false)
 	if err != nil {
 		switch {
 		case errors.Is(err, errSessionBusy):
 			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
+		case errors.Is(err, errCommandIDConflict):
+			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
 		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			h.writeEnsureRunningError(w, err)
 		default:
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append message command: %v", err))
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append session input command: %v", err))
 		}
 		return
 	}
-
-	command, err := messageCommandFromItem(item, h.sessionStoreRoot())
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("build message command: %v", err))
-		return
-	}
-	h.registry.MarkWorking(id, "")
-	if !h.sendCommand(r.Context(), id, command) {
-		h.registry.MarkIdle(id)
-	}
-	status := http.StatusCreated
-	if stopping {
-		status = http.StatusAccepted
-	}
-	writeAPIJSON(w, status, publicCommandFromCommand(command))
+	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
 }
 
 func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id string, name string) {
@@ -325,47 +280,95 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 }
 
 var (
-	errSessionBusy     = errors.New("session is busy")
-	errApprovalPending = errors.New("approval is pending")
+	errSessionBusy       = errors.New("session is busy")
+	errApprovalPending   = errors.New("approval is pending")
+	errNoActiveTurn      = errors.New("no active turn")
+	errTurnMismatch      = errors.New("active turn does not match expected turn")
+	errCommandIDConflict = errors.New("client message ID already belongs to different input")
 )
 
-func (h *handler) appendMessageCommand(ctx context.Context, id string, text string, images []messageImage, selectedSkills []string, allowStoppingTurn bool) (zotigosession.DisplayItem, error) {
+func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, steeringOnly bool) (commandResponse, []messageImage, []zotigosession.ImageRef, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
 	refs, err := messageImageRefs(id, images)
 	if err != nil {
 		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
 	if err := h.putMessageImageRefs(ctx, refs); err != nil {
 		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
+		return commandResponse{}, nil, nil, err
 	}
-	item := displayMessageItem(zotigosession.DisplayItemUserMessage, text, images)
-	item.Command = &zotigosession.DisplayCommand{
-		Type:   sessionCommandMessage,
-		Text:   text,
-		Images: displayCommandImages(images),
-		Skills: append([]string(nil), selectedSkills...),
+	if commandID == "" {
+		commandID = "item_" + uuid.NewString()
 	}
-	condition := requireIdleSession
-	if allowStoppingTurn {
-		condition = func(items []zotigosession.DisplayItem) error {
-			if hasPendingMessageCommand(items) {
-				return errSessionBusy
-			}
-			return nil
+	commandImages := make([]commandImageData, 0, len(images))
+	for _, image := range images {
+		commandImages = append(commandImages, commandImageData{
+			MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height,
+			DataBase64: base64.StdEncoding.EncodeToString(image.Data), BlobPath: image.BlobPath,
+		})
+	}
+	command := commandResponse{ID: commandID, CreatedAt: time.Now().UTC()}
+	if steeringOnly {
+		command.Type = sessionCommandSteering
+		command.Steering = &steeringCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
+	} else {
+		command.Type = sessionCommandMessage
+		command.Message = &messageCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
+	}
+	return command, images, refs, nil
+}
+
+func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool) (commandResponse, error) {
+	unlock := h.sessionOps.lock(id)
+	defer unlock()
+	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
+		return commandResponse{}, fmt.Errorf("check session availability: %w", err)
+	} else if unavailable != "" {
+		return commandResponse{}, fmt.Errorf("%w: %s", errSessionUnavailable, unavailable)
+	}
+	session, ok := h.registry.Get(id)
+	if !ok {
+		return commandResponse{}, errSessionNotFound
+	}
+	if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
+		return commandResponse{}, errInvalidSessionTransition
+	}
+	command, storedImages, refs, err := h.prepareSessionInputCommand(ctx, id, commandID, text, images, selectedSkills, steeringOnly)
+	if err != nil {
+		return commandResponse{}, err
+	}
+	accepted, err := h.workers.SubmitInput(ctx, id, workerInputRequest{
+		Command: command, SteeringOnly: steeringOnly, ExpectedTurnID: expectedTurnID,
+	})
+	if err != nil {
+		var inputErr *workerInputError
+		if errors.As(err, &inputErr) {
+			_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
+			cleanupMessageImageBlobs(storedImages)
+		}
+		return commandResponse{}, err
+	}
+	if !sameCommandImagePaths(command, accepted) {
+		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
+		cleanupMessageImageBlobs(storedImages)
+	}
+	return accepted, nil
+}
+
+func equalStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
 		}
 	}
-	item, err = h.items.AppendItemIf(ctx, id, item, condition)
-	if err != nil {
-		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
-		cleanupMessageImageBlobs(images)
-		return zotigosession.DisplayItem{}, err
-	}
-	return item, nil
+	return true
 }
 
 func (h *handler) indexLegacyMessageImageRef(ctx context.Context, store imageRefStore, sessionID string, name string, blobPath string) (zotigosession.ImageRef, bool, error) {
@@ -582,20 +585,6 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 
-	session, ok := h.registry.Get(id)
-	if !ok {
-		h.writeSessionNotLiveOrMissing(w, r.Context(), id, "steering requires a live session")
-		return
-	}
-	if session.State != SessionStateRunning {
-		if session.State == SessionStatePausing {
-			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
-			return
-		}
-		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires a running session")
-		return
-	}
-
 	var req steeringRequest
 	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 		if errors.Is(err, errRequestBodyTooLarge) {
@@ -615,92 +604,51 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		writeAPIError(w, http.StatusBadRequest, "steering requires text or images")
 		return
 	}
-	items, _, err := h.items.LoadItems(r.Context(), id)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
+	expectedTurnID := strings.TrimSpace(req.ExpectedTurnID)
+	legacyTurnID := strings.TrimSpace(req.TurnID)
+	if expectedTurnID != "" && legacyTurnID != "" && expectedTurnID != legacyTurnID {
+		writeAPIErrorCode(w, http.StatusBadRequest, "invalid_turn_precondition", "turn_id and expected_turn_id must match")
 		return
 	}
-	turnID := lastOpenTurnID(items)
-	if turnID == "" {
+	if expectedTurnID == "" {
+		expectedTurnID = legacyTurnID
+	}
+	if _, live := h.registry.Get(id); !live {
+		_, stored, err := h.storedSession(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
+			return
+		}
+		if !stored {
+			writeAPIError(w, http.StatusNotFound, "session not found")
+			return
+		}
 		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		return
 	}
-	if expected := strings.TrimSpace(req.TurnID); expected != "" && expected != turnID {
-		writeAPIError(w, http.StatusConflict, "steering turn_id does not match active turn")
+	if !h.workers.Has(id) {
+		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		return
 	}
-	if hasPendingApprovalForTurn(items, turnID) {
-		writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
-		return
-	}
-	if !h.ensureWorkerOnline(r.Context(), id) {
-		writeAPIError(w, http.StatusServiceUnavailable, "steering requires an online worker")
-		return
-	}
-	items, _, err = h.items.LoadItems(r.Context(), id)
+	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, nil, expectedTurnID, true)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
-		return
-	}
-	if lastOpenTurnID(items) != turnID {
-		writeAPIError(w, http.StatusConflict, "steering requires an active turn")
-		return
-	}
-	if hasPendingApprovalForTurn(items, turnID) {
-		writeAPIError(w, http.StatusConflict, "steering rejected while approval is pending")
-		return
-	}
-
-	command, storedImages, refs, err := h.prepareSteeringCommand(r.Context(), id, turnID, text, images)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("prepare steering command: %v", err))
-		return
-	}
-	if !h.workers.Send(id, command) {
-		_ = h.deleteMessageImageRefs(r.Context(), id, imageRefNames(refs))
-		cleanupMessageImageBlobs(storedImages)
-		writeAPIError(w, http.StatusServiceUnavailable, "steering requires an online worker")
+		switch {
+		case errors.Is(err, errNoActiveTurn):
+			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
+		case errors.Is(err, errTurnMismatch):
+			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "expected_turn_id does not match active turn")
+		case errors.Is(err, errCommandIDConflict):
+			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
+		case errors.Is(err, errSessionNotFound):
+			writeAPIError(w, http.StatusNotFound, "session not found")
+		case errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
+			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append steering command: %v", err))
+		}
 		return
 	}
 	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
-}
-
-func (h *handler) prepareSteeringCommand(ctx context.Context, id string, turnID string, text string, images []messageImage) (commandResponse, []messageImage, []zotigosession.ImageRef, error) {
-	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
-	if err != nil {
-		return commandResponse{}, nil, nil, err
-	}
-	refs, err := messageImageRefs(id, images)
-	if err != nil {
-		cleanupMessageImageBlobs(images)
-		return commandResponse{}, nil, nil, err
-	}
-	if err := h.putMessageImageRefs(ctx, refs); err != nil {
-		cleanupMessageImageBlobs(images)
-		return commandResponse{}, nil, nil, err
-	}
-	commandImages := make([]commandImageData, 0, len(images))
-	for _, image := range images {
-		commandImages = append(commandImages, commandImageData{
-			MimeType:   image.MimeType,
-			SizeBytes:  image.SizeBytes,
-			Width:      image.Width,
-			Height:     image.Height,
-			DataBase64: base64.StdEncoding.EncodeToString(image.Data),
-			BlobPath:   image.BlobPath,
-		})
-	}
-	command := commandResponse{
-		ID:        "item_" + uuid.NewString(),
-		Type:      sessionCommandSteering,
-		CreatedAt: time.Now().UTC(),
-		Steering: &steeringCommandPayload{
-			Text:   text,
-			Images: commandImages,
-			TurnID: turnID,
-		},
-	}
-	return command, images, refs, nil
 }
 
 func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx context.Context, id string, message string) {
@@ -898,6 +846,19 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 				}
 				resp.Commands = append(resp.Commands, command)
 				appended = true
+			case sessionCommandSteering:
+				if item.Type != zotigosession.DisplayItemSessionCommand {
+					break
+				}
+				command, err := steeringCommandFromItem(item, rootDir)
+				if err != nil {
+					if errors.Is(err, errCommandImageUnavailable) {
+						continue
+					}
+					return commandsResponse{}, err
+				}
+				resp.Commands = append(resp.Commands, command)
+				appended = true
 			case sessionCommandPause:
 				resp.Commands = append(resp.Commands, pauseCommandFromItem(item))
 				appended = true
@@ -1061,6 +1022,34 @@ func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (com
 			return commandResponse{}, err
 		}
 		command.Message.Images = images
+	}
+	return command, nil
+}
+
+func sessionInputCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
+	if item.Command != nil && item.Command.Type == sessionCommandSteering {
+		return steeringCommandFromItem(item, rootDir)
+	}
+	return messageCommandFromItem(item, rootDir)
+}
+
+func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
+	command := commandResponse{
+		ID:        item.ID,
+		Sequence:  item.Sequence,
+		Type:      sessionCommandSteering,
+		CreatedAt: item.CreatedAt,
+		Steering:  &steeringCommandPayload{},
+	}
+	if item.Command != nil {
+		command.Steering.Text = item.Command.Text
+		command.Steering.TurnID = item.Command.TurnID
+		command.Steering.Skills = append([]string(nil), item.Command.Skills...)
+		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		command.Steering.Images = images
 	}
 	return command, nil
 }

@@ -35,6 +35,10 @@ type batchDisplayItemSource interface {
 	AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
 }
 
+type atomicDisplayItemSource interface {
+	AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error)
+}
+
 type storedDisplayItemSource struct {
 	store zotigosession.Store
 }
@@ -71,6 +75,18 @@ func (s eventingDisplayItemSource) AppendItemIf(ctx context.Context, sessionID s
 		s.events.Wake(sessionID)
 	}
 	return stored, err
+}
+
+func (s eventingDisplayItemSource) AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
+	source, ok := s.source.(atomicDisplayItemSource)
+	if !ok {
+		return zotigosession.DisplayItem{}, false, errors.New("display item source does not support atomic append")
+	}
+	stored, appended, err := source.AppendItemAtomically(ctx, sessionID, build)
+	if err == nil && appended {
+		s.events.Wake(sessionID)
+	}
+	return stored, appended, err
 }
 
 func (s eventingDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
@@ -140,6 +156,20 @@ func (s storedDisplayItemSource) AppendItemIf(ctx context.Context, sessionID str
 		}
 	}
 	return s.store.AppendDisplayItem(ctx, sessionID, item)
+}
+
+func (s storedDisplayItemSource) AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
+	if err := s.ensureSession(ctx, sessionID); err != nil {
+		return zotigosession.DisplayItem{}, false, err
+	}
+	type atomicStore interface {
+		AppendDisplayItemAtomically(context.Context, string, func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error)
+	}
+	store, ok := s.store.(atomicStore)
+	if !ok {
+		return zotigosession.DisplayItem{}, false, errors.New("session store does not support atomic display append")
+	}
+	return store.AppendDisplayItemAtomically(ctx, sessionID, build)
 }
 
 func (s storedDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {

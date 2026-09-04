@@ -88,6 +88,13 @@ func (l *workerDisplayLog) DiscardSteering(commandID string) {
 	delete(l.steering, commandID)
 }
 
+func (l *workerDisplayLog) HasQueuedSteering(commandID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.steering[commandID]
+	return ok
+}
+
 func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemProfileChanged,

@@ -139,7 +139,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	stopKeepalive = clientWriter.Close
 	displayBarrier := newWorkerDisplayBarrierClient(clientWriter)
-	commandCh, approvalCh, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	commandCh, inputCh, approvalCh, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
@@ -220,6 +220,30 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = err
 				return err
 			}
+		case request, ok := <-inputCh:
+			if !ok {
+				runErr = <-readErrCh
+				return runErr
+			}
+			result := runtime.AcceptInput(ctx, request)
+			if !clientWriter.SendInputResult(ctx, result) {
+				runErr = fmt.Errorf("send input result: worker websocket closed")
+				return runErr
+			}
+			if result.Command != nil {
+				recovered, recoverErr := recoverWorkerCommandCursor(ctx, store, cfg.SessionID)
+				if recoverErr != nil {
+					runErr = recoverErr
+					return recoverErr
+				}
+				if recovered.Sequence > cursor.Sequence {
+					cursor = recovered
+					if err := saveWorkerCommandCursor(cfg.SessionID, cursor); err != nil {
+						runErr = err
+						return err
+					}
+				}
+			}
 		case decision, ok := <-approvalCh:
 			if !ok {
 				runErr = <-readErrCh
@@ -259,12 +283,14 @@ type workerRuntimeConfig struct {
 	HookDispatcher         *hooks.Dispatcher
 }
 
-func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerApprovalDecision, <-chan error) {
+func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan error) {
 	commandCh := make(chan commandResponse, workerCommandBufferSize)
+	inputCh := make(chan workerInputRequest, workerCommandBufferSize)
 	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
+		defer close(inputCh)
 		defer close(approvalCh)
 		for {
 			_, data, err := conn.ReadMessage()
@@ -300,6 +326,17 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 					_ = conn.Close()
 					return
 				}
+			case workerMessageInputRequest:
+				if msg.InputRequest == nil {
+					continue
+				}
+				select {
+				case inputCh <- *msg.InputRequest:
+				default:
+					errCh <- fmt.Errorf("worker input buffer full")
+					_ = conn.Close()
+					return
+				}
 			case workerMessageDisplayBarrierOK:
 				if msg.DisplayBarrier == nil || msg.DisplayBarrier.ID == "" {
 					continue
@@ -310,7 +347,7 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 			}
 		}
 	}()
-	return commandCh, approvalCh, errCh
+	return commandCh, inputCh, approvalCh, errCh
 }
 
 type workerRuntime struct {
@@ -655,6 +692,110 @@ func (r *workerRuntime) Close() {
 func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
 	_, err := r.handleCommand(ctx, command)
 	return err
+}
+
+func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequest) workerInputResult {
+	result := workerInputResult{RequestID: request.RequestID}
+	command, err := r.acceptInput(ctx, request)
+	if err != nil {
+		result.ErrorCode, result.Error = workerInputErrorDetails(err)
+		return result
+	}
+	result.Command = &command
+	return result
+}
+
+func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
+	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
+		return commandResponse{}, err
+	} else if found {
+		if request.SteeringOnly && existing.Type != sessionCommandSteering {
+			return commandResponse{}, errCommandIDConflict
+		}
+		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
+			return commandResponse{}, errCommandIDConflict
+		}
+		return existing, nil
+	}
+
+	turnID := r.display.CurrentTurnID()
+	if request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID {
+		return commandResponse{}, errTurnMismatch
+	}
+	if request.SteeringOnly && turnID == "" {
+		return commandResponse{}, errNoActiveTurn
+	}
+
+	message, err := inputMessageFromRequest(request)
+	if err != nil {
+		return commandResponse{}, err
+	}
+	if turnID != "" {
+		ready, err := r.waitForTurnAdmission(ctx, turnID)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		if !ready {
+			if request.SteeringOnly {
+				return commandResponse{}, errNoActiveTurn
+			}
+			turnID = ""
+		}
+	}
+	if turnID != "" {
+		steering := steeringCommandForRequest(request, turnID)
+		r.display.QueueSteering(steering)
+		err := r.agent.QueueTurnUserMessageWithAdmission(message, func() error {
+			stored, appendErr := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, steering)
+			if appendErr == nil {
+				steering = stored
+			}
+			return appendErr
+		})
+		if err == nil {
+			r.noteTurnCommandSequence(steering.Sequence)
+			if err := r.afterTurnUserInputQueued(ctx, turnID, steering.Steering.Text); err != nil {
+				return commandResponse{}, err
+			}
+			return steering, nil
+		}
+		r.display.DiscardSteering(steering.ID)
+		if request.SteeringOnly || !isStaleTurnUserInputError(err) {
+			if isStaleTurnUserInputError(err) {
+				return commandResponse{}, errNoActiveTurn
+			}
+			return commandResponse{}, err
+		}
+	}
+
+	messageCommand := messageCommandForRequest(request)
+	stored, err := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, messageCommand)
+	if err != nil {
+		return commandResponse{}, err
+	}
+	if err := r.startMessageTurn(ctx, stored.ID, stored.Sequence, stored.Message); err != nil {
+		return commandResponse{}, err
+	}
+	return stored, nil
+}
+
+func (r *workerRuntime) waitForTurnAdmission(ctx context.Context, turnID string) (bool, error) {
+	r.mu.Lock()
+	active := r.turnActive
+	ready := r.turnReady
+	done := r.turnDone
+	r.mu.Unlock()
+	if !active || ready == nil || done == nil {
+		return false, nil
+	}
+	select {
+	case <-ready:
+		return r.display.CurrentTurnID() == turnID, nil
+	case <-done:
+		return false, nil
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
 }
 
 func (r *workerRuntime) resolveApproval(ctx context.Context, decision workerApprovalDecision) (workerApprovalResult, *workerApprovalResolution) {
@@ -1046,6 +1187,9 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandR
 	if len(msg.Content) == 0 {
 		return nil
 	}
+	if r.display.HasQueuedSteering(command.ID) {
+		return nil
+	}
 
 	r.mu.Lock()
 	active := r.turnActive
@@ -1053,40 +1197,44 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandR
 	done := r.turnDone
 	r.mu.Unlock()
 	if !active || ready == nil || done == nil {
-		return nil
+		return staleSteeringResult(command)
 	}
 
 	currentTurnID := r.display.CurrentTurnID()
 	if payload.TurnID != "" && currentTurnID != "" && payload.TurnID != currentTurnID {
-		return nil
+		return staleSteeringResult(command)
 	}
 	select {
 	case <-ready:
 	case <-done:
-		return nil
+		return staleSteeringResult(command)
 	case <-ctx.Done():
 		return ctx.Err()
 	}
 	currentTurnID = r.display.CurrentTurnID()
 	if currentTurnID == "" || (payload.TurnID != "" && payload.TurnID != currentTurnID) {
-		return nil
+		return staleSteeringResult(command)
 	}
 	msg.ID = command.ID
 	r.display.QueueSteering(command)
 	if err := r.agent.QueueTurnUserMessage(msg); err != nil {
 		r.display.DiscardSteering(command.ID)
 		if isStaleTurnUserInputError(err) {
-			return nil
+			return staleSteeringResult(command)
 		}
 		return err
 	}
-	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, currentTurnID, payload.Text)
+	return r.afterTurnUserInputQueued(ctx, currentTurnID, payload.Text)
+}
+
+func (r *workerRuntime) afterTurnUserInputQueued(ctx context.Context, turnID string, text string) error {
+	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, text)
 	snapshot := r.agent.Snapshot()
 	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
 		if err := r.beginRuntimeWAL(ctx); err != nil {
 			return err
 		}
-		if err := r.transport.interruptApprovalForSteering(ctx, currentTurnID); err != nil {
+		if err := r.transport.interruptApprovalForSteering(ctx, turnID); err != nil {
 			_ = r.saveSnapshot(context.Background(), snapshot)
 			return err
 		}
@@ -1094,8 +1242,12 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandR
 	return nil
 }
 
+func staleSteeringResult(commandResponse) error {
+	return nil
+}
+
 func isStaleTurnUserInputError(err error) bool {
-	return err != nil && strings.Contains(err.Error(), "agent is not running")
+	return errors.Is(err, agent.ErrNotRunning)
 }
 
 func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *messageCommandPayload) error {
@@ -1109,7 +1261,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		if !r.turnActive {
 			break
 		}
-		if !r.turnStopping || r.turnDone == nil {
+		if r.agent == nil || r.agent.Snapshot().State != agent.StateIdle || r.turnDone == nil {
 			r.mu.Unlock()
 			return errActiveTurn
 		}
@@ -1636,11 +1788,15 @@ func validateWorkerCommandCursor(ctx context.Context, store zotigosession.Store,
 func latestCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	var latest uint64
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type != "" && item.Command.Type != sessionCommandSteering {
+		if isDurableCommandItem(item) {
 			latest = item.Sequence
 		}
 	}
 	return latest
+}
+
+func isDurableCommandItem(item zotigosession.DisplayItem) bool {
+	return item.Command != nil && item.Command.Type != "" && (item.Command.Type != sessionCommandSteering || item.Type == zotigosession.DisplayItemSessionCommand)
 }
 
 func recoverWorkerCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string) (workerCommandCursor, error) {
@@ -1659,11 +1815,12 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 	safe := make(map[uint64]bool)
 	pendingMessages := make([]uint64, 0)
 	pendingByTurn := make(map[string][]uint64)
+	pendingSteering := make(map[string]uint64)
 	pendingProfiles := make(map[string]uint64)
 	pendingApprovalPolicies := make(map[string]uint64)
 
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type != "" && item.Command.Type != sessionCommandSteering {
+		if isDurableCommandItem(item) {
 			commandSeqs = append(commandSeqs, item.Sequence)
 			switch item.Command.Type {
 			case sessionCommandMessage:
@@ -1672,6 +1829,8 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 				if item.Command.TurnID != "" {
 					pendingByTurn[item.Command.TurnID] = append(pendingByTurn[item.Command.TurnID], item.Sequence)
 				}
+			case sessionCommandSteering:
+				pendingSteering[item.ID] = item.Sequence
 			case sessionCommandProfile:
 				pendingProfiles[item.ID] = item.Sequence
 			case sessionCommandApprovalPolicy:
@@ -1681,6 +1840,11 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 			}
 		}
 		switch item.Type {
+		case zotigosession.DisplayItemSteeringMessage:
+			if sequence, ok := pendingSteering[item.ID]; ok {
+				safe[sequence] = true
+				delete(pendingSteering, item.ID)
+			}
 		case zotigosession.DisplayItemTurnStarted:
 			if len(pendingMessages) > 0 {
 				safe[pendingMessages[0]] = true
@@ -1977,6 +2141,18 @@ func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier wor
 
 func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result workerApprovalResult) bool {
 	msg := workerMessage{Type: workerMessageApprovalResult, ApprovalResult: &result}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-w.done:
+		return false
+	case w.sendCh <- msg:
+		return true
+	}
+}
+
+func (w *workerClientWriter) SendInputResult(ctx context.Context, result workerInputResult) bool {
+	msg := workerMessage{Type: workerMessageInputResult, InputResult: &result}
 	select {
 	case <-ctx.Done():
 		return false

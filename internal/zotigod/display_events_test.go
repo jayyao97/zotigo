@@ -278,7 +278,7 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 		done:   make(chan struct{}),
 	}
 	barrierClient := newWorkerDisplayBarrierClient(writer)
-	_, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
+	_, _, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
 	writer.SendDelta(displayDeltaEvent{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
 	writer.SendDisplayWake()
 	barrierResult := make(chan error, 1)
