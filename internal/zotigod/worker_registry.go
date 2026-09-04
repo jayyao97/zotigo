@@ -183,6 +183,9 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 			worker.idleTimer.Stop()
 			worker.idleTimer = nil
 		}
+		worker.idleCommandSequence = 0
+		worker.idleTimeout = 0
+		worker.idlePending = false
 		if command.Sequence > worker.lastCommandSequence {
 			worker.lastCommandSequence = command.Sequence
 		}
@@ -204,8 +207,19 @@ func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle
 	if worker.idleTimer != nil {
 		worker.idleTimer.Stop()
 	}
+	worker.idleCommandSequence = idle.CommandSequence
+	worker.idleTimeout = timeout
+	worker.idlePending = true
+	if len(worker.inputRequests) > 0 {
+		worker.idleTimer = nil
+		r.mu.Unlock()
+		return true
+	}
 	if timeout <= 0 {
 		worker.idleTimer = nil
+		worker.idleCommandSequence = 0
+		worker.idleTimeout = 0
+		worker.idlePending = false
 		worker.closing = true
 		r.mu.Unlock()
 		worker.close()
@@ -222,9 +236,12 @@ func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle
 
 func (r *workerRegistry) closeIdleWorker(worker *workerConnection, idleEpoch uint64, commandSequence uint64) {
 	r.mu.Lock()
-	active := r.workers[worker.sessionID] == worker && !worker.closing && worker.idleTimer != nil && worker.idleEpoch == idleEpoch && worker.lastCommandSequence <= commandSequence
+	active := r.workers[worker.sessionID] == worker && !worker.closing && worker.idleTimer != nil && worker.idleEpoch == idleEpoch && len(worker.inputRequests) == 0 && worker.lastCommandSequence <= commandSequence
 	if active {
 		worker.idleTimer = nil
+		worker.idleCommandSequence = 0
+		worker.idleTimeout = 0
+		worker.idlePending = false
 		worker.closing = true
 	}
 	r.mu.Unlock()
@@ -370,39 +387,97 @@ type workerConnection struct {
 	inputWaiters        map[string]chan workerInputResult
 	idleTimer           *time.Timer
 	idleEpoch           uint64
+	idleCommandSequence uint64
+	idleTimeout         time.Duration
+	idlePending         bool
+	inputRequests       map[string]struct{}
 	lastCommandSequence uint64
 	closing             bool
 }
 
 func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID:    sessionID,
-		generation:   generation,
-		conn:         conn,
-		registry:     registry,
-		sendCh:       make(chan workerMessage, 32),
-		doneCh:       make(chan struct{}),
-		waiters:      make(map[string]chan workerApprovalResult),
-		inputWaiters: make(map[string]chan workerInputResult),
+		sessionID:     sessionID,
+		generation:    generation,
+		conn:          conn,
+		registry:      registry,
+		sendCh:        make(chan workerMessage, 32),
+		doneCh:        make(chan struct{}),
+		waiters:       make(map[string]chan workerApprovalResult),
+		inputWaiters:  make(map[string]chan workerInputResult),
+		inputRequests: make(map[string]struct{}),
 	}
 }
 
 func (r *workerRegistry) SubmitInput(ctx context.Context, sessionID string, request workerInputRequest) (commandResponse, error) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
+	available := worker != nil && !worker.closing
 	r.mu.Unlock()
-	if worker == nil {
+	if !available {
 		return commandResponse{}, fmt.Errorf("input requires an online worker")
 	}
-	command, err := worker.submitInput(ctx, request)
-	if err == nil {
-		r.mu.Lock()
-		if r.workers[sessionID] == worker && command.Sequence > worker.lastCommandSequence {
-			worker.lastCommandSequence = command.Sequence
-		}
-		r.mu.Unlock()
+	return worker.submitInput(ctx, request)
+}
+
+func (r *workerRegistry) beginInput(worker *workerConnection, requestID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.workers[worker.sessionID] != worker || worker.closing {
+		return false
 	}
-	return command, err
+	if worker.idleTimer != nil {
+		worker.idleTimer.Stop()
+		worker.idleTimer = nil
+	}
+	if worker.inputRequests == nil {
+		worker.inputRequests = make(map[string]struct{})
+	}
+	worker.inputRequests[requestID] = struct{}{}
+	return true
+}
+
+func (r *workerRegistry) finishInput(worker *workerConnection, requestID string, command *commandResponse) {
+	r.mu.Lock()
+	if r.workers[worker.sessionID] != worker {
+		r.mu.Unlock()
+		return
+	}
+	if _, ok := worker.inputRequests[requestID]; !ok {
+		r.mu.Unlock()
+		return
+	}
+	delete(worker.inputRequests, requestID)
+	if command != nil && command.Sequence > worker.lastCommandSequence {
+		worker.lastCommandSequence = command.Sequence
+	}
+	if len(worker.inputRequests) > 0 || !worker.idlePending {
+		r.mu.Unlock()
+		return
+	}
+	if worker.lastCommandSequence > worker.idleCommandSequence {
+		worker.idleCommandSequence = 0
+		worker.idleTimeout = 0
+		worker.idlePending = false
+		r.mu.Unlock()
+		return
+	}
+	if worker.idleTimeout <= 0 {
+		worker.idleCommandSequence = 0
+		worker.idleTimeout = 0
+		worker.idlePending = false
+		worker.closing = true
+		r.mu.Unlock()
+		worker.close()
+		return
+	}
+	worker.idleEpoch++
+	idleEpoch := worker.idleEpoch
+	commandSequence := worker.idleCommandSequence
+	worker.idleTimer = time.AfterFunc(worker.idleTimeout, func() {
+		r.closeIdleWorker(worker, idleEpoch, commandSequence)
+	})
+	r.mu.Unlock()
 }
 
 func (c *workerConnection) send(command commandResponse) bool {
@@ -483,6 +558,15 @@ func (c *workerConnection) resolveApproval(result workerApprovalResult) {
 
 func (c *workerConnection) submitInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
 	request.RequestID = newZotigodID("input_submit")
+	if !c.registry.beginInput(c, request.RequestID) {
+		return commandResponse{}, fmt.Errorf("worker disconnected")
+	}
+	queued := false
+	defer func() {
+		if !queued {
+			c.registry.finishInput(c, request.RequestID, nil)
+		}
+	}()
 	waiter := make(chan workerInputResult, 1)
 	c.waitersMu.Lock()
 	c.inputWaiters[request.RequestID] = waiter
@@ -500,6 +584,7 @@ func (c *workerConnection) submitInput(ctx context.Context, request workerInputR
 	case <-c.doneCh:
 		return commandResponse{}, fmt.Errorf("worker disconnected")
 	case c.sendCh <- msg:
+		queued = true
 	}
 
 	select {
@@ -546,6 +631,7 @@ func (e *workerInputError) Is(target error) bool {
 }
 
 func (c *workerConnection) resolveInput(result workerInputResult) {
+	c.registry.finishInput(c, result.RequestID, result.Command)
 	c.waitersMu.Lock()
 	waiter := c.inputWaiters[result.RequestID]
 	c.waitersMu.Unlock()
