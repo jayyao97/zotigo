@@ -822,6 +822,11 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 				ID: completed.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeReasoning), Text: text}},
 			})
+		case "contextCompaction":
+			return r.append(zotigosession.DisplayItem{
+				ID: completed.Item.ID, Type: zotigosession.DisplayItemContextCompacted,
+				Turn: &zotigosession.DisplayTurn{ID: completed.TurnID},
+			})
 		case "imageGeneration":
 			if !codexImageGenerationCompleted(completed.Item) {
 				return nil

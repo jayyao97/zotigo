@@ -609,7 +609,8 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		{Method: "item/started", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","startedAtMs":2,"item":{"type":"commandExecution","id":"tool-1","command":"sed -n '1,20p' AGENTS.md","cwd":"/tmp/workspace","status":"inProgress","commandActions":[{"type":"read","command":"sed -n '1,20p' AGENTS.md","name":"AGENTS.md","path":"/tmp/workspace/AGENTS.md"}]}}`)},
 		{Method: "item/commandExecution/outputDelta", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","itemId":"tool-1","delta":"# Instructions\n"}`)},
 		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":3,"item":{"type":"commandExecution","id":"tool-1","command":"sed -n '1,20p' AGENTS.md","cwd":"/tmp/workspace","status":"completed","commandActions":[{"type":"read","command":"sed -n '1,20p' AGENTS.md","name":"AGENTS.md","path":"/tmp/workspace/AGENTS.md"}],"aggregatedOutput":"# Instructions\n","exitCode":0,"durationMs":12}}`)},
-		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":4,"item":{"type":"reasoning","id":"reasoning-1","summary":["The instructions apply."],"content":[]}}`)},
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":4,"item":{"type":"contextCompaction","id":"compaction-1"}}`)},
+		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":5,"item":{"type":"reasoning","id":"reasoning-1","summary":["The instructions apply."],"content":[]}}`)},
 		{Method: "thread/tokenUsage/updated", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":30,"inputTokens":24,"cachedInputTokens":10,"cacheWriteInputTokens":4,"outputTokens":6},"last":{"totalTokens":30,"inputTokens":24,"cachedInputTokens":10,"cacheWriteInputTokens":4,"outputTokens":6},"modelContextWindow":128000}}`)},
 		{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-1","status":"completed","durationMs":20}}`)},
 	}
@@ -622,7 +623,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 6 {
+	if len(items) != 7 {
 		t.Fatalf("display items = %#v", items)
 	}
 	if items[0].ID != "message-1" || items[0].Content[0].Text != "Checking files." {
@@ -636,11 +637,14 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if result == nil || result.ToolCallID != "tool-1" || result.ToolName != "read_file" || result.Text != "# Instructions\n" || result.IsError {
 		t.Fatalf("tool result = %#v", items[2])
 	}
-	if items[3].Content[0].Type != string(protocol.ContentTypeReasoning) || items[3].Content[0].Text != "The instructions apply." {
-		t.Fatalf("reasoning item = %#v", items[3])
+	if items[3].ID != "compaction-1" || items[3].Type != zotigosession.DisplayItemContextCompacted || items[3].Turn == nil || items[3].Turn.ID != "turn-1" {
+		t.Fatalf("compaction item = %#v", items[3])
 	}
-	if items[5].Type != zotigosession.DisplayItemTurnCompleted {
-		t.Fatalf("turn item = %#v", items[5])
+	if items[4].Content[0].Type != string(protocol.ContentTypeReasoning) || items[4].Content[0].Text != "The instructions apply." {
+		t.Fatalf("reasoning item = %#v", items[4])
+	}
+	if items[6].Type != zotigosession.DisplayItemTurnCompleted {
+		t.Fatalf("turn item = %#v", items[6])
 	}
 	if len(hookDispatcher.events) != 2 {
 		t.Fatalf("hook events = %#v", hookDispatcher.events)
