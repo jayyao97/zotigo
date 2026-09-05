@@ -103,6 +103,15 @@ API and may change without compatibility guarantees.
 
 ### Workspace Sources
 
+`DELETE /projects/{id}/sources/{source_id}` deregisters a Source from the
+Project's Source list and future Workspace Source selections. It does not
+remove files, Git branches, worktrees, existing Workspace bindings, or session
+history. Repeating the request for a deregistered Source succeeds. Existing
+bindings retain their Source metadata and support normal Workspace lifecycle
+operations. Adding the same path again reactivates the original Source ID when
+its repository identity and binding defaults still match; conflicting identity
+changes are rejected.
+
 `GET /workspaces/{id}/sources` returns the Sources currently bound to a
 Workspace together with their binding mode, target path, status, and Git
 checkout configuration when applicable.
@@ -125,13 +134,36 @@ when the Workspace is created. Later display-name changes do not rename it.
 Folder Sources require an explicit `mode` of
 `direct`, `reference`, or `copy`.
 
-The Source must already belong to the Workspace's Project. A Source registered
+The Source must be currently registered in the Workspace's Project. A Source registered
 under another Project is rejected with `400`; register that path as a new Source
 under the target Project before binding it. Duplicate bindings and Workspaces
 that are not `ready` return `409`. Failures before Zotigo creates any owned Git
 ref or folder target roll back the planned binding, so the request can be
 corrected and submitted again. Failures after owned state exists remain visible
 on the binding and can be retried through `POST /workspaces/{id}/retry`.
+
+### Workspace deletion
+
+Workspace deletion removes managed Workspace files and linked Git worktree
+registrations, but preserves original Source directories, runtime session
+history, and all local and remote Git branches. The current checkout may be on
+a different branch or detached HEAD; no branch switch or branch deletion is
+performed. Project deletion uses the same Workspace deletion behavior.
+
+Both delete-preview responses advertise `preserves_local_branches: true` and
+return an empty `local_branches` deletion-target list. Clients promising branch
+preservation must reject a daemon whose preview omits this flag or returns
+false. Dirty worktree files can still be discarded after explicit deletion
+confirmation. Owner markers, managed paths, repository identity, and active
+session protection remain enforced. An interrupted deletion can be retried;
+already removed worktrees do not require their branches to be removed.
+
+Source deregistration migrates the catalog to schema version 7, with existing
+Sources initially registered. Upgrade zotigod and CLI catalog readers together;
+older binaries reject the newer schema. Before upgrading, stop catalog writers
+and take a consistent backup of the catalog. Database rollback requires that
+backup or an explicit reverse migration; restoring the catalog alone cannot
+restore Workspace files deleted after the backup.
 
 Current internal worker endpoints include:
 

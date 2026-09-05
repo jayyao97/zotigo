@@ -63,7 +63,7 @@ func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
 	}
 }
 
-func TestDeleteWorkspaceRemovesOwnedRootAndLocalBranchOnly(t *testing.T) {
+func TestDeleteWorkspaceRemovesOwnedRootAndPreservesBranches(t *testing.T) {
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -92,8 +92,8 @@ func TestDeleteWorkspaceRemovesOwnedRootAndLocalBranchOnly(t *testing.T) {
 	if _, err := store.GetSource(ctx, workspace.ProjectID, source.ID); err != nil {
 		t.Fatalf("source was deleted: %v", err)
 	}
-	if _, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", "refs/heads/zotigo/test-workspace"); err == nil {
-		t.Fatal("workspace branch still exists")
+	if _, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", "refs/heads/zotigo/test-workspace"); err != nil {
+		t.Fatal("workspace branch was removed")
 	}
 	if _, err := os.Stat(source.CanonicalPath); err != nil {
 		t.Fatalf("source path was deleted: %v", err)
@@ -161,7 +161,10 @@ func TestArchivedWorkspaceRejectsRecreatedBranchGeneration(t *testing.T) {
 			} else {
 				err = store.DeleteWorkspace(ctx, workspace.ID, workspace.Title)
 			}
-			if !errors.Is(err, ErrConflict) {
+			if operation == "delete" && err != nil {
+				t.Fatal(err)
+			}
+			if operation == "unarchive" && !errors.Is(err, ErrConflict) {
 				t.Fatalf("%s error = %v, want generation conflict", operation, err)
 			}
 			if head := strings.TrimSpace(runGitProvisionCommand(t, source.CanonicalPath, "rev-parse", branchRef)); head != newHead {

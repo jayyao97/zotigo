@@ -22,11 +22,11 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 	source, err := scanSource(db.QueryRowContext(ctx, `
 		SELECT id, project_id, kind, canonical_path, git_common_dir,
 		       git_object_format, folder_mode, source_key, created_at, updated_at
-		FROM sources WHERE id = ? AND project_id = ?
+		FROM sources WHERE id = ? AND project_id = ? AND registered = 1
 	`, selection.SourceID, workspace.ProjectID))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
-			return fmt.Errorf("%w: workspace source must belong to the project", ErrInvalid)
+			return fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
 		}
 		return err
 	}

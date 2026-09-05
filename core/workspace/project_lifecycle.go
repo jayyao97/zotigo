@@ -129,6 +129,7 @@ func (s *Store) PreviewProjectDelete(ctx context.Context, projectID string) (Pro
 		PreservesSourceDirectories: true,
 		PreservesSessions:          true,
 		PreservesRemoteRefs:        true,
+		PreservesLocalBranches:     true,
 	}
 	for _, workspace := range workspaces {
 		if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
@@ -165,10 +166,10 @@ func (s *Store) DeleteProject(ctx context.Context, projectID string, confirmatio
 	if project.Status != ProjectStatusActive && project.Status != ProjectStatusArchived && project.Status != ProjectStatusDeleting {
 		return fmt.Errorf("%w: project cannot be deleted from %s", ErrConflict, project.Status)
 	}
+	if _, err := s.PreviewProjectDelete(ctx, projectID); err != nil {
+		return err
+	}
 	if project.Status != ProjectStatusDeleting {
-		if _, err := s.PreviewProjectDelete(ctx, projectID); err != nil {
-			return err
-		}
 		if err := s.setProjectStatus(ctx, projectID, ProjectStatusDeleting, nil); err != nil {
 			return err
 		}

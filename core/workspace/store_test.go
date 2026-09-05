@@ -262,8 +262,14 @@ func TestSourceConstraintsAndReferences(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DeleteSource(ctx, project.ID, source.ID); !errors.Is(err, ErrSourceInUse) {
-		t.Fatalf("delete referenced source error = %v, want source in use", err)
+	if err := store.DeleteSource(ctx, project.ID, source.ID); err != nil {
+		t.Fatalf("deregister referenced source: %v", err)
+	}
+	if sources, err := store.ListSources(ctx, project.ID); err != nil || len(sources) != 0 {
+		t.Fatalf("registered sources = %+v, %v", sources, err)
+	}
+	if _, err := store.GetSource(ctx, project.ID, source.ID); err != nil {
+		t.Fatalf("bound source metadata missing: %v", err)
 	}
 }
 
