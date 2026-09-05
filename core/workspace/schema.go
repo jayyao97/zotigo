@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 6
+const schemaVersion = 7
 
 type Store struct {
 	db          *sql.DB
@@ -132,6 +132,7 @@ func (s *Store) migrate(ctx context.Context) error {
 			git_object_format TEXT,
 			folder_mode TEXT,
 			source_key TEXT NOT NULL,
+			registered INTEGER NOT NULL DEFAULT 1 CHECK(registered IN (0, 1)),
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL,
 			UNIQUE(project_id, canonical_path),
@@ -368,6 +369,20 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("backfill session activity timestamp: %w", err)
 		}
 		version = 6
+	}
+	if version == 6 {
+		var hasRegistered bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
+			SELECT 1 FROM pragma_table_info('sources') WHERE name = 'registered'
+		)`).Scan(&hasRegistered); err != nil {
+			return fmt.Errorf("inspect source registration schema: %w", err)
+		}
+		if !hasRegistered {
+			if _, err := tx.ExecContext(ctx, `ALTER TABLE sources ADD COLUMN registered INTEGER NOT NULL DEFAULT 1 CHECK(registered IN (0, 1))`); err != nil {
+				return fmt.Errorf("migrate source registration: %w", err)
+			}
+		}
+		version = 7
 	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)

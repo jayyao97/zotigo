@@ -175,25 +175,46 @@ func (s *Store) UnarchiveWorkspace(ctx context.Context, workspaceID string) (Wor
 }
 
 func (s *Store) PreviewDelete(ctx context.Context, workspaceID string) (DeleteImpact, error) {
-	workspace, err := s.GetWorkspace(ctx, workspaceID)
+	workspace, nonce, err := s.workspaceWithNonce(ctx, workspaceID)
 	if err != nil {
 		return DeleteImpact{}, err
 	}
-	archive, err := s.PreviewArchive(ctx, workspaceID)
+	checkouts, _, err := s.workspaceBindings(ctx, workspaceID)
 	if err != nil {
 		return DeleteImpact{}, err
 	}
-	return DeleteImpact{
-		WorkspaceID:         workspace.ID,
-		SessionIDs:          archive.SessionIDs,
-		WorkspaceRoot:       workspace.RootPath,
-		WorktreePaths:       archive.WorktreePaths,
-		DirtyWorktreePaths:  archive.DirtyWorktreePaths,
-		LocalBranches:       archive.RetainedBranches,
-		PreservesSources:    true,
-		PreservesSessions:   true,
-		PreservesRemoteRefs: true,
-	}, nil
+	if err := s.preflightDelete(ctx, workspace, nonce, checkouts); err != nil {
+		return DeleteImpact{}, err
+	}
+	sessionIDs, err := s.WorkspaceSessionIDs(ctx, workspaceID)
+	if err != nil {
+		return DeleteImpact{}, err
+	}
+	impact := DeleteImpact{
+		WorkspaceID:            workspace.ID,
+		SessionIDs:             sessionIDs,
+		WorkspaceRoot:          workspace.RootPath,
+		WorktreePaths:          []string{},
+		DirtyWorktreePaths:     []string{},
+		LocalBranches:          []string{},
+		PreservesSources:       true,
+		PreservesSessions:      true,
+		PreservesRemoteRefs:    true,
+		PreservesLocalBranches: true,
+	}
+	for _, checkout := range checkouts {
+		impact.WorktreePaths = append(impact.WorktreePaths, checkout.WorktreePath)
+		dirty, err := gitWorktreeDirty(ctx, checkout.WorktreePath)
+		if err != nil {
+			return DeleteImpact{}, err
+		}
+		if dirty {
+			impact.DirtyWorktreePaths = append(impact.DirtyWorktreePaths, checkout.WorktreePath)
+		}
+	}
+	sort.Strings(impact.WorktreePaths)
+	sort.Strings(impact.DirtyWorktreePaths)
+	return impact, nil
 }
 
 func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirmation string) error {
@@ -209,32 +230,12 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
 		return fmt.Errorf("%w: workspace cannot be deleted from %s", ErrConflict, workspace.Status)
 	}
-	recoveringDelete := workspace.Status == WorkspaceStatusDeleting
 	checkouts, _, err := s.workspaceBindings(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
-	if workspace.Status == WorkspaceStatusReady {
-		for index, checkout := range checkouts {
-			source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
-			if err != nil {
-				return err
-			}
-			if err := verifySourceIdentity(ctx, source); err != nil {
-				return err
-			}
-			if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
-				return err
-			}
-			head, err := checkoutBranchHead(ctx, source, checkout)
-			if err != nil {
-				return err
-			}
-			if err := s.setCheckoutOwnedHead(ctx, workspace.ID, checkout.SourceID, head); err != nil {
-				return err
-			}
-			checkouts[index].OwnedHead = head
-		}
+	if err := s.preflightDelete(ctx, workspace, nonce, checkouts); err != nil {
+		return err
 	}
 	if workspace.Status != WorkspaceStatusDeleting {
 		if err := s.setWorkspaceStatus(ctx, workspaceID, WorkspaceStatusDeleting, ""); err != nil {
@@ -250,26 +251,19 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 			return err
 		}
 		ownershipRef := checkoutOwnershipRef(workspace.ID, source.SourceKey)
-		if err := verifyCheckoutOwnership(ctx, source, checkout, ownershipRef); err != nil {
-			if !recoveringDelete {
-				return err
+		if err := verifyCheckoutRemoved(ctx, source, checkout); err == nil {
+			// Older interrupted deletes may already have removed the ownership ref.
+			if err := verifyCheckoutOwnership(ctx, source, checkout, ownershipRef); err != nil {
+				continue
 			}
-			if removedErr := verifyCheckoutRemoved(ctx, source, checkout); removedErr != nil {
-				return err
-			}
-			continue
-		}
-		if err := verifyCheckoutGeneration(ctx, source, checkout); err != nil {
+		} else if err := verifyCheckoutOwnership(ctx, source, checkout, ownershipRef); err != nil {
 			return err
 		}
 		if err := removeCheckout(ctx, source, checkout, true); err != nil {
 			return err
 		}
-		branchRef := "refs/heads/" + checkout.BranchName
-		commands := "delete " + branchRef + " " + checkout.OwnedHead + "\n" +
-			"delete " + ownershipRef + " " + checkout.BaseCommit + "\n"
-		if _, err := runGitMutationInput(ctx, source.CanonicalPath, commands, "update-ref", "--stdin"); err != nil {
-			return fmt.Errorf("delete workspace branch refs: %w", err)
+		if _, err := runGitMutation(ctx, source.CanonicalPath, "update-ref", "-d", ownershipRef, checkout.BaseCommit); err != nil {
+			return fmt.Errorf("delete workspace ownership ref: %w", err)
 		}
 	}
 	trash := filepath.Join(filepath.Dir(workspace.RootPath), ".trash-"+workspace.ID)
@@ -307,14 +301,103 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 	return s.finishDelete(ctx, workspaceID)
 }
 
+// Validate every resource before deleting the first worktree. Branch names and
+// heads are deliberately irrelevant: deletion never removes branch refs.
+func (s *Store) preflightDelete(ctx context.Context, workspace Workspace, nonce string, checkouts []Checkout) error {
+	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
+		return fmt.Errorf("%w: workspace cannot be deleted from %s", ErrConflict, workspace.Status)
+	}
+	rootExists := false
+	trash := filepath.Join(filepath.Dir(workspace.RootPath), ".trash-"+workspace.ID)
+	for _, path := range []string{workspace.RootPath, trash} {
+		if _, err := os.Lstat(path); os.IsNotExist(err) {
+			continue
+		} else if err != nil {
+			return err
+		}
+		if path == workspace.RootPath {
+			rootExists = true
+		} else if rootExists || workspace.Status != WorkspaceStatusDeleting {
+			return fmt.Errorf("%w: workspace trash target is occupied", ErrConflict)
+		}
+		if err := s.validateManagedWorkspacePath(ctx, workspace, path); err != nil {
+			return err
+		}
+		if err := validateOwnerMarker(path, workspace.ProjectID, workspace.ID, nonce); err != nil {
+			return err
+		}
+	}
+	if !rootExists && workspace.Status != WorkspaceStatusDeleting {
+		return fmt.Errorf("%w: workspace root is missing", ErrConflict)
+	}
+	for _, checkout := range checkouts {
+		// Even retry metadata must not point at an unrelated directory.
+		parent := filepath.Dir(filepath.Clean(checkout.WorktreePath))
+		if parent != filepath.Join(workspace.RootPath, "code") && parent != filepath.Join(workspace.RootPath, "notes") {
+			return fmt.Errorf("%w: checkout is outside workspace", ErrConflict)
+		}
+		if rootExists {
+			if err := s.validateWorkspaceBindingTarget(ctx, workspace, checkout.WorktreePath); err != nil {
+				return err
+			}
+		}
+		source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
+		if err != nil {
+			return err
+		}
+		if err := verifySourceIdentity(ctx, source); err != nil {
+			return err
+		}
+		removed := verifyCheckoutRemoved(ctx, source, checkout) == nil
+		if workspace.Status == WorkspaceStatusDeleting && removed {
+			continue
+		}
+		if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
+			return err
+		}
+		if removed {
+			continue
+		}
+		if !rootExists {
+			return fmt.Errorf("%w: checkout remains after workspace root removal", ErrConflict)
+		}
+		info, err := os.Lstat(checkout.WorktreePath)
+		if err != nil && !os.IsNotExist(err) {
+			return err
+		}
+		if err == nil && (!info.IsDir() || info.Mode()&os.ModeSymlink != 0) {
+			return fmt.Errorf("%w: checkout path is not a directory", ErrConflict)
+		}
+		if err == nil {
+			commonDir, err := runGitMutation(ctx, checkout.WorktreePath, "rev-parse", "--path-format=absolute", "--git-common-dir")
+			if err != nil || !samePath(strings.TrimSpace(commonDir), source.GitCommonDir) {
+				return fmt.Errorf("%w: checkout repository identity changed", ErrConflict)
+			}
+		}
+		worktrees, err := listGitWorktrees(ctx, source.CanonicalPath)
+		if err != nil {
+			return err
+		}
+		found := false
+		for _, candidate := range worktrees {
+			if samePath(candidate.Path, checkout.WorktreePath) {
+				found = true
+			}
+		}
+		if !found {
+			return fmt.Errorf("%w: checkout path is not the registered worktree", ErrConflict)
+		}
+	}
+	return nil
+}
+
 func verifyCheckoutRemoved(ctx context.Context, source Source, checkout Checkout) error {
 	worktrees, err := listGitWorktrees(ctx, source.CanonicalPath)
 	if err != nil {
 		return err
 	}
-	branchRef := "refs/heads/" + checkout.BranchName
 	for _, candidate := range worktrees {
-		if samePath(candidate.Path, checkout.WorktreePath) || candidate.Branch == branchRef {
+		if samePath(candidate.Path, checkout.WorktreePath) {
 			return fmt.Errorf("%w: workspace checkout still exists", ErrConflict)
 		}
 	}
@@ -322,9 +405,6 @@ func verifyCheckoutRemoved(ctx context.Context, source Source, checkout Checkout
 		return fmt.Errorf("%w: workspace checkout path still exists", ErrConflict)
 	} else if !os.IsNotExist(err) {
 		return err
-	}
-	if _, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", branchRef+"^{commit}"); err == nil {
-		return fmt.Errorf("%w: workspace branch still exists", ErrConflict)
 	}
 	return nil
 }
@@ -408,11 +488,11 @@ func removeCheckout(ctx context.Context, source Source, checkout Checkout, force
 	found := false
 	for _, candidate := range worktrees {
 		if samePath(candidate.Path, checkout.WorktreePath) {
-			if candidate.Branch != branchRef {
+			if !force && candidate.Branch != branchRef {
 				return fmt.Errorf("%w: worktree branch does not match", ErrConflict)
 			}
 			found = true
-		} else if candidate.Branch == branchRef {
+		} else if !force && candidate.Branch == branchRef {
 			return fmt.Errorf("%w: workspace branch is checked out elsewhere", ErrConflict)
 		}
 	}

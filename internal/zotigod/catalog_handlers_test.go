@@ -297,6 +297,62 @@ func TestCatalogCreatesGitWorkspaceWithoutClientSideCommitResolution(t *testing.
 	if _, err := os.Stat(filepath.Join(workspace.RootPath, "code", filepath.Base(source.CanonicalPath), "README.md")); err != nil {
 		t.Fatalf("Git workspace checkout: %v", err)
 	}
+	t.Run("deregister source then delete switched checkout", func(t *testing.T) {
+		checkout := filepath.Join(workspace.RootPath, "code", filepath.Base(source.CanonicalPath))
+		runCatalogGit(t, checkout, "switch", "-c", "user-selected-branch")
+		refs := exec.Command("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes")
+		refs.Dir = repository
+		before, err := refs.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		remove := requestCatalog(t, handler, http.MethodDelete, "/projects/"+project.ID+"/sources/"+source.ID, "")
+		if remove.Code != http.StatusNoContent {
+			t.Fatalf("deregister bound source = %d: %s", remove.Code, remove.Body.String())
+		}
+		var detail struct {
+			Sources []zotigoworkspace.Source `json:"sources"`
+		}
+		decodeCatalogData(t, requestCatalog(t, handler, http.MethodGet, "/projects/"+project.ID, ""), &detail)
+		if len(detail.Sources) != 0 {
+			t.Fatalf("deregistered source remains in Project: %+v", detail.Sources)
+		}
+		var bindings struct {
+			Sources []zotigoworkspace.WorkspaceSource `json:"sources"`
+		}
+		decodeCatalogData(t, requestCatalog(t, handler, http.MethodGet, "/workspaces/"+workspace.ID+"/sources", ""), &bindings)
+		if len(bindings.Sources) != 1 || bindings.Sources[0].Source.ID != source.ID {
+			t.Fatalf("existing binding lost: %+v", bindings.Sources)
+		}
+		if _, err := os.Stat(filepath.Join(checkout, "README.md")); err != nil {
+			t.Fatalf("deregistration changed checkout files: %v", err)
+		}
+		var impact zotigoworkspace.DeleteImpact
+		preview := requestCatalog(t, handler, http.MethodGet, "/workspaces/"+workspace.ID+"/delete-preview", "")
+		if preview.Code != http.StatusOK {
+			t.Fatalf("delete preview = %d: %s", preview.Code, preview.Body.String())
+		}
+		decodeCatalogData(t, preview, &impact)
+		if !impact.PreservesLocalBranches || len(impact.LocalBranches) != 0 {
+			t.Fatalf("branch preservation contract = %+v", impact)
+		}
+		deleted := requestCatalog(t, handler, http.MethodPost, "/workspaces/"+workspace.ID+"/delete", `{"confirmation":"Git workspace"}`)
+		if deleted.Code != http.StatusOK {
+			t.Fatalf("delete switched checkout = %d: %s", deleted.Code, deleted.Body.String())
+		}
+		if _, err := os.Stat(workspace.RootPath); !os.IsNotExist(err) {
+			t.Fatalf("workspace root remains: %v", err)
+		}
+		if _, err := os.Stat(filepath.Join(repository, "README.md")); err != nil {
+			t.Fatalf("original Source changed: %v", err)
+		}
+		refs = exec.Command("git", "for-each-ref", "--format=%(refname) %(objectname)", "refs/heads", "refs/remotes")
+		refs.Dir = repository
+		after, err := refs.Output()
+		if err != nil || !bytes.Equal(before, after) {
+			t.Fatalf("branches changed: before=%s after=%s error=%v", before, after, err)
+		}
+	})
 }
 
 func runCatalogGit(t *testing.T, directory string, args ...string) {

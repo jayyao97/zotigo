@@ -149,16 +149,25 @@ func (s *Store) AddSource(ctx context.Context, projectID string, input SourceInp
 		CreatedAt:       now,
 		UpdatedAt:       now,
 	}
-	_, err := s.db.ExecContext(ctx, `
+	row := s.db.QueryRowContext(ctx, `
 		INSERT INTO sources(
 			id, project_id, kind, canonical_path, git_common_dir,
 			git_object_format, folder_mode, source_key, created_at, updated_at
 		) VALUES(?, ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''), NULLIF(?, ''), ?, ?, ?)
+		ON CONFLICT(project_id, canonical_path) DO UPDATE SET registered = 1, updated_at = excluded.updated_at
+		WHERE sources.registered = 0 AND sources.kind = excluded.kind
+			AND sources.git_common_dir IS excluded.git_common_dir
+			AND sources.git_object_format IS excluded.git_object_format
+			AND sources.folder_mode IS excluded.folder_mode AND sources.source_key = excluded.source_key
+		RETURNING id, project_id, kind, canonical_path, git_common_dir,
+			git_object_format, folder_mode, source_key, created_at, updated_at
 	`, source.ID, source.ProjectID, source.Kind, source.CanonicalPath,
 		source.GitCommonDir, source.GitObjectFormat, source.FolderMode,
 		source.SourceKey, unixMillis(now), unixMillis(now))
+	// Re-registration preserves the identity used by existing workspace bindings.
+	source, err := scanSource(row)
 	if err != nil {
-		if isConstraintError(err) {
+		if isConstraintError(err) || errors.Is(err, ErrNotFound) {
 			return Source{}, fmt.Errorf("%w: source already registered or project missing", ErrConflict)
 		}
 		return Source{}, fmt.Errorf("add source: %w", err)
@@ -178,7 +187,7 @@ func (s *Store) ListSources(ctx context.Context, projectID string) ([]Source, er
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, project_id, kind, canonical_path, git_common_dir,
 		       git_object_format, folder_mode, source_key, created_at, updated_at
-		FROM sources WHERE project_id = ? ORDER BY source_key ASC, id ASC
+		FROM sources WHERE project_id = ? AND registered = 1 ORDER BY source_key ASC, id ASC
 	`, projectID)
 	if err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
@@ -203,18 +212,8 @@ func (s *Store) DeleteSource(ctx context.Context, projectID string, sourceID str
 	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return err
 	}
-	var references int
-	if err := s.db.QueryRowContext(ctx, `
-		SELECT
-			(SELECT COUNT(*) FROM workspace_checkouts WHERE source_id = ?) +
-			(SELECT COUNT(*) FROM workspace_folders WHERE source_id = ?)
-	`, sourceID, sourceID).Scan(&references); err != nil {
-		return fmt.Errorf("check source references: %w", err)
-	}
-	if references > 0 {
-		return ErrSourceInUse
-	}
-	result, err := s.db.ExecContext(ctx, `DELETE FROM sources WHERE id = ? AND project_id = ?`, sourceID, projectID)
+	// Existing bindings still need this metadata for restore and deletion.
+	result, err := s.db.ExecContext(ctx, `UPDATE sources SET registered = 0, updated_at = ? WHERE id = ? AND project_id = ?`, unixMillis(time.Now().UTC()), sourceID, projectID)
 	if err != nil {
 		return fmt.Errorf("delete source: %w", err)
 	}

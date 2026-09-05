@@ -134,15 +134,16 @@ type ArchiveImpact struct {
 }
 
 type DeleteImpact struct {
-	WorkspaceID         string   `json:"workspace_id"`
-	SessionIDs          []string `json:"session_ids"`
-	WorkspaceRoot       string   `json:"workspace_root"`
-	WorktreePaths       []string `json:"worktree_paths"`
-	DirtyWorktreePaths  []string `json:"dirty_worktree_paths"`
-	LocalBranches       []string `json:"local_branches"`
-	PreservesSources    bool     `json:"preserves_sources"`
-	PreservesSessions   bool     `json:"preserves_runtime_sessions"`
-	PreservesRemoteRefs bool     `json:"preserves_remote_refs"`
+	WorkspaceID            string   `json:"workspace_id"`
+	SessionIDs             []string `json:"session_ids"`
+	WorkspaceRoot          string   `json:"workspace_root"`
+	WorktreePaths          []string `json:"worktree_paths"`
+	DirtyWorktreePaths     []string `json:"dirty_worktree_paths"`
+	LocalBranches          []string `json:"local_branches"`
+	PreservesLocalBranches bool     `json:"preserves_local_branches"`
+	PreservesSources       bool     `json:"preserves_sources"`
+	PreservesSessions      bool     `json:"preserves_runtime_sessions"`
+	PreservesRemoteRefs    bool     `json:"preserves_remote_refs"`
 }
 
 type ProjectArchiveImpact struct {
@@ -162,6 +163,7 @@ type ProjectDeleteImpact struct {
 	WorktreePaths              []string `json:"worktree_paths"`
 	DirtyWorktreePaths         []string `json:"dirty_worktree_paths"`
 	LocalBranches              []string `json:"local_branches"`
+	PreservesLocalBranches     bool     `json:"preserves_local_branches"`
 	PreservesSourceDirectories bool     `json:"preserves_source_directories"`
 	PreservesSessions          bool     `json:"preserves_runtime_sessions"`
 	PreservesRemoteRefs        bool     `json:"preserves_remote_refs"`
