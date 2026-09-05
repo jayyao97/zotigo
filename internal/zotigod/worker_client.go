@@ -1608,7 +1608,7 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 		completion <-chan error
 	}
 	pendingProfiles := make([]pendingProfile, 0)
-	completedProfiles, completedApprovalPolicies, err := completedWorkerCommandIDs(ctx, runtime)
+	appliedCommands, err := loadAppliedWorkerCommandSequences(ctx, runtime)
 	if err != nil {
 		return cursor, err
 	}
@@ -1638,14 +1638,9 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 			if command.Sequence <= cursor.Sequence {
 				continue
 			}
-			if command.Type == sessionCommandProfile && completedProfiles[command.ID] {
-				if err := flushProfiles(); err != nil {
-					return cursor, err
-				}
-				cursor.Sequence = command.Sequence
-				continue
-			}
-			if command.Type == sessionCommandApprovalPolicy && completedApprovalPolicies[command.ID] {
+			// Recovery can rewind past an unacknowledged command. Later commands
+			// with durable execution evidence must not run again across that gap.
+			if appliedCommands[command.Sequence] {
 				if err := flushProfiles(); err != nil {
 					return cursor, err
 				}
@@ -1680,38 +1675,15 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 	}
 }
 
-func completedWorkerCommandIDs(ctx context.Context, runtime *workerRuntime) (map[string]bool, map[string]bool, error) {
-	completedProfiles := make(map[string]bool)
-	completedApprovalPolicies := make(map[string]bool)
-	pending := make(map[string]bool)
+func loadAppliedWorkerCommandSequences(ctx context.Context, runtime *workerRuntime) (map[uint64]bool, error) {
 	if runtime == nil || runtime.display == nil || runtime.display.items == nil {
-		return completedProfiles, completedApprovalPolicies, nil
+		return nil, nil
 	}
 	items, _, err := runtime.display.items.LoadItems(ctx, runtime.sessionID)
 	if err != nil {
-		return nil, nil, fmt.Errorf("load worker command completions: %w", err)
+		return nil, fmt.Errorf("load worker command completions: %w", err)
 	}
-	for _, item := range items {
-		if item.Type == zotigosession.DisplayItemApprovalPolicyChanged && item.ApprovalPolicy != nil && item.ApprovalPolicy.CommandID != "" {
-			completedApprovalPolicies[item.ApprovalPolicy.CommandID] = true
-		}
-		if item.Command != nil && item.Command.Type == sessionCommandProfile {
-			pending[item.ID] = true
-		}
-		if item.Type != zotigosession.DisplayItemProfileChanged && item.Type != zotigosession.DisplayItemProfileFailed {
-			continue
-		}
-		if item.Profile != nil && item.Profile.CommandID != "" {
-			completedProfiles[item.Profile.CommandID] = true
-			delete(pending, item.Profile.CommandID)
-		} else if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil {
-			for commandID := range pending {
-				completedProfiles[commandID] = true
-			}
-			clear(pending)
-		}
-	}
-	return completedProfiles, completedApprovalPolicies, nil
+	return appliedWorkerCommandSequences(items), nil
 }
 
 func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, cursor workerCommandCursor) (commandsResponse, error) {
@@ -1811,7 +1783,21 @@ func recoverWorkerCommandCursor(ctx context.Context, store zotigosession.Store, 
 }
 
 func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
-	commandSeqs := make([]uint64, 0)
+	applied := appliedWorkerCommandSequences(items)
+	var cursor uint64
+	for _, item := range items {
+		if !isDurableCommandItem(item) {
+			continue
+		}
+		if !applied[item.Sequence] {
+			return cursor
+		}
+		cursor = item.Sequence
+	}
+	return cursor
+}
+
+func appliedWorkerCommandSequences(items []zotigosession.DisplayItem) map[uint64]bool {
 	safe := make(map[uint64]bool)
 	pendingMessages := make([]uint64, 0)
 	pendingByTurn := make(map[string][]uint64)
@@ -1821,7 +1807,6 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 
 	for _, item := range items {
 		if isDurableCommandItem(item) {
-			commandSeqs = append(commandSeqs, item.Sequence)
 			switch item.Command.Type {
 			case sessionCommandMessage:
 				pendingMessages = append(pendingMessages, item.Sequence)
@@ -1880,14 +1865,7 @@ func recoverAppliedCommandSequence(items []zotigosession.DisplayItem) uint64 {
 		}
 	}
 
-	var cursor uint64
-	for _, seq := range commandSeqs {
-		if !safe[seq] {
-			return cursor
-		}
-		cursor = seq
-	}
-	return cursor
+	return safe
 }
 
 func saveWorkerCommandCursor(sessionID string, cursor workerCommandCursor) error {
