@@ -506,15 +506,13 @@ func lastAssistantText(history []protocol.Message) string {
 
 func formatSpawnResult(name, agentType, workDir, description, report string, trace []string, toolCalls int, usage protocol.Usage) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf(
-		"Subagent completed\nName: %s\nAgent type: %s\nWorkdir: %s\nDescription: %s\nTool calls: %d\nTokens: %d",
+	fmt.Fprintf(&sb, "Subagent completed\nName: %s\nAgent type: %s\nWorkdir: %s\nDescription: %s\nTool calls: %d\nTokens: %d",
 		name,
 		agentType,
 		workDir,
 		description,
 		toolCalls,
-		usage.TotalTokens,
-	))
+		usage.TotalTokens)
 	if len(trace) > 0 {
 		sb.WriteString("\n\nTrace:\n")
 		sb.WriteString(strings.Join(trace, "\n"))

@@ -82,14 +82,14 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 
 	// Append message content
 	for _, msg := range messages {
-		sb.WriteString(fmt.Sprintf("[%s]: ", msg.Role))
+		fmt.Fprintf(&sb, "[%s]: ", msg.Role)
 		for _, part := range msg.Content {
 			switch part.Type {
 			case protocol.ContentTypeText:
 				sb.WriteString(part.Text)
 			case protocol.ContentTypeToolCall:
 				if part.ToolCall != nil {
-					sb.WriteString(fmt.Sprintf("[Called tool: %s]", part.ToolCall.Name))
+					fmt.Fprintf(&sb, "[Called tool: %s]", part.ToolCall.Name)
 				}
 			case protocol.ContentTypeToolResult:
 				if part.ToolResult != nil {
@@ -98,7 +98,7 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 					if len(text) > 500 {
 						text = text[:500] + "..."
 					}
-					sb.WriteString(fmt.Sprintf("[Tool result: %s]", text))
+					fmt.Fprintf(&sb, "[Tool result: %s]", text)
 				}
 			}
 		}

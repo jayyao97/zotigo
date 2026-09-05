@@ -52,8 +52,8 @@ func (c *HelpCommand) showAllCommands(env *commands.Environment) error {
 		if len(aliases) > 0 {
 			aliasStr = fmt.Sprintf(" (aliases: /%s)", strings.Join(aliases, ", /"))
 		}
-		sb.WriteString(fmt.Sprintf("  /%s%s\n", cmd.Name(), aliasStr))
-		sb.WriteString(fmt.Sprintf("    %s\n\n", cmd.Description()))
+		fmt.Fprintf(&sb, "  /%s%s\n", cmd.Name(), aliasStr)
+		fmt.Fprintf(&sb, "    %s\n\n", cmd.Description())
 	}
 
 	sb.WriteString("Type /help <command> for more details.\n")
@@ -68,7 +68,7 @@ func (c *HelpCommand) showAllCommands(env *commands.Environment) error {
 				if desc == "" {
 					desc = "(no description)"
 				}
-				sb.WriteString(fmt.Sprintf("  /%-18s %s\n", skill.Name, desc))
+				fmt.Fprintf(&sb, "  /%-18s %s\n", skill.Name, desc)
 			}
 		}
 	}
@@ -84,14 +84,14 @@ func (c *HelpCommand) showCommandHelp(env *commands.Environment, name string) er
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("/%s - %s\n\n", cmd.Name(), cmd.Description()))
+	fmt.Fprintf(&sb, "/%s - %s\n\n", cmd.Name(), cmd.Description())
 
 	if usage := cmd.Usage(); usage != "" {
-		sb.WriteString(fmt.Sprintf("Usage: %s\n", usage))
+		fmt.Fprintf(&sb, "Usage: %s\n", usage)
 	}
 
 	if aliases := cmd.Aliases(); len(aliases) > 0 {
-		sb.WriteString(fmt.Sprintf("Aliases: /%s\n", strings.Join(aliases, ", /")))
+		fmt.Fprintf(&sb, "Aliases: /%s\n", strings.Join(aliases, ", /"))
 	}
 
 	env.Output("%s", sb.String())

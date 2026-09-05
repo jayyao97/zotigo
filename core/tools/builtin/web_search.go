@@ -127,7 +127,7 @@ func (t *WebSearchTool) Execute(ctx context.Context, _ executor.Executor, argsJS
 
 func formatSearchResults(query string, results []searchResult) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Search results for: %s\n", query))
+	fmt.Fprintf(&sb, "Search results for: %s\n", query)
 	sb.WriteString(strings.Repeat("─", 40))
 	sb.WriteByte('\n')
 
@@ -137,16 +137,16 @@ func formatSearchResults(query string, results []searchResult) string {
 	}
 
 	for i, r := range results {
-		sb.WriteString(fmt.Sprintf("\n[%d] %s\n", i+1, r.Title))
+		fmt.Fprintf(&sb, "\n[%d] %s\n", i+1, r.Title)
 		if r.URL != "" {
-			sb.WriteString(fmt.Sprintf("    URL: %s\n", r.URL))
+			fmt.Fprintf(&sb, "    URL: %s\n", r.URL)
 		}
 		if r.Content != "" {
 			content := r.Content
 			if len(content) > 5000 {
 				content = content[:5000] + "\n    [... truncated]"
 			}
-			sb.WriteString(fmt.Sprintf("    %s\n", content))
+			fmt.Fprintf(&sb, "    %s\n", content)
 		}
 	}
 
