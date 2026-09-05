@@ -160,8 +160,8 @@ func (t *LSPTool) listLanguages() (string, error) {
 		if availableSet[lang] {
 			status = "✓ Available"
 		}
-		sb.WriteString(fmt.Sprintf("  %s (%s): %s\n", lang, config.Command, status))
-		sb.WriteString(fmt.Sprintf("    Extensions: %s\n", strings.Join(config.Extensions, ", ")))
+		fmt.Fprintf(&sb, "  %s (%s): %s\n", lang, config.Command, status)
+		fmt.Fprintf(&sb, "    Extensions: %s\n", strings.Join(config.Extensions, ", "))
 	}
 
 	return sb.String(), nil
@@ -230,15 +230,15 @@ func (t *LSPTool) documentSymbols(ctx context.Context, filePath string) (string,
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Document Symbols (%d):\n\n", len(symbols)))
+	fmt.Fprintf(&sb, "Document Symbols (%d):\n\n", len(symbols))
 
 	for _, sym := range symbols {
 		kind := lsp.SymbolKindString(sym.Kind)
 		loc := fmt.Sprintf("%d:%d", sym.Location.Range.Start.Line+1, sym.Location.Range.Start.Character+1)
 		if sym.ContainerName != "" {
-			sb.WriteString(fmt.Sprintf("  [%s] %s.%s (line %s)\n", kind, sym.ContainerName, sym.Name, loc))
+			fmt.Fprintf(&sb, "  [%s] %s.%s (line %s)\n", kind, sym.ContainerName, sym.Name, loc)
 		} else {
-			sb.WriteString(fmt.Sprintf("  [%s] %s (line %s)\n", kind, sym.Name, loc))
+			fmt.Fprintf(&sb, "  [%s] %s (line %s)\n", kind, sym.Name, loc)
 		}
 	}
 
@@ -256,14 +256,14 @@ func (t *LSPTool) workspaceSymbols(ctx context.Context, language, query string) 
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Workspace Symbols for '%s' (%d results):\n\n", query, len(symbols)))
+	fmt.Fprintf(&sb, "Workspace Symbols for '%s' (%d results):\n\n", query, len(symbols))
 
 	for _, sym := range symbols {
 		kind := lsp.SymbolKindString(sym.Kind)
 		// Extract just the file name from URI
 		uri := strings.TrimPrefix(sym.Location.URI, "file://")
 		loc := fmt.Sprintf("%s:%d", uri, sym.Location.Range.Start.Line+1)
-		sb.WriteString(fmt.Sprintf("  [%s] %s (%s)\n", kind, sym.Name, loc))
+		fmt.Fprintf(&sb, "  [%s] %s (%s)\n", kind, sym.Name, loc)
 	}
 
 	return sb.String(), nil
@@ -280,14 +280,14 @@ func (t *LSPTool) diagnostics(filePath string) (string, error) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Diagnostics (%d):\n\n", len(diags)))
+	fmt.Fprintf(&sb, "Diagnostics (%d):\n\n", len(diags))
 
 	for _, d := range diags {
 		severity := lsp.SeverityString(d.Severity)
 		loc := fmt.Sprintf("%d:%d", d.Range.Start.Line+1, d.Range.Start.Character+1)
-		sb.WriteString(fmt.Sprintf("  [%s] %s (line %s)\n", severity, d.Message, loc))
+		fmt.Fprintf(&sb, "  [%s] %s (line %s)\n", severity, d.Message, loc)
 		if d.Source != "" {
-			sb.WriteString(fmt.Sprintf("    Source: %s\n", d.Source))
+			fmt.Fprintf(&sb, "    Source: %s\n", d.Source)
 		}
 	}
 
@@ -296,13 +296,13 @@ func (t *LSPTool) diagnostics(filePath string) (string, error) {
 
 func (t *LSPTool) formatLocations(title string, locations []lsp.Location) string {
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("%s (%d):\n\n", title, len(locations)))
+	fmt.Fprintf(&sb, "%s (%d):\n\n", title, len(locations))
 
 	for _, loc := range locations {
 		uri := strings.TrimPrefix(loc.URI, "file://")
 		line := loc.Range.Start.Line + 1
 		char := loc.Range.Start.Character + 1
-		sb.WriteString(fmt.Sprintf("  %s:%d:%d\n", uri, line, char))
+		fmt.Fprintf(&sb, "  %s:%d:%d\n", uri, line, char)
 	}
 
 	return sb.String()

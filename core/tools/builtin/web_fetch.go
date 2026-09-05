@@ -151,11 +151,11 @@ func (t *WebFetchTool) Execute(ctx context.Context, _ executor.Executor, argsJSO
 
 	// Build result with metadata header.
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("URL: %s\n", args.URL))
-	sb.WriteString(fmt.Sprintf("Status: %d\n", resp.StatusCode))
-	sb.WriteString(fmt.Sprintf("Content-Type: %s\n", contentType))
+	fmt.Fprintf(&sb, "URL: %s\n", args.URL)
+	fmt.Fprintf(&sb, "Status: %d\n", resp.StatusCode)
+	fmt.Fprintf(&sb, "Content-Type: %s\n", contentType)
 	if tokens := resp.Header.Get("X-Markdown-Tokens"); tokens != "" {
-		sb.WriteString(fmt.Sprintf("Markdown-Tokens: %s\n", tokens))
+		fmt.Fprintf(&sb, "Markdown-Tokens: %s\n", tokens)
 	}
 	sb.WriteString(strings.Repeat("─", 40))
 	sb.WriteByte('\n')

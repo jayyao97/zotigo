@@ -54,7 +54,7 @@ func (c *ModelCommand) showModels(env *commands.Environment) error {
 	var sb strings.Builder
 	sb.WriteString("Available models:\n")
 	for _, model := range models {
-		sb.WriteString(fmt.Sprintf("  - %s\n", model))
+		fmt.Fprintf(&sb, "  - %s\n", model)
 	}
 	sb.WriteString("\nUsage: /model <model_name>")
 	env.Output("%s", sb.String())

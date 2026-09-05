@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -82,7 +83,14 @@ func (h *clientHandler) Configuration(ctx context.Context, params *protocol.Conf
 }
 
 func (h *clientHandler) WorkspaceFolders(ctx context.Context) ([]protocol.WorkspaceFolder, error) {
-	return nil, nil
+	return h.client.workspaceFolders(), nil
+}
+
+func (c *Client) workspaceFolders() []protocol.WorkspaceFolder {
+	return []protocol.WorkspaceFolder{{
+		URI:  string(c.rootURI),
+		Name: filepath.Base(c.rootURI.Filename()),
+	}}
 }
 
 // NewClient creates a new LSP client for the given server configuration.
@@ -170,8 +178,11 @@ func (rwc *readWriteCloser) Close() error {
 // initialize sends the initialize request to the server.
 func (c *Client) initialize(ctx context.Context) error {
 	params := &protocol.InitializeParams{
-		ProcessID: int32(os.Getpid()),
-		RootURI:   protocol.DocumentURI(c.rootURI),
+		// pylsp still derives its primary workspace/config from rootUri; custom
+		// servers predating workspaceFolders also need this compatibility field.
+		RootURI:          protocol.DocumentURI(c.rootURI), //nolint:staticcheck // SA1019: retain rootUri alongside workspaceFolders for server compatibility.
+		ProcessID:        int32(os.Getpid()),
+		WorkspaceFolders: c.workspaceFolders(),
 		Capabilities: protocol.ClientCapabilities{
 			TextDocument: &protocol.TextDocumentClientCapabilities{
 				Synchronization: &protocol.TextDocumentSyncClientCapabilities{
@@ -192,7 +203,8 @@ func (c *Client) initialize(ctx context.Context) error {
 				},
 			},
 			Workspace: &protocol.WorkspaceClientCapabilities{
-				Symbol: &protocol.WorkspaceSymbolClientCapabilities{},
+				Symbol:           &protocol.WorkspaceSymbolClientCapabilities{},
+				WorkspaceFolders: true,
 			},
 		},
 	}
