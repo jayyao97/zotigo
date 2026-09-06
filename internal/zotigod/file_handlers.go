@@ -37,7 +37,7 @@ type textFileSnapshot struct {
 
 func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/files/capabilities" && r.Method == http.MethodGet {
-		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true})
+		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true, "list": true})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -116,6 +116,10 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeAPIJSON(w, 200, snapshot)
+		return
+	}
+	if info, statErr := root.Stat(relative); statErr == nil && info.IsDir() {
+		writeAPIJSON(w, 200, map[string]any{"kind": "directory", "path": resolved})
 		return
 	}
 	snapshot, err := readWorkspaceText(root, relative, resolved)

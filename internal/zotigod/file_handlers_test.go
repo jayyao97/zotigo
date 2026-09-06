@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -84,4 +85,64 @@ func TestWorkspaceFilesStayOnDaemonAndRejectConflicts(t *testing.T) {
 	if denied.Code != 403 {
 		t.Fatalf("outside read %d", denied.Code)
 	}
+	t.Run("directory browsing and source selection boundaries", func(t *testing.T) {
+		canonicalSource, err := filepath.EvalSymlinks(source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		child := filepath.Join(source, "child")
+		if err := os.Mkdir(child, 0700); err != nil {
+			t.Fatal(err)
+		}
+		var listing directoryListing
+		listed := requestCatalog(t, handler, http.MethodPost, "/files/list", `{"path":`+quotedJSON(t, source)+`}`)
+		if listed.Code != 200 {
+			t.Fatalf("list %d: %s", listed.Code, listed.Body)
+		}
+		decodeCatalogData(t, listed, &listing)
+		if listing.ParentPath != nil || listing.Entries[0].Name != "child" {
+			t.Fatalf("listing %+v", listing)
+		}
+		for _, entry := range listing.Entries {
+			if entry.Name == "escape" && entry.Kind != "unavailable" {
+				t.Fatalf("escape exposed: %+v", entry)
+			}
+		}
+		listed = requestCatalog(t, handler, http.MethodPost, "/files/list", `{"path":`+quotedJSON(t, child)+`}`)
+		decodeCatalogData(t, listed, &listing)
+		if listing.ParentPath == nil || *listing.ParentPath != canonicalSource || len(listing.Entries) != 0 {
+			t.Fatalf("child %+v", listing)
+		}
+		for _, outsidePath := range []string{root, filepath.Join(source, ".."), link} {
+			denied := requestCatalog(t, handler, http.MethodPost, "/files/list", `{"path":`+quotedJSON(t, outsidePath)+`}`)
+			if denied.Code != 403 {
+				t.Fatalf("outside listing %d: %s", denied.Code, denied.Body)
+			}
+		}
+		listed = requestCatalog(t, handler, http.MethodPost, "/sources/directories", `{"path":`+quotedJSON(t, root)+`}`)
+		if listed.Code != 200 {
+			t.Fatalf("source directories %d: %s", listed.Code, listed.Body)
+		}
+		decodeCatalogData(t, listed, &listing)
+		for _, entry := range listing.Entries {
+			if entry.Kind != "directory" {
+				t.Fatalf("source picker exposed file %+v", entry)
+			}
+		}
+		for i := range directoryEntryLimit + 1 {
+			if err := os.WriteFile(filepath.Join(child, fmt.Sprintf("entry-%04d", i)), nil, 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		listed = requestCatalog(t, handler, http.MethodPost, "/files/list", `{"path":`+quotedJSON(t, child)+`}`)
+		decodeCatalogData(t, listed, &listing)
+		if !listing.Truncated || len(listing.Entries) != directoryEntryLimit {
+			t.Fatalf("limit: %d %v", len(listing.Entries), listing.Truncated)
+		}
+		listed = requestCatalog(t, handler, http.MethodPost, "/files/list", `{ "path": "" }`)
+		decodeCatalogData(t, listed, &listing)
+		if len(listing.Entries) != 1 || listing.Entries[0].Path != canonicalSource {
+			t.Fatalf("roots %+v", listing)
+		}
+	})
 }
