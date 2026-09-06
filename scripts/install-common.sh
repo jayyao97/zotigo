@@ -124,7 +124,7 @@ service_install() {
 Description=Zotigo $component
 [Service]
 ExecStart="$root/current/run"
-WorkingDirectory="$HOME"
+WorkingDirectory=%h
 Restart=on-failure
 RestartSec=3
 TimeoutStopSec=30
