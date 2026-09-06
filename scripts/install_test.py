@@ -202,6 +202,7 @@ chmod +x "$2"
         self.assertEqual(plist["StandardErrorPath"], "/dev/null")
         unit = (home / ".config/systemd/user/zotigo-daemon.service").read_text()
         self.assertIn(f'ExecStart="{self.prefix}/daemon/current/run"', unit)
+        self.assertIn("WorkingDirectory=%h\n", unit)
         self.assertIn("KillMode=control-group", unit)
         self.assertIn("StandardOutput=null", unit)
         self.assertIn("StandardError=null", unit)
