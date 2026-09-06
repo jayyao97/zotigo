@@ -230,6 +230,10 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if strings.HasPrefix(name, "codex-input-") {
+		h.handleCodexInputImage(w, r, id, name)
+		return
+	}
 	blobPath, ok := messageImageBlobPath(id, name)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "image not found")
