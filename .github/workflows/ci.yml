@@ -7,6 +7,39 @@ on:
     branches: [master]
 
 jobs:
+  installer:
+    name: source installer (${{ matrix.os }})
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: python3 scripts/install_test.py
+      - run: python3 scripts/toolchains_test.py
+      - name: Verify official private toolchains
+        run: |
+          set -eu
+          . scripts/install-common.sh
+          . scripts/toolchains.sh
+          prefix="$RUNNER_TEMP/zotigo"
+          platform=$(uname -s)
+          toolchain_manifest="$PWD/scripts/toolchains.tsv"
+          go_version=$(awk '$1=="go" {print $2; exit}' go.mod)
+          node_version=$(awk '$1=="node" {print $2; exit}' "$toolchain_manifest")
+          pnpm_version=$(awk '$1=="pnpm" {print $2; exit}' "$toolchain_manifest")
+          install_tool go "$go_version"
+          install_tool node "$node_version"
+          node_executable="$prefix/toolchains/node-$node_version/bin/node"
+          install_tool pnpm "$pnpm_version"
+          "$prefix/toolchains/go-$go_version/bin/go" version
+          "$node_executable" "$prefix/toolchains/pnpm-$pnpm_version/bin/pnpm.cjs" --version
+      - run: sh install.sh --source "$PWD" --prefix "$RUNNER_TEMP/zotigo" --no-service
+      - run: '"$RUNNER_TEMP/zotigo/bin/zotigo" --version'
+
   check:
     name: gofmt + vet + lint + test
     runs-on: ubuntu-latest

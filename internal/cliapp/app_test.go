@@ -10,6 +10,22 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 )
 
+func TestRunVersionDoesNotCreateConfiguration(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	output := captureStdout(t, func() {
+		if code := Run([]string{"--version"}); code != 0 {
+			t.Fatalf("Run exit code = %d, want 0", code)
+		}
+	})
+	if !strings.HasPrefix(output, "zotigo ") {
+		t.Fatalf("version output = %q", output)
+	}
+	if _, err := os.Stat(filepath.Join(home, config.ConfigDirName)); !os.IsNotExist(err) {
+		t.Fatalf("version should not initialize configuration: %v", err)
+	}
+}
+
 func TestRunCreatesMissingConfigAndExits(t *testing.T) {
 	home := filepath.Join(t.TempDir(), "new-home")
 	t.Setenv("HOME", home)

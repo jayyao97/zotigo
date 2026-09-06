@@ -3,7 +3,7 @@
 # Project information
 PROJECT_NAME := zotigo
 BINARY_NAME := zotigo
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION := $(shell sed -n 's/^const Version = "\(.*\)"/\1/p' internal/buildinfo/buildinfo.go)
 BUILD_TIME := $(shell date -u '+%Y-%m-%d_%H:%M:%S')
 COMMIT_HASH := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 
@@ -14,7 +14,7 @@ GOOS := $(shell go env GOOS)
 GOARCH := $(shell go env GOARCH)
 
 # Build flags
-LDFLAGS := -ldflags "-X main.Version=$(VERSION) -X main.BuildTime=$(BUILD_TIME) -X main.CommitHash=$(COMMIT_HASH) -s -w"
+LDFLAGS := -ldflags "-s -w"
 BUILD_FLAGS := -trimpath $(LDFLAGS)
 
 # Directories

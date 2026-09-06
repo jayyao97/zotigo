@@ -96,6 +96,8 @@ zotigo/
 
 ## Installation
 
+For versioned Linux/macOS source installation and daemon services, see [source installation](docs/installation.md).
+
 ```bash
 go install github.com/jayyao97/zotigo/cmd/zotigo@latest
 ```

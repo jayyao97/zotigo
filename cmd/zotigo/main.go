@@ -3,9 +3,14 @@ package main
 import (
 	"os"
 
+	"github.com/jayyao97/zotigo/internal/diagnostics"
+
 	"github.com/jayyao97/zotigo/internal/cliapp"
 )
 
 func main() {
-	os.Exit(cliapp.Run(os.Args[1:]))
+	finish := diagnostics.MonitorCrashes("cli")
+	code := cliapp.Run(os.Args[1:])
+	finish()
+	os.Exit(code)
 }

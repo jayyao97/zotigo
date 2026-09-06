@@ -26,7 +26,9 @@ Authorization: Bearer <token>
 
 `GET /health` is intentionally unauthenticated so clients can distinguish an
 unreachable daemon from an authentication failure. Its data includes
-`status: "ok"` and `protocol_version: "1"`. All other public endpoints return
+`status: "ok"`, `protocol_version: "1"`, and running build identity fields
+`version` (the code-owned release constant) and `commit` (optional Go VCS metadata,
+`unknown` when unavailable), plus `process_id` (the daemon PID as a string, for local service verification). These fields are additive; older daemons may omit them. All other public endpoints return
 `401` with code `unauthorized` when the token is missing or incorrect.
 Clients that discover an occupied daemon address must validate this complete
 health envelope; an arbitrary HTTP `200` is not a compatible zotigod. Starting

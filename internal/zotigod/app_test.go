@@ -448,6 +448,12 @@ func TestHealth(t *testing.T) {
 	if body["status"] != "ok" {
 		t.Fatalf("unexpected health response: %#v", body)
 	}
+	if body["version"] == "" || body["commit"] == "" {
+		t.Fatalf("missing build identity: %#v", body)
+	}
+	if body["process_id"] != strconv.Itoa(os.Getpid()) {
+		t.Fatalf("unexpected daemon process identity: %#v", body)
+	}
 	if body["protocol_version"] != apiProtocolVersion {
 		t.Fatalf("protocol_version = %q, want %q", body["protocol_version"], apiProtocolVersion)
 	}

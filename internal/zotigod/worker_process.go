@@ -80,7 +80,7 @@ func newProcessWorkerLauncher(daemonURL string, authToken string, logger *log.Lo
 		authToken:  authToken,
 		workDir:    workDir,
 		env:        os.Environ(),
-		output:     os.Stderr,
+		output:     logger.Writer(),
 		logger:     logger,
 		commands:   make(map[string]*exec.Cmd),
 	}, nil

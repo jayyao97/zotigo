@@ -486,7 +486,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	hookDispatcher := cfg.HookDispatcher
 	ownsHookDispatcher := false
 	if hookDispatcher == nil {
-		hookLogger := log.New(os.Stderr, "[zotigo-hooks] ", log.LstdFlags)
+		hookLogger := log.New(log.Writer(), "[zotigo-hooks] ", log.LstdFlags)
 		hookDispatcher, err = hooks.LoadDefault(hookLogger)
 		if err != nil {
 			hookLogger.Printf("hook_config outcome=failed error=%q", err)
