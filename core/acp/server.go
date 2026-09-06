@@ -15,7 +15,7 @@ const (
 	ProtocolVersion = 1
 
 	agentName    = "zotigo"
-	agentVersion = "0.1.0"
+	agentVersion = "0.0.1"
 )
 
 // PromptResult carries the result of a session/prompt callback so the

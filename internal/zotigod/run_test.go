@@ -19,6 +19,7 @@ func TestDefaultDaemonAddressUses8766(t *testing.T) {
 }
 
 func TestRunFailsFastWhenPortBelongsToAnotherService(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -38,6 +39,7 @@ func TestRunFailsFastWhenPortBelongsToAnotherService(t *testing.T) {
 }
 
 func TestRunReusesCompatibleZotigod(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -64,6 +66,15 @@ func TestRunCreatesMissingConfigAndContinuesStartup(t *testing.T) {
 			t.Fatalf("Run exit code = %d, want listener failure code 1", code)
 		}
 	})
+
+	files, err := filepath.Glob(filepath.Join(home, ".zotigo", "logs", "daemon", "run-*.log"))
+	if err != nil || len(files) != 1 {
+		t.Fatalf("diagnostic logs = %v, error = %v", files, err)
+	}
+	data, err := os.ReadFile(files[0])
+	if err != nil || !strings.Contains(string(data), "Server failed") || !strings.Contains(string(data), "daemon_exit code=1") {
+		t.Fatalf("diagnostic log = %q, error = %v", data, err)
+	}
 
 	path := filepath.Join(home, config.ConfigDirName, config.ConfigFileName)
 	if _, err := os.Stat(path); err != nil {

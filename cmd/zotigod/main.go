@@ -4,9 +4,14 @@ package main
 import (
 	"os"
 
+	"github.com/jayyao97/zotigo/internal/diagnostics"
+
 	"github.com/jayyao97/zotigo/internal/zotigod"
 )
 
 func main() {
-	os.Exit(zotigod.Run(os.Args[1:]))
+	finish := diagnostics.MonitorCrashes("daemon")
+	code := zotigod.Run(os.Args[1:])
+	finish()
+	os.Exit(code)
 }

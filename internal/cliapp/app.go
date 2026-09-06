@@ -5,6 +5,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -25,6 +26,8 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/internal/buildinfo"
+	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/wiring"
 )
 
@@ -46,9 +49,10 @@ func (k *KittyFilterWriter) Write(p []byte) (n int, err error) {
 }
 
 // Run starts the interactive CLI and returns a process exit code.
-func Run(args []string) int {
+func Run(args []string) (exitCode int) {
 	fs := flag.NewFlagSet("zotigo", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	versionFlag := fs.Bool("version", false, "Print program release version")
 
 	resumeFlag := fs.Bool("resume", false, "Resume a previous session")
 	rFlag := fs.Bool("r", false, "Resume a previous session (shorthand)")
@@ -59,8 +63,25 @@ func Run(args []string) int {
 		"Execute all registered tools without safety checks or approval",
 	)
 	if err := fs.Parse(args); err != nil {
+		stopLogging := diagnostics.Start("cli")
+		log.Printf("argument_error: %v", err)
+		stopLogging()
 		return 2
 	}
+	if *versionFlag {
+		fmt.Printf("zotigo %s\n", buildinfo.Version)
+		return 0
+	}
+	stopLogging := diagnostics.Start("cli")
+	defer stopLogging()
+	log.Printf("cli_start version=%s pid=%d", buildinfo.Version, os.Getpid())
+	defer func() {
+		if value := recover(); value != nil {
+			log.Printf("cli_panic: %v", value)
+			panic(value)
+		}
+		log.Printf("cli_exit code=%d", exitCode)
+	}()
 	doResume := *resumeFlag || *rFlag || *resumeAllFlag
 	approvalPolicy := agent.ApprovalPolicyAuto
 	if *bypassPermissions {
@@ -70,6 +91,7 @@ func Run(args []string) int {
 	cm := config.NewManager()
 	configPath, created, err := cm.EnsureGlobalConfig()
 	if err != nil {
+		log.Printf("Error creating config file: %v\n", err)
 		fmt.Printf("Error creating config file: %v\n", err)
 		return 1
 	}
@@ -81,6 +103,7 @@ func Run(args []string) int {
 
 	sessMgr, err := session.NewManager()
 	if err != nil {
+		log.Printf("Error initializing session manager: %v\n", err)
 		fmt.Printf("Error initializing session manager: %v\n", err)
 		return 1
 	}
@@ -97,6 +120,7 @@ func Run(args []string) int {
 			sessions, err = sessMgr.ListByDir(cwd)
 		}
 		if err != nil {
+			log.Printf("Error listing sessions: %v\n", err)
 			fmt.Printf("Error listing sessions: %v\n", err)
 			return 1
 		}
@@ -108,6 +132,7 @@ func Run(args []string) int {
 		p := tea.NewProgram(selModel)
 		m, err := p.Run()
 		if err != nil {
+			log.Println("Error running selection:", err)
 			fmt.Println("Error running selection:", err)
 			return 1
 		}
@@ -120,6 +145,7 @@ func Run(args []string) int {
 
 		currentSession, err = sessMgr.Load(finalModel.ChosenID)
 		if err != nil {
+			log.Printf("Error loading session: %v\n", err)
 			fmt.Printf("Error loading session: %v\n", err)
 			return 1
 		}
@@ -127,6 +153,7 @@ func Run(args []string) int {
 	} else {
 		currentSession, err = sessMgr.CreateNew(cwd)
 		if err != nil {
+			log.Printf("Error creating session: %v\n", err)
 			fmt.Printf("Error creating session: %v\n", err)
 			return 1
 		}
@@ -134,16 +161,20 @@ func Run(args []string) int {
 
 	cfg, err := cm.LoadForDir(cwd)
 	if err != nil {
+		log.Println("Error loading config:", err)
 		fmt.Println("Error loading config:", err)
 		return 1
 	}
 	profileName, profile, err := cfg.ResolveProfile(currentSession.ProfileName)
 	if err != nil {
+		log.Println("Error resolving profile:", err)
 		fmt.Println("Error resolving profile:", err)
 		return 1
 	}
 
+	log.Printf("cli_session session=%s profile=%s", currentSession.ID, profileName)
 	if err := sessMgr.Lock(currentSession.ID); err != nil {
+		log.Printf("Error locking session: %v\n", err)
 		fmt.Printf("Error locking session: %v\n", err)
 		return 1
 	}
@@ -151,6 +182,7 @@ func Run(args []string) int {
 
 	localExec, err := executor.NewLocalExecutor(cwd)
 	if err != nil {
+		log.Printf("Error creating executor: %v\n", err)
 		fmt.Printf("Error creating executor: %v\n", err)
 		return 1
 	}
@@ -165,6 +197,7 @@ func Run(args []string) int {
 
 	sm, err := wiring.NewSkillManager(cwd)
 	if err != nil {
+		log.Printf("Warning: failed to load skills: %v\n", err)
 		fmt.Printf("Warning: failed to load skills: %v\n", err)
 	}
 
@@ -217,6 +250,7 @@ func Run(args []string) int {
 		ConfigureClassifier: true,
 	})
 	if err != nil {
+		log.Println("Error creating agent:", err)
 		fmt.Println("Error creating agent:", err)
 		return 1
 	}
@@ -240,6 +274,7 @@ func Run(args []string) int {
 		Spawn:                  true,
 		SpawnApprovalRequester: spawnApprovalBroker,
 	}); err != nil {
+		log.Println("Error registering tools:", err)
 		fmt.Println("Error registering tools:", err)
 		return 1
 	}
@@ -252,6 +287,7 @@ func Run(args []string) int {
 		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
 	)
 	if _, err := p.Run(); err != nil {
+		log.Println("Error running program:", err)
 		fmt.Println("Error running program:", err)
 		return 1
 	}

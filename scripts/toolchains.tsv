@@ -1,0 +1,12 @@
+# tool version os arch sha256 official-url
+# Go hashes: go.dev/dl/?mode=json&include=all; Node: nodejs.org/dist/v22.23.2/SHASUMS256.txt
+# pnpm archive verified against registry.npmjs.org/pnpm/10.30.3 dist.integrity before SHA-256 pinning.
+go 1.25.3 darwin amd64 1641050b422b80dfd6299f8aa7eb8798d1cd23eac7e79f445728926e881b7bcd https://go.dev/dl/go1.25.3.darwin-amd64.tar.gz
+go 1.25.3 darwin arm64 7c083e3d2c00debfeb2f77d9a4c00a1aac97113b89b9ccc42a90487af3437382 https://go.dev/dl/go1.25.3.darwin-arm64.tar.gz
+go 1.25.3 linux amd64 0335f314b6e7bfe08c3d0cfaa7c19db961b7b99fb20be62b0a826c992ad14e0f https://go.dev/dl/go1.25.3.linux-amd64.tar.gz
+go 1.25.3 linux arm64 1d42ebc84999b5e2069f5e31b67d6fc5d67308adad3e178d5a2ee2c9ff2001f5 https://go.dev/dl/go1.25.3.linux-arm64.tar.gz
+node 22.23.2 darwin arm64 61130f394c1630d211dd50aecc4353d379480f36d3ac913cd85dbba1aed585c6 https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-arm64.tar.gz
+node 22.23.2 darwin amd64 58e99022c2ff89395576cc7fd4d98cea24bb68081475d5f88b801ee8729fb026 https://nodejs.org/dist/v22.23.2/node-v22.23.2-darwin-x64.tar.gz
+node 22.23.2 linux arm64 013b59cfd2819703a6f4a14ab891fc46fc2a4e3f5bcd92de3fb4929b43e35b30 https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-arm64.tar.gz
+node 22.23.2 linux amd64 b294a556e639d64338823920e5866c21c02741742d2e1529ee1a225c1ec9252a https://nodejs.org/dist/v22.23.2/node-v22.23.2-linux-x64.tar.gz
+pnpm 10.30.3 any any ff0a72140f6a6d66c0b284f6c9560aff605518e28c29aeac25fb262b74331588 https://registry.npmjs.org/pnpm/-/pnpm-10.30.3.tgz

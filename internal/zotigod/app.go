@@ -25,7 +25,9 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
@@ -495,9 +497,10 @@ type workerReadyRequest struct {
 }
 
 // Run starts zotigod and returns a process exit code.
-func Run(args []string) int {
+func Run(args []string) (exitCode int) {
 	fs := flag.NewFlagSet("zotigod", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
+	versionFlag := fs.Bool("version", false, "Print program release version")
 
 	addr := fs.String("addr", defaultAddr, "Address to listen on")
 	authTokenFile := fs.String("auth-token-file", "", "File containing the bearer token required by public APIs")
@@ -513,8 +516,25 @@ func Run(args []string) int {
 	codexReasoningEffort := fs.String("codex-reasoning-effort", "", "Codex reasoning effort")
 	codexThreadID := fs.String("codex-thread-id", "", "Existing Codex thread id")
 	if err := fs.Parse(args); err != nil {
+		stopLogging := diagnostics.Start("daemon")
+		log.Printf("argument_error: %v", err)
+		stopLogging()
 		return 2
 	}
+	if *versionFlag {
+		fmt.Printf("zotigod %s\n", buildinfo.Version)
+		return 0
+	}
+	stopLogging := diagnostics.Start("daemon")
+	defer stopLogging()
+	log.Printf("daemon_start version=%s pid=%d", buildinfo.Version, os.Getpid())
+	defer func() {
+		if value := recover(); value != nil {
+			log.Printf("daemon_panic: %v", value)
+			panic(value)
+		}
+		log.Printf("daemon_exit code=%d", exitCode)
+	}()
 	if *workerMode {
 		daemonURL := *workerDaemonURL
 		if daemonURL == "" {
@@ -527,7 +547,7 @@ func Run(args []string) int {
 			SessionID: *workerSessionID,
 			AuthToken: workerAuthToken,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "zotigod worker failed: %v\n", err)
+			log.Printf("zotigod worker failed: %v", err)
 			return 1
 		}
 		return 0
@@ -546,13 +566,13 @@ func Run(args []string) int {
 			ReasoningEffort: *codexReasoningEffort, ThreadID: *codexThreadID,
 			SessionStoreRoot: *sessionStoreRoot,
 		}); err != nil {
-			fmt.Fprintf(os.Stderr, "zotigod Codex worker failed: %v\n", err)
+			log.Printf("zotigod Codex worker failed: %v", err)
 			return 1
 		}
 		return 0
 	}
 
-	logger := log.New(os.Stderr, "[zotigod] ", log.LstdFlags)
+	logger := log.New(log.Writer(), "[zotigod] ", log.LstdFlags)
 	var publicAuthToken string
 	if strings.TrimSpace(*authTokenFile) != "" {
 		var err error
@@ -621,7 +641,7 @@ func Run(args []string) int {
 	if binaryPath, _, discoverErr := codexapp.Discover(); discoverErr == nil && launcher != nil {
 		cacheDir, cacheErr := os.UserCacheDir()
 		if cacheErr == nil {
-			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), os.Stderr, codexapp.HostOptions{StopWhenIdle: true})
+			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), log.Writer(), codexapp.HostOptions{StopWhenIdle: true})
 		}
 		if cacheErr != nil {
 			logger.Printf("Codex runtime disabled: %v", cacheErr)
@@ -1018,7 +1038,11 @@ func (h *handler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	version, commit := buildinfo.Current()
 	writeAPIJSON(w, http.StatusOK, map[string]string{
+		"version":          version,
+		"commit":           commit,
+		"process_id":       fmt.Sprint(os.Getpid()),
 		"status":           "ok",
 		"protocol_version": apiProtocolVersion,
 	})
@@ -2053,6 +2077,7 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 }
 
 func writeAPIErrorCode(w http.ResponseWriter, status int, code string, message string) {
+	log.Printf("daemon_api_error status=%d code=%s", status, code)
 	writeJSON(w, status, apiErrorResponse{
 		Code:    code,
 		Message: message,

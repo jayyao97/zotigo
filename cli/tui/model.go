@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -693,6 +694,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.commitLine(timingSuffix)
 
 		case protocol.EventTypeError:
+			log.Printf("cli_turn_error session=%s error=%v", m.sessionID, msg.Error)
 			m.err = msg.Error
 			m.thinking = false
 			m.appendTurnFailed(msg.Error)
@@ -707,6 +709,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case errMsg:
+		log.Printf("cli_runtime_error: %v", msg)
 		if strings.Contains(msg.Error(), "agent is not paused") {
 			return m, nil
 		}

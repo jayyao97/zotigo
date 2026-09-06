@@ -138,7 +138,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	hookDispatcher := cfg.HookDispatcher
 	var ownedHookDispatcher *hooks.Dispatcher
 	if hookDispatcher == nil {
-		hookLogger := log.New(os.Stderr, "[zotigo-hooks] ", log.LstdFlags)
+		hookLogger := log.New(log.Writer(), "[zotigo-hooks] ", log.LstdFlags)
 		ownedHookDispatcher, err = hooks.LoadDefault(hookLogger)
 		if err != nil {
 			hookLogger.Printf("hook_config outcome=failed error=%q", err)

@@ -14,6 +14,8 @@ make test                 # unit + integration tests
 make test-e2e             # E2E tests (need zotigo.e2e.yaml — see E2E_TESTING.md)
 go test ./core/agent/... -count=1 -run TestAgent_<Name>   # focused test loop
 gofmt -w <file>           # pre-commit hook will reject otherwise
+python3 scripts/install_test.py  # source installer transaction tests
+python3 scripts/toolchains_test.py  # isolated download/checksum/cache tests
 make build                # produces ./build/zotigo
 go run ./cmd/zotigo       # run the TUI from source
 go run ./cmd/acp          # run the ACP JSON-RPC server
