@@ -3,10 +3,12 @@ package zotigod
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 )
 
@@ -20,6 +22,7 @@ type workerRuntimeTransport struct {
 	closedCh          chan struct{}
 	closeOnce         sync.Once
 	approvalMu        sync.Mutex
+	approvalGate      chan struct{}
 	approval          *approvalRequest
 	decisionCh        chan []zotigotransport.ApprovalResult
 	resolved          bool
@@ -36,13 +39,16 @@ type workerApprovalResolution struct {
 }
 
 func newWorkerRuntimeTransport(sessionID string, display *workerDisplayLog, notifyApproval func(context.Context, approvalRequestResponse)) *workerRuntimeTransport {
-	return &workerRuntimeTransport{
+	transport := &workerRuntimeTransport{
 		sessionID:      sessionID,
 		display:        display,
 		notifyApproval: notifyApproval,
 		inputCh:        make(chan zotigotransport.UserInput, 32),
 		closedCh:       make(chan struct{}),
+		approvalGate:   make(chan struct{}, 1),
 	}
+	transport.approvalGate <- struct{}{}
+	return transport
 }
 
 func (t *workerRuntimeTransport) Send(ctx context.Context, event protocol.Event) error {
@@ -54,7 +60,32 @@ func (t *workerRuntimeTransport) Receive(context.Context) <-chan zotigotransport
 }
 
 func (t *workerRuntimeTransport) RequestApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) ([]zotigotransport.ApprovalResult, error) {
-	_, decisionCh, err := t.beginApproval(ctx, pending)
+	return t.requestApproval(ctx, pending, "")
+}
+
+func (t *workerRuntimeTransport) RequestSpawnApproval(ctx context.Context, request builtin.SpawnApprovalRequest) ([]zotigotransport.ApprovalResult, error) {
+	pending := make([]zotigotransport.PendingToolCall, 0, len(request.Actions))
+	for _, action := range request.Actions {
+		if action == nil {
+			continue
+		}
+		pending = append(pending, zotigotransport.PendingToolCall{
+			ID: action.ToolCallID, Name: action.Name, Arguments: action.Arguments,
+		})
+	}
+	return t.requestApproval(ctx, pending, strings.TrimSpace(request.AgentName))
+}
+
+func (t *workerRuntimeTransport) requestApproval(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string) ([]zotigotransport.ApprovalResult, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	case <-t.closedCh:
+		return nil, zotigotransport.ErrTransportClosed
+	case <-t.approvalGate:
+	}
+	defer func() { t.approvalGate <- struct{}{} }()
+	_, decisionCh, err := t.beginApprovalFrom(ctx, pending, requesterName)
 	if err != nil {
 		return nil, err
 	}
@@ -90,14 +121,18 @@ func (t *workerRuntimeTransport) SendInput(ctx context.Context, input zotigotran
 }
 
 func (t *workerRuntimeTransport) beginApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
-	return t.registerApproval(ctx, pending, false)
+	return t.beginApprovalFrom(ctx, pending, "")
+}
+
+func (t *workerRuntimeTransport) beginApprovalFrom(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
+	return t.registerApproval(ctx, pending, requesterName, false)
 }
 
 func (t *workerRuntimeTransport) ensureApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
-	return t.registerApproval(ctx, pending, true)
+	return t.registerApproval(ctx, pending, "", true)
 }
 
-func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending []zotigotransport.PendingToolCall, reuseReleased bool) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
+func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string, reuseReleased bool) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
 	displayPending := make([]zotigosession.DisplayPendingApproval, 0, len(pending))
 	for _, item := range pending {
 		displayPending = append(displayPending, zotigosession.DisplayPendingApproval{
@@ -105,6 +140,7 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 			ToolName:    item.Name,
 			Arguments:   item.Arguments,
 			Description: item.Description,
+			Source:      requesterSource(requesterName),
 		})
 	}
 	t.approvalMu.Lock()
@@ -176,6 +212,13 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 	}
 	t.approvalMu.Unlock()
 	return approval, decisionCh, nil
+}
+
+func requesterSource(name string) string {
+	if strings.TrimSpace(name) == "" {
+		return ""
+	}
+	return "subagent:" + strings.TrimSpace(name)
 }
 
 func (t *workerRuntimeTransport) interruptApprovalForSteering(ctx context.Context, turnID string) error {

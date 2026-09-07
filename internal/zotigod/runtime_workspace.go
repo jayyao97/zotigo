@@ -39,7 +39,7 @@ func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zoti
 	}
 	spec := zotigoruntime.WorkerLaunchSpec{
 		SessionID: sessionID, SessionStoreRoot: h.sessionStoreRoot(), Agent: agentKind, WorkingDirectory: stored.WorkingDirectory,
-		Settings: zotigoruntime.Settings{Model: stored.Model, ReasoningEffort: stored.ReasoningEffort},
+		Settings: zotigoruntime.Settings{Model: stored.Model, ReasoningEffort: stored.ReasoningEffort, ApprovalPolicy: string(stored.ApprovalPolicy)},
 	}
 	if stored.ConversationID != "" {
 		spec.SessionBinding = &zotigoruntime.BackendBinding{

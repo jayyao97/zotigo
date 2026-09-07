@@ -16,6 +16,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 type failingApprovalPolicyStore struct {
@@ -195,6 +196,66 @@ func TestSessionApprovalPolicyChangeQueuesRunningWorkerCommand(t *testing.T) {
 	}
 	if len(commands.Commands) != 2 || commands.Commands[0].ApprovalPolicy == nil || commands.Commands[1].ApprovalPolicy == nil || commands.Commands[0].ApprovalPolicy.Policy != agent.ApprovalPolicyBypass || commands.Commands[1].ApprovalPolicy.Policy != agent.ApprovalPolicyAuto {
 		t.Fatalf("unexpected durable policy order: %#v", commands.Commands)
+	}
+}
+
+func TestSessionApprovalPolicyChangeAppliesToOfflineCodexSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("create store: %v", err)
+	}
+	defer store.Close()
+	workDir := t.TempDir()
+	putStoredSession(t, store, "sess-codex-policy", workDir)
+	stored, err := store.Get(context.Background(), "sess-codex-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Agent = string(zotigoruntime.AgentCodex)
+	stored.ApprovalPolicy = agent.ApprovalPolicyAuto
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+
+	for _, policy := range []agent.ApprovalPolicy{agent.ApprovalPolicyBypass, agent.ApprovalPolicyAuto} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"approval_policy":%q}`, policy)
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-codex-policy/approval-policy", strings.NewReader(body)))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("change to %q status = %d: %s", policy, rec.Code, rec.Body.String())
+		}
+		stored, err = store.Get(context.Background(), "sess-codex-policy")
+		if err != nil || stored.ApprovalPolicy != policy {
+			t.Fatalf("stored Codex policy = %#v, err=%v, want %q", stored, err, policy)
+		}
+	}
+}
+
+func TestSessionApprovalPolicyChangeQueuesRunningCodexWorkerCommands(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	registry := newSessionRegistry()
+	registry.Add(Session{
+		ID: "sess-running-codex-policy", State: SessionStateRunning, Live: true,
+		Agent: string(zotigoruntime.AgentCodex), ApprovalPolicy: agent.ApprovalPolicyAuto,
+	})
+	handler := newHandler(registry, source)
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	worker, _ := connectWorker(t, server, "sess-running-codex-policy")
+	defer worker.Close()
+
+	for _, policy := range []agent.ApprovalPolicy{agent.ApprovalPolicyBypass, agent.ApprovalPolicyAuto} {
+		rec := httptest.NewRecorder()
+		body := fmt.Sprintf(`{"approval_policy":%q}`, policy)
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-running-codex-policy/approval-policy", strings.NewReader(body)))
+		if rec.Code != http.StatusAccepted {
+			t.Fatalf("change to %q status = %d: %s", policy, rec.Code, rec.Body.String())
+		}
+		msg := readWorkerMessage(t, worker)
+		if msg.Command == nil || msg.Command.Type != sessionCommandApprovalPolicy || msg.Command.ApprovalPolicy == nil || msg.Command.ApprovalPolicy.Policy != policy {
+			t.Fatalf("unexpected Codex worker command for %q: %#v", policy, msg)
+		}
 	}
 }
 

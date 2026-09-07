@@ -514,6 +514,7 @@ func Run(args []string) (exitCode int) {
 	codexWorkingDirectory := fs.String("codex-working-directory", "", "Codex worker working directory")
 	codexModel := fs.String("codex-model", "", "Codex model")
 	codexReasoningEffort := fs.String("codex-reasoning-effort", "", "Codex reasoning effort")
+	codexApprovalPolicy := fs.String("codex-approval-policy", "", "Codex approval policy")
 	codexThreadID := fs.String("codex-thread-id", "", "Existing Codex thread id")
 	if err := fs.Parse(args); err != nil {
 		stopLogging := diagnostics.Start("daemon")
@@ -563,7 +564,7 @@ func Run(args []string) (exitCode int) {
 			workerClientConfig: workerClientConfig{DaemonURL: daemonURL, SessionID: *workerSessionID, AuthToken: workerAuthToken},
 			SocketPath:         *codexSocket,
 			WorkingDirectory:   *codexWorkingDirectory, Model: *codexModel,
-			ReasoningEffort: *codexReasoningEffort, ThreadID: *codexThreadID,
+			ReasoningEffort: *codexReasoningEffort, ApprovalPolicy: *codexApprovalPolicy, ThreadID: *codexThreadID,
 			SessionStoreRoot: *sessionStoreRoot,
 		}); err != nil {
 			log.Printf("zotigod Codex worker failed: %v", err)
@@ -917,9 +918,17 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageApprovalResult:
 			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == approvalStatusResolved {
+				handler.reconcileHumanRequestState(sessionID)
+			}
+		case workerMessageInteractionRequest:
+			if msg.InteractionRequest != nil && msg.InteractionRequest.Status == interactionStatusPending && msg.InteractionRequest.IsBlocking {
 				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
-				_, _ = handler.registry.ResumeAfterApproval(sessionID)
+				_, _ = handler.registry.Pause(sessionID)
 				unlock()
+			}
+		case workerMessageInteractionResult:
+			if msg.InteractionResult != nil && msg.InteractionResult.Error == "" && msg.InteractionResult.Interaction != nil && msg.InteractionResult.Interaction.Status != interactionStatusPending && msg.InteractionResult.Interaction.IsBlocking {
+				handler.reconcileHumanRequestState(sessionID)
 			}
 		case workerMessageConversationBound:
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
@@ -996,6 +1005,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/images/{name...}", withPathValues("id", "name", handler.handleSessionImage))
 	mux.HandleFunc("/sessions/{id}/approvals/{$}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/sessions/{id}/approvals/{approval_id...}", withPathValues("id", "approval_id", handler.handleApprovalDecision))
+	mux.HandleFunc("/sessions/{id}/interactions/{$}", handler.handleSessionRouteNotFound)
+	mux.HandleFunc("/sessions/{id}/interactions/{interaction_id...}", withPathValues("id", "interaction_id", handler.handleInteractionResponse))
 	mux.HandleFunc("/sessions/{id}/{route...}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/internal/sessions/{$}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/internal/sessions/{id}/commands", withPathValue("id", handler.handleWorkerCommands))
@@ -1153,11 +1164,6 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusServiceUnavailable, "codex sessions require persistent session storage")
 				return
 			}
-			if req.ApprovalPolicy != "" && approvalPolicy != agent.ApprovalPolicyBypass {
-				writeAPIError(w, http.StatusBadRequest, "codex sessions do not support approval callbacks; approval_policy must be bypass or omitted")
-				return
-			}
-			approvalPolicy = agent.ApprovalPolicyBypass
 			if err := h.validateCodexSettings(r.Context(), strings.TrimSpace(req.Model), strings.TrimSpace(req.ReasoningEffort)); err != nil {
 				writeAPIError(w, http.StatusBadRequest, err.Error())
 				return
@@ -1877,6 +1883,12 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusConflict, "worker ready does not match the active connection")
 		return
 	}
+	if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
+		if err := h.expireDisconnectedCodexRequests(r.Context(), id); err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("expire stale Codex requests: %v", err))
+			return
+		}
+	}
 	if session.State == SessionStatePaused {
 		var err error
 		session, err = h.reconcileApprovalState(r.Context(), id, session)
@@ -1910,7 +1922,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 
 func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session, generation string) {
 	items, _, err := h.items.LoadItems(ctx, session.ID)
-	if err != nil || lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items) {
+	if err != nil || lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingHumanRequest(items) {
 		return
 	}
 	h.closeWorkerWhenIdle(session.ID, generation, workerIdle{CommandSequence: latestCommandSequence(items)})
@@ -1940,6 +1952,11 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 	}
 	h.events.WakeBarrier(id)
 	if session, ok := h.registry.Get(id); ok {
+		if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
+			if err := h.expireDisconnectedCodexRequests(context.Background(), id); err != nil && h.logger != nil {
+				h.logger.Printf("expire Codex requests on disconnect: session=%s error=%v", id, err)
+			}
+		}
 		_, _ = h.reconcileApprovalState(context.Background(), id, session)
 	}
 	h.registry.MarkIdle(id)
@@ -1955,7 +1972,7 @@ func (h *handler) reconcileApprovalState(ctx context.Context, id string, session
 	if err != nil {
 		return Session{}, err
 	}
-	if hasPendingApproval(items) {
+	if hasPendingHumanRequest(items) {
 		if session.State == SessionStatePaused {
 			return session, nil
 		}
@@ -1965,6 +1982,16 @@ func (h *handler) reconcileApprovalState(ctx context.Context, id string, session
 		return h.registry.ResumeAfterApproval(id)
 	}
 	return session, nil
+}
+
+func (h *handler) reconcileHumanRequestState(id string) {
+	unlock := h.sessionOps.lockWorkerCallback(id)
+	defer unlock()
+	session, ok := h.registry.Get(id)
+	if !ok {
+		return
+	}
+	_, _ = h.reconcileApprovalState(context.Background(), id, session)
 }
 
 func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id string) {

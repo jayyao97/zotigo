@@ -6972,6 +6972,66 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	}
 }
 
+func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := storedDisplayItemSource{store: store}
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+
+	interaction, err := newUserInputInteraction(created.ID, "turn-1", "item-1", interactionRequester{Agent: "codex", Name: "Subagent"}, []interactionQuestion{{ID: "mode", Question: "Choose", Options: []interactionOption{{Label: "Safe"}}}}, true, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := source.AppendItem(context.Background(), created.ID, interactionDisplayItem(interaction, false)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.Pause(created.ID); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		var message workerMessage
+		if err := worker.ReadJSON(&message); err != nil {
+			done <- err
+			return
+		}
+		if message.InteractionResponse == nil || message.InteractionResponse.Answers["mode"][0] != "Safe" {
+			done <- fmt.Errorf("unexpected interaction response: %#v", message)
+			return
+		}
+		resolvedAt := time.Now().UTC()
+		resolved := interaction
+		resolved.Status = interactionStatusResolved
+		resolved.Answers = message.InteractionResponse.Answers
+		resolved.ResolvedAt = &resolvedAt
+		if _, err := source.AppendItem(context.Background(), created.ID, interactionDisplayItem(resolved, true)); err != nil {
+			done <- err
+			return
+		}
+		done <- worker.WriteJSON(workerMessage{Type: workerMessageInteractionResult, InteractionResult: &workerInteractionResult{RequestID: message.InteractionResponse.RequestID, Interaction: &resolved}})
+	}()
+	recorder := httptest.NewRecorder()
+	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/interactions/"+interaction.ID, strings.NewReader(`{"answers":{"mode":["Safe"]}}`)))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
+		t.Fatalf("session state = %q", got.State)
+	}
+}
+
 func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()

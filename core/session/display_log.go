@@ -20,6 +20,8 @@ const (
 	DisplayItemTurnInterrupted       DisplayItemType = "turn_interrupted"
 	DisplayItemApprovalRequest       DisplayItemType = "approval_request"
 	DisplayItemApprovalDecision      DisplayItemType = "approval_decision"
+	DisplayItemInteractionRequest    DisplayItemType = "interaction_request"
+	DisplayItemInteractionResponse   DisplayItemType = "interaction_response"
 	DisplayItemContextCompacted      DisplayItemType = "context_compacted"
 	DisplayItemProfileChanged        DisplayItemType = "profile_changed"
 	DisplayItemProfileFailed         DisplayItemType = "profile_change_failed"
@@ -118,6 +120,39 @@ type DisplayApprovalDecision struct {
 	ModifiedArgs string `json:"modified_args,omitempty"`
 }
 
+type DisplayInteraction struct {
+	ID            string                       `json:"id,omitempty"`
+	Kind          string                       `json:"kind,omitempty"`
+	Status        string                       `json:"status,omitempty"`
+	TurnID        string                       `json:"turn_id,omitempty"`
+	ItemID        string                       `json:"item_id,omitempty"`
+	Requester     *DisplayInteractionRequester `json:"requester,omitempty"`
+	Questions     []DisplayInteractionQuestion `json:"questions,omitempty"`
+	Answers       map[string][]string          `json:"answers,omitempty"`
+	IsBlocking    bool                         `json:"is_blocking,omitempty"`
+	AutoResolveMS *uint64                      `json:"auto_resolve_ms,omitempty"`
+}
+
+type DisplayInteractionRequester struct {
+	Agent    string `json:"agent,omitempty"`
+	ThreadID string `json:"thread_id,omitempty"`
+	Name     string `json:"name,omitempty"`
+}
+
+type DisplayInteractionQuestion struct {
+	ID       string                     `json:"id"`
+	Header   string                     `json:"header,omitempty"`
+	Question string                     `json:"question"`
+	IsOther  bool                       `json:"is_other,omitempty"`
+	IsSecret bool                       `json:"is_secret,omitempty"`
+	Options  []DisplayInteractionOption `json:"options,omitempty"`
+}
+
+type DisplayInteractionOption struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
+}
+
 type DisplayCommand struct {
 	Type           string                `json:"type,omitempty"`
 	Text           string                `json:"text,omitempty"`
@@ -165,6 +200,7 @@ type DisplayItem struct {
 	Content           []DisplayContentPart         `json:"content,omitempty"`
 	Turn              *DisplayTurn                 `json:"turn,omitempty"`
 	Approval          *DisplayApproval             `json:"approval,omitempty"`
+	Interaction       *DisplayInteraction          `json:"interaction,omitempty"`
 	Command           *DisplayCommand              `json:"command,omitempty"`
 	Profile           *DisplayProfileChange        `json:"profile,omitempty"`
 	ApprovalPolicy    *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`

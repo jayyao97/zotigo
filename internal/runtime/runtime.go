@@ -21,6 +21,7 @@ type BackendBinding struct {
 type Settings struct {
 	Model           string `json:"model,omitempty"`
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	ApprovalPolicy  string `json:"approval_policy,omitempty"`
 }
 
 type WorkerLaunchSpec struct {

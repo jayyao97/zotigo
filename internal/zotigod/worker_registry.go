@@ -34,6 +34,9 @@ const (
 	workerMessageApprovalRequest         workerMessageType = "approval_request"
 	workerMessageApprovalDecision        workerMessageType = "approval_decision"
 	workerMessageApprovalResult          workerMessageType = "approval_result"
+	workerMessageInteractionRequest      workerMessageType = "interaction_request"
+	workerMessageInteractionResponse     workerMessageType = "interaction_response"
+	workerMessageInteractionResult       workerMessageType = "interaction_result"
 	workerMessageConversationBound       workerMessageType = "conversation_bound"
 	workerMessageConversationBoundResult workerMessageType = "conversation_bound_result"
 	workerMessageInputRequest            workerMessageType = "input_request"
@@ -49,6 +52,9 @@ type workerMessage struct {
 	ApprovalRequest         *approvalRequestResponse       `json:"approval_request,omitempty"`
 	ApprovalDecision        *workerApprovalDecision        `json:"approval_decision,omitempty"`
 	ApprovalResult          *workerApprovalResult          `json:"approval_result,omitempty"`
+	InteractionRequest      *interactionRequest            `json:"interaction_request,omitempty"`
+	InteractionResponse     *workerInteractionResponse     `json:"interaction_response,omitempty"`
+	InteractionResult       *workerInteractionResult       `json:"interaction_result,omitempty"`
 	ConversationBound       *workerConversationBound       `json:"conversation_bound,omitempty"`
 	ConversationBoundResult *workerConversationBoundResult `json:"conversation_bound_result,omitempty"`
 	InputRequest            *workerInputRequest            `json:"input_request,omitempty"`
@@ -88,6 +94,18 @@ type workerApprovalResult struct {
 	RequestID string                   `json:"request_id"`
 	Approval  *approvalRequestResponse `json:"approval,omitempty"`
 	Error     string                   `json:"error,omitempty"`
+}
+
+type workerInteractionResponse struct {
+	RequestID     string              `json:"request_id"`
+	InteractionID string              `json:"interaction_id"`
+	Answers       map[string][]string `json:"answers"`
+}
+
+type workerInteractionResult struct {
+	RequestID   string              `json:"request_id"`
+	Interaction *interactionRequest `json:"interaction,omitempty"`
+	Error       string              `json:"error,omitempty"`
 }
 
 type workerConversationBound struct {
@@ -281,6 +299,21 @@ func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, a
 	return worker.submitApproval(ctx, approvalID, decisions)
 }
 
+func (r *workerRegistry) SubmitInteraction(ctx context.Context, sessionID, interactionID string, answers map[string][]string) (interactionRequest, error) {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	r.mu.Unlock()
+	if worker == nil {
+		return interactionRequest{}, fmt.Errorf("interaction response requires an online worker")
+	}
+	if r.approvalWait > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, r.approvalWait)
+		defer cancel()
+	}
+	return worker.submitInteraction(ctx, interactionID, answers)
+}
+
 func (r *workerRegistry) Has(sessionID string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -395,6 +428,7 @@ type workerConnection struct {
 	closeOnce           sync.Once
 	waitersMu           sync.Mutex
 	waiters             map[string]chan workerApprovalResult
+	interactionWaiters  map[string]chan workerInteractionResult
 	inputWaiters        map[string]chan workerInputResult
 	idleTimer           *time.Timer
 	idleEpoch           uint64
@@ -408,15 +442,16 @@ type workerConnection struct {
 
 func newWorkerConnection(sessionID string, generation string, conn *websocket.Conn, registry *workerRegistry) *workerConnection {
 	return &workerConnection{
-		sessionID:     sessionID,
-		generation:    generation,
-		conn:          conn,
-		registry:      registry,
-		sendCh:        make(chan workerMessage, 32),
-		doneCh:        make(chan struct{}),
-		waiters:       make(map[string]chan workerApprovalResult),
-		inputWaiters:  make(map[string]chan workerInputResult),
-		inputRequests: make(map[string]*workerInputSubmission),
+		sessionID:          sessionID,
+		generation:         generation,
+		conn:               conn,
+		registry:           registry,
+		sendCh:             make(chan workerMessage, 32),
+		doneCh:             make(chan struct{}),
+		waiters:            make(map[string]chan workerApprovalResult),
+		interactionWaiters: make(map[string]chan workerInteractionResult),
+		inputWaiters:       make(map[string]chan workerInputResult),
+		inputRequests:      make(map[string]*workerInputSubmission),
 	}
 }
 
@@ -589,9 +624,59 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 	}
 }
 
+func (c *workerConnection) submitInteraction(ctx context.Context, interactionID string, answers map[string][]string) (interactionRequest, error) {
+	requestID := newZotigodID("interaction_submit")
+	waiter := make(chan workerInteractionResult, 1)
+	c.waitersMu.Lock()
+	c.interactionWaiters[requestID] = waiter
+	c.waitersMu.Unlock()
+	defer func() {
+		c.waitersMu.Lock()
+		delete(c.interactionWaiters, requestID)
+		c.waitersMu.Unlock()
+	}()
+	msg := workerMessage{Type: workerMessageInteractionResponse, InteractionResponse: &workerInteractionResponse{
+		RequestID: requestID, InteractionID: interactionID, Answers: answers,
+	}}
+	select {
+	case <-ctx.Done():
+		return interactionRequest{}, ctx.Err()
+	case <-c.doneCh:
+		return interactionRequest{}, fmt.Errorf("worker disconnected")
+	case c.sendCh <- msg:
+	}
+	select {
+	case <-ctx.Done():
+		return interactionRequest{}, ctx.Err()
+	case <-c.doneCh:
+		return interactionRequest{}, fmt.Errorf("worker disconnected")
+	case result := <-waiter:
+		if result.Error != "" {
+			return interactionRequest{}, fmt.Errorf("worker rejected interaction response: %s", result.Error)
+		}
+		if result.Interaction == nil {
+			return interactionRequest{}, fmt.Errorf("worker returned an empty interaction result")
+		}
+		return *result.Interaction, nil
+	}
+}
+
 func (c *workerConnection) resolveApproval(result workerApprovalResult) {
 	c.waitersMu.Lock()
 	waiter := c.waiters[result.RequestID]
+	c.waitersMu.Unlock()
+	if waiter == nil {
+		return
+	}
+	select {
+	case waiter <- result:
+	default:
+	}
+}
+
+func (c *workerConnection) resolveInteraction(result workerInteractionResult) {
+	c.waitersMu.Lock()
+	waiter := c.interactionWaiters[result.RequestID]
 	c.waitersMu.Unlock()
 	if waiter == nil {
 		return
@@ -748,6 +833,11 @@ func (c *workerConnection) readLoop() {
 		if msg.Type == workerMessageApprovalResult && msg.ApprovalResult != nil {
 			c.registry.receive(c, msg)
 			c.resolveApproval(*msg.ApprovalResult)
+			continue
+		}
+		if msg.Type == workerMessageInteractionResult && msg.InteractionResult != nil {
+			c.registry.receive(c, msg)
+			c.resolveInteraction(*msg.InteractionResult)
 			continue
 		}
 		if msg.Type == workerMessageInputResult && msg.InputResult != nil {

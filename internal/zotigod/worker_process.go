@@ -30,6 +30,7 @@ func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime
 		"--codex-working-directory", spec.WorkingDirectory,
 		"--codex-model", spec.Settings.Model,
 		"--codex-reasoning-effort", spec.Settings.ReasoningEffort,
+		"--codex-approval-policy", spec.Settings.ApprovalPolicy,
 	}
 	if spec.SessionBinding != nil && spec.SessionBinding.ConversationID != "" {
 		args = append(args, "--codex-thread-id", spec.SessionBinding.ConversationID)

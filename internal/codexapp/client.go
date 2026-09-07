@@ -153,6 +153,17 @@ func (c *Client) RespondError(id json.RawMessage, code int, message string) erro
 	})
 }
 
+func (c *Client) RespondResult(id json.RawMessage, result any) error {
+	if len(id) == 0 {
+		return fmt.Errorf("codex app-server request id is required")
+	}
+	var decodedID any
+	if err := json.Unmarshal(id, &decodedID); err != nil {
+		return fmt.Errorf("decode codex app-server request id: %w", err)
+	}
+	return c.writeJSON(map[string]any{"jsonrpc": "2.0", "id": decodedID, "result": result})
+}
+
 func (c *Client) Notifications() <-chan Message {
 	return c.notifications
 }

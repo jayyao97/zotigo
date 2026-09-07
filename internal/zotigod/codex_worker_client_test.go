@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
@@ -23,10 +25,14 @@ import (
 type codexWorkerRPC struct {
 	methods        []string
 	resumeApproval string
+	turnApproval   string
 	turnID         string
 	err            error
 	methodErrors   map[string]error
 	activeTurnID   string
+	responseID     string
+	response       any
+	responseCalls  int
 }
 
 func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*codexWorkerRuntime, *zotigosession.FileStore) {
@@ -794,6 +800,7 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 		r.resumeApproval, _ = request["approvalPolicy"].(string)
 	}
 	if method == "turn/start" && r.err == nil {
+		r.turnApproval, _ = request["approvalPolicy"].(string)
 		turnID := r.turnID
 		if turnID == "" {
 			turnID = "turn-1"
@@ -956,6 +963,13 @@ func TestResumeCodexThreadClassifiesAnotherAppOwnership(t *testing.T) {
 
 func (*codexWorkerRPC) Notify(string, any) error { return nil }
 
+func (r *codexWorkerRPC) RespondResult(id json.RawMessage, result any) error {
+	r.responseCalls++
+	r.responseID = string(id)
+	r.response = result
+	return r.err
+}
+
 func TestResumeCodexThreadUsesCWDWithoutUpdatingProject(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
@@ -967,7 +981,63 @@ func TestResumeCodexThreadUsesCWDWithoutUpdatingProject(t *testing.T) {
 	if got := fmt.Sprint(rpc.methods); got != "[thread/resume]" {
 		t.Fatalf("methods = %s", got)
 	}
-	if rpc.resumeApproval != "never" {
+	if rpc.resumeApproval != "on-request" {
 		t.Fatalf("resume approval policy = %q", rpc.resumeApproval)
+	}
+}
+
+func TestCodexApprovalPolicyMapping(t *testing.T) {
+	if got := codexApprovalPolicy(string(agent.ApprovalPolicyAuto)); got != "on-request" {
+		t.Fatalf("auto policy = %q", got)
+	}
+	if got := codexApprovalPolicy(string(agent.ApprovalPolicyBypass)); got != "never" {
+		t.Fatalf("bypass policy = %q", got)
+	}
+}
+
+func TestCodexApprovalPolicyCommandPersistsAndCompletesBeforeNextTurn(t *testing.T) {
+	rpc := &codexWorkerRPC{}
+	runtime, store := newCodexInputTestRuntime(t, "session-codex-policy", rpc)
+	stored, err := store.Get(context.Background(), "session-codex-policy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.ApprovalPolicy = agent.ApprovalPolicyBypass
+	stored.Model = "gpt-test"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	runtime.cfg.ApprovalPolicy = string(agent.ApprovalPolicyBypass)
+	commandItem, err := store.AppendDisplayItem(context.Background(), "session-codex-policy", zotigosession.DisplayItem{
+		ID: "policy-command", Type: zotigosession.DisplayItemSessionCommand,
+		Command: &zotigosession.DisplayCommand{Type: sessionCommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyAuto)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	command := commandResponse{
+		ID: "policy-command", Sequence: commandItem.Sequence, Type: sessionCommandApprovalPolicy,
+		ApprovalPolicy: &approvalPolicyCommandPayload{Policy: agent.ApprovalPolicyAuto},
+	}
+	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = store.Get(context.Background(), "session-codex-policy")
+	if err != nil || stored.ApprovalPolicy != agent.ApprovalPolicyAuto || runtime.cfg.ApprovalPolicy != string(agent.ApprovalPolicyAuto) {
+		t.Fatalf("persisted policy=%#v runtime=%q err=%v", stored, runtime.cfg.ApprovalPolicy, err)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-codex-policy")
+	if err != nil || len(items) != 2 || items[1].ApprovalPolicy == nil || items[1].ApprovalPolicy.CommandID != "policy-command" || items[1].ID == "policy-command" {
+		t.Fatalf("policy completion items=%#v err=%v", items, err)
+	}
+	cursor, err := recoverWorkerCommandCursor(context.Background(), store, "session-codex-policy")
+	if err != nil || cursor.Sequence != commandItem.Sequence {
+		t.Fatalf("recovered cursor=%#v err=%v, want %d", cursor, err, commandItem.Sequence)
+	}
+	_, _, err = runtime.callTurnStart(context.Background(), commandResponse{
+		ID: "message", Message: &messageCommandPayload{Text: "continue"},
+	}, nil)
+	if err != nil || rpc.turnApproval != "on-request" {
+		t.Fatalf("next turn approval=%q err=%v", rpc.turnApproval, err)
 	}
 }
