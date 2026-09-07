@@ -44,10 +44,67 @@ chmod +x "$2"
         compiler.chmod(0o755)
         self.env = {**os.environ, "PATH": f"{self.tools}:{os.environ['PATH']}"}
 
-    def install(self, **env):
+    def install(self, component="cli", **env):
         return subprocess.run(["sh", str(self.source / "install.sh"), "--source", str(self.source),
-                               "--prefix", str(self.prefix), "--no-service"],
+                               "--prefix", str(self.prefix), "--component", component, "--no-service"],
                               env={**self.env, **env}, text=True, capture_output=True)
+
+    def prepare_daemon(self):
+        compiler = self.tools / "go"
+        compiler.write_text(compiler.read_text().replace(
+            'echo "zotigo 1.0.0"',
+            'if [ "$1" = --version ]; then echo "zotigod 1.0.0"; else printenv ZOTIGO_CODEX_BINARY; fi'))
+        # The temporary install has no service; do not query the host's daemon.
+        for name in ("launchctl", "systemctl"):
+            tool = self.tools / name
+            tool.write_text("#!/bin/sh\nexit 1\n")
+            tool.chmod(0o755)
+
+    def test_daemon_captures_custom_codex_and_preserves_overrides(self):
+        self.prepare_daemon()
+        custom = self.base / "custom tools' directory"
+        custom.mkdir()
+        codex = custom / "codex"
+        codex.write_text('#!/usr/bin/env node\n')
+        codex.chmod(0o755)
+        node = custom / "node"
+        node.write_text('#!/bin/sh\necho codex-cli test\n')
+        node.chmod(0o755)
+        # Toolchain PATH changes must not replace the captured entry point.
+        decoy = self.tools / "codex"
+        decoy.write_text('#!/bin/sh\necho decoy-version\n')
+        decoy.chmod(0o755)
+        toolchains = self.source / "scripts/toolchains.sh"
+        toolchains.write_text(toolchains.read_text() + '\nensure_go() { PATH="$CAPTURE_TEST_TOOLS:$PATH"; export PATH; }\n')
+        self.env["CAPTURE_TEST_TOOLS"] = str(self.tools)
+        result = self.install(component="daemon", PATH=f"{custom}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        launcher = self.prefix / "daemon/current/run"
+        clean_env = {**self.env, "ZOTIGO_CODEX_BINARY": ""}
+        self.assertEqual(subprocess.check_output([str(launcher)], env=clean_env, text=True).strip(), str(codex))
+        explicit = {**clean_env, "ZOTIGO_CODEX_BINARY": "/explicit/codex"}
+        self.assertEqual(subprocess.check_output([str(launcher)], env=explicit, text=True).strip(), "/explicit/codex")
+        config = self.prefix / "config/daemon.env"
+        content = config.read_text() + '\nexport ZOTIGO_CODEX_BINARY=/configured/codex\n'
+        config.write_text(content)
+        result = self.install(component="daemon", PATH=f"{custom}:{self.env['PATH']}")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text(), content)
+        self.assertEqual(subprocess.check_output([str(launcher)], env=clean_env, text=True).strip(), "/configured/codex")
+
+    def test_daemon_without_usable_codex_still_installs(self):
+        self.prepare_daemon()
+        clean_path = f"{self.tools}:/usr/bin:/bin:/usr/sbin:/sbin"
+        for script in (None, "#!/bin/sh\nexit 1\n"):
+            if script:
+                codex = self.tools / "codex"
+                codex.write_text(script)
+                codex.chmod(0o755)
+            result = self.install(component="daemon", PATH=clean_path)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("ZOTIGO_CODEX_BINARY", (self.prefix / "daemon/current/run").read_text())
+            if script:
+                self.assertIn("cannot run", result.stderr)
 
     def test_piped_installer_selects_numeric_stable_tag(self):
         for args in [["tag", "v1.9.0"], ["-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-a", "v1.10.0", "-m", "stable"], ["tag", "v2.0.0-rc.1"]]:

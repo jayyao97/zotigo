@@ -60,6 +60,12 @@ fi
 
 . "$source_dir/scripts/install-common.sh"
 install_init
+# Capture the caller's choice before build toolchains can prepend to PATH.
+detected_codex=
+if [ "$component" = daemon ]; then
+  candidate=$(command -v codex 2>/dev/null || :)
+  case "$candidate" in /*) [ ! -f "$candidate" ] || [ ! -x "$candidate" ] || detected_codex=$candidate ;; esac
+fi
 need git
 need tar
 toolchain_manifest="$source_dir/scripts/toolchains.tsv"
@@ -76,11 +82,21 @@ validate_version
 "$stage/output/$binary" --version
 if [ "$component" = daemon ]; then
   need curl
+  # Validate with the PATH the generated launcher will actually use (including
+  # interpreters needed by npm wrappers), not just the interactive environment.
+  if [ -n "$detected_codex" ] && ! "$detected_codex" --version >/dev/null 2>&1; then
+    echo 'Codex found on PATH but cannot run in the service environment; configure ZOTIGO_CODEX_BINARY in daemon.env.' >&2
+    detected_codex=
+  fi
   config="$prefix/config/daemon.env"
   [ -e "$config" ] || printf '%s\n' '# Shell assignments; preserved on upgrade.' 'ZOTIGOD_ADDR=127.0.0.1:8766' '# ZOTIGOD_AUTH_TOKEN_FILE=/absolute/path/to/token' > "$config"
   {
     echo '#!/bin/sh'
     printf 'PATH=%s; export PATH\n' "$(quote "$PATH")"
+    if [ -n "$detected_codex" ]; then
+      printf '[ -n "${ZOTIGO_CODEX_BINARY:-}" ] || ZOTIGO_CODEX_BINARY=%s\n' "$(quote "$detected_codex")"
+      echo 'export ZOTIGO_CODEX_BINARY'
+    fi
     printf '. %s\n' "$(quote "$config")"
     printf 'set -- %s --addr "$ZOTIGOD_ADDR"\n' "$(quote "$root/current/zotigod")"
     echo '[ -z "${ZOTIGOD_AUTH_TOKEN_FILE:-}" ] || set -- "$@" --auth-token-file "$ZOTIGOD_AUTH_TOKEN_FILE"'

@@ -2,6 +2,21 @@
 
 ## Codex discovery in background services
 
+When installing the daemon, the installer captures an absolute `codex` executable
+from the caller's PATH before selecting build toolchains. It validates `--version`
+with the launcher's PATH and records a usable result as a default in that release's
+`run` script, not in the user's `daemon.env`. The launcher loads `daemon.env` after
+this default, so explicit configuration wins. A new installation captures again;
+if a captured path is later removed, reinstall from a terminal where Codex works
+or set an explicit path. Existing configuration files are never rewritten.
+
+For `curl ... | sh` in a logged-in terminal, the installer inherits that terminal's
+PATH; it does not load shell profiles. A non-interactive SSH command may not have
+the same PATH. Missing or unusable Codex does not prevent installation and leaves
+runtime discovery in effect. The installer retains its toolchain-adjusted PATH in
+the launcher, including interpreter lookup for script-based Codex entry points.
+It does not make external Node/version-manager directories immutable.
+
 The daemon does not load interactive shell startup files. Codex discovery checks
 `ZOTIGO_CODEX_BINARY` first (an absolute executable path), then `codex` on the
 daemon's `PATH`, then `~/.local/bin/codex`. On macOS it also checks the existing
