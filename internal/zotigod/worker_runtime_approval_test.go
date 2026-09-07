@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 )
 
@@ -86,6 +87,39 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 	results := <-resultCh
 	if len(results) != 1 || results[0].ToolCallID != "call-1" || !results[0].Approved {
 		t.Fatalf("unexpected approval results: %#v", results)
+	}
+}
+
+func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
+	const sessionID = "sess-subagent-approval"
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog(sessionID, source)
+	if _, err := display.StartTurn(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	notified := make(chan approvalRequestResponse, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
+	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
+	go func() {
+		results, _ := transport.RequestSpawnApproval(context.Background(), builtin.SpawnApprovalRequest{
+			AgentName: "reviewer", Actions: []*agent.PendingAction{{ToolCallID: "child-call", Name: "shell", Arguments: `{"command":"touch file"}`}},
+		})
+		resultCh <- results
+	}()
+	approval := <-notified
+	if got := approval.Pending[0].Source; got != "subagent:reviewer" {
+		t.Fatalf("approval source = %q", got)
+	}
+	resolution, err := transport.resolveApproval(context.Background(), approval.ID, []zotigosession.DisplayApprovalDecision{{ToolCallID: "child-call", Approved: false, Reason: "not needed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := transport.releaseApproval(context.Background(), resolution); err != nil {
+		t.Fatal(err)
+	}
+	result := <-resultCh
+	if len(result) != 1 || result[0].Approved || result[0].Reason != "not needed" {
+		t.Fatalf("subagent result = %#v", result)
 	}
 }
 

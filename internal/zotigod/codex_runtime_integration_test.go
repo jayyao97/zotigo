@@ -500,8 +500,11 @@ func TestCodexSessionUsesWorkspaceCWDWithoutRuntimeProjectBinding(t *testing.T) 
 	if launch.SessionStoreRoot != store.RootDir() {
 		t.Fatalf("launch session store root = %q, want %q", launch.SessionStoreRoot, store.RootDir())
 	}
+	if launch.Settings.ApprovalPolicy != string(agent.ApprovalPolicyAuto) {
+		t.Fatalf("launch approval policy = %q", launch.Settings.ApprovalPolicy)
+	}
 	stored, err := store.Get(ctx, created.ID)
-	if err != nil || stored.ApprovalPolicy != agent.ApprovalPolicyBypass {
+	if err != nil || stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
 		t.Fatalf("stored Codex approval policy = %v, err=%v", stored, err)
 	}
 }

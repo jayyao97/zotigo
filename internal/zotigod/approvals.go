@@ -47,6 +47,54 @@ func hasPendingApproval(items []zotigosession.DisplayItem) bool {
 	return turnID != "" && hasPendingApprovalForTurn(items, turnID)
 }
 
+func hasPendingHumanRequest(items []zotigosession.DisplayItem) bool {
+	turnID := lastOpenTurnID(items)
+	if turnID == "" {
+		return false
+	}
+	start := 0
+	for index, item := range items {
+		switch item.Type {
+		case zotigosession.DisplayItemTurnCompleted, zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
+			start = index + 1
+		}
+	}
+	for index := len(items) - 1; index >= 0; index-- {
+		if items[index].Type == zotigosession.DisplayItemTurnStarted && items[index].Turn != nil && items[index].Turn.ID == turnID {
+			if index > start {
+				start = index
+			}
+			break
+		}
+	}
+	pendingApprovals := make(map[string]struct{})
+	pendingInteractions := make(map[string]struct{})
+	for _, item := range items[start:] {
+		if item.Approval != nil {
+			key := item.Approval.ID
+			if key == "" {
+				key = "turn:" + item.Approval.TurnID
+			}
+			switch item.Type {
+			case zotigosession.DisplayItemApprovalRequest:
+				pendingApprovals[key] = struct{}{}
+			case zotigosession.DisplayItemApprovalDecision:
+				delete(pendingApprovals, key)
+			}
+		}
+		if item.Interaction == nil || !item.Interaction.IsBlocking || item.Interaction.ID == "" {
+			continue
+		}
+		switch item.Type {
+		case zotigosession.DisplayItemInteractionRequest:
+			pendingInteractions[item.Interaction.ID] = struct{}{}
+		case zotigosession.DisplayItemInteractionResponse:
+			delete(pendingInteractions, item.Interaction.ID)
+		}
+	}
+	return len(pendingApprovals) > 0 || len(pendingInteractions) > 0
+}
+
 func approvalFromDisplayItems(sessionID string, approvalID string, items []zotigosession.DisplayItem) (approvalRequest, bool) {
 	var req approvalRequest
 	for _, item := range items {

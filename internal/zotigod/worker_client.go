@@ -149,7 +149,9 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		NotifyDisplay:  clientWriter.SendDisplayWake,
 		SyncDisplay:    clientWriter.SendDisplayWakeReliable,
 		DisplayBarrier: displayBarrier.Wait,
-		NotifyApproval: clientWriter.SendApprovalRequest,
+		NotifyApproval: func(ctx context.Context, approval approvalRequestResponse) {
+			_ = clientWriter.SendApprovalRequest(ctx, approval)
+		},
 		NotifyApprovalResolved: func(ctx context.Context, approval approvalRequestResponse) {
 			_ = clientWriter.SendApprovalResult(ctx, workerApprovalResult{Approval: &approval})
 		},
@@ -539,15 +541,18 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		agent.WithToolExecutionRecorder(durabilityRecorder)(ag)
 	}
 	ag.Restore(sess.AgentSnapshot)
+	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
+	transport.notifyApprovalResolved = cfg.NotifyApprovalResolved
 
 	stepStarted = time.Now()
 	lspManager := lsp.NewManager(cwd)
 	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:      appConfig,
-		Profile:     profile,
-		ShellPolicy: builtin.DefaultShellPolicy(),
-		LSPManager:  lspManager,
-		Spawn:       true,
+		Config:                 appConfig,
+		Profile:                profile,
+		ShellPolicy:            builtin.DefaultShellPolicy(),
+		LSPManager:             lspManager,
+		Spawn:                  true,
+		SpawnApprovalRequester: transport,
 	}); err != nil {
 		if ownsHookDispatcher {
 			closeHookDispatcher(hookDispatcher)
@@ -568,8 +573,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("repair open display turn: %w", err)
 	}
-	transport := newWorkerRuntimeTransport(cfg.SessionID, display, cfg.NotifyApproval)
-	transport.notifyApprovalResolved = cfg.NotifyApprovalResolved
 	runtime := &workerRuntime{
 		sessionID:     cfg.SessionID,
 		workDir:       cwd,
@@ -2129,6 +2132,18 @@ func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result work
 	}
 }
 
+func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result workerInteractionResult) bool {
+	msg := workerMessage{Type: workerMessageInteractionResult, InteractionResult: &result}
+	select {
+	case <-ctx.Done():
+		return false
+	case <-w.done:
+		return false
+	case w.sendCh <- msg:
+		return true
+	}
+}
+
 func (w *workerClientWriter) SendInputResult(ctx context.Context, result workerInputResult) bool {
 	msg := workerMessage{Type: workerMessageInputResult, InputResult: &result}
 	select {
@@ -2141,15 +2156,27 @@ func (w *workerClientWriter) SendInputResult(ctx context.Context, result workerI
 	}
 }
 
-func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval approvalRequestResponse) {
+func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval approvalRequestResponse) error {
 	msg := workerMessage{Type: workerMessageApprovalRequest, ApprovalRequest: &approval}
 	select {
 	case <-ctx.Done():
-		return
+		return ctx.Err()
 	case <-w.done:
-		return
+		return errors.New("worker connection is closed")
 	case w.sendCh <- msg:
-		return
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interaction interactionRequest) error {
+	msg := workerMessage{Type: workerMessageInteractionRequest, InteractionRequest: &interaction}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
 	}
 }
 

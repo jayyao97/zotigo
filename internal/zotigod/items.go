@@ -241,19 +241,20 @@ func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigose
 }
 
 type itemResponse struct {
-	ID                string                         `json:"id"`
-	Sequence          uint64                         `json:"sequence"`
-	Type              string                         `json:"type"`
-	Role              string                         `json:"role,omitempty"`
-	Content           []itemContentResponse          `json:"content,omitempty"`
-	Turn              *itemTurnResponse              `json:"turn,omitempty"`
-	Approval          *itemApprovalResponse          `json:"approval,omitempty"`
-	Command           *itemCommandResponse           `json:"command,omitempty"`
-	Profile           *itemProfileResponse           `json:"profile,omitempty"`
-	ApprovalPolicy    *itemApprovalPolicyResponse    `json:"approval_policy,omitempty"`
-	ContextCompaction *itemContextCompactionResponse `json:"context_compaction,omitempty"`
-	Error             string                         `json:"error,omitempty"`
-	CreatedAt         time.Time                      `json:"created_at"`
+	ID                string                            `json:"id"`
+	Sequence          uint64                            `json:"sequence"`
+	Type              string                            `json:"type"`
+	Role              string                            `json:"role,omitempty"`
+	Content           []itemContentResponse             `json:"content,omitempty"`
+	Turn              *itemTurnResponse                 `json:"turn,omitempty"`
+	Approval          *itemApprovalResponse             `json:"approval,omitempty"`
+	Interaction       *zotigosession.DisplayInteraction `json:"interaction,omitempty"`
+	Command           *itemCommandResponse              `json:"command,omitempty"`
+	Profile           *itemProfileResponse              `json:"profile,omitempty"`
+	ApprovalPolicy    *itemApprovalPolicyResponse       `json:"approval_policy,omitempty"`
+	ContextCompaction *itemContextCompactionResponse    `json:"context_compaction,omitempty"`
+	Error             string                            `json:"error,omitempty"`
+	CreatedAt         time.Time                         `json:"created_at"`
 }
 
 type itemContentResponse struct {
@@ -464,6 +465,7 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Content:           publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
 		Turn:              publicDisplayTurn(item.Turn),
 		Approval:          publicDisplayApproval(item.Approval),
+		Interaction:       item.Interaction,
 		Command:           publicDisplayCommand(item.Command),
 		Profile:           publicDisplayProfile(item.Profile),
 		ApprovalPolicy:    publicDisplayApprovalPolicy(item.ApprovalPolicy),
