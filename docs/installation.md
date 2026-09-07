@@ -1,5 +1,24 @@
 # Source installation (Linux and macOS)
 
+## Codex discovery in background services
+
+The daemon does not load interactive shell startup files. Codex discovery checks
+`ZOTIGO_CODEX_BINARY` first (an absolute executable path), then `codex` on the
+daemon's `PATH`, then `~/.local/bin/codex`. On macOS it also checks the existing
+user and system `Applications/ChatGPT.app/Contents/Resources/codex` locations.
+The user-bin entry may be a symlink to a standalone Codex release. Discovery does
+not modify `PATH`, install Codex, or choose among version-manager installations.
+
+For a custom location, add `export ZOTIGO_CODEX_BINARY=/absolute/path/to/codex`
+to `~/.local/share/zotigo/config/daemon.env` (or `PREFIX/config/daemon.env` for a
+custom install prefix). Explicit invalid paths fail rather than selecting another
+installation. This file is preserved during upgrades. Finish active tasks before
+restarting the daemon to reload its environment; restarting Desktop or Web alone
+does not reload daemon configuration. A script-based installation must also have
+its interpreter, such as Node, available in the daemon's environment.
+
+## Installation
+
 No Homebrew tap, separate manager, GitHub Release, or Apple Developer account is required for this source-install path. Run as your normal user. Git, curl, tar, and a SHA-256 utility (`sha256sum` or `shasum`) are prerequisites. On macOS, install Command Line Tools if Git is unavailable. Daemon services require a systemd user manager on Linux or a logged-in macOS GUI session.
 
 After the installer is merged and an initial stable tag is published:

@@ -47,6 +47,63 @@ func TestDiscoverUsesConfiguredBinary(t *testing.T) {
 	}
 }
 
+func TestDiscoverUsesUserBinOutsidePATH(t *testing.T) {
+	userHome := t.TempDir()
+	binaryPath := filepath.Join(userHome, ".local", "bin", "codex")
+	if err := os.MkdirAll(filepath.Dir(binaryPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "codex-standalone")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\necho codex-user-version\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, binaryPath); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(codexBinaryEnv, "")
+	t.Setenv("PATH", "")
+	t.Setenv("HOME", userHome)
+
+	discoveredPath, version, err := Discover()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if discoveredPath != binaryPath || version != "codex-user-version" {
+		t.Fatalf("Discover() = path:%q version:%q", discoveredPath, version)
+	}
+	host, err := NewHost("", t.TempDir(), io.Discard, HostOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer host.Close()
+	if host.binaryPath != binaryPath {
+		t.Fatalf("host binary = %q, want %q", host.binaryPath, binaryPath)
+	}
+	if os.Getenv("PATH") != "" {
+		t.Fatal("discovery modified PATH")
+	}
+
+	pathDir := t.TempDir()
+	pathBinary := filepath.Join(pathDir, "codex")
+	if err := os.WriteFile(pathBinary, []byte("#!/bin/sh\necho codex-path-version\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", pathDir)
+	if got, err := discoverBinaryPath(); err != nil || got != pathBinary {
+		t.Fatalf("PATH priority: got %q, err %v", got, err)
+	}
+	t.Setenv(codexBinaryEnv, target)
+	if got, err := discoverBinaryPath(); err != nil || got != target {
+		t.Fatalf("configured priority: got %q, err %v", got, err)
+	}
+	for _, invalid := range []string{"relative/codex", filepath.Join(userHome, "missing")} {
+		t.Setenv(codexBinaryEnv, invalid)
+		if _, err := discoverBinaryPath(); err == nil {
+			t.Fatalf("invalid configured binary %q silently fell back", invalid)
+		}
+	}
+}
+
 func TestDiscoverUsesChatGPTAppBinaryOutsidePATH(t *testing.T) {
 	if runtime.GOOS != "darwin" {
 		t.Skip("ChatGPT.app discovery is macOS-specific")

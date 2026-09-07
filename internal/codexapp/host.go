@@ -95,6 +95,13 @@ func discoverBinaryPath() (string, error) {
 	if binaryPath, err := exec.LookPath("codex"); err == nil {
 		return binaryPath, nil
 	}
+	// User services do not inherit the interactive shell's PATH. Resolve the
+	// stable user-installed entry point without changing the daemon's environment.
+	if userHome, err := os.UserHomeDir(); err == nil && filepath.IsAbs(userHome) {
+		if binaryPath := firstExecutable(filepath.Join(userHome, ".local", "bin", "codex")); binaryPath != "" {
+			return binaryPath, nil
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		candidates := []string{"/Applications/ChatGPT.app/Contents/Resources/codex"}
 		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
