@@ -7,6 +7,7 @@ import (
 	"io"
 	"sync"
 
+	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"go.lsp.dev/jsonrpc2"
 )
 
@@ -14,8 +15,7 @@ const (
 	// ProtocolVersion is the ACP protocol version we support.
 	ProtocolVersion = 1
 
-	agentName    = "zotigo"
-	agentVersion = "0.0.1"
+	agentName = "zotigo"
 )
 
 // PromptResult carries the result of a session/prompt callback so the
@@ -295,7 +295,7 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 		ProtocolVersion: ProtocolVersion,
 		AgentInfo: &Implementation{
 			Name:    agentName,
-			Version: agentVersion,
+			Version: buildinfo.Version,
 		},
 		AgentCapabilities: AgentCapabilities{
 			LoadSession: false,
