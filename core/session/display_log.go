@@ -38,6 +38,15 @@ type DisplayContentPart struct {
 	ToolResult *DisplayToolResult `json:"tool_result,omitempty"`
 }
 
+type DisplaySubagent struct {
+	ToolCallID  string `json:"tool_call_id"`
+	Name        string `json:"name,omitempty"`
+	AgentType   string `json:"agent_type,omitempty"`
+	WorkDir     string `json:"workdir,omitempty"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
+}
+
 type DisplayToolCall struct {
 	ID        string `json:"id,omitempty"`
 	Name      string `json:"name,omitempty"`
@@ -198,6 +207,7 @@ type DisplayItem struct {
 	Type              DisplayItemType              `json:"type"`
 	Role              string                       `json:"role,omitempty"`
 	Content           []DisplayContentPart         `json:"content,omitempty"`
+	Subagent          *DisplaySubagent             `json:"subagent,omitempty"`
 	Turn              *DisplayTurn                 `json:"turn,omitempty"`
 	Approval          *DisplayApproval             `json:"approval,omitempty"`
 	Interaction       *DisplayInteraction          `json:"interaction,omitempty"`

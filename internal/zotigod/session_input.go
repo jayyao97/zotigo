@@ -87,7 +87,9 @@ func sameCommandImagePaths(left commandResponse, right commandResponse) bool {
 
 func inputMessageFromRequest(request workerInputRequest) (message protocol.Message, err error) {
 	text, images, _ := commandInput(request.Command)
-	return userMessageFromCommand(text, images, "session input")
+	message, err = userMessageFromCommand(text, images, "session input")
+	message.ID = request.Command.ID
+	return message, err
 }
 
 func messageCommandForRequest(request workerInputRequest) commandResponse {

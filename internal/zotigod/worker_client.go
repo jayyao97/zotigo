@@ -820,8 +820,10 @@ func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerAp
 	if r.transport == nil {
 		return fmt.Errorf("approval transport is not configured")
 	}
-	if err := r.beginRuntimeWAL(ctx); err != nil {
-		return err
+	if r.runtimeWAL != nil && !r.runtimeWAL.Active() {
+		if err := r.beginRuntimeWAL(ctx); err != nil {
+			return err
+		}
 	}
 	return r.transport.releaseApproval(ctx, resolution)
 }

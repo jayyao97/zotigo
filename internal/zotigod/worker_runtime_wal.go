@@ -52,6 +52,12 @@ func (w *workerRuntimeWAL) Begin(ctx context.Context, sess *zotigosession.Sessio
 	return nil
 }
 
+func (w *workerRuntimeWAL) Active() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.header != nil
+}
+
 func (w *workerRuntimeWAL) RecordHistory(mutation agent.HistoryMutation) error {
 	return w.append(zotigosession.RuntimeWALRecord{Mutation: mutation})
 }

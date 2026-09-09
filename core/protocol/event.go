@@ -13,6 +13,7 @@ const (
 	EventTypeToolCallEnd    EventType = "tool_call_end"
 	EventTypeToolProgress   EventType = "tool_progress"
 	EventTypeToolResultDone EventType = "tool_result_done"
+	EventTypeSubagent       EventType = "subagent"
 
 	// Control
 	EventTypeContextCompacted EventType = "context_compacted"
@@ -31,6 +32,7 @@ type Event struct {
 	ContentPart       *ContentPart       `json:"content_part,omitempty"`
 	ToolCall          *ToolCall          `json:"tool_call,omitempty"`
 	ToolResult        *ToolResult        `json:"tool_result,omitempty"`
+	Subagent          *SubagentEvent     `json:"subagent,omitempty"`
 	ContextCompaction *ContextCompaction `json:"context_compaction,omitempty"`
 	SteeringIDs       []string           `json:"steering_ids,omitempty"`
 	// SteeringAck keeps steering out of Agent history until the host has
@@ -40,6 +42,18 @@ type Event struct {
 	FinishReason FinishReason `json:"finish_reason,omitempty"`
 	Error        error        `json:"error,omitempty"`
 	Usage        *Usage       `json:"usage,omitempty"`
+}
+
+// SubagentEvent associates one child-agent event with its parent spawn call.
+// Child agents cannot spawn, so nested Subagent events are not supported.
+type SubagentEvent struct {
+	ToolCallID  string `json:"tool_call_id"`
+	Name        string `json:"name,omitempty"`
+	AgentType   string `json:"agent_type,omitempty"`
+	WorkDir     string `json:"workdir,omitempty"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
+	Event       *Event `json:"event,omitempty"`
 }
 
 type ContextCompaction struct {

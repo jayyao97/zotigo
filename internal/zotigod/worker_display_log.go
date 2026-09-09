@@ -25,6 +25,7 @@ type workerDisplayLog struct {
 	terminalID  string
 	terminal    string
 	block       *workerDisplayBlock
+	subagents   map[string]*workerSubagentBlock
 	toolCalls   map[string]chan struct{}
 	toolCallErr map[string]error
 	steering    map[string]commandResponse
@@ -36,6 +37,11 @@ type workerDisplayBlock struct {
 	index    int
 	partType string
 	text     string
+}
+
+type workerSubagentBlock struct {
+	block workerDisplayBlock
+	info  zotigosession.DisplaySubagent
 }
 
 func newWorkerDisplayLog(sessionID string, items displayItemSource) *workerDisplayLog {
@@ -50,6 +56,7 @@ func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
 	l.terminalID = ""
 	l.terminal = ""
 	l.block = nil
+	l.subagents = make(map[string]*workerSubagentBlock)
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
 	l.steering = make(map[string]commandResponse)
@@ -393,6 +400,8 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 				ToolName:   event.ToolResult.ToolName,
 			})
 		}
+	case protocol.EventTypeSubagent:
+		return l.handleSubagentEventLocked(ctx, event.Subagent)
 	case protocol.EventTypeContextCompacted:
 		if event.ContextCompaction == nil {
 			return nil
@@ -509,6 +518,141 @@ func (l *workerDisplayLog) flushBlockLocked(ctx context.Context) error {
 	}
 	l.block = nil
 	return nil
+}
+
+func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subagent *protocol.SubagentEvent) error {
+	if subagent == nil || subagent.ToolCallID == "" {
+		return nil
+	}
+	info := zotigosession.DisplaySubagent{
+		ToolCallID: subagent.ToolCallID, Name: subagent.Name, AgentType: subagent.AgentType,
+		WorkDir: subagent.WorkDir, Description: subagent.Description, Status: "running",
+	}
+	if subagent.Status != "" {
+		info.Status = subagent.Status
+		return l.appendSubagentItemLocked(ctx, "", info, nil, "")
+	}
+	if subagent.Event == nil {
+		return nil
+	}
+	child := subagent.Event
+	switch child.Type {
+	case protocol.EventTypeContentDelta:
+		if child.ContentPartDelta == nil || child.ContentPartDelta.Text == "" {
+			return nil
+		}
+		partType := string(child.ContentPartDelta.Type)
+		if partType == "" {
+			partType = string(protocol.ContentTypeText)
+		}
+		current := l.subagents[subagent.ToolCallID]
+		if current != nil && (current.block.index != child.Index || current.block.partType != partType) {
+			if err := l.flushSubagentBlockLocked(ctx, subagent.ToolCallID); err != nil {
+				return err
+			}
+			current = nil
+		}
+		if current == nil {
+			current = &workerSubagentBlock{
+				block: workerDisplayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType},
+				info:  info,
+			}
+			l.subagents[subagent.ToolCallID] = current
+		}
+		current.block.text += child.ContentPartDelta.Text
+		if l.delta != nil && !l.deltaMuted {
+			l.delta(displayDeltaEvent{
+				ItemID: current.block.id, Role: string(protocol.RoleAssistant), PartType: partType,
+				Delta: child.ContentPartDelta.Text, Subagent: &current.info,
+			})
+		}
+		return nil
+	case protocol.EventTypeContentEnd:
+		current := l.subagents[subagent.ToolCallID]
+		if current == nil && child.ContentPart != nil && child.ContentPart.Text != "" {
+			partType := string(child.ContentPart.Type)
+			if partType == "" {
+				partType = string(protocol.ContentTypeText)
+			}
+			l.subagents[subagent.ToolCallID] = &workerSubagentBlock{
+				block: workerDisplayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType, text: child.ContentPart.Text},
+				info:  info,
+			}
+		} else if current != nil && child.ContentPart != nil && child.ContentPart.Text != "" {
+			current.block.text = child.ContentPart.Text
+		}
+		return l.flushSubagentBlockLocked(ctx, subagent.ToolCallID)
+	case protocol.EventTypeToolCallEnd:
+		if err := l.flushSubagentBlockLocked(ctx, subagent.ToolCallID); err != nil {
+			return err
+		}
+		if child.ToolCall == nil {
+			return nil
+		}
+		return l.appendSubagentItemLocked(ctx, "", info, []zotigosession.DisplayContentPart{{
+			Type:     string(protocol.ContentTypeToolCall),
+			ToolCall: &zotigosession.DisplayToolCall{ID: child.ToolCall.ID, Name: child.ToolCall.Name, Arguments: child.ToolCall.Arguments},
+		}}, "")
+	case protocol.EventTypeToolResultDone:
+		if err := l.flushSubagentBlockLocked(ctx, subagent.ToolCallID); err != nil {
+			return err
+		}
+		if child.ToolResult == nil {
+			return nil
+		}
+		return l.appendSubagentItemLocked(ctx, "", info, []zotigosession.DisplayContentPart{{
+			Type: string(protocol.ContentTypeToolResult), ToolResult: displayToolResultFromProtocol(child.ToolResult),
+		}}, "")
+	case protocol.EventTypeToolProgress:
+		if child.ToolResult != nil && child.ToolResult.ToolCallID != "" && child.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
+			l.delta(displayDeltaEvent{
+				ItemID: "subagent-tool-progress:" + subagent.ToolCallID + ":" + child.ToolResult.ToolCallID,
+				Role:   string(protocol.RoleAssistant), PartType: "tool_progress", Delta: child.ToolResult.Text,
+				ToolCallID: child.ToolResult.ToolCallID, ToolName: child.ToolResult.ToolName, Subagent: &info,
+			})
+		}
+		return nil
+	case protocol.EventTypeFinish:
+		if err := l.flushSubagentBlockLocked(ctx, subagent.ToolCallID); err != nil {
+			return err
+		}
+		if child.FinishReason == "need_approval" {
+			info.Status = "waiting_approval"
+		} else {
+			info.Status = "completed"
+		}
+		return l.appendSubagentItemLocked(ctx, "", info, nil, "")
+	case protocol.EventTypeError:
+		if err := l.flushSubagentBlockLocked(ctx, subagent.ToolCallID); err != nil {
+			return err
+		}
+		info.Status = "failed"
+		if child.Error != nil {
+			return l.appendSubagentItemLocked(ctx, "", info, nil, child.Error.Error())
+		}
+	}
+	return nil
+}
+
+func (l *workerDisplayLog) flushSubagentBlockLocked(ctx context.Context, toolCallID string) error {
+	current := l.subagents[toolCallID]
+	if current == nil || current.block.text == "" {
+		delete(l.subagents, toolCallID)
+		return nil
+	}
+	err := l.appendSubagentItemLocked(ctx, current.block.id, current.info, []zotigosession.DisplayContentPart{{
+		Type: current.block.partType, Text: current.block.text,
+	}}, "")
+	delete(l.subagents, toolCallID)
+	return err
+}
+
+func (l *workerDisplayLog) appendSubagentItemLocked(ctx context.Context, itemID string, info zotigosession.DisplaySubagent, content []zotigosession.DisplayContentPart, errText string) error {
+	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
+		Content: content, Subagent: &info, Error: errText,
+	})
+	return err
 }
 
 func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {

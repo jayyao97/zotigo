@@ -135,6 +135,104 @@ func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
 	}
 }
 
+func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source)
+	display := newWorkerDisplayLog("sess-subagent-stream", source)
+	var deltas []displayDeltaEvent
+	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	ctx := context.Background()
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	wrap := func(event protocol.Event) protocol.Event {
+		return protocol.Event{
+			Type: protocol.EventTypeSubagent,
+			Subagent: &protocol.SubagentEvent{
+				ToolCallID: "spawn-1", Name: "reviewer", AgentType: "general-purpose",
+				WorkDir: "/tmp/project", Description: "Review the change", Event: &event,
+			},
+		}
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.NewTextDeltaEvent("Checking "))); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.NewTextDeltaEvent("tests"))); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 2 || deltas[0].Subagent == nil || deltas[0].Subagent.ToolCallID != "spawn-1" || deltas[1].Delta != "tests" {
+		t.Fatalf("subagent deltas = %#v", deltas)
+	}
+	streamedItemID := deltas[0].ItemID
+	if err := display.HandleEvent(ctx, wrap(protocol.Event{
+		Type:        protocol.EventTypeContentEnd,
+		ContentPart: &protocol.ContentPart{Type: protocol.ContentTypeText, Text: "Checking tests"},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.Event{
+		Type:     protocol.EventTypeToolCallEnd,
+		ToolCall: &protocol.ToolCall{ID: "child-call", Name: "shell", Arguments: `{"command":"go test ./..."}`},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.Event{
+		Type: protocol.EventTypeToolProgress,
+		ToolResult: &protocol.ToolResult{
+			ToolCallID: "child-call", ToolName: "shell", Type: protocol.ToolResultTypeText, Text: "package one passed\n",
+		},
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if len(deltas) != 3 || deltas[2].PartType != "tool_progress" || deltas[2].ToolCallID != "child-call" || deltas[2].Subagent == nil {
+		t.Fatalf("subagent tool progress = %#v", deltas)
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.NewFinishEvent(protocol.FinishReason("need_approval")))); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.Event{
+		Type: protocol.EventTypeSubagent,
+		Subagent: &protocol.SubagentEvent{
+			ToolCallID: "spawn-1", Name: "reviewer", Status: "running",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, wrap(protocol.NewFinishEvent(protocol.FinishReasonStop))); err != nil {
+		t.Fatal(err)
+	}
+
+	items, _, err := source.LoadItems(ctx, "sess-subagent-stream")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 6 {
+		t.Fatalf("subagent items = %#v", items)
+	}
+	for _, item := range items[1:] {
+		if item.Type != zotigosession.DisplayItemAssistantMessage || item.Subagent == nil || item.Subagent.ToolCallID != "spawn-1" {
+			t.Fatalf("unexpected subagent item = %#v", item)
+		}
+	}
+	if items[1].Content[0].Text != "Checking tests" || items[2].Content[0].ToolCall == nil {
+		t.Fatalf("subagent content was not persisted: %#v %#v", items[1], items[2])
+	}
+	if items[1].ID != streamedItemID {
+		t.Fatalf("streamed item ID %q did not match durable item ID %q", streamedItemID, items[1].ID)
+	}
+	if items[3].Subagent.Status != "waiting_approval" {
+		t.Fatalf("subagent status = %q", items[3].Subagent.Status)
+	}
+	if items[4].Subagent.Status != "running" || items[5].Subagent.Status != "completed" {
+		t.Fatalf("subagent resume statuses = %q, %q", items[4].Subagent.Status, items[5].Subagent.Status)
+	}
+	page := getItems(t, handler, "/sessions/sess-subagent-stream/items")
+	if len(page.Items) != 6 || page.Items[1].Subagent == nil || page.Items[1].Subagent.ToolCallID != "spawn-1" {
+		t.Fatalf("public subagent items = %#v", page.Items)
+	}
+}
+
 func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	display := newWorkerDisplayLog("sess-compaction", source)
