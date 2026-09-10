@@ -26,6 +26,7 @@ type Settings struct {
 
 type WorkerLaunchSpec struct {
 	SessionID        string
+	Activation       uint64
 	SessionStoreRoot string
 	Agent            AgentKind
 	WorkingDirectory string

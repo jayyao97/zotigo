@@ -25,6 +25,7 @@ func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime
 		"--codex-worker",
 		"--daemon-url", l.daemonURL,
 		"--session-id", spec.SessionID,
+		"--worker-activation", fmt.Sprint(spec.Activation),
 		"--session-store-root", spec.SessionStoreRoot,
 		"--codex-socket", socketPath,
 		"--codex-working-directory", spec.WorkingDirectory,

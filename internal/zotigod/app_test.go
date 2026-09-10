@@ -2450,9 +2450,9 @@ func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
 	})
 	registry := newSessionRegistry()
 	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
-		store:                store,
-		launcher:             launcher,
-		workerConnectTimeout: 20 * time.Millisecond,
+		store:               store,
+		launcher:            launcher,
+		workerLaunchTimeout: 20 * time.Millisecond,
 	})
 
 	ownerCtx, cancelOwner := context.WithCancel(context.Background())
@@ -2471,7 +2471,7 @@ func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
 	for time.Now().Before(deadline) {
 		session, ok := registry.Get("sess-owner-timeout")
 		if ok && session.State == SessionStateFailed {
-			if !strings.Contains(session.Error, errWorkerConnectTimeout.Error()) {
+			if !strings.Contains(session.Error, errWorkerLaunchTimeout.Error()) {
 				t.Fatalf("unexpected daemon timeout error: %q", session.Error)
 			}
 			close(releaseLaunch)
@@ -2500,12 +2500,12 @@ func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
 		return ctx.Err()
 	})
 	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
-		store: store, launcher: launcher, workerConnectTimeout: 20 * time.Millisecond,
+		store: store, launcher: launcher, workerLaunchTimeout: 20 * time.Millisecond,
 	})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-launch-cancel/start", nil))
-	assertAPIError(t, rec, http.StatusServiceUnavailable, "service_unavailable", errWorkerConnectTimeout.Error())
+	assertAPIError(t, rec, http.StatusServiceUnavailable, "service_unavailable", errWorkerLaunchTimeout.Error())
 	select {
 	case <-launcherCanceled:
 	case <-time.After(time.Second):
@@ -2529,6 +2529,90 @@ func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
 	if got := getSession(t, handler, created.ID); got.State != SessionStateFailed {
 		t.Fatalf("expected state %q, got %q", SessionStateFailed, got.State)
 	}
+}
+
+func TestSessionStartConnectTimeoutBeginsAfterLauncherReturns(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	var server *httptest.Server
+	workerReady := make(chan *websocket.Conn, 1)
+	const connectTimeout = 250 * time.Millisecond
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		time.Sleep(2 * connectTimeout)
+		go func() {
+			conn, err := connectReadyWorker(server, sessionID)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{
+		launcher:             launcher,
+		workerConnectTimeout: connectTimeout,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	started := startSession(t, handler, created.ID)
+	if started.State != SessionStateRunning {
+		t.Fatalf("session state = %q, want %q", started.State, SessionStateRunning)
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected worker websocket connection")
+	}
+	defer worker.Close()
+}
+
+func TestWorkerConnectTimeoutCanRetryWithMessage(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	var server *httptest.Server
+	var launches atomic.Int32
+	workerReady := make(chan *websocket.Conn, 1)
+	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
+		if launches.Add(1) == 1 {
+			return nil
+		}
+		go func() {
+			conn, err := connectReadyWorker(server, sessionID)
+			if err != nil {
+				workerReady <- nil
+				return
+			}
+			serveTestWorkerInputs(t, conn, source, sessionID)
+			workerReady <- conn
+		}()
+		return nil
+	})
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{
+		launcher:             launcher,
+		workerConnectTimeout: 250 * time.Millisecond,
+	})
+	server = httptest.NewServer(handler)
+	defer server.Close()
+
+	created := createSession(t, handler)
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/start", nil))
+	assertAPIError(t, rec, http.StatusServiceUnavailable, "service_unavailable", errWorkerConnectTimeout.Error())
+
+	rec = httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"retry this session"}`))
+	handler.ServeHTTP(rec, req)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("message status = %d, want %d: %s", rec.Code, http.StatusCreated, rec.Body.String())
+	}
+	if launches.Load() != 2 {
+		t.Fatalf("worker launches = %d, want 2", launches.Load())
+	}
+	worker := <-workerReady
+	if worker == nil {
+		t.Fatal("expected retried worker websocket connection")
+	}
+	defer worker.Close()
 }
 
 func TestWorkerConnectTimeoutDoesNotFailNewActivation(t *testing.T) {
@@ -2698,6 +2782,37 @@ func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateStarting {
 		t.Fatalf("session state after rejected ready = %q, want %q", got.State, SessionStateStarting)
+	}
+}
+
+func TestCodexWorkerConnectRejectsStaleActivation(t *testing.T) {
+	registry := newSessionRegistry()
+	workers := newWorkerRegistry()
+	registry.Add(Session{
+		ID: "sess-stale-activation", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex), workerActivation: 2,
+	})
+	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	staleURL := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=sess-stale-activation&activation=1"
+	stale, response, err := websocket.DefaultDialer.Dial(staleURL, nil)
+	if stale != nil {
+		_ = stale.Close()
+	}
+	if err == nil || response == nil || response.StatusCode != http.StatusConflict {
+		t.Fatalf("stale worker connect error = %v, response = %#v", err, response)
+	}
+	_ = response.Body.Close()
+	if workers.Has("sess-stale-activation") {
+		t.Fatal("stale worker was registered")
+	}
+
+	current, generation := connectWorkerForActivation(t, server, "sess-stale-activation", "2")
+	defer current.Close()
+	markWorkerReady(t, server, "sess-stale-activation", generation)
+	if session, _ := registry.Get("sess-stale-activation"); session.State != SessionStateRunning {
+		t.Fatalf("current activation state = %q, want %q", session.State, SessionStateRunning)
 	}
 }
 
@@ -4595,7 +4710,8 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 	handler := newHandler(registry, source, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	worker := dialWorker(t, server, sessionID)
+	worker, generation := connectWorkerForActivation(t, server, sessionID, "0")
+	markWorkerReady(t, server, sessionID, generation)
 	defer worker.Close()
 
 	messageDone := make(chan *httptest.ResponseRecorder, 1)
@@ -8444,9 +8560,16 @@ func connectReadyWorker(server *httptest.Server, sessionID string) (*websocket.C
 }
 
 func connectWorker(t *testing.T, server *httptest.Server, sessionID string) (*websocket.Conn, string) {
+	return connectWorkerForActivation(t, server, sessionID, "")
+}
+
+func connectWorkerForActivation(t *testing.T, server *httptest.Server, sessionID string, activation string) (*websocket.Conn, string) {
 	t.Helper()
 
 	url := "ws" + strings.TrimPrefix(server.URL, "http") + "/internal/workers/connect?session_id=" + sessionID
+	if activation != "" {
+		url += "&activation=" + activation
+	}
 	conn, resp, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial worker websocket: %v", err)

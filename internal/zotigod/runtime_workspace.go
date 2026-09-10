@@ -10,12 +10,12 @@ import (
 )
 
 func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zotigoruntime.WorkerLaunchSpec, error) {
+	runtimeSession, ok := h.registry.Get(sessionID)
+	if !ok {
+		return zotigoruntime.WorkerLaunchSpec{}, errSessionNotFound
+	}
 	if h.store == nil {
-		session, ok := h.registry.Get(sessionID)
-		if !ok {
-			return zotigoruntime.WorkerLaunchSpec{}, errSessionNotFound
-		}
-		agentKind := zotigoruntime.AgentKind(session.Agent)
+		agentKind := zotigoruntime.AgentKind(runtimeSession.Agent)
 		if agentKind == "" {
 			agentKind = zotigoruntime.AgentZotigo
 		}
@@ -23,7 +23,7 @@ func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zoti
 			return zotigoruntime.WorkerLaunchSpec{}, fmt.Errorf("runtime %q requires persistent session storage", agentKind)
 		}
 		return zotigoruntime.WorkerLaunchSpec{
-			SessionID: sessionID, Agent: agentKind, WorkingDirectory: session.WorkingDirectory,
+			SessionID: sessionID, Activation: runtimeSession.workerActivation, Agent: agentKind, WorkingDirectory: runtimeSession.WorkingDirectory,
 		}, nil
 	}
 	stored, err := h.store.Get(ctx, sessionID)
@@ -38,7 +38,7 @@ func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zoti
 		agentKind = zotigoruntime.AgentZotigo
 	}
 	spec := zotigoruntime.WorkerLaunchSpec{
-		SessionID: sessionID, SessionStoreRoot: h.sessionStoreRoot(), Agent: agentKind, WorkingDirectory: stored.WorkingDirectory,
+		SessionID: sessionID, Activation: runtimeSession.workerActivation, SessionStoreRoot: h.sessionStoreRoot(), Agent: agentKind, WorkingDirectory: stored.WorkingDirectory,
 		Settings: zotigoruntime.Settings{Model: stored.Model, ReasoningEffort: stored.ReasoningEffort, ApprovalPolicy: string(stored.ApprovalPolicy)},
 	}
 	if stored.ConversationID != "" {
