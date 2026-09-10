@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -30,10 +31,44 @@ type codexWorkerRPC struct {
 	err            error
 	methodErrors   map[string]error
 	activeTurnID   string
+	turns          []codexTurn
 	responseID     string
 	response       any
 	responseCalls  int
 }
+
+type blockingCodexTurnStartRPC struct {
+	mu          sync.Mutex
+	methods     []string
+	startCalled chan struct{}
+	interrupted chan struct{}
+	startOnce   sync.Once
+	stopOnce    sync.Once
+}
+
+func (r *blockingCodexTurnStartRPC) Call(ctx context.Context, method string, _ any, response any) error {
+	r.mu.Lock()
+	r.methods = append(r.methods, method)
+	r.mu.Unlock()
+	switch method {
+	case "turn/start":
+		r.startOnce.Do(func() { close(r.startCalled) })
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-r.interrupted:
+		}
+		encoded, _ := json.Marshal(map[string]any{"turn": map[string]any{"id": "turn-active"}})
+		return json.Unmarshal(encoded, response)
+	case "turn/interrupt":
+		r.stopOnce.Do(func() { close(r.interrupted) })
+		return nil
+	default:
+		return fmt.Errorf("unexpected method %s", method)
+	}
+}
+
+func (r *blockingCodexTurnStartRPC) Notify(string, any) error { return nil }
 
 func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*codexWorkerRuntime, *zotigosession.FileStore) {
 	t.Helper()
@@ -76,6 +111,50 @@ func TestCodexAcceptInputUsesTurnStartForAtomicStartOrSteer(t *testing.T) {
 	items, _, err := store.ListDisplayItems(context.Background(), "session-input-steer")
 	if err != nil || len(items) != 2 || items[0].Command == nil || items[0].Command.Type != sessionCommandSteering || items[1].Type != zotigosession.DisplayItemSteeringMessage {
 		t.Fatalf("accepted steering items = %#v, err=%v", items, err)
+	}
+}
+
+func TestCodexUrgentInterruptUnblocksAtomicStartOrSteer(t *testing.T) {
+	rpc := &blockingCodexTurnStartRPC{startCalled: make(chan struct{}), interrupted: make(chan struct{})}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-stop", nil)
+	runtime.app = rpc
+	runtime.activeTurnID = "turn-active"
+	resultCh := make(chan workerInputResult, 1)
+	go func() {
+		resultCh <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
+			ID: "client-stop", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "one last steer"},
+		}}, nil, nil)
+	}()
+	select {
+	case <-rpc.startCalled:
+	case <-time.After(time.Second):
+		t.Fatal("turn/start was not called")
+	}
+
+	interrupts := make(chan workerInterruptTurn, 1)
+	interruptCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go serveCodexWorkerInterrupts(interruptCtx, rpc, interrupts)
+	interrupts <- workerInterruptTurn{ThreadID: "thread-1", TurnID: "turn-active"}
+
+	var result workerInputResult
+	select {
+	case result = <-resultCh:
+	case <-time.After(time.Second):
+		t.Fatal("atomic turn/start did not settle after urgent interrupt")
+	}
+	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering {
+		t.Fatalf("input result = %#v", result)
+	}
+	rpc.mu.Lock()
+	methods := append([]string(nil), rpc.methods...)
+	rpc.mu.Unlock()
+	if got := fmt.Sprint(methods); got != "[turn/start turn/interrupt]" {
+		t.Fatalf("RPC methods = %s", got)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-stop")
+	if err != nil || len(items) != 2 || items[0].ID != "client-stop" {
+		t.Fatalf("accepted input items = %#v, err=%v", items, err)
 	}
 }
 
@@ -814,9 +893,9 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 		}
 	}
 	if method == "thread/turns/list" {
-		turns := make([]codexTurn, 0, 1)
-		if r.activeTurnID != "" {
-			turns = append(turns, codexTurn{ID: r.activeTurnID, Status: "inProgress"})
+		turns := append([]codexTurn(nil), r.turns...)
+		if turns == nil && r.activeTurnID != "" {
+			turns = []codexTurn{{ID: r.activeTurnID, Status: "inProgress"}}
 		}
 		payload, err := sonic.Marshal(codexTurnList{Data: turns})
 		if err != nil {
@@ -827,6 +906,25 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 		}
 	}
 	return r.err
+}
+
+func TestCodexPauseAcknowledgesAlreadyInterruptedTurn(t *testing.T) {
+	rpc := &codexWorkerRPC{
+		methodErrors: map[string]error{"turn/interrupt": &codexapp.RPCError{Code: -32600, Message: "turn is not active"}},
+		turns:        []codexTurn{{ID: "turn-old", Status: "interrupted"}},
+	}
+	runtime, _ := newCodexInputTestRuntime(t, "session-pause-terminal", rpc)
+	runtime.activeTurnID = "turn-old"
+	command := commandResponse{ID: "pause-1", Sequence: 7, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}}
+	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
+		t.Fatalf("idempotent pause failed: %v", err)
+	}
+	if runtime.commandSequence != 7 {
+		t.Fatalf("pause command sequence = %d, want 7", runtime.commandSequence)
+	}
+	if got := fmt.Sprint(rpc.methods); got != "[turn/interrupt thread/turns/list]" {
+		t.Fatalf("RPC methods = %s", got)
+	}
 }
 
 func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testing.T) {

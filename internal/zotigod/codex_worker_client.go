@@ -40,6 +40,7 @@ type codexWorkerChannels struct {
 	approvals    <-chan workerApprovalDecision
 	interactions <-chan workerInteractionResponse
 	boundResults <-chan workerConversationBoundResult
+	interrupts   <-chan workerInterruptTurn
 	errors       <-chan error
 }
 
@@ -158,6 +159,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	runtime.toolNames = make(map[string]string)
 	runtime.toolArguments = make(map[string]string)
 	runtime.toolNativeNames = make(map[string]string)
+	go serveCodexWorkerInterrupts(ctx, appClient, channels.interrupts)
 	if cfg.ThreadID != "" {
 		items, _, err := store.ListDisplayItems(ctx, cfg.SessionID)
 		if err != nil {
@@ -997,11 +999,24 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 	case sessionCommandPause:
 		if r.activeTurnID == "" {
 			r.acknowledgeCommand(command.Sequence)
+			return r.sendIdleAfterPause(ctx, command.Sequence)
+		}
+		targetTurnID := r.activeTurnID
+		if command.Pause != nil && command.Pause.TurnID != "" {
+			targetTurnID = command.Pause.TurnID
+		}
+		if targetTurnID != r.activeTurnID {
+			r.acknowledgeCommand(command.Sequence)
 			return nil
 		}
 		var response any
-		if err := r.app.Call(ctx, "turn/interrupt", map[string]any{"threadId": r.threadID, "turnId": r.activeTurnID}, &response); err != nil {
-			return err
+		if err := r.app.Call(ctx, "turn/interrupt", map[string]any{"threadId": r.threadID, "turnId": targetTurnID}, &response); err != nil {
+			terminal, checkErr := r.codexTurnIsTerminal(ctx, targetTurnID)
+			if checkErr != nil || !terminal {
+				return err
+			}
+			r.acknowledgeCommand(command.Sequence)
+			return r.sendIdleAfterPause(ctx, command.Sequence)
 		}
 		r.acknowledgeCommand(command.Sequence)
 		return nil
@@ -1033,6 +1048,31 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 	default:
 		return fmt.Errorf("codex runtime does not support command %q", command.Type)
 	}
+}
+
+func (r *codexWorkerRuntime) codexTurnIsTerminal(ctx context.Context, turnID string) (bool, error) {
+	turns, err := listCodexThreadTurns(ctx, r.app, r.threadID, "notLoaded")
+	if err != nil {
+		return false, err
+	}
+	for _, turn := range turns {
+		if turn.ID == turnID {
+			switch strings.ToLower(turn.Status) {
+			case "completed", "failed", "interrupted", "cancelled", "canceled":
+				return true, nil
+			default:
+				return false, nil
+			}
+		}
+	}
+	return false, nil
+}
+
+func (r *codexWorkerRuntime) sendIdleAfterPause(ctx context.Context, commandSequence uint64) error {
+	if r.writer == nil || r.messagePending {
+		return nil
+	}
+	return r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence})
 }
 
 func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *approvalPolicyCommandPayload) error {
@@ -1779,6 +1819,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 	approvals := make(chan workerApprovalDecision, workerCommandBufferSize)
 	interactions := make(chan workerInteractionResponse, workerCommandBufferSize)
 	boundResults := make(chan workerConversationBoundResult, 1)
+	interrupts := make(chan workerInterruptTurn, 1)
 	errorsCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
@@ -1786,6 +1827,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 		defer close(approvals)
 		defer close(interactions)
 		defer close(boundResults)
+		defer close(interrupts)
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -1818,8 +1860,37 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 				if message.ConversationBoundResult != nil {
 					boundResults <- *message.ConversationBoundResult
 				}
+			case workerMessageInterruptTurn:
+				if message.InterruptTurn != nil {
+					select {
+					case interrupts <- *message.InterruptTurn:
+					default:
+						errorsCh <- fmt.Errorf("codex worker interrupt buffer full")
+						return
+					}
+				}
 			}
 		}
 	}()
-	return codexWorkerChannels{commands: commands, inputs: inputs, approvals: approvals, interactions: interactions, boundResults: boundResults, errors: errorsCh}
+	return codexWorkerChannels{commands: commands, inputs: inputs, approvals: approvals, interactions: interactions, boundResults: boundResults, interrupts: interrupts, errors: errorsCh}
+}
+
+func serveCodexWorkerInterrupts(ctx context.Context, app codexapp.RPC, interrupts <-chan workerInterruptTurn) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case interrupt, ok := <-interrupts:
+			if !ok {
+				return
+			}
+			interruptCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+			var response any
+			_ = app.Call(interruptCtx, "turn/interrupt", map[string]any{
+				"threadId": interrupt.ThreadID,
+				"turnId":   interrupt.TurnID,
+			}, &response)
+			cancel()
+		}
+	}
 }
