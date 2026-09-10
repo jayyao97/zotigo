@@ -34,6 +34,8 @@ import (
 
 const defaultAddr = "127.0.0.1:8766"
 
+const defaultWorkerLaunchTimeout = 15 * time.Second
+
 const defaultWorkerConnectTimeout = 3 * time.Second
 
 const apiProtocolVersion = "1"
@@ -344,7 +346,7 @@ func (r *sessionRegistry) FailStartingWithCode(id string, code string, message s
 	})
 }
 
-func (r *sessionRegistry) RetryOccupiedWorker(id string) (Session, error) {
+func (r *sessionRegistry) RetryFailedWorker(id string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateFailed}, func(session *Session) {
 		session.State = SessionStateStarting
@@ -465,6 +467,7 @@ type handler struct {
 	launcher             workerLauncher
 	runtimes             *runtimeRegistry
 	workerConnectTimeout time.Duration
+	workerLaunchTimeout  time.Duration
 	inputStopTimeout     time.Duration
 	sessionOps           *sessionOperationLocks
 	workspaceOps         *sessionOperationLocks
@@ -513,6 +516,7 @@ func Run(args []string) (exitCode int) {
 	workerMode := fs.Bool("worker", false, "Run an internal zotigod worker")
 	workerDaemonURL := fs.String("daemon-url", "", "zotigod daemon URL for internal worker mode")
 	workerSessionID := fs.String("session-id", "", "zotigod session id for internal worker mode")
+	workerActivation := fs.Uint64("worker-activation", 0, "zotigod worker activation for internal worker mode")
 	sessionStoreRoot := fs.String("session-store-root", "", "Session store root for internal worker mode")
 	codexWorkerMode := fs.Bool("codex-worker", false, "Run an internal Codex bridge worker")
 	codexSocket := fs.String("codex-socket", "", "Codex app-server Unix socket")
@@ -549,9 +553,10 @@ func Run(args []string) (exitCode int) {
 		workerAuthToken := os.Getenv(workerAuthTokenEnv)
 		_ = os.Unsetenv(workerAuthTokenEnv)
 		if err := runWorkerClient(context.Background(), workerClientConfig{
-			DaemonURL: daemonURL,
-			SessionID: *workerSessionID,
-			AuthToken: workerAuthToken,
+			DaemonURL:  daemonURL,
+			SessionID:  *workerSessionID,
+			Activation: *workerActivation,
+			AuthToken:  workerAuthToken,
 		}); err != nil {
 			log.Printf("zotigod worker failed: %v", err)
 			return 1
@@ -566,7 +571,7 @@ func Run(args []string) (exitCode int) {
 		workerAuthToken := os.Getenv(workerAuthTokenEnv)
 		_ = os.Unsetenv(workerAuthTokenEnv)
 		if err := runCodexWorkerClient(context.Background(), codexWorkerConfig{
-			workerClientConfig: workerClientConfig{DaemonURL: daemonURL, SessionID: *workerSessionID, AuthToken: workerAuthToken},
+			workerClientConfig: workerClientConfig{DaemonURL: daemonURL, SessionID: *workerSessionID, Activation: *workerActivation, AuthToken: workerAuthToken},
 			SocketPath:         *codexSocket,
 			WorkingDirectory:   *codexWorkingDirectory, Model: *codexModel,
 			ReasoningEffort: *codexReasoningEffort, ApprovalPolicy: *codexApprovalPolicy, ThreadID: *codexThreadID,
@@ -752,6 +757,7 @@ type handlerOptions struct {
 	runtimes             *runtimeRegistry
 	workers              *workerRegistry
 	workerConnectTimeout time.Duration
+	workerLaunchTimeout  time.Duration
 	inputStopTimeout     time.Duration
 	store                zotigosession.Store
 	sessionOps           *sessionOperationLocks
@@ -845,6 +851,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.workerConnectTimeout == 0 && options.launcher != nil {
 		options.workerConnectTimeout = defaultWorkerConnectTimeout
 	}
+	if options.workerLaunchTimeout == 0 && options.launcher != nil {
+		options.workerLaunchTimeout = defaultWorkerLaunchTimeout
+	}
 	if options.inputStopTimeout == 0 {
 		options.inputStopTimeout = workerHTTPTimeout
 	}
@@ -880,6 +889,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		launcher:             options.launcher,
 		runtimes:             options.runtimes,
 		workerConnectTimeout: options.workerConnectTimeout,
+		workerLaunchTimeout:  options.workerLaunchTimeout,
 		inputStopTimeout:     options.inputStopTimeout,
 		sessionOps:           options.sessionOps,
 		workspaceOps:         options.workspaceOps,
@@ -1422,6 +1432,7 @@ func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id 
 
 var (
 	errWorkerConnectTimeout = errors.New("worker did not connect before timeout")
+	errWorkerLaunchTimeout  = errors.New("worker did not start before timeout")
 	errSessionUnavailable   = errors.New("session is unavailable")
 )
 
@@ -1472,16 +1483,20 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 }
 
 func (h *handler) launchWorkerInBackground(id string, activation uint64) {
-	launchCtx, cancel := context.WithCancel(context.Background())
-	var watchdog *time.Timer
-	if h.workerConnectTimeout > 0 {
-		watchdog = time.AfterFunc(h.workerConnectTimeout, func() {
+	launchCtx := context.Background()
+	cancelLaunch := func() {}
+	if h.workerLaunchTimeout > 0 {
+		launchCtx, cancelLaunch = context.WithTimeout(launchCtx, h.workerLaunchTimeout)
+	}
+	var launchWatchdog *time.Timer
+	if h.workerLaunchTimeout > 0 {
+		launchWatchdog = time.AfterFunc(h.workerLaunchTimeout, func() {
 			unlock := h.sessionOps.lock(id)
 			var failed Session
 			var failErr error
 			if session, ok := h.registry.Get(id); ok && session.workerActivation == activation && !h.workers.Has(id) {
-				failed, failErr = h.registry.FailStartingWithCode(id, "worker_connect_timeout", errWorkerConnectTimeout.Error())
-				cancel()
+				failed, failErr = h.registry.FailStartingWithCode(id, "worker_start_timeout", errWorkerLaunchTimeout.Error())
+				cancelLaunch()
 			}
 			unlock()
 			if failErr == nil && failed.ID != "" {
@@ -1490,16 +1505,22 @@ func (h *handler) launchWorkerInBackground(id string, activation uint64) {
 		})
 	}
 	go func() {
-		defer cancel()
+		defer cancelLaunch()
 		if err := h.launchWorker(launchCtx, id); err != nil {
-			if watchdog != nil {
-				watchdog.Stop()
+			if launchWatchdog != nil {
+				launchWatchdog.Stop()
 			}
 			unlock := h.sessionOps.lock(id)
 			var failed Session
 			var failErr error
 			if session, ok := h.registry.Get(id); ok && session.workerActivation == activation {
-				failed, failErr = h.registry.FailStartingWithCode(id, "worker_start_failed", fmt.Sprintf("start worker: %v", err))
+				code := "worker_start_failed"
+				message := fmt.Sprintf("start worker: %v", err)
+				if errors.Is(err, context.DeadlineExceeded) {
+					code = "worker_start_timeout"
+					message = errWorkerLaunchTimeout.Error()
+				}
+				failed, failErr = h.registry.FailStartingWithCode(id, code, message)
 			}
 			unlock()
 			if failErr == nil && failed.ID != "" {
@@ -1507,7 +1528,33 @@ func (h *handler) launchWorkerInBackground(id string, activation uint64) {
 			}
 			return
 		}
-		_ = h.waitForRunningWorker(launchCtx, id)
+		if launchWatchdog != nil {
+			launchWatchdog.Stop()
+		}
+		cancelLaunch()
+		session, ok := h.registry.Get(id)
+		if !ok || session.workerActivation != activation || session.State != SessionStateStarting || h.workers.Has(id) {
+			return
+		}
+		connectCtx, cancelConnect := context.WithCancel(context.Background())
+		defer cancelConnect()
+		var watchdog *time.Timer
+		if h.workerConnectTimeout > 0 {
+			watchdog = time.AfterFunc(h.workerConnectTimeout, func() {
+				unlock := h.sessionOps.lock(id)
+				var failed Session
+				var failErr error
+				if session, ok := h.registry.Get(id); ok && session.workerActivation == activation && !h.workers.Has(id) {
+					failed, failErr = h.registry.FailStartingWithCode(id, "worker_connect_timeout", errWorkerConnectTimeout.Error())
+					cancelConnect()
+				}
+				unlock()
+				if failErr == nil && failed.ID != "" {
+					h.dispatchSessionEnd(failed)
+				}
+			})
+		}
+		_ = h.waitForRunningWorker(connectCtx, id)
 		if watchdog != nil {
 			watchdog.Stop()
 		}
@@ -1535,6 +1582,9 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 		case SessionStateFailed:
 			if session.Error == errWorkerConnectTimeout.Error() {
 				return errWorkerConnectTimeout
+			}
+			if session.ErrorCode == "worker_start_timeout" {
+				return errWorkerLaunchTimeout
 			}
 			if isRuntimeOccupiedSession(session) {
 				return fmt.Errorf("%w: %s", errRuntimeOccupied, runtimeOccupiedMessage(session))
@@ -1615,10 +1665,10 @@ func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Se
 			}
 			return session, true, nil
 		case SessionStateFailed:
-			if !isRuntimeOccupiedSession(session) {
+			if !isRuntimeOccupiedSession(session) && session.ErrorCode != "worker_connect_timeout" && session.ErrorCode != "worker_start_timeout" {
 				return Session{}, false, errInvalidSessionTransition
 			}
-			session, err = h.registry.RetryOccupiedWorker(id)
+			session, err = h.registry.RetryFailedWorker(id)
 			if errors.Is(err, errInvalidSessionTransition) {
 				continue
 			}
@@ -1778,6 +1828,8 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, err.Error())
 	case errors.Is(err, errWorkerConnectTimeout):
 		writeAPIError(w, http.StatusServiceUnavailable, errWorkerConnectTimeout.Error())
+	case errors.Is(err, errWorkerLaunchTimeout):
+		writeAPIError(w, http.StatusServiceUnavailable, errWorkerLaunchTimeout.Error())
 	case errors.Is(err, errWorkerDisconnectedBeforeReady):
 		writeAPIError(w, http.StatusServiceUnavailable, errWorkerDisconnectedBeforeReady.Error())
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):

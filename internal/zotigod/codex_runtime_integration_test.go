@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -36,7 +37,7 @@ func (*fakeCodexRuntime) Probe(context.Context, zotigoruntime.ProbeRequest) (zot
 func (f *fakeCodexRuntime) StartWorker(_ context.Context, spec zotigoruntime.WorkerLaunchSpec) error {
 	f.launches <- spec
 	go func() {
-		url := "ws" + f.server.URL[len("http"):] + "/internal/workers/connect?session_id=" + spec.SessionID
+		url := "ws" + f.server.URL[len("http"):] + "/internal/workers/connect?session_id=" + spec.SessionID + "&activation=" + strconv.FormatUint(spec.Activation, 10)
 		conn, response, err := websocket.DefaultDialer.Dial(url, nil)
 		if err != nil {
 			return
@@ -75,7 +76,7 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 	command := commandResponse{ID: "command-1", Sequence: 1, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}}
@@ -114,7 +115,7 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 	registry.MarkWorking(session.ID, "tool")
@@ -180,7 +181,7 @@ func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 
@@ -236,7 +237,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 	registry.MarkWorking(session.ID, "tool")
@@ -305,7 +306,7 @@ func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 
@@ -357,7 +358,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 	fakeRuntime.server = server
 	t.Cleanup(server.Close)
 
-	worker, generation := connectWorker(t, server, session.ID)
+	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
 	registry.MarkWorking(session.ID, "tool")

@@ -242,7 +242,7 @@ func TestSessionApprovalPolicyChangeQueuesRunningCodexWorkerCommands(t *testing.
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	worker, _ := connectWorker(t, server, "sess-running-codex-policy")
+	worker, _ := connectWorkerForActivation(t, server, "sess-running-codex-policy", "0")
 	defer worker.Close()
 
 	for _, policy := range []agent.ApprovalPolicy{agent.ApprovalPolicyBypass, agent.ApprovalPolicyAuto} {

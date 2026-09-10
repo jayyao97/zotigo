@@ -96,7 +96,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	}()
 
 	daemonURL := strings.TrimRight(cfg.DaemonURL, "/")
-	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID)
+	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
 	if err != nil {
 		return err
 	}

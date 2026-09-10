@@ -54,9 +54,10 @@ const (
 )
 
 type workerClientConfig struct {
-	DaemonURL string
-	SessionID string
-	AuthToken string
+	DaemonURL  string
+	SessionID  string
+	Activation uint64
+	AuthToken  string
 }
 
 func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr error) {
@@ -115,7 +116,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		_ = store.Close()
 	}()
 
-	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID)
+	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
 	if err != nil {
 		return err
 	}
@@ -1925,7 +1926,7 @@ func isExpectedWorkerClose(err error) bool {
 		strings.Contains(err.Error(), "EOF")
 }
 
-func workerConnectURL(daemonURL string, sessionID string) (string, error) {
+func workerConnectURL(daemonURL string, sessionID string, activation uint64) (string, error) {
 	parsed, err := url.Parse(daemonURL)
 	if err != nil {
 		return "", fmt.Errorf("parse daemon url: %w", err)
@@ -1942,6 +1943,7 @@ func workerConnectURL(daemonURL string, sessionID string) (string, error) {
 	parsed.Path = "/internal/workers/connect"
 	values := parsed.Query()
 	values.Set("session_id", sessionID)
+	values.Set("activation", strconv.FormatUint(activation, 10))
 	parsed.RawQuery = values.Encode()
 	return parsed.String(), nil
 }

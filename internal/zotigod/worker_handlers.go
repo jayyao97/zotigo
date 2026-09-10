@@ -2,8 +2,10 @@ package zotigod
 
 import (
 	"net/http"
+	"strconv"
 
 	"github.com/gorilla/websocket"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 const workerGenerationHeader = "X-Zotigo-Worker-Generation"
@@ -34,6 +36,11 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusConflict, "worker connect requires a live session")
 		return
 	}
+	activation := r.URL.Query().Get("activation")
+	if !workerActivationMatches(session, activation) {
+		writeAPIError(w, http.StatusConflict, "worker activation does not match the active session")
+		return
+	}
 
 	generation := newZotigodID("worker")
 	responseHeader := http.Header{}
@@ -45,7 +52,7 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 	unlock := h.sessionOps.lock(sessionID)
 	defer unlock()
 	session, ok = h.registry.Get(sessionID)
-	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused) || h.workers.Has(sessionID) {
+	if !ok || (session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused) || !workerActivationMatches(session, activation) || h.workers.Has(sessionID) {
 		_ = conn.Close()
 		return
 	}
@@ -54,4 +61,12 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.workers.Register(sessionID, generation, conn)
+}
+
+func workerActivationMatches(session Session, value string) bool {
+	if zotigoruntime.AgentKind(session.Agent) != zotigoruntime.AgentCodex {
+		return true
+	}
+	activation, err := strconv.ParseUint(value, 10, 64)
+	return err == nil && activation == session.workerActivation
 }
