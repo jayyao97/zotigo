@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 const (
@@ -197,6 +198,10 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 			selectedNames[index] = skill.Name
 		}
 	}
+	if h.workers.InputStopping(id) {
+		writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
+		return
+	}
 	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
 		h.writeEnsureRunningError(w, err)
 		return
@@ -208,6 +213,8 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", false)
 	if err != nil {
 		switch {
+		case errors.Is(err, errWorkerInputStopping):
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
 		case errors.Is(err, errSessionBusy):
 			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
 		case errors.Is(err, errCommandIDConflict):
@@ -329,6 +336,9 @@ func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, com
 }
 
 func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool) (commandResponse, error) {
+	if h.workers.InputStopping(id) {
+		return commandResponse{}, errWorkerInputStopping
+	}
 	var command commandResponse
 	var storedImages []messageImage
 	var refs []zotigosession.ImageRef
@@ -564,6 +574,33 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
 		return
 	}
+	var interrupt *workerInterruptTurn
+	if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
+		stored, loadErr := h.store.Get(r.Context(), id)
+		if loadErr != nil || stored == nil || stored.ConversationID == "" {
+			writeAPIError(w, http.StatusInternalServerError, "load Codex conversation for pause")
+			return
+		}
+		interrupt = &workerInterruptTurn{ThreadID: stored.ConversationID, TurnID: turnID}
+	}
+	drained, releaseInputStop, err := h.workers.BeginInputStop(id, interrupt)
+	if err != nil {
+		if errors.Is(err, errWorkerInputStopping) {
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is already stopping")
+			return
+		}
+		writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
+		return
+	}
+	defer releaseInputStop()
+	waitCtx, cancelWait := context.WithTimeout(r.Context(), h.inputStopTimeout)
+	defer cancelWait()
+	select {
+	case <-drained:
+	case <-waitCtx.Done():
+		writeAPIErrorCode(w, http.StatusGatewayTimeout, "input_stop_timeout", "timed out waiting for in-flight input to stop")
+		return
+	}
 
 	item, err := func() (zotigosession.DisplayItem, error) {
 		unlock := h.sessionOps.lock(id)
@@ -667,6 +704,8 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, nil, expectedTurnID, true)
 	if err != nil {
 		switch {
+		case errors.Is(err, errWorkerInputStopping):
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
 		case errors.Is(err, errNoActiveTurn):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		case errors.Is(err, errWorkerOffline):
@@ -702,7 +741,8 @@ func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx contex
 
 func requireOpenTurnWithoutPendingApproval(turnID string) func([]zotigosession.DisplayItem) error {
 	return func(items []zotigosession.DisplayItem) error {
-		if lastOpenTurnID(items) != turnID {
+		openTurnID := lastOpenTurnID(items)
+		if openTurnID != turnID && (openTurnID != "" || !hasTerminalTurn(items, turnID)) {
 			return errSessionBusy
 		}
 		if hasPendingApprovalForTurn(items, turnID) {
@@ -710,6 +750,20 @@ func requireOpenTurnWithoutPendingApproval(turnID string) func([]zotigosession.D
 		}
 		return nil
 	}
+}
+
+func hasTerminalTurn(items []zotigosession.DisplayItem, turnID string) bool {
+	for index := len(items) - 1; index >= 0; index-- {
+		item := items[index]
+		if item.Turn == nil || item.Turn.ID != turnID {
+			continue
+		}
+		switch item.Type {
+		case zotigosession.DisplayItemTurnCompleted, zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
+			return true
+		}
+	}
+	return false
 }
 
 func (h *handler) handleWorkerTurnInterrupted(w http.ResponseWriter, r *http.Request, id string) {

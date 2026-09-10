@@ -15,7 +15,10 @@ import (
 const workerWriteWait = 10 * time.Second
 const defaultWorkerApprovalWait = 30 * time.Second
 
-var errWorkerOffline = errors.New("worker is offline")
+var (
+	errWorkerOffline       = errors.New("worker is offline")
+	errWorkerInputStopping = errors.New("worker input is stopping")
+)
 
 const (
 	defaultWorkerPingInterval = 15 * time.Second
@@ -41,6 +44,7 @@ const (
 	workerMessageConversationBoundResult workerMessageType = "conversation_bound_result"
 	workerMessageInputRequest            workerMessageType = "input_request"
 	workerMessageInputResult             workerMessageType = "input_result"
+	workerMessageInterruptTurn           workerMessageType = "interrupt_turn"
 	workerMessageIdle                    workerMessageType = "idle"
 )
 
@@ -59,7 +63,13 @@ type workerMessage struct {
 	ConversationBoundResult *workerConversationBoundResult `json:"conversation_bound_result,omitempty"`
 	InputRequest            *workerInputRequest            `json:"input_request,omitempty"`
 	InputResult             *workerInputResult             `json:"input_result,omitempty"`
+	InterruptTurn           *workerInterruptTurn           `json:"interrupt_turn,omitempty"`
 	Idle                    *workerIdle                    `json:"idle,omitempty"`
+}
+
+type workerInterruptTurn struct {
+	ThreadID string `json:"thread_id"`
+	TurnID   string `json:"turn_id"`
 }
 
 type workerInputRequest struct {
@@ -321,6 +331,13 @@ func (r *workerRegistry) Has(sessionID string) bool {
 	return worker != nil && !worker.closing
 }
 
+func (r *workerRegistry) InputStopping(sessionID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	return worker != nil && worker.inputStopping
+}
+
 func (r *workerRegistry) Close(sessionID string) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
@@ -386,6 +403,7 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 	r.mu.Lock()
 	removed := false
 	var submissions []*workerInputSubmission
+	var inputStopWaiter chan struct{}
 	if r.workers[sessionID] == worker {
 		if worker.idleTimer != nil {
 			worker.idleTimer.Stop()
@@ -395,6 +413,8 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 			submissions = append(submissions, submission)
 		}
 		worker.inputRequests = make(map[string]*workerInputSubmission)
+		inputStopWaiter = worker.inputStopWaiter
+		worker.inputStopWaiter = nil
 		delete(r.workers, sessionID)
 		removed = true
 	}
@@ -402,6 +422,9 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 	r.mu.Unlock()
 	for _, submission := range submissions {
 		submission.finish()
+	}
+	if inputStopWaiter != nil {
+		close(inputStopWaiter)
 	}
 	if removed && onDisconnect != nil {
 		onDisconnect(sessionID, worker.generation)
@@ -436,6 +459,8 @@ type workerConnection struct {
 	idleTimeout         time.Duration
 	idlePending         bool
 	inputRequests       map[string]*workerInputSubmission
+	inputStopping       bool
+	inputStopWaiter     chan struct{}
 	lastCommandSequence uint64
 	closing             bool
 }
@@ -473,6 +498,10 @@ func (r *workerRegistry) BeginInput(sessionID string, request workerInputRequest
 	if !available {
 		r.mu.Unlock()
 		return nil, errWorkerOffline
+	}
+	if worker.inputStopping {
+		r.mu.Unlock()
+		return nil, errWorkerInputStopping
 	}
 	if worker.idleTimer != nil {
 		worker.idleTimer.Stop()
@@ -512,6 +541,11 @@ func (r *workerRegistry) finishInput(worker *workerConnection, requestID string,
 		return
 	}
 	delete(worker.inputRequests, requestID)
+	var inputStopWaiter chan struct{}
+	if len(worker.inputRequests) == 0 && worker.inputStopWaiter != nil {
+		inputStopWaiter = worker.inputStopWaiter
+		worker.inputStopWaiter = nil
+	}
 	if command != nil && command.Sequence > worker.lastCommandSequence {
 		worker.lastCommandSequence = command.Sequence
 	}
@@ -538,11 +572,52 @@ func (r *workerRegistry) finishInput(worker *workerConnection, requestID string,
 	}
 	r.mu.Unlock()
 	submission.finish()
+	if inputStopWaiter != nil {
+		close(inputStopWaiter)
+	}
 	if closeWorker {
 		// close invokes the session lifecycle callback; never run it inline with
 		// an input result that may beat the handler releasing sessionOps.
 		go worker.close()
 	}
+}
+
+func (r *workerRegistry) BeginInputStop(sessionID string, interrupt *workerInterruptTurn) (<-chan struct{}, func(), error) {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.closing {
+		r.mu.Unlock()
+		return nil, nil, errWorkerOffline
+	}
+	if worker.inputStopping {
+		r.mu.Unlock()
+		return nil, nil, errWorkerInputStopping
+	}
+	worker.inputStopping = true
+	drained := make(chan struct{})
+	hasPendingInput := len(worker.inputRequests) > 0
+	if hasPendingInput {
+		worker.inputStopWaiter = drained
+	} else {
+		close(drained)
+	}
+	r.mu.Unlock()
+
+	release := func() {
+		r.mu.Lock()
+		if r.workers[sessionID] == worker {
+			worker.inputStopping = false
+			if worker.inputStopWaiter == drained {
+				worker.inputStopWaiter = nil
+			}
+		}
+		r.mu.Unlock()
+	}
+	if hasPendingInput && interrupt != nil && !worker.trySendMessage(workerMessage{Type: workerMessageInterruptTurn, InterruptTurn: interrupt}) {
+		release()
+		return nil, nil, errWorkerOffline
+	}
+	return drained, release, nil
 }
 
 func (c *workerConnection) send(command commandResponse) bool {

@@ -72,6 +72,7 @@ type Session struct {
 	ContextUsage     *SessionContextUsage `json:"context_usage"`
 	seq              uint64
 	activationSource string
+	workerActivation uint64
 	workerGeneration string
 }
 
@@ -238,6 +239,7 @@ func (r *sessionRegistry) Start(id string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateCreated}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.workerActivation++
 		session.workerGeneration = ""
 		session.StartedAt = &now
 		if session.activationSource == "" {
@@ -255,6 +257,7 @@ func (r *sessionRegistry) MarkRunning(id string) (Session, error) {
 func (r *sessionRegistry) RestartWorker(id string) (Session, error) {
 	return r.transition(id, []SessionState{SessionStateRunning, SessionStatePausing, SessionStatePaused}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.workerActivation++
 		session.workerGeneration = ""
 		session.activationSource = "restart"
 	})
@@ -345,6 +348,7 @@ func (r *sessionRegistry) RetryOccupiedWorker(id string) (Session, error) {
 	now := time.Now().UTC()
 	return r.transition(id, []SessionState{SessionStateFailed}, func(session *Session) {
 		session.State = SessionStateStarting
+		session.workerActivation++
 		session.StartedAt = &now
 		session.EndedAt = nil
 		session.Error = ""
@@ -461,6 +465,7 @@ type handler struct {
 	launcher             workerLauncher
 	runtimes             *runtimeRegistry
 	workerConnectTimeout time.Duration
+	inputStopTimeout     time.Duration
 	sessionOps           *sessionOperationLocks
 	workspaceOps         *sessionOperationLocks
 	approvalOps          *sessionOperationLocks
@@ -747,6 +752,7 @@ type handlerOptions struct {
 	runtimes             *runtimeRegistry
 	workers              *workerRegistry
 	workerConnectTimeout time.Duration
+	inputStopTimeout     time.Duration
 	store                zotigosession.Store
 	sessionOps           *sessionOperationLocks
 	workspaceOps         *sessionOperationLocks
@@ -839,6 +845,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	if options.workerConnectTimeout == 0 && options.launcher != nil {
 		options.workerConnectTimeout = defaultWorkerConnectTimeout
 	}
+	if options.inputStopTimeout == 0 {
+		options.inputStopTimeout = workerHTTPTimeout
+	}
 	if options.runtimes == nil {
 		options.runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: options.launcher})
 	}
@@ -871,6 +880,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		launcher:             options.launcher,
 		runtimes:             options.runtimes,
 		workerConnectTimeout: options.workerConnectTimeout,
+		inputStopTimeout:     options.inputStopTimeout,
 		sessionOps:           options.sessionOps,
 		workspaceOps:         options.workspaceOps,
 		approvalOps:          newSessionOperationLocks(),
@@ -1445,7 +1455,7 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 		return Session{}, err
 	}
 	if launched {
-		h.launchWorkerInBackground(id)
+		h.launchWorkerInBackground(id, session.workerActivation)
 	}
 	if !h.sessionUsesWorker(session) || (!launched && session.State != SessionStateStarting) {
 		session.Live = true
@@ -1461,7 +1471,7 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 	return Session{}, errWorkerConnectTimeout
 }
 
-func (h *handler) launchWorkerInBackground(id string) {
+func (h *handler) launchWorkerInBackground(id string, activation uint64) {
 	launchCtx, cancel := context.WithCancel(context.Background())
 	var watchdog *time.Timer
 	if h.workerConnectTimeout > 0 {
@@ -1469,7 +1479,7 @@ func (h *handler) launchWorkerInBackground(id string) {
 			unlock := h.sessionOps.lock(id)
 			var failed Session
 			var failErr error
-			if !h.workers.Has(id) {
+			if session, ok := h.registry.Get(id); ok && session.workerActivation == activation && !h.workers.Has(id) {
 				failed, failErr = h.registry.FailStartingWithCode(id, "worker_connect_timeout", errWorkerConnectTimeout.Error())
 				cancel()
 			}
@@ -1486,9 +1496,13 @@ func (h *handler) launchWorkerInBackground(id string) {
 				watchdog.Stop()
 			}
 			unlock := h.sessionOps.lock(id)
-			failed, failErr := h.registry.FailStartingWithCode(id, "worker_start_failed", fmt.Sprintf("start worker: %v", err))
+			var failed Session
+			var failErr error
+			if session, ok := h.registry.Get(id); ok && session.workerActivation == activation {
+				failed, failErr = h.registry.FailStartingWithCode(id, "worker_start_failed", fmt.Sprintf("start worker: %v", err))
+			}
 			unlock()
-			if failErr == nil {
+			if failErr == nil && failed.ID != "" {
 				h.dispatchSessionEnd(failed)
 			}
 			return

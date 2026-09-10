@@ -33,6 +33,7 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
 type sessionListResponse struct {
@@ -2527,6 +2528,73 @@ func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateFailed {
 		t.Fatalf("expected state %q, got %q", SessionStateFailed, got.State)
+	}
+}
+
+func TestWorkerConnectTimeoutDoesNotFailNewActivation(t *testing.T) {
+	for _, test := range []struct {
+		name              string
+		launchErr         error
+		releaseBeforeWait bool
+	}{
+		{name: "old timeout"},
+		{name: "old launcher error", launchErr: errors.New("old launch failed"), releaseBeforeWait: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			workDir := t.TempDir()
+			writeTestProfileConfig(t, workDir)
+			launchStarted := make(chan struct{})
+			releaseLaunch := make(chan struct{})
+			launcher := workerLauncherFunc(func(context.Context, string, string) error {
+				close(launchStarted)
+				<-releaseLaunch
+				return test.launchErr
+			})
+			registry := newSessionRegistry()
+			const connectTimeout = 20 * time.Millisecond
+			handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+				launcher:             launcher,
+				workerConnectTimeout: connectTimeout,
+			})
+			created := registry.Add(newSession(workDir, "test"))
+			ownerCtx, cancelOwner := context.WithCancel(context.Background())
+			ownerDone := make(chan struct{})
+			go func() {
+				defer close(ownerDone)
+				rec := httptest.NewRecorder()
+				req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/start", nil).WithContext(ownerCtx)
+				handler.ServeHTTP(rec, req)
+			}()
+			<-launchStarted
+			cancelOwner()
+			<-ownerDone
+			first, ok := registry.Get(created.ID)
+			if !ok {
+				t.Fatal("session missing after first activation")
+			}
+			if _, err := registry.MarkRunning(created.ID); err != nil {
+				t.Fatal(err)
+			}
+			second, err := registry.RestartWorker(created.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if second.workerActivation == first.workerActivation {
+				t.Fatal("worker activation did not advance")
+			}
+			if test.releaseBeforeWait {
+				close(releaseLaunch)
+			}
+
+			time.Sleep(4 * connectTimeout)
+			if got := getSession(t, handler, created.ID); got.State != SessionStateStarting {
+				t.Fatalf("new activation state = %q, want %q", got.State, SessionStateStarting)
+			}
+			if !test.releaseBeforeWait {
+				close(releaseLaunch)
+			}
+		})
 	}
 }
 
@@ -5559,6 +5627,157 @@ func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) 
 	}
 }
 
+func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	registry := newSessionRegistry()
+	handler := newHandler(registry, source, handlerOptions{store: store})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	stored, err := store.Get(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.Agent = string(zotigoruntime.AgentCodex)
+	stored.ConversationID = "thread-1"
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	registry.mu.Lock()
+	live := registry.sessions[created.ID]
+	live.Agent = string(zotigoruntime.AgentCodex)
+	registry.sessions[created.ID] = live
+	registry.mu.Unlock()
+	appendTurnStarted(t, source, created.ID, "turn-1")
+
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"pending steer","client_message_id":"pending-once"}`))
+		handler.ServeHTTP(rec, req)
+		messageDone <- rec
+	}()
+	input := readWorkerMessage(t, worker)
+	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", input)
+	}
+
+	pauseDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
+		pauseDone <- rec
+	}()
+	interrupt := readWorkerMessage(t, worker)
+	if interrupt.Type != workerMessageInterruptTurn || interrupt.InterruptTurn == nil || interrupt.InterruptTurn.TurnID != "turn-1" {
+		t.Fatalf("expected urgent turn interrupt, got %#v", interrupt)
+	}
+
+	lateMessageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"too late"}`))
+		handler.ServeHTTP(rec, req)
+		lateMessageDone <- rec
+	}()
+
+	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: input.InputRequest.RequestID, Command: &accepted,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if message := <-messageDone; message.Code != http.StatusCreated {
+		t.Fatalf("pending message status = %d: %s", message.Code, message.Body.String())
+	}
+	if late := <-lateMessageDone; late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "turn_stopping") {
+		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
+	}
+	pauseCommand := readWorkerMessage(t, worker)
+	if pauseCommand.Type != workerMessageCommand || pauseCommand.Command == nil || pauseCommand.Command.Type != sessionCommandPause {
+		t.Fatalf("expected durable pause command, got %#v", pauseCommand)
+	}
+	if pause := <-pauseDone; pause.Code != http.StatusAccepted {
+		t.Fatalf("pause status = %d: %s", pause.Code, pause.Body.String())
+	}
+
+	items, _, err := source.LoadItems(context.Background(), created.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acceptedCount := 0
+	for _, item := range items {
+		if item.ID == "pending-once" {
+			acceptedCount++
+		}
+	}
+	if acceptedCount != 1 {
+		t.Fatalf("pending input persisted %d times: %#v", acceptedCount, items)
+	}
+}
+
+func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	workers := newWorkerRegistry()
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{workers: workers, inputStopTimeout: 20 * time.Millisecond})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+	created := createSession(t, handler)
+	startSession(t, handler, created.ID)
+	worker := dialWorker(t, server, created.ID)
+	defer worker.Close()
+	appendTurnStarted(t, source, created.ID, "turn-1")
+
+	messageDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() {
+		rec := httptest.NewRecorder()
+		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"late durable input","client_message_id":"late-durable"}`))
+		handler.ServeHTTP(rec, req)
+		messageDone <- rec
+	}()
+	input := readWorkerMessage(t, worker)
+	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+		t.Fatalf("expected input request, got %#v", input)
+	}
+
+	pause := httptest.NewRecorder()
+	handler.ServeHTTP(pause, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
+	if pause.Code != http.StatusGatewayTimeout || !strings.Contains(pause.Body.String(), "input_stop_timeout") {
+		t.Fatalf("pause status = %d: %s", pause.Code, pause.Body.String())
+	}
+	if !workers.Has(created.ID) || workers.InputStopping(created.ID) {
+		t.Fatalf("timeout replaced worker or left stop gate set")
+	}
+
+	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+		RequestID: input.InputRequest.RequestID, Command: &accepted,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if message := <-messageDone; message.Code != http.StatusCreated {
+		t.Fatalf("late input status = %d: %s", message.Code, message.Body.String())
+	}
+	items, _, err := source.LoadItems(context.Background(), created.ID)
+	if err != nil || len(items) != 2 || items[1].ID != "late-durable" {
+		t.Fatalf("late input was not retained: %#v, err=%v", items, err)
+	}
+}
+
 func TestSessionMessageSteersActiveTurn(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
@@ -6403,7 +6622,7 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	}
 }
 
-func TestSessionPauseRejectsTurnCompletedDuringAdmission(t *testing.T) {
+func TestSessionPauseAcceptsTurnCompletedDuringAdmission(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	var completed atomic.Bool
 	source.appendErr = func(sessionID string, item zotigosession.DisplayItem) error {
@@ -6428,13 +6647,13 @@ func TestSessionPauseRejectsTurnCompletedDuringAdmission(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/pause", nil))
-	if rec.Code != http.StatusConflict {
-		t.Fatalf("expected status %d, got %d: %s", http.StatusConflict, rec.Code, rec.Body.String())
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("expected status %d, got %d: %s", http.StatusAccepted, rec.Code, rec.Body.String())
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 2 || items.Items[1].Type != string(zotigosession.DisplayItemTurnCompleted) {
-		t.Fatalf("expected only lifecycle completion to be appended, got %#v", items.Items)
+	if len(items.Items) != 3 || items.Items[1].Type != string(zotigosession.DisplayItemTurnCompleted) || items.Items[2].Command == nil || items.Items[2].Command.Type != sessionCommandPause {
+		t.Fatalf("expected lifecycle completion followed by an idempotent pause, got %#v", items.Items)
 	}
 }
 
