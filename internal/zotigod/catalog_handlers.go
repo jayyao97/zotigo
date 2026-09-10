@@ -29,6 +29,10 @@ type createWorkspaceRequest struct {
 	Sources []zotigoworkspace.WorkspaceSourceInput `json:"sources,omitempty"`
 }
 
+type renameWorkspaceRequest struct {
+	Title string `json:"title"`
+}
+
 type deleteCatalogRequest struct {
 	Confirmation string `json:"confirmation"`
 }
@@ -335,16 +339,31 @@ func (h *handler) handleWorkspace(w http.ResponseWriter, r *http.Request, worksp
 	if !h.requireCatalog(w) {
 		return
 	}
-	if r.Method != http.MethodGet {
+	switch r.Method {
+	case http.MethodPut:
+		unlockWorkspace := h.workspaceOps.lock(workspaceID)
+		defer unlockWorkspace()
+		var request renameWorkspaceRequest
+		if err := readRequiredJSON(r, &request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid workspace rename request")
+			return
+		}
+		workspace, err := h.catalog.RenameWorkspace(r.Context(), workspaceID, request.Title)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, workspace)
+	case http.MethodGet:
+		workspace, err := h.catalog.GetWorkspace(r.Context(), workspaceID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusOK, workspace)
+	default:
 		writeAPIError(w, http.StatusNotFound, "workspace route not found")
-		return
 	}
-	workspace, err := h.catalog.GetWorkspace(r.Context(), workspaceID)
-	if err != nil {
-		h.writeCatalogError(w, err)
-		return
-	}
-	writeAPIJSON(w, http.StatusOK, workspace)
 }
 
 func (h *handler) handleWorkspaceSources(w http.ResponseWriter, r *http.Request, workspaceID string) {

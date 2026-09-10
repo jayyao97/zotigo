@@ -95,6 +95,37 @@ func TestRenameProject(t *testing.T) {
 	}
 }
 
+func TestRenameWorkspaceChangesDisplayTitleOnly(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	ctx := context.Background()
+	project, err := store.CreateProject(ctx, "Zotigo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := store.CreateWorkspace(ctx, project.ID, "Original")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	renamed, err := store.RenameWorkspace(ctx, workspace.ID, "  Renamed  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.Title != "Renamed" || renamed.RootPath != workspace.RootPath {
+		t.Fatalf("renamed workspace = %+v", renamed)
+	}
+	if _, err := store.RenameWorkspace(ctx, workspace.ID, "  "); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("blank title error = %v", err)
+	}
+	if _, err := store.RenameWorkspace(ctx, "missing", "Renamed"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("missing workspace error = %v", err)
+	}
+}
+
 func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
