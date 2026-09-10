@@ -231,6 +231,34 @@ func (s *Store) CreateWorkspace(ctx context.Context, projectID string, title str
 	return s.CreateWorkspacePlan(ctx, projectID, title, nil)
 }
 
+func (s *Store) RenameWorkspace(ctx context.Context, id string, title string) (Workspace, error) {
+	title = strings.TrimSpace(title)
+	if title == "" || len(title) > 200 {
+		return Workspace{}, ErrInvalid
+	}
+	workspace, err := s.GetWorkspace(ctx, id)
+	if err != nil {
+		return Workspace{}, err
+	}
+	if workspace.Status == WorkspaceStatusDeleting {
+		return Workspace{}, fmt.Errorf("%w: workspace is deleting", ErrConflict)
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE workspaces SET title = ?, updated_at = ? WHERE id = ? AND status != 'deleted'
+	`, title, unixMillis(time.Now().UTC()), id)
+	if err != nil {
+		return Workspace{}, fmt.Errorf("rename workspace: %w", err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return Workspace{}, fmt.Errorf("rename workspace affected rows: %w", err)
+	}
+	if affected == 0 {
+		return Workspace{}, ErrNotFound
+	}
+	return s.GetWorkspace(ctx, id)
+}
+
 func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title string, selections []WorkspaceSourceInput) (Workspace, error) {
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > 200 {

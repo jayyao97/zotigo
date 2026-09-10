@@ -119,6 +119,15 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	if workspaceDetailRec.Code != http.StatusOK {
 		t.Fatalf("workspace detail status = %d: %s", workspaceDetailRec.Code, workspaceDetailRec.Body.String())
 	}
+	renameWorkspaceRec := requestCatalog(t, handler, http.MethodPut, "/workspaces/"+workspace.ID, `{"title":"  Renamed Workspace  "}`)
+	if renameWorkspaceRec.Code != http.StatusOK {
+		t.Fatalf("rename workspace status = %d: %s", renameWorkspaceRec.Code, renameWorkspaceRec.Body.String())
+	}
+	var renamedWorkspace zotigoworkspace.Workspace
+	decodeCatalogData(t, renameWorkspaceRec, &renamedWorkspace)
+	if renamedWorkspace.Title != "Renamed Workspace" || renamedWorkspace.RootPath != workspace.RootPath {
+		t.Fatalf("renamed workspace = %+v", renamedWorkspace)
+	}
 	workspaceSourcesRec := requestCatalog(t, handler, http.MethodGet, "/workspaces/"+workspace.ID+"/sources", "")
 	if workspaceSourcesRec.Code != http.StatusOK {
 		t.Fatalf("workspace sources status = %d: %s", workspaceSourcesRec.Code, workspaceSourcesRec.Body.String())

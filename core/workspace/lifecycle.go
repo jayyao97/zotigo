@@ -227,7 +227,7 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 	if confirmation != workspace.Title {
 		return fmt.Errorf("%w: workspace title confirmation does not match", ErrInvalid)
 	}
-	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
+	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusError && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
 		return fmt.Errorf("%w: workspace cannot be deleted from %s", ErrConflict, workspace.Status)
 	}
 	checkouts, _, err := s.workspaceBindings(ctx, workspaceID)
@@ -304,7 +304,7 @@ func (s *Store) DeleteWorkspace(ctx context.Context, workspaceID string, confirm
 // Validate every resource before deleting the first worktree. Branch names and
 // heads are deliberately irrelevant: deletion never removes branch refs.
 func (s *Store) preflightDelete(ctx context.Context, workspace Workspace, nonce string, checkouts []Checkout) error {
-	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
+	if workspace.Status != WorkspaceStatusReady && workspace.Status != WorkspaceStatusError && workspace.Status != WorkspaceStatusArchived && workspace.Status != WorkspaceStatusDeleting {
 		return fmt.Errorf("%w: workspace cannot be deleted from %s", ErrConflict, workspace.Status)
 	}
 	rootExists := false
@@ -327,7 +327,7 @@ func (s *Store) preflightDelete(ctx context.Context, workspace Workspace, nonce 
 			return err
 		}
 	}
-	if !rootExists && workspace.Status != WorkspaceStatusDeleting {
+	if !rootExists && workspace.Status != WorkspaceStatusError && workspace.Status != WorkspaceStatusDeleting {
 		return fmt.Errorf("%w: workspace root is missing", ErrConflict)
 	}
 	for _, checkout := range checkouts {
@@ -349,7 +349,7 @@ func (s *Store) preflightDelete(ctx context.Context, workspace Workspace, nonce 
 			return err
 		}
 		removed := verifyCheckoutRemoved(ctx, source, checkout) == nil
-		if workspace.Status == WorkspaceStatusDeleting && removed {
+		if (workspace.Status == WorkspaceStatusError || workspace.Status == WorkspaceStatusDeleting) && removed {
 			continue
 		}
 		if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {

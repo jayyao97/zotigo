@@ -100,6 +100,41 @@ func TestDeleteWorkspaceRemovesOwnedRootAndPreservesBranches(t *testing.T) {
 	}
 }
 
+func TestDeleteFailedWorkspaceWithUncreatedCheckout(t *testing.T) {
+	store, readyWorkspace, source := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	branchRef := "refs/heads/already-exists"
+	branchHead := strings.TrimSpace(runGitProvisionCommand(t, source.CanonicalPath, "rev-parse", "HEAD"))
+	runGitProvisionCommand(t, source.CanonicalPath, "update-ref", branchRef, branchHead)
+	failed, err := store.CreateWorkspacePlan(ctx, readyWorkspace.ProjectID, "Failed workspace", []WorkspaceSourceInput{{
+		SourceID:   source.ID,
+		BaseRef:    "HEAD",
+		BranchName: "already-exists",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.setWorkspaceStatus(ctx, failed.ID, WorkspaceStatusError, "workspace branch already exists without Zotigo ownership"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(failed.RootPath); !os.IsNotExist(err) {
+		t.Fatalf("failed workspace root exists: %v", err)
+	}
+
+	if err := store.DeleteWorkspace(ctx, failed.ID, failed.Title); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetWorkspace(ctx, failed.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted workspace lookup = %v, want not found", err)
+	}
+	if _, err := store.GetSource(ctx, failed.ProjectID, source.ID); err != nil {
+		t.Fatalf("source was deleted: %v", err)
+	}
+	if head := strings.TrimSpace(runGitProvisionCommand(t, source.CanonicalPath, "rev-parse", branchRef)); head != branchHead {
+		t.Fatalf("colliding branch head = %q, want %q", head, branchHead)
+	}
+}
+
 func TestDeleteWorkspaceRejectsSymlinkAncestor(t *testing.T) {
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	projectDir := filepath.Dir(filepath.Dir(workspace.RootPath))
