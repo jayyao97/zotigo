@@ -261,9 +261,35 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	}
 	var trace []string
 	eventSink, hasEventSink := agent.ToolEventSinkFromContext(ctx)
+	parentCall, hasParentCall := agent.ToolCallFromContext(ctx)
+	forwardChildEvent := func(event protocol.Event) {
+		if !hasEventSink || !hasParentCall {
+			return
+		}
+		eventSink(protocol.Event{
+			Type: protocol.EventTypeSubagent,
+			Subagent: &protocol.SubagentEvent{
+				ToolCallID: parentCall.ID, Name: args.Name, AgentType: args.AgentType,
+				WorkDir: childWorkDir, Description: args.Description, Event: &event,
+			},
+		})
+	}
+	forwardChildStatus := func(status string) {
+		if !hasEventSink || !hasParentCall {
+			return
+		}
+		eventSink(protocol.Event{
+			Type: protocol.EventTypeSubagent,
+			Subagent: &protocol.SubagentEvent{
+				ToolCallID: parentCall.ID, Name: args.Name, AgentType: args.AgentType,
+				WorkDir: childWorkDir, Description: args.Description, Status: status,
+			},
+		})
+	}
 	for {
 		var finish protocol.FinishReason
 		for event := range events {
+			forwardChildEvent(event)
 			if event.Type == protocol.EventTypeFinish {
 				finish = event.FinishReason
 			}
@@ -311,6 +337,7 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		if err != nil {
 			return nil, fmt.Errorf("resolve subagent approval: %w", err)
 		}
+		forwardChildStatus("running")
 	}
 
 	snap := child.Snapshot()

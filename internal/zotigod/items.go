@@ -246,6 +246,7 @@ type itemResponse struct {
 	Type              string                            `json:"type"`
 	Role              string                            `json:"role,omitempty"`
 	Content           []itemContentResponse             `json:"content,omitempty"`
+	Subagent          *itemSubagentEventResponse        `json:"subagent,omitempty"`
 	Turn              *itemTurnResponse                 `json:"turn,omitempty"`
 	Approval          *itemApprovalResponse             `json:"approval,omitempty"`
 	Interaction       *zotigosession.DisplayInteraction `json:"interaction,omitempty"`
@@ -297,6 +298,15 @@ type itemSubagentResponse struct {
 	Status      string                        `json:"status,omitempty"`
 	History     []itemSubagentMessageResponse `json:"history,omitempty"`
 	Usage       protocol.Usage                `json:"usage"`
+}
+
+type itemSubagentEventResponse struct {
+	ToolCallID  string `json:"tool_call_id"`
+	Name        string `json:"name,omitempty"`
+	AgentType   string `json:"agent_type,omitempty"`
+	WorkDir     string `json:"workdir,omitempty"`
+	Description string `json:"description,omitempty"`
+	Status      string `json:"status,omitempty"`
 }
 
 type itemSubagentMessageResponse struct {
@@ -463,6 +473,7 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		Type:              string(item.Type),
 		Role:              item.Role,
 		Content:           publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
+		Subagent:          publicDisplaySubagent(item.Subagent),
 		Turn:              publicDisplayTurn(item.Turn),
 		Approval:          publicDisplayApproval(item.Approval),
 		Interaction:       item.Interaction,
@@ -472,6 +483,16 @@ func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 		ContextCompaction: publicDisplayContextCompaction(item.ContextCompaction),
 		Error:             item.Error,
 		CreatedAt:         item.CreatedAt,
+	}
+}
+
+func publicDisplaySubagent(subagent *zotigosession.DisplaySubagent) *itemSubagentEventResponse {
+	if subagent == nil {
+		return nil
+	}
+	return &itemSubagentEventResponse{
+		ToolCallID: subagent.ToolCallID, Name: subagent.Name, AgentType: subagent.AgentType,
+		WorkDir: subagent.WorkDir, Description: subagent.Description, Status: subagent.Status,
 	}
 }
 

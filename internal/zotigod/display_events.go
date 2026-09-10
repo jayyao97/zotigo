@@ -32,12 +32,13 @@ func newDisplayEventBroker() *displayEventBroker {
 }
 
 type displayDeltaEvent struct {
-	ItemID     string `json:"item_id"`
-	Role       string `json:"role"`
-	PartType   string `json:"part_type"`
-	Delta      string `json:"delta"`
-	ToolCallID string `json:"tool_call_id,omitempty"`
-	ToolName   string `json:"tool_name,omitempty"`
+	ItemID     string                         `json:"item_id"`
+	Role       string                         `json:"role"`
+	PartType   string                         `json:"part_type"`
+	Delta      string                         `json:"delta"`
+	ToolCallID string                         `json:"tool_call_id,omitempty"`
+	ToolName   string                         `json:"tool_name,omitempty"`
+	Subagent   *zotigosession.DisplaySubagent `json:"subagent,omitempty"`
 }
 
 type displayBrokerEvent struct {

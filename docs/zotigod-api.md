@@ -781,6 +781,15 @@ calls, tool results, and media references, but omits provider continuation
 state, signatures, encrypted reasoning, inline media bytes, and nested internal
 metadata.
 
+While a spawned child is running, its completed content blocks and tool events
+are persisted as `assistant_message` items carrying `subagent` metadata. Their
+`subagent.tool_call_id` points
+to the parent `spawn` call; the remaining metadata identifies the child and its
+current `running`, `waiting_approval`, `completed`, or `failed` status. Clients
+should render these items in the matching subagent transcript rather than the
+parent conversation timeline. The final `spawn` result remains the authoritative
+complete child history.
+
 Immediately before invoking a registered tool, the worker appends an internal
 `tool_execution_started` journal item containing `turn_id`, `tool_call_id`, and
 `tool_name`. The worker waits until the corresponding complete `tool_call` is
@@ -839,8 +848,8 @@ data: {"id":"item_sess_8f0e12ab34cd56ef_42","sequence":42,"type":"assistant_mess
 
 ```
 
-While a text or reasoning block is being generated, the worker may also send
-volatile `delta` events:
+While a parent or subagent text or reasoning block is being generated, the
+worker may also send volatile `delta` events:
 
 ```text
 event: delta
@@ -848,11 +857,15 @@ data: {"item_id":"item_550e8400-e29b-41d4-a716-446655440000","role":"assistant",
 
 ```
 
+Subagent deltas additionally carry a `subagent` object whose `tool_call_id`
+matches the parent `spawn` call. Their durable replacement is a
+`assistant_message` with `subagent` metadata and the same `item_id`.
+
 All deltas for one block use the same worker-generated UUID. When the block
-finishes, its complete durable `assistant_message` uses that UUID as its item
-ID and receives the next durable sequence. Desktop should append deltas to a
-temporary block keyed by `item_id`, then replace that block with the durable
-`item` event carrying the same ID.
+finishes, its complete durable `assistant_message` uses
+that UUID as its item ID and receives the next durable sequence. Desktop should
+append deltas to a temporary block keyed by `item_id`, then replace that block
+with the durable `item` event carrying the same ID.
 
 Delta events intentionally have no SSE `id` and never advance
 `Last-Event-ID`: they are not persisted, replayed, or included in `/items`.

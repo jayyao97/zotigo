@@ -123,6 +123,53 @@ func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 	}
 }
 
+func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T) {
+	const sessionID = "sess-subagent-active-wal"
+	ctx := context.Background()
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	snapshot := agent.Snapshot{State: agent.StateIdle}
+	sess := &zotigosession.Session{Metadata: zotigosession.Metadata{ID: sessionID}, AgentSnapshot: snapshot}
+	if err := store.Put(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	wal := newWorkerRuntimeWAL(store, sessionID)
+	if err := wal.Begin(ctx, sess, snapshot, "turn-1"); err != nil {
+		t.Fatal(err)
+	}
+
+	display := newWorkerDisplayLog(sessionID, storedDisplayItemSource{store: store})
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	notified := make(chan approvalRequestResponse, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
+	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
+	go func() {
+		results, _ := transport.RequestSpawnApproval(ctx, builtin.SpawnApprovalRequest{
+			AgentName: "reviewer",
+			Actions:   []*agent.PendingAction{{ToolCallID: "child-call", Name: "shell", Arguments: `{"command":"go test ./..."}`}},
+		})
+		resultCh <- results
+	}()
+	approval := <-notified
+	resolution, err := transport.resolveApproval(ctx, approval.ID, []zotigosession.DisplayApprovalDecision{{ToolCallID: "child-call", Approved: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime := &workerRuntime{sessionID: sessionID, store: store, transport: transport, runtimeWAL: wal}
+	if err := runtime.releaseApproval(ctx, resolution); err != nil {
+		t.Fatalf("release approval with active parent WAL: %v", err)
+	}
+	results := <-resultCh
+	if len(results) != 1 || !results[0].Approved {
+		t.Fatalf("subagent approval results = %#v", results)
+	}
+}
+
 func TestWorkerRuntimeSteeringWinsBeforeApprovalRegistration(t *testing.T) {
 	const sessionID = "sess-steering-before-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
