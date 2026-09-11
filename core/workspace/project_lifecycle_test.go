@@ -93,6 +93,29 @@ func TestProjectArchiveRejectsDirtyWorktreeBeforeChangingProjectStatus(t *testin
 	}
 }
 
+func TestProjectArchiveAllowsAlreadyArchivedGitWorkspace(t *testing.T) {
+	store, workspace, _ := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	project, err := store.GetProject(ctx, workspace.ProjectID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ArchiveWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	impact, err := store.PreviewProjectArchive(ctx, project.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(impact.RetainedBranches) != 1 || impact.RetainedBranches[0] != "zotigo/test-workspace" {
+		t.Fatalf("retained branches = %v", impact.RetainedBranches)
+	}
+	if _, err := store.ArchiveProject(ctx, project.ID); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 	store, project, workspace, source := createFolderProjectFixture(t)
 	ctx := context.Background()
