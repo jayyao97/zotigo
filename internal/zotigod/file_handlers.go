@@ -2,7 +2,9 @@ package zotigod
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"io"
@@ -34,10 +36,20 @@ type textFileSnapshot struct {
 	MtimeMs   float64 `json:"mtimeMs"`
 	ReadOnly  bool    `json:"readOnly"`
 }
+type imageFileSnapshot struct {
+	Path       string  `json:"path"`
+	Name       string  `json:"name"`
+	MediaType  string  `json:"mediaType"`
+	DataBase64 string  `json:"dataBase64"`
+	SizeBytes  int64   `json:"sizeBytes"`
+	MtimeMs    float64 `json:"mtimeMs"`
+}
+
+const maximumImagePreviewBytes = 10 * 1024 * 1024
 
 func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/files/capabilities" && r.Method == http.MethodGet {
-		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true, "list": true})
+		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true, "list": true, "image": true})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -122,6 +134,15 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		writeAPIJSON(w, 200, map[string]any{"kind": "directory", "path": resolved})
 		return
 	}
+	image, err := readWorkspaceImage(root, relative, resolved)
+	if err != nil {
+		writeAPIError(w, 400, "file cannot be read")
+		return
+	}
+	if image != nil {
+		writeAPIJSON(w, 200, map[string]any{"kind": "image", "file": image})
+		return
+	}
 	snapshot, err := readWorkspaceText(root, relative, resolved)
 	if err != nil {
 		writeAPIError(w, 400, "file cannot be read")
@@ -132,6 +153,98 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeAPIJSON(w, 200, map[string]any{"kind": "text", "file": snapshot})
+}
+
+func readWorkspaceImage(root *os.Root, relative, resolved string) (*imageFileSnapshot, error) {
+	extension := strings.ToLower(filepath.Ext(resolved))
+	if !supportedImageExtension(extension) {
+		return nil, nil
+	}
+	info, err := root.Stat(relative)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > maximumImagePreviewBytes {
+		return nil, nil
+	}
+	file, err := root.Open(relative)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = file.Close() }()
+	data, err := io.ReadAll(io.LimitReader(file, maximumImagePreviewBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maximumImagePreviewBytes {
+		return nil, nil
+	}
+	mediaType := imageMediaType(extension, data)
+	if mediaType == "" {
+		return nil, nil
+	}
+	return &imageFileSnapshot{
+		Path: resolved, Name: filepath.Base(resolved), MediaType: mediaType,
+		DataBase64: base64.StdEncoding.EncodeToString(data), SizeBytes: int64(len(data)),
+		MtimeMs: float64(info.ModTime().UnixNano()) / 1e6,
+	}, nil
+}
+
+func supportedImageExtension(extension string) bool {
+	switch extension {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp", ".avif", ".bmp", ".ico", ".svg":
+		return true
+	default:
+		return false
+	}
+}
+
+func imageMediaType(extension string, data []byte) string {
+	switch strings.ToLower(extension) {
+	case ".png":
+		if bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")) {
+			return "image/png"
+		}
+	case ".jpg", ".jpeg":
+		if len(data) >= 3 && bytes.Equal(data[:3], []byte{0xff, 0xd8, 0xff}) {
+			return "image/jpeg"
+		}
+	case ".gif":
+		if bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")) {
+			return "image/gif"
+		}
+	case ".webp":
+		if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+			return "image/webp"
+		}
+	case ".avif":
+		if len(data) >= 12 && string(data[4:8]) == "ftyp" && (string(data[8:12]) == "avif" || string(data[8:12]) == "avis") {
+			return "image/avif"
+		}
+	case ".bmp":
+		if bytes.HasPrefix(data, []byte("BM")) {
+			return "image/bmp"
+		}
+	case ".ico":
+		if bytes.HasPrefix(data, []byte{0, 0, 1, 0}) {
+			return "image/x-icon"
+		}
+	case ".svg":
+		decoder := xml.NewDecoder(bytes.NewReader(data))
+		for {
+			token, err := decoder.Token()
+			if err != nil {
+				return ""
+			}
+			if start, ok := token.(xml.StartElement); ok {
+				if strings.EqualFold(start.Name.Local, "svg") {
+					return "image/svg+xml"
+				}
+				return ""
+			}
+		}
+	}
+	return ""
 }
 
 func openWorkspaceFileRoot(requested string, roots []string) (*os.Root, string, string, error) {

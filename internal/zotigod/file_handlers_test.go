@@ -21,6 +21,12 @@ func TestWorkspaceFilesStayOnDaemonAndRejectConflicts(t *testing.T) {
 	}
 	defer func() { _ = catalog.Close() }()
 	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
+	capabilities := requestCatalog(t, handler, http.MethodGet, "/files/capabilities", "")
+	var fileCapabilities map[string]bool
+	decodeCatalogData(t, capabilities, &fileCapabilities)
+	if !fileCapabilities["read"] || !fileCapabilities["write"] || !fileCapabilities["list"] || !fileCapabilities["image"] {
+		t.Fatalf("file capabilities %+v", fileCapabilities)
+	}
 	projectRec := requestCatalog(t, handler, http.MethodPost, "/projects", `{"name":"files"}`)
 	var project zotigoworkspace.Project
 	decodeCatalogData(t, projectRec, &project)
@@ -49,6 +55,35 @@ func TestWorkspaceFilesStayOnDaemonAndRejectConflicts(t *testing.T) {
 	decodeCatalogData(t, opened, &result)
 	if result.File.Content != "original" {
 		t.Fatalf("read %+v", result)
+	}
+	imagePath := filepath.Join(source, "preview.png")
+	imageData := append([]byte("\x89PNG\r\n\x1a\n"), []byte("preview")...)
+	if err := os.WriteFile(imagePath, imageData, 0600); err != nil {
+		t.Fatal(err)
+	}
+	imageOpened := requestCatalog(t, handler, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, imagePath)+`}`)
+	if imageOpened.Code != 200 {
+		t.Fatalf("open image %d: %s", imageOpened.Code, imageOpened.Body)
+	}
+	var imageResult struct {
+		Kind string            `json:"kind"`
+		File imageFileSnapshot `json:"file"`
+	}
+	decodeCatalogData(t, imageOpened, &imageResult)
+	if imageResult.Kind != "image" || imageResult.File.MediaType != "image/png" || imageResult.File.DataBase64 != "iVBORw0KGgpwcmV2aWV3" {
+		t.Fatalf("image read %+v", imageResult)
+	}
+	spoofedImage := filepath.Join(source, "spoofed.png")
+	if err := os.WriteFile(spoofedImage, []byte("not an image"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	spoofedOpened := requestCatalog(t, handler, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, spoofedImage)+`}`)
+	var spoofedResult struct {
+		Kind string `json:"kind"`
+	}
+	decodeCatalogData(t, spoofedOpened, &spoofedResult)
+	if spoofedResult.Kind != "text" {
+		t.Fatalf("spoofed image read %+v", spoofedResult)
 	}
 	input = fileRequest{Path: file, Content: "saved remotely", ExpectedMtimeMs: result.File.MtimeMs}
 	payload, _ = json.Marshal(input)
@@ -145,4 +180,28 @@ func TestWorkspaceFilesStayOnDaemonAndRejectConflicts(t *testing.T) {
 			t.Fatalf("roots %+v", listing)
 		}
 	})
+}
+
+func TestWorkspaceImageMediaTypes(t *testing.T) {
+	tests := []struct {
+		extension string
+		data      []byte
+		mediaType string
+	}{
+		{".png", []byte("\x89PNG\r\n\x1a\n"), "image/png"},
+		{".jpg", []byte{0xff, 0xd8, 0xff}, "image/jpeg"},
+		{".gif", []byte("GIF89a"), "image/gif"},
+		{".webp", []byte("RIFF0000WEBP"), "image/webp"},
+		{".avif", []byte("0000ftypavif"), "image/avif"},
+		{".bmp", []byte("BM"), "image/bmp"},
+		{".ico", []byte{0, 0, 1, 0}, "image/x-icon"},
+		{".svg", []byte(`<?xml version="1.0"?><!-- preview --><svg></svg>`), "image/svg+xml"},
+	}
+	for _, test := range tests {
+		t.Run(test.extension, func(t *testing.T) {
+			if got := imageMediaType(test.extension, test.data); got != test.mediaType {
+				t.Fatalf("imageMediaType(%q) = %q, want %q", test.extension, got, test.mediaType)
+			}
+		})
+	}
 }
