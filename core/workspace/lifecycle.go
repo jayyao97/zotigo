@@ -35,8 +35,15 @@ func (s *Store) PreviewArchive(ctx context.Context, workspaceID string) (Archive
 		if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
 			return ArchiveImpact{}, err
 		}
+		branchName := checkout.BranchName
+		if workspace.Status == WorkspaceStatusReady {
+			branchName, err = currentCheckoutBranch(ctx, source, checkout)
+			if err != nil {
+				return ArchiveImpact{}, err
+			}
+		}
 		impact.WorktreePaths = append(impact.WorktreePaths, checkout.WorktreePath)
-		impact.RetainedBranches = append(impact.RetainedBranches, checkout.BranchName)
+		impact.RetainedBranches = append(impact.RetainedBranches, branchName)
 		dirty, err := gitWorktreeDirty(ctx, checkout.WorktreePath)
 		if err != nil {
 			return ArchiveImpact{}, err
@@ -87,13 +94,19 @@ func (s *Store) ArchiveWorkspace(ctx context.Context, workspaceID string) (Works
 			if err := verifyCheckoutOwnership(ctx, source, checkout, checkoutOwnershipRef(workspace.ID, source.SourceKey)); err != nil {
 				return Workspace{}, err
 			}
+			branchName, err := currentCheckoutBranch(ctx, source, checkout)
+			if err != nil {
+				return Workspace{}, err
+			}
+			checkout.BranchName = branchName
 			head, err := checkoutBranchHead(ctx, source, checkout)
 			if err != nil {
 				return Workspace{}, err
 			}
-			if err := s.setCheckoutOwnedHead(ctx, workspace.ID, checkout.SourceID, head); err != nil {
+			if err := s.setCheckoutBranchAndOwnedHead(ctx, workspace.ID, checkout.SourceID, branchName, head); err != nil {
 				return Workspace{}, err
 			}
+			checkouts[index].BranchName = branchName
 			checkouts[index].OwnedHead = head
 		}
 		if err := s.setWorkspaceStatus(ctx, workspaceID, WorkspaceStatusArchiving, ""); err != nil {
@@ -416,6 +429,24 @@ func checkoutBranchHead(ctx context.Context, source Source, checkout Checkout) (
 		return "", fmt.Errorf("%w: workspace branch is missing", ErrConflict)
 	}
 	return strings.TrimSpace(head), nil
+}
+
+func currentCheckoutBranch(ctx context.Context, source Source, checkout Checkout) (string, error) {
+	worktrees, err := listGitWorktrees(ctx, source.CanonicalPath)
+	if err != nil {
+		return "", err
+	}
+	for _, candidate := range worktrees {
+		if !samePath(candidate.Path, checkout.WorktreePath) {
+			continue
+		}
+		const localBranchPrefix = "refs/heads/"
+		if !strings.HasPrefix(candidate.Branch, localBranchPrefix) {
+			return "", fmt.Errorf("%w: workspace worktree is not on a branch", ErrConflict)
+		}
+		return strings.TrimPrefix(candidate.Branch, localBranchPrefix), nil
+	}
+	return "", fmt.Errorf("%w: checkout path is not the registered worktree", ErrConflict)
 }
 
 func verifyCheckoutGeneration(ctx context.Context, source Source, checkout Checkout) error {

@@ -63,6 +63,60 @@ func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
 	}
 }
 
+func TestArchiveTracksCurrentWorktreeBranch(t *testing.T) {
+	for _, mode := range []string{"renamed", "switched"} {
+		t.Run(mode, func(t *testing.T) {
+			store, workspace, source := createGitWorkspaceFixture(t)
+			ctx := context.Background()
+			worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
+			branchName := "user-branch"
+			if mode == "renamed" {
+				runGitProvisionCommand(t, worktree, "branch", "-m", branchName)
+			} else {
+				runGitProvisionCommand(t, worktree, "checkout", "-b", branchName)
+			}
+
+			impact, err := store.PreviewArchive(ctx, workspace.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(impact.RetainedBranches) != 1 || impact.RetainedBranches[0] != branchName {
+				t.Fatalf("retained branches = %v, want [%s]", impact.RetainedBranches, branchName)
+			}
+			if _, err := store.ArchiveWorkspace(ctx, workspace.ID); err != nil {
+				t.Fatal(err)
+			}
+			checkouts, _, err := store.workspaceBindings(ctx, workspace.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(checkouts) != 1 || checkouts[0].BranchName != branchName {
+				t.Fatalf("checkouts = %+v, want branch %s", checkouts, branchName)
+			}
+			if _, err := store.UnarchiveWorkspace(ctx, workspace.ID); err != nil {
+				t.Fatal(err)
+			}
+			if branch := strings.TrimSpace(runGitProvisionCommand(t, worktree, "symbolic-ref", "--short", "HEAD")); branch != branchName {
+				t.Fatalf("unarchived branch = %q, want %q", branch, branchName)
+			}
+		})
+	}
+}
+
+func TestArchiveRejectsDetachedWorktree(t *testing.T) {
+	store, workspace, source := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
+	runGitProvisionCommand(t, worktree, "checkout", "--detach")
+
+	if _, err := store.PreviewArchive(ctx, workspace.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("preview archive error = %v, want conflict", err)
+	}
+	if _, err := store.ArchiveWorkspace(ctx, workspace.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("archive error = %v, want conflict", err)
+	}
+}
+
 func TestDeleteWorkspaceRemovesOwnedRootAndPreservesBranches(t *testing.T) {
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()

@@ -443,12 +443,13 @@ func (s *Store) workspaceBindings(ctx context.Context, workspaceID string) ([]Ch
 	return checkouts, folders, nil
 }
 
-func (s *Store) setCheckoutOwnedHead(ctx context.Context, workspaceID string, sourceID string, head string) error {
+func (s *Store) setCheckoutBranchAndOwnedHead(ctx context.Context, workspaceID string, sourceID string, branchName string, head string) error {
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE workspace_checkouts SET owned_head = ? WHERE workspace_id = ? AND source_id = ?
-	`, head, workspaceID, sourceID)
+		UPDATE workspace_checkouts SET branch_name = ?, owned_head = ?
+		WHERE workspace_id = ? AND source_id = ?
+	`, branchName, head, workspaceID, sourceID)
 	if err != nil {
-		return fmt.Errorf("update workspace checkout head: %w", err)
+		return fmt.Errorf("update workspace checkout branch: %w", err)
 	}
 	count, err := result.RowsAffected()
 	if err != nil {
