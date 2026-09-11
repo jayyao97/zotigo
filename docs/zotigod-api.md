@@ -1467,19 +1467,19 @@ Status codes:
   should refresh `/sessions/{id}/items` before retrying.
 - `405`: method not allowed.
 
-## Workspace text files
+## Workspace files
 
 These endpoints use the daemon's normal Bearer authentication and success/error envelope. They let remote clients access files on the daemon machine without using the UI backend's filesystem.
 
-- `GET /files/capabilities`: returns `data: {"read": true, "write": true, "list": true}`. Clients should check this before enabling remote workspace operations; older daemons return 404.
+- `GET /files/capabilities`: returns `data: {"read": true, "write": true, "list": true, "image": true}`. Clients should check this before enabling remote workspace operations; older daemons return 404, and daemons without `image` do not return image previews.
 - `POST /files/open`: accepts `path`, optional `sessionId`, and `basePath`/`baseKind` (`file` or directory) for relative links. Paths use the daemon's operating-system conventions. File URLs may have an empty or `localhost` authority.
 - `POST /files/save`: accepts the resolved absolute `path`, optional `sessionId`, new `content`, and the `expectedMtimeMs` from the opened file.
 
-Open returns `data: {"kind":"text","file":{"path":"/workspace/notes.md","name":"notes.md","content":"text","sizeBytes":4,"mtimeMs":1234.5,"readOnly":false}}`. Directories return `data: {"kind":"directory","path":"..."}`. Binary files and files larger than 5 MiB return `data: {"kind":"system","path":"..."}`; remote clients must not interpret that path as a local operating-system file. UTF-8 text over 1 MiB is preview-only. Save returns the updated file snapshot directly in `data`.
+Open returns `data: {"kind":"text","file":{"path":"/workspace/notes.md","name":"notes.md","content":"text","sizeBytes":4,"mtimeMs":1234.5,"readOnly":false}}`. PNG, JPEG, GIF, WebP, AVIF, BMP, ICO and SVG files up to 10 MiB return `kind: "image"` with `path`, `name`, `mediaType`, `dataBase64`, `sizeBytes`, and `mtimeMs`. Image signatures are validated instead of trusting the extension. Directories return `data: {"kind":"directory","path":"..."}`. Other binary files and oversized files return `data: {"kind":"system","path":"..."}`; remote clients must not interpret that path as a local operating-system file. UTF-8 text over 1 MiB is preview-only. Save returns the updated text-file snapshot directly in `data`.
 
 Allowed roots come from the daemon's registered sources, active workspaces and the optional session's stored working directory. Caller-supplied paths cannot grant additional roots. Resolved symlinks must remain inside a registered root, and filesystem access uses a confined root handle. Missing or outside-root paths return 403. Invalid/uneditable files return 400. A stale modification time returns 409; clients should reopen before retrying. Save checks and writes are serialized across API clients of one daemon. This is not a lock against other programs editing files; external editors and agent tools remain independent. Saves modify existing files only, and are not a general upload or filesystem-management API. JSON bodies are bounded at 7 MiB, text reads at 5 MiB and edits at 1 MiB.
 
-The API is additive. Existing clients remain compatible; remote UI clients must deploy a daemon containing these routes before enabling file operations. Registered workspace roots restrict this file API, not the broader operating-system capabilities of authorized agents.
+The API is additive. Existing clients remain compatible; remote UI clients must deploy a daemon containing these routes before enabling file operations. Registered workspace roots restrict this file API, not the broader operating-system capabilities of authorized agents. Image payloads are base64 encoded in the authenticated JSON response; clients should release them when the preview tab closes.
 
 ### Directory browsing
 
