@@ -369,6 +369,7 @@ type workerRuntime struct {
 	profileMu        sync.Mutex
 	profileEpoch     uint64
 	hookModel        string
+	promptConfig     zotigosession.PromptConfig
 	profileOrderMu   sync.Mutex
 	profileOrderTail <-chan struct{}
 	fatalCh          chan error
@@ -505,17 +506,20 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		Profile:     profile,
 		Executor:    localExec,
 		PromptBuilder: wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-			WorkDir:      cwd,
-			SkillManager: skills,
+			WorkDir:           cwd,
+			SkillManager:      skills,
+			AgentInstructions: sess.PromptConfig.AgentInstructions,
 		}),
 		UserContextBuilder: wiring.NewUserContextBuilder(wiring.PromptConfig{
 			WorkDir:                    cwd,
 			IncludeProjectInstructions: true,
 		}),
-		ApprovalPolicy:      approvalPolicy,
-		TranscriptDir:       transcriptDir,
-		Observer:            observer,
-		ConfigureClassifier: true,
+		ApprovalPolicy:       approvalPolicy,
+		TranscriptDir:        transcriptDir,
+		Observer:             observer,
+		ConfigureClassifier:  true,
+		ApprovalInstructions: sess.PromptConfig.ApprovalInstructions,
+		ReviewAllTools:       sess.PromptConfig.ReviewAllTools,
 		Middleware: []agent.Middleware{
 			hooks.ToolMiddleware(hookDispatcher, hooks.ToolContext{
 				SessionID: cfg.SessionID,
@@ -589,6 +593,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		notifyWorking: cfg.NotifyWorking,
 		hooks:         hookDispatcher,
 		hookModel:     profile.Model,
+		promptConfig:  sess.PromptConfig,
 	}
 	if runtimeWAL != nil {
 		runtimeWAL.onError = func(err error) {
@@ -710,10 +715,24 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequ
 }
 
 func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
+	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
+		r.mu.Lock()
+		promptRevision := r.promptConfig.Revision
+		r.mu.Unlock()
+		if request.RequiredApprovalPolicy != "" && r.agent.RequestedApprovalPolicy() != request.RequiredApprovalPolicy {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+	}
 	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
 		return commandResponse{}, err
 	} else if found {
 		if request.SteeringOnly && existing.Type != sessionCommandSteering {
+			return commandResponse{}, errCommandIDConflict
+		}
+		if request.StartOnly && existing.Type != sessionCommandMessage {
 			return commandResponse{}, errCommandIDConflict
 		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
@@ -723,6 +742,14 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 	}
 
 	turnID := r.display.CurrentTurnID()
+	if request.StartOnly {
+		r.mu.Lock()
+		turnActive := r.turnActive
+		r.mu.Unlock()
+		if turnID != "" || turnActive {
+			return commandResponse{}, errActiveTurn
+		}
+	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID {
 		return commandResponse{}, errTurnMismatch
 	}
@@ -955,11 +982,13 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 		return completion, nil
 	}
 	runtimeProfile, err := wiring.NewRuntimeProfile(wiring.AgentConfig{
-		Config:              appConfig,
-		ProfileName:         target,
-		Profile:             profile,
-		Observer:            r.observer,
-		ConfigureClassifier: true,
+		Config:               appConfig,
+		ProfileName:          target,
+		Profile:              profile,
+		Observer:             r.observer,
+		ConfigureClassifier:  true,
+		ApprovalInstructions: r.promptConfig.ApprovalInstructions,
+		ReviewAllTools:       r.promptConfig.ReviewAllTools,
 	})
 	if err != nil {
 		r.completeProfileFailure(predecessor, ordered, completion, commandID, target, err)
@@ -1290,7 +1319,8 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.turnCommandSequence = commandSequence
 	r.mu.Unlock()
 
-	turnID, err := r.display.StartTurn(ctx)
+	model := r.turnHookModel()
+	turnID, err := r.display.StartTurnWithRuntime(ctx, zotigosession.DisplayRuntime{Agent: "zotigo", ProfileName: r.agent.ActiveProfileName(), Model: model})
 	if err != nil {
 		r.finishTurn()
 		return err
@@ -1302,7 +1332,6 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	if r.notifyWorking != nil {
 		_ = r.notifyWorking(ctx)
 	}
-	model := r.turnHookModel()
 	usageBefore := r.agent.Snapshot().CumulativeUsage
 	dispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
 	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
@@ -1357,7 +1386,10 @@ func messageFromCommandWithSkills(commandID string, command *messageCommandPaylo
 	if err != nil {
 		return protocol.Message{}, err
 	}
-	enriched.Metadata = &protocol.MessageMetadata{OriginalText: original.String()}
+	if enriched.Metadata == nil {
+		enriched.Metadata = &protocol.MessageMetadata{}
+	}
+	enriched.Metadata.OriginalText = original.String()
 	return enriched, nil
 }
 
@@ -1398,7 +1430,17 @@ func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
 }
 
 func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
-	return userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+	message, err := userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+	if err != nil {
+		return protocol.Message{}, err
+	}
+	if command.RequestContext != nil {
+		if message.Metadata == nil {
+			message.Metadata = &protocol.MessageMetadata{}
+		}
+		message.Metadata.RequestContext = command.RequestContext.Clone()
+	}
+	return message, nil
 }
 
 func userMessageFromCommand(text string, images []commandImageData, label string) (protocol.Message, error) {

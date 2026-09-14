@@ -26,6 +26,8 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/buildinfo"
+	"github.com/jayyao97/zotigo/internal/channels"
+	channelsfeishu "github.com/jayyao97/zotigo/internal/channels/feishu"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
@@ -480,6 +482,7 @@ type handler struct {
 	codexSync            *codexSessionSyncer
 	logger               *log.Logger
 	hooks                hookEventDispatcher
+	channels             *channels.Service
 	skillsMu             sync.Mutex
 	skillManagers        map[string]*skills.SkillManager
 }
@@ -665,21 +668,52 @@ func Run(args []string) (exitCode int) {
 		defer func() { _ = codexHost.Close() }()
 	}
 	server := &http.Server{
-		Addr: *addr,
-		Handler: newDefaultHandler(handlerOptions{
-			launcher:        launcher,
-			runtimes:        runtimes,
-			codexHost:       codexHost,
-			publicAuthToken: publicAuthToken,
-			workerAuthToken: workerAuthToken,
-			logger:          logger,
-			hooks:           hookDispatcher,
-		}),
+		Addr:              *addr,
+		Handler:           nil,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	channelStore, channelStoreErr := channels.Open("")
+	var channelService *channels.Service
+	if channelStoreErr != nil {
+		logger.Printf("Channels disabled: %v", channelStoreErr)
+	} else if secretStore, secretErr := channels.NewSecretStore(""); secretErr != nil {
+		_ = channelStore.Close()
+		logger.Printf("Channels disabled: %v", secretErr)
+	} else {
+		channelService = channels.NewService(channelStore, secretStore, logger, map[string]channels.AdapterFactory{channels.ProviderFeishu: channelsfeishu.Factory{}})
+	}
+	server.Handler = newDefaultHandler(handlerOptions{
+		launcher:        launcher,
+		runtimes:        runtimes,
+		codexHost:       codexHost,
+		publicAuthToken: publicAuthToken,
+		workerAuthToken: workerAuthToken,
+		logger:          logger,
+		hooks:           hookDispatcher,
+		channels:        channelService,
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var closeChannelsOnce sync.Once
+	closeChannels := func() {
+		closeChannelsOnce.Do(func() {
+			if channelService == nil {
+				return
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := channelService.Close(shutdownCtx); err != nil {
+				logger.Printf("Channels shutdown failed: %v", err)
+			}
+		})
+	}
+	defer closeChannels()
+	if channelService != nil {
+		if err := channelService.Start(ctx); err != nil {
+			logger.Printf("Channels start failed: %v", err)
+		}
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -699,6 +733,7 @@ func Run(args []string) (exitCode int) {
 			logger.Printf("Shutdown failed: %v", err)
 			return 1
 		}
+		closeChannels()
 		if err := <-errCh; err != nil {
 			logger.Printf("Server failed: %v", err)
 			return 1
@@ -772,6 +807,7 @@ type handlerOptions struct {
 	codexHost            codexapp.HostProvider
 	logger               *log.Logger
 	hooks                hookEventDispatcher
+	channels             *channels.Service
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -901,6 +937,10 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		catalogErr:           options.catalogErr,
 		logger:               options.logger,
 		hooks:                options.hooks,
+		channels:             options.channels,
+	}
+	if handler.channels != nil {
+		handler.channels.SetDispatcher(handler)
 	}
 	if options.codexHost != nil && options.store != nil {
 		handler.codexSync = newCodexSessionSyncer(options.codexHost, options.store, items, options.catalog, registry, options.sessionOps)
@@ -999,6 +1039,13 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/catalog/sessions/{$}", handler.handleCatalogSessionNotFound)
 	handleOptionalTrailingSlash(mux, "/catalog/sessions/{id}", withPathValue("id", handler.handleCatalogSession))
 	mux.HandleFunc("/catalog/sessions/{id}/{route...}", handler.handleCatalogSessionNotFound)
+	mux.HandleFunc("/channels/connections", handler.handleChannelConnections)
+	mux.HandleFunc("/channels/connections/{id}/groups", withPathValue("id", handler.handleChannelGroups))
+	mux.HandleFunc("/channels/connections/{id}/groups/{chat_id}/members", withPathValue("id", handler.handleChannelGroupMembers))
+	mux.HandleFunc("/channels/connections/{id}", withPathValue("id", handler.handleChannelConnection))
+	mux.HandleFunc("/channels/conversations", handler.handleChannelConversations)
+	mux.HandleFunc("/channels/conversations/{id}", withPathValue("id", handler.handleChannelConversation))
+	mux.HandleFunc("/channels/conversations/{id}/messages", withPathValue("id", handler.handleChannelMessages))
 	mux.HandleFunc("/sessions", handler.handleSessions)
 	mux.HandleFunc("/sessions/{$}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/sessions/{id}", withPathValue("id", handler.handleSessionGet))
@@ -1931,6 +1978,19 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	if req.Generation == "" {
 		writeAPIError(w, http.StatusBadRequest, "worker generation is required")
 		return
+	}
+	if _, ok := h.registry.Get(id); !ok {
+		h.writeTransition(w, Session{}, errSessionNotFound)
+		return
+	}
+	if !h.workers.Matches(id, req.Generation) {
+		waitCtx, cancel := context.WithTimeout(r.Context(), workerRegistrationWait)
+		matched := h.workers.WaitForMatch(waitCtx.Done(), id, req.Generation)
+		cancel()
+		if !matched {
+			writeAPIError(w, http.StatusConflict, "worker ready does not match the active connection")
+			return
+		}
 	}
 
 	unlock := h.sessionOps.lock(id)

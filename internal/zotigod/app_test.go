@@ -5797,13 +5797,12 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		t.Fatalf("expected urgent turn interrupt, got %#v", interrupt)
 	}
 
-	lateMessageDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"too late"}`))
-		handler.ServeHTTP(rec, req)
-		lateMessageDone <- rec
-	}()
+	late := httptest.NewRecorder()
+	lateRequest := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"too late"}`))
+	handler.ServeHTTP(late, lateRequest)
+	if late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "turn_stopping") {
+		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
+	}
 
 	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
 	if err != nil {
@@ -5816,9 +5815,6 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 	}
 	if message := <-messageDone; message.Code != http.StatusCreated {
 		t.Fatalf("pending message status = %d: %s", message.Code, message.Body.String())
-	}
-	if late := <-lateMessageDone; late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "turn_stopping") {
-		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
 	}
 	pauseCommand := readWorkerMessage(t, worker)
 	if pauseCommand.Type != workerMessageCommand || pauseCommand.Command == nil || pauseCommand.Command.Type != sessionCommandPause {

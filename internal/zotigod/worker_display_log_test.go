@@ -11,6 +11,42 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
+func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-runtime", source)
+	runtime := zotigosession.DisplayRuntime{Agent: "zotigo", ProfileName: "main", Model: "gemini-test"}
+	if _, err := display.StartTurnWithRuntime(context.Background(), runtime); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := source.LoadItems(context.Background(), "sess-runtime")
+	if err != nil || len(items) != 1 || items[0].Turn == nil || items[0].Turn.Runtime == nil || *items[0].Turn.Runtime != runtime {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+}
+
+func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-usage", source)
+	ctx := context.Background()
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.Event{Type: protocol.EventTypeFinish, FinishReason: protocol.FinishReason("need_approval"), Usage: &protocol.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := display.HandleEvent(ctx, protocol.Event{Type: protocol.EventTypeFinish, FinishReason: protocol.FinishReasonStop, Usage: &protocol.Usage{InputTokens: 20, OutputTokens: 3, TotalTokens: 23}}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := source.LoadItems(ctx, "sess-usage")
+	if err != nil || len(items) != 2 || items[1].Turn == nil || items[1].Turn.Usage == nil {
+		t.Fatalf("items=%+v err=%v", items, err)
+	}
+	want := protocol.Usage{InputTokens: 30, OutputTokens: 5, TotalTokens: 35}
+	if got := *items[1].Turn.Usage; got != want {
+		t.Fatalf("usage=%+v want=%+v", got, want)
+	}
+}
+
 func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)

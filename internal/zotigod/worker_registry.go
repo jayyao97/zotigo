@@ -9,11 +9,13 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
+	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 const workerWriteWait = 10 * time.Second
 const defaultWorkerApprovalWait = 30 * time.Second
+const workerRegistrationWait = time.Second
 
 var (
 	errWorkerOffline       = errors.New("worker is offline")
@@ -73,10 +75,14 @@ type workerInterruptTurn struct {
 }
 
 type workerInputRequest struct {
-	RequestID      string          `json:"request_id"`
-	Command        commandResponse `json:"command"`
-	SteeringOnly   bool            `json:"steering_only,omitempty"`
-	ExpectedTurnID string          `json:"expected_turn_id,omitempty"`
+	RequestID              string               `json:"request_id"`
+	Command                commandResponse      `json:"command"`
+	SteeringOnly           bool                 `json:"steering_only,omitempty"`
+	StartOnly              bool                 `json:"start_only,omitempty"`
+	ExpectedTurnID         string               `json:"expected_turn_id,omitempty"`
+	RequiredApprovalPolicy agent.ApprovalPolicy `json:"required_approval_policy,omitempty"`
+	RequiredPromptRevision uint64               `json:"required_prompt_revision,omitempty"`
+	RequirePromptRevision  bool                 `json:"require_prompt_revision,omitempty"`
 }
 
 type workerInputResult struct {
@@ -192,6 +198,28 @@ func (r *workerRegistry) Matches(sessionID string, generation string) bool {
 	defer r.mu.Unlock()
 	worker := r.workers[sessionID]
 	return worker != nil && !worker.closing && worker.generation == generation
+}
+
+// WaitForMatch bridges the small interval between the WebSocket upgrade
+// response reaching a worker and Register publishing that connection.
+func (r *workerRegistry) WaitForMatch(ctxDone <-chan struct{}, sessionID string, generation string) bool {
+	r.mu.Lock()
+	if worker := r.workers[sessionID]; worker != nil {
+		matched := !worker.closing && worker.generation == generation
+		r.mu.Unlock()
+		return matched
+	}
+	waiter := make(chan struct{})
+	r.waiters[sessionID] = append(r.waiters[sessionID], waiter)
+	r.mu.Unlock()
+
+	select {
+	case <-ctxDone:
+		r.removeWaiter(sessionID, waiter)
+		return false
+	case <-waiter:
+		return r.Matches(sessionID, generation)
+	}
 }
 
 func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result workerConversationBoundResult) bool {
@@ -844,10 +872,14 @@ func (e *workerInputError) Is(target error) bool {
 		return e.Code == "command_pending"
 	case errNoActiveTurn:
 		return e.Code == "no_active_turn"
+	case errActiveTurn:
+		return e.Code == "active_turn"
 	case errTurnMismatch:
 		return e.Code == "turn_mismatch"
 	case errCommandIDConflict:
 		return e.Code == "command_id_conflict"
+	case errInputPolicyMismatch:
+		return e.Code == "input_policy_mismatch"
 	default:
 		return false
 	}

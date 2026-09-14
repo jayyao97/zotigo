@@ -37,15 +37,18 @@ func TestConvertAgentTurns(t *testing.T) {
 			SnapshotID:        "snap-123",
 			SafetyEvents: []agent.AuditEvent{
 				{
-					Timestamp:       now,
-					TurnID:          "turn_1",
-					ToolCallID:      "call_1",
-					ToolName:        "write_file",
-					DecisionSource:  agent.SafetyDecisionSourceHardRule,
-					Decision:        agent.SafetyClassifierDecisionAskUser,
-					Reason:          "mutating tool requires approval",
-					SnapshotStatus:  agent.SnapshotStatusCreated,
-					ContextSummary:  agent.AuditContextSummary{UserPrompt: "write a file", Trigger: "protected write"},
+					Timestamp:      now,
+					TurnID:         "turn_1",
+					ToolCallID:     "call_1",
+					ToolName:       "write_file",
+					DecisionSource: agent.SafetyDecisionSourceHardRule,
+					Decision:       agent.SafetyClassifierDecisionAskUser,
+					Reason:         "mutating tool requires approval",
+					SnapshotStatus: agent.SnapshotStatusCreated,
+					ContextSummary: agent.AuditContextSummary{
+						UserPrompt: "write a file", Trigger: "protected write",
+						RequestContext: &protocol.RequestContext{Source: "feishu", Actor: protocol.RequestActor{ID: "ou_member", Role: "member"}},
+					},
 					ToolArgsSummary: `{"path":"note.txt"}`,
 				},
 			},
@@ -70,5 +73,13 @@ func TestConvertAgentTurns(t *testing.T) {
 	}
 	if got[0].SafetyEvents[0].ContextSummary.Trigger != "protected write" {
 		t.Fatalf("unexpected trigger summary: %s", got[0].SafetyEvents[0].ContextSummary.Trigger)
+	}
+	requestContext := got[0].SafetyEvents[0].ContextSummary.RequestContext
+	if requestContext == nil || requestContext.Actor.ID != "ou_member" || requestContext.Actor.Role != "member" {
+		t.Fatalf("unexpected request context: %+v", requestContext)
+	}
+	turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role = "owner"
+	if requestContext.Actor.Role != "member" {
+		t.Fatal("converted request context aliases the agent audit")
 	}
 }

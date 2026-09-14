@@ -331,12 +331,14 @@ type itemMediaPartResponse struct {
 }
 
 type itemTurnResponse struct {
-	ID                   string `json:"id,omitempty"`
-	Reason               string `json:"reason,omitempty"`
-	Status               string `json:"status,omitempty"`
-	ProviderFinishReason string `json:"provider_finish_reason,omitempty"`
-	LastAgentMessage     string `json:"last_agent_message,omitempty"`
-	DurationMS           int64  `json:"duration_ms,omitempty"`
+	ID                   string                        `json:"id,omitempty"`
+	Reason               string                        `json:"reason,omitempty"`
+	Status               string                        `json:"status,omitempty"`
+	ProviderFinishReason string                        `json:"provider_finish_reason,omitempty"`
+	LastAgentMessage     string                        `json:"last_agent_message,omitempty"`
+	DurationMS           int64                         `json:"duration_ms,omitempty"`
+	Usage                *protocol.Usage               `json:"usage,omitempty"`
+	Runtime              *zotigosession.DisplayRuntime `json:"runtime,omitempty"`
 }
 
 type itemApprovalResponse struct {
@@ -373,6 +375,7 @@ type itemCommandResponse struct {
 	Reason         string                     `json:"reason,omitempty"`
 	Profile        string                     `json:"profile,omitempty"`
 	ApprovalPolicy string                     `json:"approval_policy,omitempty"`
+	RequestContext *protocol.RequestContext   `json:"request_context,omitempty"`
 }
 
 type itemProfileResponse struct {
@@ -735,6 +738,8 @@ func publicDisplayTurn(turn *zotigosession.DisplayTurn) *itemTurnResponse {
 		ProviderFinishReason: turn.ProviderFinishReason,
 		LastAgentMessage:     turn.LastAgentMessage,
 		DurationMS:           turn.DurationMS,
+		Usage:                turn.Usage,
+		Runtime:              turn.Runtime,
 	}
 }
 
@@ -763,6 +768,7 @@ func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandRes
 		Reason:         command.Reason,
 		Profile:        command.Profile,
 		ApprovalPolicy: command.ApprovalPolicy,
+		RequestContext: command.RequestContext.Clone(),
 	}
 }
 
