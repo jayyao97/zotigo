@@ -1,0 +1,2187 @@
+package channels
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"path/filepath"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+type fakeFactory struct{ adapter *fakeAdapter }
+
+func (fakeFactory) Capabilities() AdapterCapabilities {
+	return AdapterCapabilities{ProgressModes: []string{ProgressModeAuto, ProgressModeCOT, ProgressModeInteractiveCard}, DefaultProgressMode: ProgressModeInteractiveCard}
+}
+
+func (f fakeFactory) New(_ Connection, _ string, callbacks AdapterCallbacks) (Adapter, error) {
+	f.adapter.callbacks = callbacks
+	originalInbound := callbacks.Inbound
+	f.adapter.callbacks.Inbound = func(ctx context.Context, in InboundMessage) error {
+		if in.ConversationKey == "" {
+			rootID := in.RootID
+			if rootID == "" {
+				rootID = in.MessageID
+			}
+			in.ConversationKey = in.ChatID + "\x00" + rootID
+			in.StartsConversation = in.RootID == "" || in.RootID == in.MessageID
+			in.TriggerAllowed = !in.StartsConversation || in.MentionedBot
+		}
+		return originalInbound(ctx, in)
+	}
+	return f.adapter, nil
+}
+
+type fakeAdapter struct {
+	callbacks  AdapterCallbacks
+	mu         sync.Mutex
+	opens      int
+	updates    []Progress
+	receipts   []DeliveryReceipt
+	afterOpen  func()
+	updateErr  error
+	updateFunc func(context.Context) error
+	openErr    error
+	groups     []Group
+	groupsErr  error
+}
+
+func (f *fakeAdapter) ListGroups(context.Context) ([]Group, error) {
+	return append([]Group(nil), f.groups...), f.groupsErr
+}
+
+func (f *fakeAdapter) Start(ctx context.Context) error {
+	f.callbacks.Ready("bot-1", "Test Bot")
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (f *fakeAdapter) Stop(context.Context) error { return nil }
+func (f *fakeAdapter) OpenProgress(context.Context, InboundMessage) (ProgressHandle, error) {
+	f.mu.Lock()
+	f.opens++
+	f.mu.Unlock()
+	if f.afterOpen != nil {
+		f.afterOpen()
+	}
+	if f.openErr != nil {
+		return nil, f.openErr
+	}
+	return f, nil
+}
+func (f *fakeAdapter) ResumeProgress(receipt DeliveryReceipt) ProgressHandle {
+	f.mu.Lock()
+	f.receipts = append(f.receipts, receipt)
+	f.mu.Unlock()
+	return f
+}
+func (f *fakeAdapter) Receipt() DeliveryReceipt {
+	return DeliveryReceipt{Mode: ProgressModeInteractiveCard, MessageID: "reply-1"}
+}
+func (f *fakeAdapter) Update(ctx context.Context, p Progress) error {
+	f.mu.Lock()
+	f.updates = append(f.updates, p)
+	updateFunc := f.updateFunc
+	f.mu.Unlock()
+	if updateFunc != nil {
+		return updateFunc(ctx)
+	}
+	return f.updateErr
+}
+func (f *fakeAdapter) Complete(ctx context.Context, result TaskResult, persistFinal func(string) error) error {
+	if err := f.Update(ctx, Progress{State: "completed", Text: result.Text}); err != nil {
+		return err
+	}
+	return persistFinal("reply-1")
+}
+func (f *fakeAdapter) Fail(ctx context.Context, progress Progress) error {
+	return f.Update(ctx, progress)
+}
+func (f *fakeAdapter) Recover(ctx context.Context, completed bool) error {
+	state := "failed"
+	if completed {
+		state = "completed"
+	}
+	return f.Update(ctx, Progress{State: state})
+}
+
+type fakeDispatcher struct{ called chan Task }
+
+func (fakeDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (f fakeDispatcher) DispatchChannelTask(_ context.Context, task Task, progress func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	f.called <- task
+	return TaskResult{Text: "done"}, nil
+}
+
+type provisioningDispatcher struct {
+	called       chan Task
+	workspaceIDs chan string
+	prompts      chan SessionPromptConfig
+	sessionIDs   chan string
+}
+
+func (provisioningDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (f provisioningDispatcher) ProvisionChannelSession(_ context.Context, workspaceID, _ string, prompt SessionPromptConfig, bind func(string) error) error {
+	f.workspaceIDs <- workspaceID
+	if f.prompts != nil {
+		f.prompts <- prompt
+	}
+	sessionID := "session-new"
+	if f.sessionIDs != nil {
+		sessionID = <-f.sessionIDs
+	}
+	return bind(sessionID)
+}
+
+func (f provisioningDispatcher) DispatchChannelTask(_ context.Context, task Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	f.called <- task
+	return TaskResult{Text: "done"}, nil
+}
+
+type controlDispatcher struct {
+	tasks chan Task
+	stops chan Task
+}
+
+func (controlDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (f controlDispatcher) DispatchChannelTask(_ context.Context, task Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	f.tasks <- task
+	return TaskResult{Text: "ordinary"}, nil
+}
+
+func (f controlDispatcher) StopChannelTask(_ context.Context, task Task, progress func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	progress(Progress{State: "running", Events: []PublicExecutionEvent{{Type: ExecutionRunStarted}}})
+	f.stops <- task
+	return TaskResult{Text: "stopped"}, nil
+}
+
+type progressDispatcher struct{}
+
+func (progressDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (progressDispatcher) DispatchChannelTask(_ context.Context, _ Task, progress func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	progress(Progress{State: "running", Sequence: 4, Events: []PublicExecutionEvent{{Type: ExecutionRunStarted}}})
+	progress(Progress{State: "running", Sequence: 5, Events: []PublicExecutionEvent{{Type: ExecutionToolStarted}}})
+	return TaskResult{Text: "done"}, nil
+}
+
+type blockingAdmissionDispatcher struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (blockingAdmissionDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+type crossConnectionDispatcher struct {
+	firstEntered  chan struct{}
+	firstRelease  chan struct{}
+	secondEntered chan struct{}
+}
+
+func (crossConnectionDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (f crossConnectionDispatcher) DispatchChannelTask(_ context.Context, task Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	if task.ConnectionID == "connection-1" {
+		close(f.firstEntered)
+		<-f.firstRelease
+	} else {
+		close(f.secondEntered)
+	}
+	admissionComplete()
+	return TaskResult{Text: "done"}, nil
+}
+
+type serialAdmissionDispatcher struct {
+	mu            sync.Mutex
+	count         int
+	firstEntered  chan struct{}
+	firstRelease  chan struct{}
+	secondEntered chan struct{}
+}
+
+type retrySnapshotDispatcher struct {
+	mu       sync.Mutex
+	attempts int
+	called   chan Task
+	snapshot *SessionPromptConfig
+}
+
+func (f *retrySnapshotDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.attempts == 1 {
+		captured := prompt
+		f.snapshot = &captured
+		return SessionPromptConfig{}, errors.New("temporary snapshot failure")
+	}
+	if f.snapshot != nil {
+		return *f.snapshot, nil
+	}
+	return prompt, nil
+}
+
+func (f *retrySnapshotDispatcher) DispatchChannelTask(_ context.Context, task Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	f.called <- task
+	return TaskResult{Text: "done"}, nil
+}
+
+func (*serialAdmissionDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+func (f *serialAdmissionDispatcher) DispatchChannelTask(_ context.Context, _ Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	f.mu.Lock()
+	f.count++
+	count := f.count
+	f.mu.Unlock()
+	if count == 1 {
+		close(f.firstEntered)
+		<-f.firstRelease
+	} else {
+		close(f.secondEntered)
+	}
+	admissionComplete()
+	return TaskResult{Text: "done"}, nil
+}
+
+type failingDispatcher struct{ err error }
+
+func (failingDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
+	return prompt, nil
+}
+
+type conversationNameResolverFunc func(context.Context, string) (string, error)
+
+func (f conversationNameResolverFunc) ResolveConversationName(ctx context.Context, chatID string) (string, error) {
+	return f(ctx, chatID)
+}
+
+func bindTestGroup(t *testing.T, store *Store, chatID string, senderIDs ...string) Conversation {
+	t.Helper()
+	ctx := context.Background()
+	group, err := store.EnsureConversation(ctx, "connection-1", chatID, "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	group.WorkspaceID = "workspace-1"
+	group.Enabled = true
+	group.AllowedSenderIDs = append([]string(nil), senderIDs...)
+	group, err = store.PutConversation(ctx, group)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return group
+}
+
+func (f failingDispatcher) DispatchChannelTask(_ context.Context, _ Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	admissionComplete()
+	return TaskResult{}, f.err
+}
+
+func (f blockingAdmissionDispatcher) DispatchChannelTask(_ context.Context, _ Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
+	close(f.entered)
+	<-f.release
+	admissionComplete()
+	return TaskResult{Text: "done"}, nil
+}
+
+func TestServiceDropsUnboundGroupsBeforeStorage(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: make(chan Task, 1)})
+	secret := "secret"
+	owners := []string{"user-1"}
+	_, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "outside-message", ChatID: "outside", ChatType: "group", Text: "private"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.GetMessageByProviderID(ctx, "connection-1", "outside-message"); err != ErrNotFound {
+		t.Fatalf("outside message was retained: %v", err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "unapproved-sender", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-2"}, Text: "private", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.GetMessageByProviderID(ctx, "connection-1", "unapproved-sender"); err != ErrNotFound {
+		t.Fatalf("unapproved sender message was retained: %v", err)
+	}
+}
+
+func TestServiceDiscoversGroupsAndMergesWorkspaceBinding(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, err := NewSecretStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	adapter := &fakeAdapter{groups: []Group{{ChatID: "chat-2", Name: "Zeta"}, {ChatID: "chat-1", Name: "Alpha", Avatar: "avatar"}}}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	secret := "secret"
+	owners := []string{"owner-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners}); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := service.ListGroups(ctx, "connection-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 || groups[0].ChatID != "chat-1" || groups[0].Name != "Alpha" || groups[0].Avatar != "avatar" || !groups[0].Available || groups[0].ConversationID == "" {
+		t.Fatalf("groups=%+v", groups)
+	}
+	conversation, err := store.GetConversation(ctx, groups[0].ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.WorkspaceID = "workspace-1"
+	conversation.Enabled = true
+	conversation.AllowedSenderIDs = []string{"owner-1"}
+	if _, err = store.PutConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	groups, err = service.ListGroups(ctx, "connection-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if groups[0].WorkspaceID != "workspace-1" || !groups[0].Enabled || !slices.Equal(groups[0].AllowedSenderIDs, []string{"owner-1"}) {
+		t.Fatalf("bound group=%+v", groups[0])
+	}
+}
+
+func TestServiceDiscoversUnnamedGroupWithoutOverwritingKnownName(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{groups: []Group{{ChatID: "known-chat"}, {ChatID: "unnamed-chat"}}}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	secret := "secret"
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.PutGroupConversationName(ctx, "connection-1", "known-chat", "Known name"); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	groups, err := service.ListGroups(ctx, "connection-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(groups) != 2 || groups[0].ChatID != "known-chat" || groups[0].Name != "Known name" || groups[1].ChatID != "unnamed-chat" || groups[1].Name != "" {
+		t.Fatalf("groups=%+v", groups)
+	}
+	unnamed, err := store.GetConversationByScope(ctx, "connection-1", "unnamed-chat", "")
+	if err != nil || unnamed.ChatName != "" {
+		t.Fatalf("unnamed group=%+v err=%v", unnamed, err)
+	}
+}
+
+func TestServiceRequiresMentionBindingAndAllowedSender(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	called := make(chan Task, 1)
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	owners := []string{"user-1"}
+	_, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "observe", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "hello", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	conversations, err := service.ListConversations(ctx, "connection-1")
+	if err != nil || len(conversations) != 2 {
+		t.Fatalf("conversations=%v err=%v", conversations, err)
+	}
+	message, _ := store.GetMessageByProviderID(ctx, "connection-1", "observe")
+	if message.TriggerStatus != "rejected" || message.StatusDetail != "conversation_not_bound" {
+		t.Fatalf("unexpected observed message: %+v", message)
+	}
+	var conversation Conversation
+	for _, candidate := range conversations {
+		if candidate.RootID == "observe" {
+			conversation = candidate
+		}
+	}
+	if conversation.ID == "" {
+		t.Fatalf("rooted conversation missing: %+v", conversations)
+	}
+	_, err = service.PutConversation(ctx, conversation.ID, ConversationInput{DisplayName: "Shadow Test", SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "run", ChatID: "allowed", RootID: "observe", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case task := <-called:
+		if task.SessionID != "session-1" || task.Origin.ActorRole != "owner" || task.Origin.Sender.ID != "user-1" || task.Origin.Sender.DisplayName != "Owner" || task.Origin.ConversationName != "Shadow Test" || task.Origin.ExternalConversation != "allowed" || task.Origin.ExternalRootID != "observe" || task.Origin.ExternalMessageID != "run" {
+			t.Fatalf("task=%+v", task)
+		}
+	case <-ctx.Done():
+		t.Fatal("task not dispatched")
+	}
+}
+
+func TestServiceDeliversWithWorkspaceGroupBindingWithoutLegacyAllowlist(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	called := make(chan Task, 1)
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	owners := []string{"user-1"}
+	connection, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connection.AllowChatIDs) != 0 {
+		t.Fatalf("legacy allowlist unexpectedly populated: %v", connection.AllowChatIDs)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "topic-root", "thread-1", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.PutConversation(ctx, conversation.ID, ConversationInput{DisplayName: "Topic", SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "reply", ChatID: "allowed", RootID: "topic-root", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "continue", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("task was not dispatched")
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, getErr := store.GetMessageByProviderID(ctx, "connection-1", "reply")
+		if getErr == nil && message.TriggerStatus == "processed" {
+			if message.FinalMessageID != "reply-1" {
+				t.Fatalf("final message ID = %q", message.FinalMessageID)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("delivery did not settle as processed: %+v err=%v", message, getErr)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if len(adapter.updates) != 1 || adapter.updates[0].State != "completed" || adapter.updates[0].Text != "done" {
+		t.Fatalf("updates=%+v", adapter.updates)
+	}
+}
+
+func TestServiceRechecksWorkspaceBindingBeforeProvisioning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := provisioningDispatcher{called: make(chan Task, 1), workspaceIDs: make(chan string, 1)}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	owners := []string{"user-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners}); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	group := bindTestGroup(t, store, "allowed", "user-1")
+	claimed := make(chan struct{})
+	resume := make(chan struct{})
+	service.afterMessageClaimed = func() {
+		close(claimed)
+		<-resume
+	}
+	inboundDone := make(chan error, 1)
+	go func() {
+		inboundDone <- adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "new-topic", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "run", MentionedBot: true, CreatedAt: time.Now()})
+	}()
+	select {
+	case <-claimed:
+	case <-time.After(time.Second):
+		t.Fatal("message was not claimed")
+	}
+	group.WorkspaceID = "workspace-2"
+	if _, err = service.PutConversation(ctx, group.ID, ConversationInput{DisplayName: group.DisplayName, WorkspaceID: group.WorkspaceID, Enabled: true, AllowedSenderIDs: group.AllowedSenderIDs}); err != nil {
+		t.Fatal(err)
+	}
+	close(resume)
+	if err = <-inboundDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case workspaceID := <-dispatcher.workspaceIDs:
+		if workspaceID != "workspace-2" {
+			t.Fatalf("session provisioned in stale workspace %q", workspaceID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session was not provisioned")
+	}
+}
+
+func TestServiceRequiresMentionForNewTopLevelSession(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := provisioningDispatcher{called: make(chan Task, 1), workspaceIDs: make(chan string, 1)}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	owners := []string{"user-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners}); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "unmentioned", ChatID: "allowed", RootID: "unmentioned", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "ambient"}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.GetMessageByProviderID(ctx, "connection-1", "unmentioned")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.TriggerStatus != "rejected" || message.StatusDetail != "mention_required" {
+		t.Fatalf("message=%+v", message)
+	}
+	select {
+	case <-dispatcher.workspaceIDs:
+		t.Fatal("unmentioned top-level message provisioned a session")
+	default:
+	}
+}
+
+func TestServiceDoesNotShareSessionBindingAcrossTopics(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	called := make(chan Task, 1)
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	owners := []string{"user-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners}); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	first := InboundMessage{MessageID: "topic-a-observe", ChatID: "allowed", ThreadID: "topic-a", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", MentionedBot: true}
+	if err = adapter.callbacks.Inbound(ctx, first); err != nil {
+		t.Fatal(err)
+	}
+	conversations, err := service.ListConversations(ctx, "connection-1")
+	if err != nil || len(conversations) != 2 {
+		t.Fatalf("conversations=%+v err=%v", conversations, err)
+	}
+	var topicA Conversation
+	for _, candidate := range conversations {
+		if candidate.RootID == first.MessageID {
+			topicA = candidate
+		}
+	}
+	if topicA.ID == "" {
+		t.Fatalf("topic A missing: %+v", conversations)
+	}
+	_, err = service.PutConversation(ctx, topicA.ID, ConversationInput{DisplayName: "Topic A", SessionID: "session-a", Enabled: true, AllowedSenderIDs: []string{"user-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "topic-b-run", ChatID: "allowed", ThreadID: "topic-b", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "run", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.GetMessageByProviderID(ctx, "connection-1", "topic-b-run")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.TriggerStatus != "rejected" || message.StatusDetail != "conversation_not_bound" {
+		t.Fatalf("topic B inherited topic A binding: %+v", message)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "topic-a-run", ChatID: "allowed", RootID: "topic-a-observe", ThreadID: "topic-a", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "run", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case task := <-called:
+		if task.SessionID != "session-a" || task.Origin.ExternalConversation != "allowed" || task.Origin.ExternalRootID != "topic-a-observe" || task.Origin.ExternalThreadID != "topic-a" {
+			t.Fatalf("task=%+v", task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("topic A was not dispatched")
+	}
+}
+
+func TestServiceProvisionsDistinctSessionForNewTopLevelConversation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := provisioningDispatcher{called: make(chan Task, 1), workspaceIDs: make(chan string, 1)}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	owners := []string{"user-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err = store.db.Exec(`INSERT INTO channel_conversations(id,connection_id,chat_id,root_id,chat_type,chat_name,display_name,workspace_id,enabled,allowed_sender_ids,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`, "group-default", "connection-1", "allowed", "", "group", "Shadow Test", "Shadow Test", "workspace-1", true, `["user-1"]`, now, now, now); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "topic-new", ChatID: "allowed", ChatType: "group", ChatName: "Shadow Test", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case workspaceID := <-dispatcher.workspaceIDs:
+		if workspaceID != "workspace-1" {
+			t.Fatalf("workspace = %q", workspaceID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("session was not provisioned")
+	}
+	select {
+	case task := <-dispatcher.called:
+		if task.SessionID != "session-new" {
+			t.Fatalf("task session = %q", task.SessionID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("task was not dispatched")
+	}
+	conversation, err := store.GetConversationByScope(ctx, "connection-1", "allowed", "topic-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if conversation.SessionID != "session-new" || conversation.WorkspaceID != "workspace-1" || !conversation.Enabled || conversation.ChatName != "Shadow Test" || !slices.Contains(conversation.AllowedSenderIDs, "user-1") {
+		t.Fatalf("conversation = %+v", conversation)
+	}
+}
+
+func TestSessionPromptSnapshotIsStableAcrossConnectionChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := provisioningDispatcher{
+		called: make(chan Task, 3), workspaceIDs: make(chan string, 2), prompts: make(chan SessionPromptConfig, 2),
+		sessionIDs: make(chan string, 2),
+	}
+	dispatcher.sessionIDs <- "session-old"
+	dispatcher.sessionIDs <- "session-new"
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	owners := []string{"owner-1"}
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners, AgentInstructions: "connection-old", ApprovalInstructions: "approval-old", ReviewAllTools: true}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "owner-1")
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "old-root", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "owner-1"}, Text: "first", MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	first := <-dispatcher.called
+	if first.AgentInstructions != "connection-old" || first.ApprovalInstructions != "approval-old" || !first.ReviewAllTools {
+		t.Fatalf("first task prompt=%+v", first)
+	}
+	if prompt := <-dispatcher.prompts; prompt.AgentInstructions != "connection-old" || prompt.ApprovalInstructions != "approval-old" || !prompt.ReviewAllTools {
+		t.Fatalf("first session snapshot=%+v", prompt)
+	}
+	input.AppSecret = nil
+	input.OwnerSenderIDs = nil
+	input.AgentInstructions = "connection-new"
+	input.ApprovalInstructions = "approval-new"
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "old-reply", ChatID: "allowed", RootID: "old-root", ChatType: "group", Sender: Sender{ID: "owner-1"}, Text: "again", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	oldReply := <-dispatcher.called
+	if oldReply.AgentInstructions != "connection-old" || oldReply.ApprovalInstructions != "approval-old" {
+		t.Fatalf("old session prompt changed=%+v", oldReply)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "new-root", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "owner-1"}, Text: "new", MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	newTask := <-dispatcher.called
+	if newTask.AgentInstructions != "connection-new" || newTask.ApprovalInstructions != "approval-new" {
+		t.Fatalf("new session prompt=%+v", newTask)
+	}
+	if prompt := <-dispatcher.prompts; prompt.AgentInstructions != "connection-new" || prompt.ApprovalInstructions != "approval-new" {
+		t.Fatalf("new session snapshot=%+v", prompt)
+	}
+}
+
+func TestLegacyConversationSnapshotMigrationRemainsRetryable(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := &retrySnapshotDispatcher{called: make(chan Task, 1)}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true, AgentInstructions: "legacy agent", ReviewAllTools: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "chat", "user")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "chat", "root", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.SessionID, conversation.WorkspaceID, conversation.Enabled = "legacy-session", "workspace-1", true
+	conversation.AllowedSenderIDs = []string{"user"}
+	if _, err = store.PutConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	firstErr := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "first", ChatID: "chat", RootID: "root", ChatType: "group", Sender: Sender{ID: "user"}, Text: "first", CreatedAt: time.Now()})
+	if firstErr == nil {
+		t.Fatal("first snapshot initialization unexpectedly succeeded")
+	}
+	afterFailure, err := store.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterFailure.AgentInstructionsMode == OverrideReplace || afterFailure.ApprovalInstructionsMode == OverrideReplace || afterFailure.ReviewAllTools != nil {
+		t.Fatalf("failed migration was committed: %+v", afterFailure)
+	}
+	connection, err := service.GetConnection(ctx, "connection-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: connection.Name, AppID: connection.AppID, Enabled: true, AgentInstructions: "new connection agent", ReviewAllTools: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "second", ChatID: "chat", RootID: "root", ChatType: "group", Sender: Sender{ID: "user"}, Text: "second", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	task := <-dispatcher.called
+	if task.AgentInstructions != "legacy agent" || !task.ReviewAllTools {
+		t.Fatalf("migrated task=%+v", task)
+	}
+	afterSuccess, err := store.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afterSuccess.AgentInstructionsMode != OverrideReplace || afterSuccess.AgentInstructions != "legacy agent" || afterSuccess.ApprovalInstructionsMode != OverrideReplace || afterSuccess.ReviewAllTools == nil || !*afterSuccess.ReviewAllTools {
+		t.Fatalf("successful migration=%+v", afterSuccess)
+	}
+}
+
+func TestServiceRefreshesOfficialGroupNameAcrossLegacyConversations(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	connection := Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app", AllowChatIDs: []string{"allowed"}}
+	if _, err = store.PutConnection(ctx, connection); err != nil {
+		t.Fatal(err)
+	}
+	group, err := store.EnsureConversation(ctx, connection.ID, "allowed", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	group.DisplayName = "hi"
+	if _, err = store.PutConversation(ctx, group); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.EnsureConversationRoot(ctx, connection.ID, "allowed", "topic-1", "", "group", time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, nil, log.New(io.Discard, "", 0), nil)
+	service.runs[connection.ID] = &adapterRun{generation: 1}
+	service.refreshConversationNames(ctx, connection, 1, conversationNameResolverFunc(func(_ context.Context, chatID string) (string, error) {
+		if chatID != "allowed" {
+			t.Fatalf("chat id = %q", chatID)
+		}
+		return "Shadow Test", nil
+	}))
+	conversations, err := store.ListConversations(ctx, connection.ID)
+	if err != nil || len(conversations) != 2 {
+		t.Fatalf("conversations=%+v err=%v", conversations, err)
+	}
+	for _, conversation := range conversations {
+		if conversation.ChatName != "Shadow Test" {
+			t.Fatalf("conversation=%+v", conversation)
+		}
+	}
+	refreshedGroup, err := store.GetConversation(ctx, group.ID)
+	if err != nil || refreshedGroup.DisplayName != "hi" {
+		t.Fatalf("group=%+v err=%v", refreshedGroup, err)
+	}
+}
+
+func TestConnectionPersistsNormalizedOwnerSenderIDs(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	connection, err := store.PutConnection(context.Background(), Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app", OwnerSenderIDs: []string{" owner-1 ", "owner-1", ""}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connection.OwnerSenderIDs) != 1 || connection.OwnerSenderIDs[0] != "owner-1" {
+		t.Fatalf("owners=%v", connection.OwnerSenderIDs)
+	}
+}
+
+func TestStoreScopesConversationsAndSendersByRootMessage(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err = store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, message := range []InboundMessage{
+		{MessageID: "root-message", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1"}},
+		{MessageID: "thread-a-root", ChatID: "chat-1", ThreadID: "thread-a", ChatType: "group", Sender: Sender{ID: "user-1"}},
+		{MessageID: "thread-b-root", ChatID: "chat-1", ThreadID: "thread-b", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}},
+		{MessageID: "thread-b-2", ChatID: "chat-1", RootID: "thread-b-root", ThreadID: "thread-b", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}},
+	} {
+		if _, err = store.RecordMessage(ctx, "connection-1", message); err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversations, err := store.ListConversations(ctx, "connection-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(conversations) != 4 {
+		t.Fatalf("conversations=%+v", conversations)
+	}
+	byRoot := make(map[string]Conversation, len(conversations))
+	for _, conversation := range conversations {
+		byRoot[conversation.RootID] = conversation
+	}
+	if byRoot["root-message"].ChatID != "chat-1" || byRoot["thread-a-root"].ID == byRoot["thread-b-root"].ID {
+		t.Fatalf("conversations were not scoped by root message: %+v", conversations)
+	}
+	threadB := byRoot["thread-b-root"]
+	if len(threadB.ObservedSenders) != 1 || threadB.ObservedSenders[0].DisplayName != "Owner" {
+		t.Fatalf("observed senders=%+v", threadB.ObservedSenders)
+	}
+	messages, err := store.ListMessages(ctx, threadB.ID, 10)
+	if err != nil || len(messages) != 2 {
+		t.Fatalf("messages=%+v err=%v", messages, err)
+	}
+}
+
+func TestStoreMigratesExistingGroupBindingsToRootScope(t *testing.T) {
+	root := t.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = database.Exec(`
+CREATE TABLE channel_connections (
+ id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
+ bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]', owner_sender_ids TEXT NOT NULL DEFAULT '[]',
+ agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
+ progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE channel_conversations (
+ id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+ chat_id TEXT NOT NULL, chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
+ session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
+ allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
+ agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
+ approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
+ last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(connection_id, chat_id)
+);
+CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
+CREATE TABLE channel_messages (
+ id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+ conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+ provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
+ mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
+ delivery_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, UNIQUE(connection_id, provider_message_id)
+);
+CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
+INSERT INTO channel_connections (id,provider,name,app_id,created_at,updated_at) VALUES ('connection-1','feishu','test','app',?,?);
+INSERT INTO channel_conversations (id,connection_id,chat_id,display_name,session_id,last_activity_at,created_at,updated_at) VALUES ('legacy-conversation','connection-1','chat-1','Shadow Test','session-1',?,?,?);
+INSERT INTO channel_messages (id,connection_id,conversation_id,provider_message_id,sender_id,text,mentioned_bot,trigger_status,created_at) VALUES ('message-1','connection-1','legacy-conversation','provider-1','user-1','hello',1,'processed',?);
+`, now, now, now, now, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	legacy, err := store.GetConversation(context.Background(), "legacy-conversation")
+	if err != nil || legacy.ThreadID != "" || legacy.SessionID != "session-1" {
+		t.Fatalf("legacy=%+v err=%v", legacy, err)
+	}
+	if _, err = store.GetMessageByProviderID(context.Background(), "connection-1", "provider-1"); err != nil {
+		t.Fatal(err)
+	}
+	rootMessage, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "provider-2", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
+	if err != nil || rootMessage.ConversationID == legacy.ID {
+		t.Fatalf("root message=%+v err=%v", rootMessage, err)
+	}
+	thread, err := store.EnsureConversationRoot(context.Background(), "connection-1", "chat-1", "root-1", "thread-1", "group", time.Now())
+	if err != nil || thread.ID == legacy.ID || thread.ThreadID != "thread-1" {
+		t.Fatalf("thread=%+v err=%v", thread, err)
+	}
+	var violations int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
+		t.Fatalf("foreign key violations=%d err=%v", violations, err)
+	}
+}
+
+func TestStoreMigratesThreadBindingAndReconcilesRedeliveredRoot(t *testing.T) {
+	root := t.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	_, err = database.Exec(`
+CREATE TABLE channel_connections (
+ id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
+ bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]', owner_sender_ids TEXT NOT NULL DEFAULT '[]',
+ agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
+ progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE channel_conversations (
+ id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+ chat_id TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
+ session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
+ allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
+ agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
+ approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
+ last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+ UNIQUE(connection_id, chat_id, thread_id)
+);
+CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
+CREATE TABLE channel_messages (
+ id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
+ conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
+ provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
+ mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
+ delivery_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, UNIQUE(connection_id, provider_message_id)
+);
+CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
+INSERT INTO channel_connections (id,provider,name,app_id,created_at,updated_at) VALUES ('connection-1','feishu','test','app',?,?);
+INSERT INTO channel_conversations (id,connection_id,chat_id,thread_id,display_name,session_id,enabled,last_activity_at,created_at,updated_at) VALUES ('legacy-thread','connection-1','chat-1','thread-1','Topic','session-1',1,?,?,?);
+INSERT INTO channel_messages (id,connection_id,conversation_id,provider_message_id,sender_id,text,mentioned_bot,trigger_status,created_at) VALUES ('message-root','connection-1','legacy-thread','root-message','user-1','hello',1,'processed',?);
+`, now, now, now, now, now, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	redelivered, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "root-message", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
+	if err != nil || redelivered.ConversationID != "legacy-thread" {
+		t.Fatalf("redelivered=%+v err=%v", redelivered, err)
+	}
+	reply, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "reply-message", ChatID: "chat-1", RootID: "root-message", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
+	if err != nil || reply.ConversationID != "legacy-thread" {
+		t.Fatalf("reply=%+v err=%v", reply, err)
+	}
+	conversations, err := store.ListConversations(context.Background(), "connection-1")
+	if err != nil || len(conversations) != 2 {
+		t.Fatalf("conversations=%+v err=%v", conversations, err)
+	}
+	var conversation Conversation
+	for _, candidate := range conversations {
+		if candidate.ID == "legacy-thread" {
+			conversation = candidate
+		}
+	}
+	if conversation.RootID != "root-message" || conversation.ThreadID != "thread-1" || conversation.SessionID != "session-1" || !conversation.Enabled {
+		t.Fatalf("conversation=%+v", conversation)
+	}
+	var violations int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
+		t.Fatalf("foreign key violations=%d err=%v", violations, err)
+	}
+}
+
+func TestConnectionUpdateDistinguishesOmittedAndEmptyOwnerSenderIDs(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, err := NewSecretStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	owners := []string{"owner-1"}
+	created, err := service.PutConnection(context.Background(), "connection-1", ConnectionInput{
+		Provider: ProviderFeishu, Name: "test", AppID: "app", OwnerSenderIDs: &owners,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, err := service.PutConnection(context.Background(), created.ID, ConnectionInput{
+		Provider: ProviderFeishu, Name: "renamed", AppID: "app",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.OwnerSenderIDs) != 1 || updated.OwnerSenderIDs[0] != "owner-1" {
+		t.Fatalf("omitted owner_sender_ids=%v, want preserved owner", updated.OwnerSenderIDs)
+	}
+	empty := []string{}
+	updated, err = service.PutConnection(context.Background(), created.ID, ConnectionInput{
+		Provider: ProviderFeishu, Name: "renamed", AppID: "app", OwnerSenderIDs: &empty,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(updated.OwnerSenderIDs) != 0 {
+		t.Fatalf("explicit empty owner_sender_ids=%v, want cleared", updated.OwnerSenderIDs)
+	}
+}
+
+func TestPutConversationCanceledWriteLeavesBindingUnchanged(t *testing.T) {
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	if _, err = store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "thread-1", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.SessionID = "session-new"
+	conversation.WorkspaceID = "workspace-1"
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if _, err = store.PutConversation(canceled, conversation); !errors.Is(err, context.Canceled) {
+		t.Fatalf("PutConversation error = %v, want context.Canceled", err)
+	}
+	unchanged, err := store.GetConversation(ctx, conversation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if unchanged.SessionID != "" || unchanged.WorkspaceID != "" {
+		t.Fatalf("canceled binding persisted: %+v", unchanged)
+	}
+}
+
+func TestOpenMigratesOwnerSenderIDsForExistingDatabase(t *testing.T) {
+	root := t.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = database.Exec(`CREATE TABLE channel_connections (
+ id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
+ enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
+ bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]',
+ agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
+ progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+)`)
+	if closeErr := database.Close(); err != nil || closeErr != nil {
+		t.Fatalf("seed legacy database: exec=%v close=%v", err, closeErr)
+	}
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	connection, err := store.PutConnection(context.Background(), Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app", OwnerSenderIDs: []string{"owner-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(connection.OwnerSenderIDs) != 1 || connection.OwnerSenderIDs[0] != "owner-1" {
+		t.Fatalf("owners=%v", connection.OwnerSenderIDs)
+	}
+}
+
+func TestServiceRoutesExactStopCommandToSessionController(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := controlDispatcher{tasks: make(chan Task, 1), stops: make(chan Task, 1)}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "stop", "", "group", time.Now())
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "stop", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: " /STOP ", MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case task := <-dispatcher.stops:
+		if task.SessionID != "session-1" || task.Text != " /STOP " {
+			t.Fatalf("stop task=%+v", task)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("stop was not dispatched")
+	}
+	select {
+	case task := <-dispatcher.tasks:
+		t.Fatalf("stop started an ordinary turn: %+v", task)
+	case <-time.After(20 * time.Millisecond):
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, err := store.GetMessageByProviderID(ctx, "connection-1", "stop")
+		if err == nil && message.TriggerStatus == "processed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("stop did not settle: %+v err=%v", message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestConversationSessionBindingIsUnique(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	first, _ := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "", "group", time.Now())
+	second, _ := store.EnsureConversationRoot(ctx, "connection-1", "chat-2", "root-2", "", "group", time.Now())
+	input := ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}
+	if _, err := service.PutConversation(ctx, first.ID, input); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PutConversation(ctx, second.ID, input); err == nil || !strings.Contains(err.Error(), "already bound") {
+		t.Fatalf("duplicate binding error=%v", err)
+	}
+}
+
+func TestConversationBindingValidationRunsInsideConfigWriteBarrier(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, _ := store.EnsureConversation(ctx, "connection-1", "chat-1", "group", time.Now())
+	validationStarted := make(chan struct{})
+	releaseValidation := make(chan struct{})
+	putDone := make(chan error, 1)
+	go func() {
+		_, err := service.PutConversationValidated(ctx, conversation.ID, ConversationInput{WorkspaceID: "workspace-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}, func(context.Context, Conversation, SessionPromptConfig) error {
+			close(validationStarted)
+			<-releaseValidation
+			return nil
+		})
+		putDone <- err
+	}()
+	<-validationStarted
+
+	readDone := make(chan error, 1)
+	go func() {
+		_, err := service.ListConversations(ctx, "connection-1")
+		readDone <- err
+	}()
+	select {
+	case err := <-readDone:
+		t.Fatalf("configuration read crossed binding validation barrier: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseValidation)
+	if err := <-putDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-readDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestServiceClaimsDuplicateEventOnce(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	called := make(chan Task, 8)
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	_, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "duplicate", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := InboundMessage{MessageID: "duplicate", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "hello", MentionedBot: true, CreatedAt: time.Now()}
+	var wait sync.WaitGroup
+	for index := 0; index < 8; index++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			if callbackErr := adapter.callbacks.Inbound(ctx, in); callbackErr != nil {
+				t.Errorf("inbound: %v", callbackErr)
+			}
+		}()
+	}
+	wait.Wait()
+	select {
+	case <-called:
+	case <-time.After(time.Second):
+		t.Fatal("task was not dispatched")
+	}
+	select {
+	case task := <-called:
+		t.Fatalf("duplicate task dispatched: %+v", task)
+	case <-time.After(50 * time.Millisecond):
+	}
+	adapter.mu.Lock()
+	opens := adapter.opens
+	adapter.mu.Unlock()
+	if opens != 1 {
+		t.Fatalf("progress cards opened=%d", opens)
+	}
+}
+
+func TestConversationUpdateWaitsForInboundAdmission(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := blockingAdmissionDispatcher{entered: make(chan struct{}), release: make(chan struct{})}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "admission", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	inboundDone := make(chan error, 1)
+	go func() {
+		inboundDone <- adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "admission", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "hello", MentionedBot: true, CreatedAt: time.Now()})
+	}()
+	<-dispatcher.entered
+	updateDone := make(chan error, 1)
+	go func() {
+		_, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: false, AllowedSenderIDs: []string{"user-1"}})
+		updateDone <- err
+	}()
+	select {
+	case err := <-updateDone:
+		t.Fatalf("conversation update crossed admission boundary: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(dispatcher.release)
+	if err := <-inboundDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-updateDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatchFailureKeepsInternalDetailsOutOfProgress(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(failingDispatcher{err: errors.New("provider failed while reading /private/workspace/config.yaml")})
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "failure", "", "group", time.Now())
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "failure", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, err := store.GetMessageByProviderID(ctx, "connection-1", "failure")
+		if err == nil && message.TriggerStatus == "failed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("dispatch failure did not settle: %+v err=%v", message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if len(adapter.updates) != 1 || strings.Contains(adapter.updates[0].Text, "/private/") || !strings.Contains(adapter.updates[0].Text, "Open the bound session") {
+		t.Fatalf("public updates=%+v", adapter.updates)
+	}
+}
+
+func TestProgressDeliveryFailureStopsFurtherExternalDelivery(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{updateErr: errors.New("ambiguous transport failure")}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(progressDispatcher{})
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "delivery-failure", "", "group", time.Now())
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "delivery-failure", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, err := store.GetMessageByProviderID(ctx, "connection-1", "delivery-failure")
+		if err == nil && message.TriggerStatus == "delivery_unknown" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("message did not become delivery_unknown: %+v err=%v", message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if len(adapter.updates) != 1 {
+		t.Fatalf("external delivery continued after ambiguity: %+v", adapter.updates)
+	}
+}
+
+func TestProgressDeliveryHasBoundedContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{updateFunc: func(ctx context.Context) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.deliveryTimeout = 10 * time.Millisecond
+	service.SetDispatcher(progressDispatcher{})
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "delivery-timeout", "", "group", time.Now())
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "delivery-timeout", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for {
+		message, err := store.GetMessageByProviderID(ctx, "connection-1", "delivery-timeout")
+		if err == nil && message.TriggerStatus == "delivery_unknown" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("bounded delivery did not settle: %+v err=%v", message, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestUncertainProgressOpenIsVisibleForReconciliation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{openErr: UncertainDelivery(errors.New("response lost after send"))}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	called := make(chan Task, 1)
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "uncertain-open", "", "group", time.Now())
+	if _, err := service.PutConversation(ctx, conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "uncertain-open", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, MentionedBot: true, CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.GetMessageByProviderID(ctx, "connection-1", "uncertain-open")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.TriggerStatus != "delivery_unknown" || !strings.Contains(message.StatusDetail, "progress_message_delivery_unknown") {
+		t.Fatalf("message=%+v", message)
+	}
+	select {
+	case task := <-called:
+		t.Fatalf("uncertain carrier started agent: %+v", task)
+	default:
+	}
+}
+
+func TestReceiptPersistsAfterInboundContextCancellation(t *testing.T) {
+	serviceCtx, cancelService := context.WithCancel(context.Background())
+	defer cancelService()
+	inboundCtx, cancelInbound := context.WithCancel(context.Background())
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{afterOpen: cancelInbound}
+	called := make(chan Task, 1)
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(fakeDispatcher{called: called})
+	secret := "secret"
+	if _, err := service.PutConnection(context.Background(), "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(serviceCtx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	conversation, _ := store.EnsureConversationRoot(context.Background(), "connection-1", "allowed", "canceled", "", "group", time.Now())
+	if _, err := service.PutConversation(context.Background(), conversation.ID, ConversationInput{SessionID: "session-1", Enabled: true, AllowedSenderIDs: []string{"user-1"}}); err != nil {
+		t.Fatal(err)
+	}
+	_ = adapter.callbacks.Inbound(inboundCtx, InboundMessage{MessageID: "canceled", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, MentionedBot: true, CreatedAt: time.Now()})
+	message, err := store.GetMessageByProviderID(context.Background(), "connection-1", "canceled")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if message.ReplyMessageID != "reply-1" || (message.TriggerStatus != "running" && message.TriggerStatus != "processed") {
+		t.Fatalf("receipt was not persisted: %+v", message)
+	}
+}
+
+type collectingFactory struct {
+	mu       sync.Mutex
+	adapters []*fakeAdapter
+}
+
+func (*collectingFactory) Capabilities() AdapterCapabilities { return fakeFactory{}.Capabilities() }
+
+type blockingStopAdapter struct {
+	fakeAdapter
+	stopEntered chan struct{}
+	stopRelease chan struct{}
+	stopOnce    sync.Once
+}
+
+func (a *blockingStopAdapter) Stop(context.Context) error {
+	a.stopOnce.Do(func() { close(a.stopEntered) })
+	<-a.stopRelease
+	return nil
+}
+
+type blockingStopFactory struct{ adapter *blockingStopAdapter }
+
+func (blockingStopFactory) Capabilities() AdapterCapabilities { return fakeFactory{}.Capabilities() }
+
+func (f blockingStopFactory) New(_ Connection, _ string, callbacks AdapterCallbacks) (Adapter, error) {
+	f.adapter.callbacks = callbacks
+	return f.adapter, nil
+}
+
+func (f *collectingFactory) New(_ Connection, _ string, callbacks AdapterCallbacks) (Adapter, error) {
+	adapter := &fakeAdapter{callbacks: callbacks}
+	f.mu.Lock()
+	f.adapters = append(f.adapters, adapter)
+	f.mu.Unlock()
+	return adapter, nil
+}
+
+type multiAdapterFactory struct {
+	mu       sync.Mutex
+	adapters map[string]*fakeAdapter
+}
+
+func (*multiAdapterFactory) Capabilities() AdapterCapabilities { return fakeFactory{}.Capabilities() }
+
+func (f *multiAdapterFactory) New(connection Connection, _ string, callbacks AdapterCallbacks) (Adapter, error) {
+	adapter := &fakeAdapter{callbacks: callbacks}
+	f.mu.Lock()
+	if f.adapters == nil {
+		f.adapters = make(map[string]*fakeAdapter)
+	}
+	f.adapters[connection.ID] = adapter
+	f.mu.Unlock()
+	return adapter, nil
+}
+
+func (f *multiAdapterFactory) adapter(connectionID string) *fakeAdapter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.adapters[connectionID]
+}
+
+func TestInboundAdmissionDoesNotBlockAnotherConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	factory := &multiAdapterFactory{}
+	dispatcher := crossConnectionDispatcher{firstEntered: make(chan struct{}), firstRelease: make(chan struct{}), secondEntered: make(chan struct{})}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: factory})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	for index := 1; index <= 2; index++ {
+		connectionID := fmt.Sprintf("connection-%d", index)
+		appID := fmt.Sprintf("app-%d", index)
+		if _, err := service.PutConnection(ctx, connectionID, ConnectionInput{Provider: ProviderFeishu, Name: connectionID, AppID: appID, AppSecret: &secret, Enabled: true}); err != nil {
+			t.Fatal(err)
+		}
+		group, err := store.EnsureConversation(ctx, connectionID, "chat", "group", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		group.WorkspaceID, group.Enabled, group.AllowedSenderIDs = "workspace", true, []string{"user"}
+		if _, err = store.PutConversation(ctx, group); err != nil {
+			t.Fatal(err)
+		}
+		conversation, err := store.EnsureConversationRoot(ctx, connectionID, "chat", "root", "", "group", time.Now())
+		if err != nil {
+			t.Fatal(err)
+		}
+		review := false
+		conversation.SessionID, conversation.WorkspaceID, conversation.Enabled = "session-"+connectionID, "workspace", true
+		conversation.AllowedSenderIDs = []string{"user"}
+		conversation.AgentInstructionsMode, conversation.ApprovalInstructionsMode, conversation.ReviewAllTools = OverrideReplace, OverrideReplace, &review
+		if _, err = store.PutConversation(ctx, conversation); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- factory.adapter("connection-1").callbacks.Inbound(ctx, InboundMessage{MessageID: "first", ChatID: "chat", RootID: "root", ChatType: "group", ConversationKey: "chat\x00root", TriggerAllowed: true, Sender: Sender{ID: "user"}, CreatedAt: time.Now()})
+	}()
+	select {
+	case <-dispatcher.firstEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first connection did not enter admission")
+	}
+	secondDone := make(chan error, 1)
+	go func() {
+		secondDone <- factory.adapter("connection-2").callbacks.Inbound(ctx, InboundMessage{MessageID: "second", ChatID: "chat", RootID: "root", ChatType: "group", ConversationKey: "chat\x00root", TriggerAllowed: true, Sender: Sender{ID: "user"}, CreatedAt: time.Now()})
+	}()
+	select {
+	case <-dispatcher.secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second connection was blocked by first connection admission")
+	}
+	close(dispatcher.firstRelease)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestInboundAdmissionSerializesTheSameConversationKey(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &fakeAdapter{}
+	dispatcher := &serialAdmissionDispatcher{firstEntered: make(chan struct{}), firstRelease: make(chan struct{}), secondEntered: make(chan struct{})}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "chat", "user")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "chat", "root", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	review := false
+	conversation.SessionID, conversation.WorkspaceID, conversation.Enabled = "session", "workspace-1", true
+	conversation.AllowedSenderIDs = []string{"user"}
+	conversation.AgentInstructionsMode, conversation.ApprovalInstructionsMode, conversation.ReviewAllTools = OverrideReplace, OverrideReplace, &review
+	if _, err = store.PutConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	send := func(messageID string) <-chan error {
+		done := make(chan error, 1)
+		go func() {
+			done <- adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: messageID, ChatID: "chat", RootID: "root", ChatType: "group", ConversationKey: "chat\x00root", TriggerAllowed: true, Sender: Sender{ID: "user"}, CreatedAt: time.Now()})
+		}()
+		return done
+	}
+	firstDone := send("first")
+	<-dispatcher.firstEntered
+	secondDone := send("second")
+	select {
+	case <-dispatcher.secondEntered:
+		t.Fatal("second message entered admission before the first released its conversation lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(dispatcher.firstRelease)
+	select {
+	case <-dispatcher.secondEntered:
+	case <-time.After(time.Second):
+		t.Fatal("second message did not enter after the first admission completed")
+	}
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
+	}
+	service.inboxLocksMu.Lock()
+	defer service.inboxLocksMu.Unlock()
+	if len(service.inboxLocks) != 0 {
+		t.Fatalf("released conversation locks=%d, want 0", len(service.inboxLocks))
+	}
+}
+
+func TestServiceOnlyRestartsAdapterForRuntimeConfigurationChanges(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	factory := &collectingFactory{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: factory})
+	secret := "secret"
+	owners := []string{"owner-1"}
+	input := ConnectionInput{
+		Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret,
+		Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners,
+		ProgressMode: ProgressModeCOT, ReviewAllTools: true,
+	}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	factory.mu.Lock()
+	adapterCount := len(factory.adapters)
+	factory.mu.Unlock()
+	if adapterCount != 1 {
+		t.Fatalf("adapters after start=%d, want 1", adapterCount)
+	}
+
+	input.Name = "renamed"
+	input.AppSecret = nil
+	input.OwnerSenderIDs = nil
+	input.AgentInstructions = "updated agent instructions"
+	input.ApprovalInstructions = "updated approval instructions"
+	input.AllowChatIDs = []string{" allowed ", "allowed"}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	factory.mu.Lock()
+	adapterCount = len(factory.adapters)
+	factory.mu.Unlock()
+	if adapterCount != 1 {
+		t.Fatalf("metadata update created %d adapters, want 1", adapterCount)
+	}
+
+	input.AllowChatIDs = []string{"allowed", "another"}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	factory.mu.Lock()
+	adapterCount = len(factory.adapters)
+	factory.mu.Unlock()
+	if adapterCount != 2 {
+		t.Fatalf("runtime update created %d adapters, want 2", adapterCount)
+	}
+}
+
+func TestServiceRejectsCallbacksFromReplacedConnection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	factory := &collectingFactory{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: factory})
+	secret := "secret"
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "old-app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	factory.mu.Lock()
+	old := factory.adapters[0]
+	factory.mu.Unlock()
+	input.AppID = "new-app"
+	input.AppSecret = nil
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	old.callbacks.Error(errors.New("late old error"))
+	if err := old.callbacks.Inbound(ctx, InboundMessage{MessageID: "old", ChatID: "allowed", ChatType: "group", Text: "old", MentionedBot: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.GetMessageByProviderID(ctx, "connection-1", "old"); err != ErrNotFound {
+		t.Fatalf("old callback retained: %v", err)
+	}
+	connection, _ := service.GetConnection(ctx, "connection-1")
+	if connection.LastError == "late old error" {
+		t.Fatal("old callback overwrote new connection status")
+	}
+}
+
+func TestDeleteSerializesWithConnectionReplacement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &blockingStopAdapter{stopEntered: make(chan struct{}), stopRelease: make(chan struct{})}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: blockingStopFactory{adapter}})
+	secret := "secret"
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	deleteDone := make(chan error, 1)
+	go func() { deleteDone <- service.DeleteConnection(ctx, "connection-1") }()
+	<-adapter.stopEntered
+	input.AppSecret = nil
+	putDone := make(chan error, 1)
+	go func() {
+		_, err := service.PutConnection(ctx, "connection-1", input)
+		putDone <- err
+	}()
+	select {
+	case err := <-putDone:
+		t.Fatalf("replacement crossed delete boundary: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(adapter.stopRelease)
+	if err := <-deleteDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-putDone; err == nil {
+		t.Fatal("replacement unexpectedly reused the deleted secret")
+	}
+	if _, err := store.GetConnection(ctx, "connection-1"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted connection reappeared: %v", err)
+	}
+	service.mu.Lock()
+	defer service.mu.Unlock()
+	if service.runs["connection-1"] != nil {
+		t.Fatal("adapter remained active after delete")
+	}
+}
+
+func TestServiceFailsInterruptedDeliveryOnRestart(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	root := t.TempDir()
+	store, _ := Open(root)
+	secrets, _ := NewSecretStore(root)
+	secret := "secret"
+	if err := secrets.Set("connection-1", secret); err != nil {
+		t.Fatal(err)
+	}
+	_, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bindTestGroup(t, store, "allowed", "user-1")
+	message, err := store.RecordMessage(ctx, "connection-1", InboundMessage{MessageID: "pending", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := store.ClaimMessage(ctx, message.ID)
+	if err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	if err := store.SetMessageRunning(ctx, message.ID, DeliveryReceipt{Mode: ProgressModeCOT, MessageID: "reply-1", COTID: "cot-1"}); err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.GetConversation(ctx, message.ConversationID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.Enabled = true
+	conversation.SessionID = "session-1"
+	conversation.AllowedSenderIDs = []string{"user-1"}
+	if _, err := store.PutConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	factory := &collectingFactory{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: factory})
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetMessageByProviderID(ctx, "connection-1", "pending")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.TriggerStatus != "failed" || recovered.StatusDetail != "daemon_restarted_before_completion" {
+		t.Fatalf("message=%+v", recovered)
+	}
+	factory.mu.Lock()
+	adapter := factory.adapters[0]
+	factory.mu.Unlock()
+	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
+	if len(adapter.updates) != 1 || adapter.updates[0].State != "failed" {
+		t.Fatalf("updates=%+v", adapter.updates)
+	}
+	if len(adapter.receipts) != 1 || adapter.receipts[0].Mode != ProgressModeCOT || adapter.receipts[0].COTID != "cot-1" {
+		t.Fatalf("receipts=%+v", adapter.receipts)
+	}
+}
+
+func TestApprovalInstructionsRequireReviewAllTools(t *testing.T) {
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	_, err := service.PutConnection(context.Background(), "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", ApprovalInstructions: "restrict", ReviewAllTools: false})
+	if err == nil {
+		t.Fatal("expected unsafe approval configuration to be rejected")
+	}
+}
+
+func TestEnabledConnectionCannotClearItsSecret(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	secret := "original"
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	input.AppSecret = nil
+	input.ClearSecret = true
+	if _, err := service.PutConnection(ctx, "connection-1", input); err == nil {
+		t.Fatal("expected enabled connection without candidate secret to be rejected")
+	}
+	if got, ok, err := secrets.Get("connection-1"); err != nil || !ok || got != secret {
+		t.Fatalf("secret changed after rejected update: value=%q ok=%v err=%v", got, ok, err)
+	}
+	connection, err := store.GetConnection(ctx, "connection-1")
+	if err != nil || !connection.Enabled {
+		t.Fatalf("connection changed after rejected update: %+v err=%v", connection, err)
+	}
+}
+
+func TestConnectionAppIDIsUniqueWithinDaemon(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "first", AppID: "app"}
+	if _, err := service.PutConnection(ctx, "connection-1", input); err != nil {
+		t.Fatal(err)
+	}
+	input.Name = "second"
+	if _, err := service.PutConnection(ctx, "connection-2", input); err == nil || !strings.Contains(err.Error(), "already used") {
+		t.Fatalf("duplicate app_id error=%v", err)
+	}
+}
+
+func TestRecoverClaimedMessageMarksDeliveryUnknown(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := store.RecordMessage(ctx, "connection-1", InboundMessage{MessageID: "claimed", ChatID: "allowed", ChatType: "group", CreatedAt: time.Now()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if claimed, err := store.ClaimMessage(ctx, message.ID); err != nil || !claimed {
+		t.Fatalf("claim=%v err=%v", claimed, err)
+	}
+	if _, err := store.RecoverPendingMessages(ctx); err != nil {
+		t.Fatal(err)
+	}
+	recovered, err := store.GetMessageByProviderID(ctx, "connection-1", "claimed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if recovered.TriggerStatus != "delivery_unknown" || recovered.StatusDetail != "daemon_restarted_after_possible_delivery" {
+		t.Fatalf("message=%+v", recovered)
+	}
+}
+
+func TestRecordMessagePrunesConversationHistory(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	defer store.Close()
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 501; index++ {
+		_, err := store.RecordMessage(ctx, "connection-1", InboundMessage{MessageID: fmt.Sprintf("message-%03d", index), ChatID: "allowed", RootID: "root-message", ChatType: "group", CreatedAt: time.Now().Add(time.Duration(index) * time.Millisecond)})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "root-message", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_messages WHERE conversation_id=?`, conversation.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 500 {
+		t.Fatalf("retained messages=%d", count)
+	}
+	old := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.ExecContext(ctx, `UPDATE channel_messages SET created_at=?`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ListMessages(ctx, conversation.ID, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_messages WHERE conversation_id=?`, conversation.ID).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("expired messages retained=%d", count)
+	}
+}
+
+func TestDeleteConnectionCleansOrphanSecret(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	if err := secrets.Set("orphan", "secret"); err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	if err := service.DeleteConnection(ctx, "orphan"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok, err := secrets.Get("orphan"); err != nil || ok {
+		t.Fatalf("orphan secret remains: ok=%v err=%v", ok, err)
+	}
+}
+
+func TestConversationApprovalOverrideCannotDisableEffectiveReview(t *testing.T) {
+	ctx := context.Background()
+	store, _ := Open(t.TempDir())
+	secrets, _ := NewSecretStore(t.TempDir())
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{&fakeAdapter{}}})
+	_, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", ApprovalInstructions: "restrict", ReviewAllTools: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation, err := store.EnsureConversation(ctx, "connection-1", "allowed", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := false
+	_, err = service.PutConversation(ctx, conversation.ID, ConversationInput{ApprovalInstructionsMode: OverrideInherit, ReviewAllTools: &disabled})
+	if err == nil {
+		t.Fatal("expected inherited approval instructions to require review")
+	}
+	_, err = service.PutConversation(ctx, conversation.ID, ConversationInput{ApprovalInstructionsMode: OverrideReplace, ApprovalInstructions: "", ReviewAllTools: &disabled})
+	if err != nil {
+		t.Fatalf("explicitly empty approval override should allow ordinary safe-tool policy: %v", err)
+	}
+}

@@ -114,6 +114,35 @@ func TestCodexAcceptInputUsesTurnStartForAtomicStartOrSteer(t *testing.T) {
 	}
 }
 
+func TestCodexStartOnlyRejectsActiveTurnWithoutRPCOrPersistence(t *testing.T) {
+	rpc := &codexWorkerRPC{turnID: "turn-active"}
+	runtime, store := newCodexInputTestRuntime(t, "session-input-start-only", rpc)
+	runtime.activeTurnID = "turn-active"
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{
+		StartOnly: true,
+		Command: commandResponse{
+			ID: "client-start-only", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "new task"},
+		},
+	}, nil, nil)
+	if result.ErrorCode != "active_turn" || result.Command != nil {
+		t.Fatalf("input result = %#v, want active_turn", result)
+	}
+	if len(rpc.methods) != 0 {
+		t.Fatalf("start-only input called Codex RPC: %#v", rpc.methods)
+	}
+	items, _, err := store.ListDisplayItems(context.Background(), "session-input-start-only")
+	if err != nil || len(items) != 0 {
+		t.Fatalf("start-only rejection persisted input: %#v, err=%v", items, err)
+	}
+}
+
+func TestWorkerInputErrorMatchesActiveTurn(t *testing.T) {
+	err := &workerInputError{Code: "active_turn", Message: "a turn is already active"}
+	if !errors.Is(err, errActiveTurn) {
+		t.Fatalf("worker input error %v did not match errActiveTurn", err)
+	}
+}
+
 func TestCodexUrgentInterruptUnblocksAtomicStartOrSteer(t *testing.T) {
 	rpc := &blockingCodexTurnStartRPC{startCalled: make(chan struct{}), interrupted: make(chan struct{})}
 	runtime, store := newCodexInputTestRuntime(t, "session-input-stop", nil)

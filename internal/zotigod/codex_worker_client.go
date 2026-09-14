@@ -483,6 +483,9 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request workerInpu
 		if request.SteeringOnly && existing.Type != sessionCommandSteering {
 			return commandResponse{}, errCommandIDConflict
 		}
+		if request.StartOnly && existing.Type != sessionCommandMessage {
+			return commandResponse{}, errCommandIDConflict
+		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
 			return commandResponse{}, errCommandIDConflict
 		}
@@ -490,6 +493,9 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request workerInpu
 	}
 
 	activeTurnID := r.activeTurnID
+	if request.StartOnly && activeTurnID != "" {
+		return commandResponse{}, errActiveTurn
+	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != activeTurnID {
 		return commandResponse{}, errTurnMismatch
 	}
@@ -511,7 +517,6 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request workerInpu
 		r.acknowledgeCommand(stored.Sequence)
 		return stored, nil
 	}
-
 	message := messageCommandForRequest(request)
 	turnID, model, err := r.callTurnStart(ctx, message, boundResults)
 	if err != nil {

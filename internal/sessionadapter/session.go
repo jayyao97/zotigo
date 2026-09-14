@@ -52,9 +52,10 @@ func ConvertAgentTurns(turns []agent.TurnAudit) []session.Turn {
 					ClassifierProvider: event.ClassifierProvider,
 					ClassifierModel:    event.ClassifierModel,
 					ContextSummary: session.ContextSummary{
-						UserPrompt:    event.ContextSummary.UserPrompt,
-						RecentActions: event.ContextSummary.RecentActions,
-						Trigger:       event.ContextSummary.Trigger,
+						UserPrompt:     event.ContextSummary.UserPrompt,
+						RecentActions:  append([]string(nil), event.ContextSummary.RecentActions...),
+						Trigger:        event.ContextSummary.Trigger,
+						RequestContext: event.ContextSummary.RequestContext.Clone(),
 					},
 					RawContext: event.RawContext,
 				}

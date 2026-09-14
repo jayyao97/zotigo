@@ -8,14 +8,20 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
+var errInputPolicyMismatch = errors.New("input policy changed before admission")
+
 func workerInputErrorDetails(err error) (string, string) {
 	switch {
 	case errors.Is(err, errNoActiveTurn):
 		return "no_active_turn", "steering requires an active turn"
+	case errors.Is(err, errActiveTurn):
+		return "active_turn", "a turn is already active"
 	case errors.Is(err, errTurnMismatch):
 		return "turn_mismatch", "expected_turn_id does not match active turn"
 	case errors.Is(err, errCommandIDConflict):
 		return "command_id_conflict", err.Error()
+	case errors.Is(err, errInputPolicyMismatch):
+		return "input_policy_mismatch", err.Error()
 	default:
 		return "input_failed", err.Error()
 	}
@@ -48,7 +54,7 @@ func findExistingSessionInput(ctx context.Context, source displayItemSource, ses
 func sameCommandInput(existing commandResponse, request commandResponse) bool {
 	existingText, existingImages, existingSkills := commandInput(existing)
 	requestText, requestImages, requestSkills := commandInput(request)
-	if existingText != requestText || !equalStrings(existingSkills, requestSkills) || len(existingImages) != len(requestImages) {
+	if existingText != requestText || !equalStrings(existingSkills, requestSkills) || !sameRequestContext(commandRequestContext(existing), commandRequestContext(request)) || len(existingImages) != len(requestImages) {
 		return false
 	}
 	for index := range existingImages {
@@ -59,6 +65,20 @@ func sameCommandInput(existing commandResponse, request commandResponse) bool {
 		}
 	}
 	return true
+}
+
+func commandRequestContext(command commandResponse) *protocol.RequestContext {
+	if command.Message == nil {
+		return nil
+	}
+	return command.Message.RequestContext
+}
+
+func sameRequestContext(left, right *protocol.RequestContext) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
 }
 
 func commandInput(command commandResponse) (string, []commandImageData, []string) {
@@ -88,6 +108,9 @@ func sameCommandImagePaths(left commandResponse, right commandResponse) bool {
 func inputMessageFromRequest(request workerInputRequest) (message protocol.Message, err error) {
 	text, images, _ := commandInput(request.Command)
 	message, err = userMessageFromCommand(text, images, "session input")
+	if err == nil && request.Command.Message != nil && request.Command.Message.RequestContext != nil {
+		message.Metadata = &protocol.MessageMetadata{RequestContext: request.Command.Message.RequestContext.Clone()}
+	}
 	message.ID = request.Command.ID
 	return message, err
 }
@@ -143,7 +166,7 @@ func displayItemForAcceptedInput(command commandResponse) zotigosession.DisplayI
 	item.ID = command.ID
 	item.CreatedAt = command.CreatedAt
 	item.Command = &zotigosession.DisplayCommand{
-		Type: command.Type, Text: text, Images: displayCommandImages(displayImages), Skills: append([]string(nil), skills...),
+		Type: command.Type, Text: text, Images: displayCommandImages(displayImages), Skills: append([]string(nil), skills...), RequestContext: commandRequestContext(command).Clone(),
 	}
 	if command.Steering != nil {
 		item.Command.TurnID = command.Steering.TurnID

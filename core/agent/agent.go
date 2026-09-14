@@ -48,6 +48,7 @@ type Agent struct {
 	classifierProfileName       string
 	classifierProfile           config.ProfileConfig
 	classifierUnavailableReason string
+	reviewAllTools              bool
 	extraSafeDirs               []string
 	turnSafety                  TurnSafetyState
 
@@ -187,6 +188,12 @@ func WithProfileName(name string) AgentOption {
 	return func(a *Agent) { a.profileName = name }
 }
 
+// WithReviewAllTools routes otherwise auto-executable Safe calls through the
+// safety classifier. Tool-level blocks and mandatory approvals still win.
+func WithReviewAllTools(enabled bool) AgentOption {
+	return func(a *Agent) { a.reviewAllTools = enabled }
+}
+
 // New creates a new Agent with the given configuration and executor.
 // The executor parameter provides the environment for tool execution (local, E2B, Docker, etc.)
 func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) (*Agent, error) {
@@ -240,6 +247,15 @@ func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 	defer a.mu.Unlock()
 	a.requestedPolicy = p
 	a.refreshApprovalPolicy()
+}
+
+// RequestedApprovalPolicy returns the policy selected by the host or user.
+// The effective policy may be stricter when the active profile forces manual
+// approval, but it can never be more permissive than this value.
+func (a *Agent) RequestedApprovalPolicy() ApprovalPolicy {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.requestedPolicy
 }
 
 // SetProfileApprovalFallback forces manual approval without overwriting the
@@ -331,7 +347,9 @@ func (a *Agent) AuditTurns() []TurnAudit {
 	defer a.mu.RUnlock()
 
 	turns := make([]TurnAudit, len(a.turns))
-	copy(turns, a.turns)
+	for index := range a.turns {
+		turns[index] = cloneTurnAudit(a.turns[index])
+	}
 	return turns
 }
 
@@ -390,14 +408,16 @@ func (a *Agent) Snapshot() Snapshot {
 	deferred := make([]*PendingAction, len(a.deferredActions))
 	copy(deferred, a.deferredActions)
 	turns := make([]TurnAudit, len(a.turns))
-	copy(turns, a.turns)
+	for index := range a.turns {
+		turns[index] = cloneTurnAudit(a.turns[index])
+	}
 	return Snapshot{
 		State:            a.state,
 		History:          hist,
 		CumulativeUsage:  a.cumulativeUsage.Normalized(),
 		PendingActions:   pending,
 		DeferredActions:  deferred,
-		TurnSafety:       a.turnSafety,
+		TurnSafety:       cloneTurnSafetyState(a.turnSafety),
 		Turns:            turns,
 		UserContextState: userContextState,
 		CreatedAt:        time.Now(),
@@ -417,12 +437,33 @@ func (a *Agent) Restore(s Snapshot) {
 	a.pendingTurnUser = nil
 	a.pendingActions = s.PendingActions
 	a.deferredActions = s.DeferredActions
-	a.turnSafety = s.TurnSafety
+	a.turnSafety = cloneTurnSafetyState(s.TurnSafety)
 	if s.Turns == nil {
 		a.turns = make([]TurnAudit, 0)
 	} else {
-		a.turns = s.Turns
+		a.turns = make([]TurnAudit, len(s.Turns))
+		for index := range s.Turns {
+			a.turns[index] = cloneTurnAudit(s.Turns[index])
+		}
 	}
+}
+
+func cloneTurnSafetyState(state TurnSafetyState) TurnSafetyState {
+	state.RequestContext = state.RequestContext.Clone()
+	if state.LastDecisionContext != nil {
+		call := *state.LastDecisionContext
+		state.LastDecisionContext = &call
+	}
+	return state
+}
+
+func cloneTurnAudit(turn TurnAudit) TurnAudit {
+	turn.SafetyEvents = append([]AuditEvent(nil), turn.SafetyEvents...)
+	for index := range turn.SafetyEvents {
+		turn.SafetyEvents[index].ContextSummary.RecentActions = append([]string(nil), turn.SafetyEvents[index].ContextSummary.RecentActions...)
+		turn.SafetyEvents[index].ContextSummary.RequestContext = turn.SafetyEvents[index].ContextSummary.RequestContext.Clone()
+	}
+	return turn
 }
 
 // ClearHistory starts a fresh conversation while retaining session-level usage.
@@ -549,11 +590,11 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		}
 
 		if msg.Role == protocol.RoleUser {
-			if err := a.appendUserInputLocked(msg); err != nil {
+			if err := a.appendUserInputLocked(msg, true); err != nil {
 				a.mu.Unlock()
 				return nil, err
 			}
-			a.startNewTurn(msg.DisplayString())
+			a.startNewTurn(msg.DisplayString(), messageRequestContext(msg))
 		} else {
 			if err := a.conversation.appendMessages(msg); err != nil {
 				a.mu.Unlock()
@@ -1722,12 +1763,13 @@ func (a *Agent) markDurabilityFailedLocked() {
 	a.state = StateDurabilityFailed
 }
 
-func (a *Agent) startNewTurn(userPrompt string) {
+func (a *Agent) startNewTurn(userPrompt string, requestContext *protocol.RequestContext) {
 	turnID := fmt.Sprintf("turn_%d", time.Now().UnixNano())
 	now := time.Now()
 	a.turnSafety = TurnSafetyState{
 		TurnID:            turnID,
 		CurrentUserPrompt: userPrompt,
+		RequestContext:    requestContext.Clone(),
 	}
 	a.turns = append(a.turns, TurnAudit{
 		ID:                turnID,
@@ -1760,6 +1802,9 @@ func (a *Agent) appendSafetyEvent(event AuditEvent) {
 	}
 	if event.TurnID == "" {
 		event.TurnID = a.turnSafety.TurnID
+	}
+	if event.ContextSummary.RequestContext == nil {
+		event.ContextSummary.RequestContext = a.turnSafety.RequestContext.Clone()
 	}
 
 	idx := a.currentTurnIndex()
@@ -1822,10 +1867,12 @@ func (a *Agent) setTurnSnapshot(status SnapshotStatus, snapshotID string) {
 //
 // Auto threshold is config.Safety.Classifier.ReviewThreshold; default
 // LevelMedium. Manual threshold is fixed at LevelLow — any mutation
-// gets a prompt. When the threshold is set to "off", the classifier is
-// never called but LevelHigh calls still require user approval ("off"
-// disables classifier calls, not safety). Tools can set RequiresApproval
-// for scope-expansion cases that must be user-approved even in Auto mode.
+// gets a prompt. ReviewAllTools explicitly sends Safe calls to the classifier
+// in either policy and overrides the normal review threshold in Auto mode.
+// Otherwise, a threshold of "off" never calls the classifier but LevelHigh
+// calls still require user approval ("off" disables classifier calls, not
+// safety). Tools can set RequiresApproval for scope-expansion cases that must
+// be user-approved even in Auto mode.
 func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) ActionDecision {
 	tool, ok := a.tools[tc.Name]
 	if !ok {
@@ -1874,6 +1921,18 @@ func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) Act
 	}
 
 	if level <= tools.LevelSafe {
+		if a.reviewAllTools {
+			if resp, ok := a.classifyWithSafetyClassifier(ctx, tc, riskLabel); ok {
+				return resp
+			}
+			return ActionDecision{
+				Decision:         ExecutionDecisionRequireApproval,
+				Source:           SafetyDecisionSourceHardRule,
+				Reason:           decision.Reason,
+				RiskLevel:        riskLabel,
+				RequiresSnapshot: decision.RequiresSnapshot,
+			}
+		}
 		return ActionDecision{
 			Decision:         ExecutionDecisionAutoExecute,
 			Source:           SafetyDecisionSourceHardRule,
@@ -1895,6 +1954,9 @@ func (a *Agent) classifyToolCall(ctx context.Context, tc *protocol.ToolCall) Act
 	}
 
 	threshold := tools.ParseSafetyLevel(a.cfg.Safety.Classifier.ReviewThreshold)
+	if a.reviewAllTools {
+		threshold = tools.LevelSafe
+	}
 	// "off" / "none" parses to a level beyond LevelHigh. Interpret this as
 	// "never call the classifier" but still require approval for anything
 	// LevelHigh and above — the setting disables the classifier, not
@@ -1949,13 +2011,14 @@ func (a *Agent) classifyWithSafetyClassifier(ctx context.Context, tc *protocol.T
 	}
 
 	req := SafetyClassifierRequest{
-		UserPrompt:    a.turnSafety.CurrentUserPrompt,
-		ToolName:      tc.Name,
-		ToolArguments: tc.Arguments,
-		RiskLevel:     riskLevel,
-		IsGitRepo:     a.isGitRepository(context.Background(), a.executor),
-		HasSnapshot:   a.turnSafety.SnapshotCreated,
-		RecentActions: a.recentActionsForClassifier(),
+		UserPrompt:     a.turnSafety.CurrentUserPrompt,
+		RequestContext: a.turnSafety.RequestContext.Clone(),
+		ToolName:       tc.Name,
+		ToolArguments:  tc.Arguments,
+		RiskLevel:      riskLevel,
+		IsGitRepo:      a.isGitRepository(context.Background(), a.executor),
+		HasSnapshot:    a.turnSafety.SnapshotCreated,
+		RecentActions:  a.recentActionsForClassifier(),
 	}
 
 	// Capture a bounded dump of the classifier request for audit when the
@@ -2022,6 +2085,9 @@ func (a *Agent) classifyWithSafetyClassifier(ctx context.Context, tc *protocol.T
 func summarizeClassifierRequest(req SafetyClassifierRequest, limit int) string {
 	var sb strings.Builder
 	fmt.Fprintf(&sb, "user_prompt: %s\n", summarizeText(req.UserPrompt, 400))
+	if req.RequestContext != nil {
+		fmt.Fprintf(&sb, "request_context: %s\n", summarizeText(req.RequestContext.PromptText(), 400))
+	}
 	fmt.Fprintf(&sb, "tool: %s\n", req.ToolName)
 	fmt.Fprintf(&sb, "args: %s\n", summarizeText(req.ToolArguments, 400))
 	fmt.Fprintf(&sb, "risk_level: %s\n", req.RiskLevel)
@@ -2409,15 +2475,15 @@ func (a *Agent) drainPendingTurnUserInputLocked(pendingCount int) (bool, error) 
 		Content:   content,
 		CreatedAt: time.Now(),
 	}
-	if err := a.appendUserInputLocked(msg); err != nil {
+	if err := a.appendUserInputLocked(msg, false); err != nil {
 		return false, err
 	}
 	a.pendingTurnUser = append([]protocol.Message(nil), a.pendingTurnUser[pendingCount:]...)
 	return true, nil
 }
 
-func (a *Agent) appendUserInputLocked(msg protocol.Message) error {
-	messages := make([]protocol.Message, 0, 2)
+func (a *Agent) appendUserInputLocked(msg protocol.Message, startsNewTurn bool) error {
+	messages := make([]protocol.Message, 0, 3)
 	var nextState *prompt.UserContextState
 	if a.userContext != nil {
 		contextText, state, err := a.userContext.BuildUpdate(a.promptContext(), a.conversation.userContextState)
@@ -2429,11 +2495,26 @@ func (a *Agent) appendUserInputLocked(msg protocol.Message) error {
 		}
 		nextState = state.Clone()
 	}
+	if requestContext := messageRequestContext(msg); requestContext != nil {
+		messages = append(messages, protocol.NewContextualUserMessage(requestContext.PromptText()))
+	} else if startsNewTurn && a.turnSafety.RequestContext != nil {
+		// Contextual messages remain in the model history until compaction. Make
+		// the transition back to a local input explicit so the prior external
+		// sender and role cannot be mistaken for the current request provenance.
+		messages = append(messages, protocol.NewContextualUserMessage("<request_context>\nnull\n</request_context>"))
+	}
 	messages = append(messages, msg)
 	if err := a.conversation.append(messages, nextState, a.userContext != nil); err != nil {
 		return fmt.Errorf("record user history: %w", err)
 	}
 	return nil
+}
+
+func messageRequestContext(msg protocol.Message) *protocol.RequestContext {
+	if msg.Metadata == nil {
+		return nil
+	}
+	return msg.Metadata.RequestContext.Clone()
 }
 
 func (a *Agent) promptContext() prompt.PromptContext {
@@ -2491,12 +2572,16 @@ func (a *Agent) compressHistoryLocked(
 func (a *Agent) rebaseUserContext(
 	history []protocol.Message,
 ) ([]protocol.Message, *prompt.UserContextState, error) {
-	if a.userContext == nil {
-		return history, a.conversation.userContextState, nil
-	}
-	contextText, state, err := a.userContext.BuildFull(a.promptContext())
-	if err != nil {
-		return nil, nil, fmt.Errorf("build user context after compaction: %w", err)
+	var contextText string
+	state := a.conversation.userContextState.Clone()
+	if a.userContext != nil {
+		var err error
+		var builtState prompt.UserContextState
+		contextText, builtState, err = a.userContext.BuildFull(a.promptContext())
+		if err != nil {
+			return nil, nil, fmt.Errorf("build user context after compaction: %w", err)
+		}
+		state = builtState.Clone()
 	}
 
 	withoutContext := make([]protocol.Message, 0, len(history)+1)
@@ -2516,12 +2601,19 @@ func (a *Agent) rebaseUserContext(
 			foundSummary = true
 		}
 	}
+	contextMessages := make([]protocol.Message, 0, 2)
 	if contextText != "" {
-		withoutContext = append(withoutContext, protocol.Message{})
-		copy(withoutContext[insertAt+1:], withoutContext[insertAt:])
-		withoutContext[insertAt] = protocol.NewContextualUserMessage(contextText)
+		contextMessages = append(contextMessages, protocol.NewContextualUserMessage(contextText))
 	}
-	return withoutContext, state.Clone(), nil
+	if requestContext := a.turnSafety.RequestContext; requestContext != nil {
+		contextMessages = append(contextMessages, protocol.NewContextualUserMessage(requestContext.PromptText()))
+	}
+	if len(contextMessages) > 0 {
+		withoutContext = append(withoutContext, make([]protocol.Message, len(contextMessages))...)
+		copy(withoutContext[insertAt+len(contextMessages):], withoutContext[insertAt:len(withoutContext)-len(contextMessages)])
+		copy(withoutContext[insertAt:], contextMessages)
+	}
+	return withoutContext, state, nil
 }
 
 // safeDirs returns all directories that are safe for auto-approved read access.

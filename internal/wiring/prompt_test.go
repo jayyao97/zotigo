@@ -35,8 +35,9 @@ Use this skill for tests.
 	}
 
 	systemBuilder := NewSystemPromptBuilder(PromptConfig{
-		WorkDir:      workDir,
-		SkillManager: sm,
+		WorkDir:           workDir,
+		SkillManager:      sm,
+		AgentInstructions: "Keep replies concise.",
 	})
 	systemMessages := systemBuilder.BuildMessages(prompt.PromptContext{
 		WorkDir:  workDir,
@@ -44,7 +45,7 @@ Use this skill for tests.
 	})
 
 	if len(systemMessages) != 2 {
-		t.Fatalf("expected static plus skills system messages, got %d", len(systemMessages))
+		t.Fatalf("expected static plus dynamic system messages, got %d", len(systemMessages))
 	}
 	if strings.Contains(systemMessages[0], "demo-skill") {
 		t.Fatalf("skill index should not be merged into static system message: %s", systemMessages[0])
@@ -57,6 +58,9 @@ Use this skill for tests.
 	}
 	if !strings.Contains(systemMessages[1], "demo-skill") {
 		t.Fatalf("dynamic system message should include skill index: %s", systemMessages[1])
+	}
+	if !strings.Contains(systemMessages[1], "<agent_instructions>\nKeep replies concise.\n</agent_instructions>") {
+		t.Fatalf("dynamic system message should append agent instructions: %s", systemMessages[1])
 	}
 
 	userContextBuilder := NewUserContextBuilder(PromptConfig{

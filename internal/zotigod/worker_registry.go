@@ -9,6 +9,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
+	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -73,10 +74,14 @@ type workerInterruptTurn struct {
 }
 
 type workerInputRequest struct {
-	RequestID      string          `json:"request_id"`
-	Command        commandResponse `json:"command"`
-	SteeringOnly   bool            `json:"steering_only,omitempty"`
-	ExpectedTurnID string          `json:"expected_turn_id,omitempty"`
+	RequestID              string               `json:"request_id"`
+	Command                commandResponse      `json:"command"`
+	SteeringOnly           bool                 `json:"steering_only,omitempty"`
+	StartOnly              bool                 `json:"start_only,omitempty"`
+	ExpectedTurnID         string               `json:"expected_turn_id,omitempty"`
+	RequiredApprovalPolicy agent.ApprovalPolicy `json:"required_approval_policy,omitempty"`
+	RequiredPromptRevision uint64               `json:"required_prompt_revision,omitempty"`
+	RequirePromptRevision  bool                 `json:"require_prompt_revision,omitempty"`
 }
 
 type workerInputResult struct {
@@ -844,10 +849,14 @@ func (e *workerInputError) Is(target error) bool {
 		return e.Code == "command_pending"
 	case errNoActiveTurn:
 		return e.Code == "no_active_turn"
+	case errActiveTurn:
+		return e.Code == "active_turn"
 	case errTurnMismatch:
 		return e.Code == "turn_mismatch"
 	case errCommandIDConflict:
 		return e.Code == "command_id_conflict"
+	case errInputPolicyMismatch:
+		return e.Code == "input_policy_mismatch"
 	default:
 		return false
 	}

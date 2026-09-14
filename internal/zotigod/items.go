@@ -373,6 +373,7 @@ type itemCommandResponse struct {
 	Reason         string                     `json:"reason,omitempty"`
 	Profile        string                     `json:"profile,omitempty"`
 	ApprovalPolicy string                     `json:"approval_policy,omitempty"`
+	RequestContext *protocol.RequestContext   `json:"request_context,omitempty"`
 }
 
 type itemProfileResponse struct {
@@ -763,6 +764,7 @@ func publicDisplayCommand(command *zotigosession.DisplayCommand) *itemCommandRes
 		Reason:         command.Reason,
 		Profile:        command.Profile,
 		ApprovalPolicy: command.ApprovalPolicy,
+		RequestContext: command.RequestContext.Clone(),
 	}
 }
 
