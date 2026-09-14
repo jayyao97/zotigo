@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -47,6 +48,7 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 			backend_updated_at INTEGER NOT NULL DEFAULT 0,
 			backend_sync_version INTEGER NOT NULL DEFAULT 0,
 			approval_policy TEXT NOT NULL DEFAULT 'auto',
+			prompt_config TEXT NOT NULL DEFAULT '{}',
 			last_prompt TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL,
 			updated_at INTEGER NOT NULL
@@ -104,6 +106,7 @@ func (i *sessionIndex) migrate(ctx context.Context) error {
 		{name: "backend_version", definition: "TEXT NOT NULL DEFAULT ''"},
 		{name: "backend_updated_at", definition: "INTEGER NOT NULL DEFAULT 0"},
 		{name: "backend_sync_version", definition: "INTEGER NOT NULL DEFAULT 0"},
+		{name: "prompt_config", definition: "TEXT NOT NULL DEFAULT '{}'"},
 	} {
 		var count int
 		if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?`, column.name).Scan(&count); err != nil {
@@ -125,10 +128,14 @@ func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 	if meta.Agent == "" {
 		meta.Agent = "zotigo"
 	}
-	_, err := i.db.ExecContext(ctx, `
+	promptConfig, err := json.Marshal(meta.PromptConfig)
+	if err != nil {
+		return fmt.Errorf("marshal session prompt config: %w", err)
+	}
+	_, err = i.db.ExecContext(ctx, `
 		INSERT INTO sessions (id, working_directory, agent, profile_name, model, reasoning_effort,
-			conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, last_prompt, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, prompt_config, last_prompt, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET
 			working_directory = excluded.working_directory,
 			agent = excluded.agent,
@@ -140,11 +147,12 @@ func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 			backend_updated_at = excluded.backend_updated_at,
 			backend_sync_version = excluded.backend_sync_version,
 			approval_policy = excluded.approval_policy,
+			prompt_config = excluded.prompt_config,
 			last_prompt = excluded.last_prompt,
 			created_at = excluded.created_at,
 			updated_at = excluded.updated_at
 	`, meta.ID, meta.WorkingDirectory, meta.Agent, meta.ProfileName, meta.Model, meta.ReasoningEffort,
-		meta.ConversationID, meta.BackendVersion, formatOptionalIndexTime(meta.BackendUpdatedAt), meta.BackendSyncVersion, meta.ApprovalPolicy, meta.LastPrompt,
+		meta.ConversationID, meta.BackendVersion, formatOptionalIndexTime(meta.BackendUpdatedAt), meta.BackendSyncVersion, meta.ApprovalPolicy, string(promptConfig), meta.LastPrompt,
 		formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))
 	if err != nil {
 		return fmt.Errorf("upsert session index: %w", err)
@@ -201,7 +209,7 @@ func (i *sessionIndex) deleteExcept(ctx context.Context, keep map[string]struct{
 func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata, error) {
 	var query strings.Builder
 	query.WriteString(`SELECT id, working_directory, agent, profile_name, model, reasoning_effort,
-		conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, last_prompt, created_at, updated_at FROM sessions`)
+		conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, prompt_config, last_prompt, created_at, updated_at FROM sessions`)
 	args := make([]any, 0, 2)
 	if filter.WorkingDirectory != "" {
 		query.WriteString(` WHERE working_directory = ?`)
@@ -237,10 +245,14 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 		var createdAt int64
 		var updatedAt int64
 		var backendUpdatedAt int64
+		var promptConfig string
 		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.Agent, &meta.ProfileName,
 			&meta.Model, &meta.ReasoningEffort, &meta.ConversationID, &meta.BackendVersion,
-			&backendUpdatedAt, &meta.BackendSyncVersion, &meta.ApprovalPolicy, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
+			&backendUpdatedAt, &meta.BackendSyncVersion, &meta.ApprovalPolicy, &promptConfig, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
 			return nil, fmt.Errorf("scan session index: %w", err)
+		}
+		if err := json.Unmarshal([]byte(promptConfig), &meta.PromptConfig); err != nil {
+			return nil, fmt.Errorf("decode session prompt config: %w", err)
 		}
 		meta.CreatedAt = parseIndexTime(createdAt)
 		meta.UpdatedAt = parseIndexTime(updatedAt)

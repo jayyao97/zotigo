@@ -28,7 +28,9 @@ type AgentConfig struct {
 	Observer       observability.Observer
 	Middleware     []agent.Middleware
 
-	ConfigureClassifier bool
+	ConfigureClassifier  bool
+	ApprovalInstructions string
+	ReviewAllTools       bool
 }
 
 // NewAgent constructs an agent with shared Zotigo wiring. Transport-specific
@@ -37,6 +39,7 @@ func NewAgent(cfg AgentConfig) (*agent.Agent, error) {
 	opts := []agent.AgentOption{
 		agent.WithApprovalPolicy(cfg.ApprovalPolicy),
 		agent.WithProfileName(cfg.ProfileName),
+		agent.WithReviewAllTools(cfg.ReviewAllTools),
 	}
 	if cfg.PromptBuilder != nil {
 		opts = append(opts, agent.WithSystemPromptBuilder(cfg.PromptBuilder))
@@ -130,6 +133,9 @@ func buildClassifierRuntime(cfg AgentConfig) classifierRuntime {
 	classifierOpts := []agent.ClassifierOption{}
 	if cfg.Observer != nil {
 		classifierOpts = append(classifierOpts, agent.WithClassifierObserver(cfg.Observer, profile.Model))
+	}
+	if cfg.ApprovalInstructions != "" {
+		classifierOpts = append(classifierOpts, agent.WithClassifierInstructions(cfg.ApprovalInstructions))
 	}
 	runtime.classifier = agent.NewProviderSafetyClassifier(provider, cfg.Profile.Safety.Classifier, classifierOpts...)
 	return runtime

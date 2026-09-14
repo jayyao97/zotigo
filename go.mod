@@ -11,6 +11,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.11.3
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/larksuite/oapi-sdk-go/v3 v3.12.0
 	github.com/openai/openai-go/v3 v3.8.1
 	github.com/pkoukk/tiktoken-go v0.1.8
 	github.com/spf13/viper v1.19.0
@@ -18,6 +19,7 @@ require (
 	go.lsp.dev/protocol v0.12.0
 	go.uber.org/zap v1.21.0
 	golang.org/x/net v0.41.0
+	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0
 	google.golang.org/genai v1.45.0
 	gopkg.in/yaml.v3 v3.0.1
@@ -45,6 +47,7 @@ require (
 	github.com/dlclark/regexp2 v1.10.0 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/fsnotify/fsnotify v1.7.0 // indirect
+	github.com/gogo/protobuf v1.3.2 // indirect
 	github.com/golang/groupcache v0.0.0-20210331224755-41bb18bfe9da // indirect
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/google/s2a-go v0.1.8 // indirect
@@ -87,7 +90,6 @@ require (
 	golang.org/x/arch v0.0.0-20210923205945-b76863e36670 // indirect
 	golang.org/x/crypto v0.40.0 // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
-	golang.org/x/sync v0.20.0 // indirect
 	golang.org/x/text v0.27.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20240903143218-8af14fe29dc1 // indirect
 	google.golang.org/grpc v1.66.2 // indirect

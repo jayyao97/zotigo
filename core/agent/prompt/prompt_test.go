@@ -13,6 +13,9 @@ func TestStaticSystemPrompt_Embedded(t *testing.T) {
 	if !strings.Contains(StaticSystemPrompt, "Zotigo") {
 		t.Error("StaticSystemPrompt should contain 'Zotigo'")
 	}
+	if !strings.Contains(StaticSystemPrompt, "<request_provenance>") || !strings.Contains(StaticSystemPrompt, "assigned by the host") {
+		t.Error("StaticSystemPrompt should define trusted request provenance")
+	}
 }
 
 func TestDynamicContext_WithSection(t *testing.T) {

@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"time"
+
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 type DisplayItemType string
@@ -163,14 +165,15 @@ type DisplayInteractionOption struct {
 }
 
 type DisplayCommand struct {
-	Type           string                `json:"type,omitempty"`
-	Text           string                `json:"text,omitempty"`
-	Skills         []string              `json:"skills,omitempty"`
-	Images         []DisplayCommandImage `json:"images,omitempty"`
-	TurnID         string                `json:"turn_id,omitempty"`
-	Reason         string                `json:"reason,omitempty"`
-	Profile        string                `json:"profile,omitempty"`
-	ApprovalPolicy string                `json:"approval_policy,omitempty"`
+	Type           string                   `json:"type,omitempty"`
+	Text           string                   `json:"text,omitempty"`
+	Skills         []string                 `json:"skills,omitempty"`
+	Images         []DisplayCommandImage    `json:"images,omitempty"`
+	TurnID         string                   `json:"turn_id,omitempty"`
+	Reason         string                   `json:"reason,omitempty"`
+	Profile        string                   `json:"profile,omitempty"`
+	ApprovalPolicy string                   `json:"approval_policy,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 type DisplayProfileChange struct {
