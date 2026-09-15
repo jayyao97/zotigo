@@ -21,9 +21,27 @@ type Metadata struct {
 	BackendUpdatedAt   time.Time            `json:"backend_updated_at,omitempty"`
 	BackendSyncVersion int                  `json:"backend_sync_version,omitempty"`
 	ApprovalPolicy     agent.ApprovalPolicy `json:"approval_policy,omitempty"`
+	PromptConfig       PromptConfig         `json:"prompt_config,omitempty"`
+	Capabilities       Capabilities         `json:"capabilities,omitempty"`
 	LastPrompt         string               `json:"last_prompt"` // Preview of the last user interaction
 	CreatedAt          time.Time            `json:"created_at"`
 	UpdatedAt          time.Time            `json:"updated_at"`
+}
+
+// Capabilities records runtime features that a worker must install when it
+// starts. Whether a capability can be added after the provider conversation is
+// created depends on that runtime; validators enforce those constraints.
+type Capabilities struct {
+	ChannelToolsVersion uint64 `json:"channel_tools_version,omitempty"`
+}
+
+// PromptConfig captures session-scoped prompt and approval behavior. Empty
+// values preserve the behavior of sessions created before this field existed.
+type PromptConfig struct {
+	AgentInstructions    string `json:"agent_instructions,omitempty"`
+	ApprovalInstructions string `json:"approval_instructions,omitempty"`
+	ReviewAllTools       bool   `json:"review_all_tools,omitempty"`
+	Revision             uint64 `json:"revision,omitempty"`
 }
 
 // Session represents the full state on disk.

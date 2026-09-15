@@ -116,6 +116,14 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusBadRequest, "profile is required")
 		return
 	}
+	if h.channels != nil {
+		unlockChannels, err := h.channels.GuardSessionRuntimeMutation(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer unlockChannels()
+	}
 	unlockOperation := h.sessionOps.lock(id)
 	defer unlockOperation()
 

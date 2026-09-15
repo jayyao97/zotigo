@@ -188,6 +188,111 @@ func TestAgentRunMessageUsesOriginalTextForTurnSummary(t *testing.T) {
 	}
 }
 
+func TestAgentRunMessageAddsHostRequestContextAsContextualUserMessage(t *testing.T) {
+	const providerName = "request-context-message"
+	provider := &ContextCaptureProvider{}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.NewUserMessage("run tests")
+	message.Metadata = &protocol.MessageMetadata{RequestContext: &protocol.RequestContext{
+		Source: "feishu", ConversationName: "Shadow Test", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"},
+	}}
+	events, err := ag.RunMessage(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if len(provider.Messages) < 2 || !provider.Messages[0].IsContextualUser() || !strings.Contains(provider.Messages[0].String(), `"role":"owner"`) || provider.Messages[1].String() != "run tests" {
+		t.Fatalf("messages=%#v", provider.Messages)
+	}
+	snapshot := ag.Snapshot()
+	if snapshot.TurnSafety.RequestContext == nil || snapshot.TurnSafety.RequestContext.Actor.ID != "ou_owner" {
+		t.Fatalf("turn safety=%+v", snapshot.TurnSafety)
+	}
+}
+
+func TestAgentRunClearsPreviousHostRequestContextForLocalTurn(t *testing.T) {
+	const providerName = "request-context-clear"
+	provider := &ContextCaptureProvider{}
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	external := protocol.NewUserMessage("from Feishu")
+	external.Metadata = &protocol.MessageMetadata{RequestContext: &protocol.RequestContext{
+		Source: "feishu", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"},
+	}}
+	events, err := ag.RunMessage(context.Background(), external)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	events, err = ag.Run(context.Background(), "from local UI")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+
+	messages := provider.Messages
+	if len(messages) < 5 {
+		t.Fatalf("messages=%#v", messages)
+	}
+	if got := messages[len(messages)-2]; !got.IsContextualUser() || got.String() != "<request_context>\nnull\n</request_context>" {
+		t.Fatalf("request context reset=%#v", got)
+	}
+	if got := messages[len(messages)-1].String(); got != "from local UI" {
+		t.Fatalf("last message=%q", got)
+	}
+	if snapshot := ag.Snapshot(); snapshot.TurnSafety.RequestContext != nil {
+		t.Fatalf("turn safety request context=%+v, want nil", snapshot.TurnSafety.RequestContext)
+	}
+}
+
+func TestAgentSnapshotDeepCopiesAuditRequestContext(t *testing.T) {
+	const providerName = "snapshot-request-context"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &profileTextProvider{name: providerName, text: "done"}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag.Restore(agent.Snapshot{Turns: []agent.TurnAudit{{
+		ID: "turn-1",
+		SafetyEvents: []agent.AuditEvent{{ContextSummary: agent.AuditContextSummary{
+			RequestContext: &protocol.RequestContext{Actor: protocol.RequestActor{ID: "ou_member", Role: "member"}},
+		}}},
+	}}})
+
+	snapshot := ag.Snapshot()
+	snapshot.Turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role = "owner"
+	if got := ag.AuditTurns()[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role; got != "member" {
+		t.Fatalf("agent audit role=%q after snapshot mutation, want member", got)
+	}
+}
+
 func TestAgentRuntimeProfileSwitchUsesLatestProfileForNextGeneration(t *testing.T) {
 	const initialProviderName = "runtime-profile-initial"
 	oldProvider := &blockingToolCallProvider{started: make(chan struct{}), release: make(chan struct{})}
@@ -845,6 +950,18 @@ type ApprovalRequiredTool struct {
 	name string
 }
 
+type BlockedTool struct{ name string }
+
+func (t *BlockedTool) Name() string        { return t.name }
+func (t *BlockedTool) Description() string { return t.name }
+func (t *BlockedTool) Schema() any         { return nil }
+func (t *BlockedTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
+	return tools.SafetyDecision{Level: tools.LevelBlocked, Reason: "blocked by tool policy"}
+}
+func (t *BlockedTool) Execute(context.Context, executor.Executor, string) (any, error) {
+	return nil, errors.New("blocked tool executed")
+}
+
 func (t *ApprovalRequiredTool) Name() string        { return t.name }
 func (t *ApprovalRequiredTool) Description() string { return t.name }
 func (t *ApprovalRequiredTool) Schema() any         { return nil }
@@ -889,13 +1006,15 @@ type ShellCallProvider struct {
 }
 
 type StaticSafetyClassifier struct {
-	Response agent.SafetyClassifierResponse
-	Err      error
-	Calls    int
+	Response    agent.SafetyClassifierResponse
+	Err         error
+	Calls       int
+	LastRequest agent.SafetyClassifierRequest
 }
 
 func (c *StaticSafetyClassifier) Classify(_ context.Context, req agent.SafetyClassifierRequest) (agent.SafetyClassifierResponse, error) {
 	c.Calls++
+	c.LastRequest = req
 	if c.Err != nil {
 		return agent.SafetyClassifierResponse{}, c.Err
 	}
@@ -1160,6 +1279,124 @@ func TestAgentBypassPermissionsSkipsAllSafetyChecks(t *testing.T) {
 	}
 	if ag.Snapshot().TurnSafety.SnapshotAttempted {
 		t.Fatal("snapshot must not be attempted in bypass mode")
+	}
+}
+
+func TestAgentReviewAllToolsClassifiesSafeCalls(t *testing.T) {
+	const providerName = "review-all-tools"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &StepMockProvider{}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	classifier := &StaticSafetyClassifier{Response: agent.SafetyClassifierResponse{
+		Decision: agent.SafetyClassifierDecisionDeny,
+		Reason:   "session policy denied the read",
+	}}
+	ag, err := agent.New(config.ProfileConfig{
+		Provider: providerName,
+		Safety: config.SafetyProfileConfig{Classifier: config.SafetyClassifierConfig{
+			Enabled: config.BoolPtr(true),
+		}},
+	}, exec,
+		agent.WithSafetyClassifier(classifier),
+		agent.WithReviewAllTools(true),
+		agent.WithTools(&ProgressTool{name: "get_time"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := protocol.NewUserMessage("What time is it?")
+	message.Metadata = &protocol.MessageMetadata{RequestContext: &protocol.RequestContext{Source: "feishu", Actor: protocol.RequestActor{ID: "ou_member", Role: "member"}}}
+	events, err := ag.RunMessage(context.Background(), message)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if classifier.Calls != 1 {
+		t.Fatalf("classifier calls = %d, want 1", classifier.Calls)
+	}
+	if classifier.LastRequest.RequestContext == nil || classifier.LastRequest.RequestContext.Actor.ID != "ou_member" || classifier.LastRequest.RequestContext.Actor.Role != "member" {
+		t.Fatalf("classifier request context = %+v", classifier.LastRequest.RequestContext)
+	}
+	if got := ag.Snapshot().State; got != agent.StateIdle {
+		t.Fatalf("state = %s, want idle after classifier denial", got)
+	}
+}
+
+func TestAgentReviewAllToolsKeepsMandatoryApprovalAsHardRule(t *testing.T) {
+	const providerName = "review-all-hard-rule"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Tool: "approval", Args: `{}`}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	classifier := &StaticSafetyClassifier{Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow}}
+	ag, err := agent.New(config.ProfileConfig{
+		Provider: providerName,
+		Safety:   config.SafetyProfileConfig{Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)}},
+	}, exec,
+		agent.WithSafetyClassifier(classifier),
+		agent.WithReviewAllTools(true),
+		agent.WithTools(&ApprovalRequiredTool{name: "approval"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := ag.Run(context.Background(), "Run it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if classifier.Calls != 0 {
+		t.Fatalf("classifier calls = %d, want 0 for mandatory approval", classifier.Calls)
+	}
+	if got := ag.Snapshot().State; got != agent.StatePaused {
+		t.Fatalf("state = %s, want paused", got)
+	}
+}
+
+func TestAgentReviewAllToolsKeepsBlockedCallsAsHardRule(t *testing.T) {
+	const providerName = "review-all-blocked-rule"
+	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
+		return &ShellCallProvider{Tool: "blocked", Args: `{}`}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	classifier := &StaticSafetyClassifier{Response: agent.SafetyClassifierResponse{Decision: agent.SafetyClassifierDecisionAllow}}
+	ag, err := agent.New(config.ProfileConfig{
+		Provider: providerName,
+		Safety:   config.SafetyProfileConfig{Classifier: config.SafetyClassifierConfig{Enabled: config.BoolPtr(true)}},
+	}, exec,
+		agent.WithSafetyClassifier(classifier),
+		agent.WithReviewAllTools(true),
+		agent.WithTools(&BlockedTool{name: "blocked"}),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	events, err := ag.Run(context.Background(), "Run it")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range events {
+	}
+	if classifier.Calls != 0 {
+		t.Fatalf("classifier calls = %d, want 0 for blocked tool", classifier.Calls)
+	}
+	if got := ag.Snapshot().State; got != agent.StateIdle {
+		t.Fatalf("state = %s, want idle after blocked result", got)
 	}
 }
 
@@ -1919,6 +2156,49 @@ func TestAgentForceCompressRebasesUserContext(t *testing.T) {
 	}
 	if markerIndex < 0 || contextIndex >= markerIndex {
 		t.Fatalf("user marker moved context: context=%d marker=%d", contextIndex, markerIndex)
+	}
+}
+
+func TestAgentForceCompressRebasesCurrentRequestContext(t *testing.T) {
+	providers.Register("mock-request-context-rebase", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return &VerboseMockProvider{}, nil
+	})
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatalf("executor: %v", err)
+	}
+	ag, err := agent.New(config.ProfileConfig{Provider: "mock-request-context-rebase", ContextWindow: 200}, exec)
+	if err != nil {
+		t.Fatalf("agent.New: %v", err)
+	}
+	requestContext := &protocol.RequestContext{
+		Source: "feishu", ConversationName: "Shadow Test", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"},
+	}
+	history := append([]protocol.Message{protocol.NewContextualUserMessage(requestContext.PromptText())}, buildSeedHistory(20)...)
+	ag.Restore(agent.Snapshot{
+		History:    history,
+		TurnSafety: agent.TurnSafetyState{TurnID: "turn-channel", RequestContext: requestContext},
+	})
+
+	result, err := ag.ForceCompress(context.Background())
+	if err != nil {
+		t.Fatalf("ForceCompress: %v", err)
+	}
+	if !result.Compressed {
+		t.Fatal("expected compression")
+	}
+	contextCount := 0
+	for _, msg := range ag.Snapshot().History {
+		if !msg.IsContextualUser() {
+			continue
+		}
+		contextCount++
+		if !strings.Contains(msg.String(), `"id":"ou_owner"`) || !strings.Contains(msg.String(), `"role":"owner"`) {
+			t.Fatalf("rebased request context=%q", msg.String())
+		}
+	}
+	if contextCount != 1 {
+		t.Fatalf("context messages=%d, want 1", contextCount)
 	}
 }
 

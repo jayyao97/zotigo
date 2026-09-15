@@ -32,6 +32,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
@@ -3075,7 +3076,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, _, _, errCh := readWorkerMessages(clientConn, nil)
+	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
 		msg := workerMessage{
 			Type: workerMessageCommand,
@@ -5797,13 +5798,12 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		t.Fatalf("expected urgent turn interrupt, got %#v", interrupt)
 	}
 
-	lateMessageDone := make(chan *httptest.ResponseRecorder, 1)
-	go func() {
-		rec := httptest.NewRecorder()
-		req := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"too late"}`))
-		handler.ServeHTTP(rec, req)
-		lateMessageDone <- rec
-	}()
+	late := httptest.NewRecorder()
+	lateRequest := httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/messages", strings.NewReader(`{"text":"too late"}`))
+	handler.ServeHTTP(late, lateRequest)
+	if late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "turn_stopping") {
+		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
+	}
 
 	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
 	if err != nil {
@@ -5816,9 +5816,6 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 	}
 	if message := <-messageDone; message.Code != http.StatusCreated {
 		t.Fatalf("pending message status = %d: %s", message.Code, message.Body.String())
-	}
-	if late := <-lateMessageDone; late.Code != http.StatusConflict || !strings.Contains(late.Body.String(), "turn_stopping") {
-		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
 	}
 	pauseCommand := readWorkerMessage(t, worker)
 	if pauseCommand.Type != workerMessageCommand || pauseCommand.Command == nil || pauseCommand.Command.Type != sessionCommandPause {
@@ -8886,6 +8883,38 @@ func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
 	reloaded := reloadedHandler.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage
 	if reloaded == nil || *reloaded != *got {
 		t.Fatalf("reloaded context usage = %#v, want %#v", reloaded, got)
+	}
+}
+
+func TestLiveSessionGetUsesStoredChannelToolCapability(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	stored := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-channel-capability", Agent: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+		Capabilities: zotigosession.Capabilities{ChannelToolsVersion: channels.RuntimeToolsVersion},
+		CreatedAt:    now, UpdatedAt: now,
+	}}
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: stored.ID, State: SessionStateRunning, Live: true, Agent: "codex", CreatedAt: now})
+	handler := &handler{registry: registry, store: store, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{stored.ID: {}}}}
+	recorder := httptest.NewRecorder()
+	handler.handleSessionGet(recorder, httptest.NewRequest(http.MethodGet, "/sessions/"+stored.ID, nil), stored.ID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var session Session
+	if err := decodeAPIData(t, recorder.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.ChannelToolsVersion != channels.RuntimeToolsVersion || !session.ChannelToolsEligible {
+		t.Fatalf("session capability = version %d eligible %v", session.ChannelToolsVersion, session.ChannelToolsEligible)
 	}
 }
 

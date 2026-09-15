@@ -99,9 +99,230 @@ zotigod \
 - `POST /sessions/{id}/pause`
 - `POST /sessions/{id}/steering`
 - `POST /sessions/{id}/approvals/{approval_id}`
+- `GET|POST /channels/connections`
+- `GET|PUT|DELETE /channels/connections/{id}`
+- `GET /channels/connections/{id}/groups`
+- `GET /channels/connections/{id}/groups/{chat_id}/members`
+- `GET /channels/conversations?connection_id={id}`
+- `GET|PUT /channels/conversations/{id}`
+- `GET /channels/conversations/{id}/messages`
 
 Internal worker endpoints under `/internal/sessions/...` are not public desktop
 API and may change without compatibility guarantees.
+
+### Channels
+
+Channels are daemon-owned IM connections. All endpoints use the normal daemon
+Bearer token and therefore expose owner configuration, including prompt text
+and observed sender IDs, only to authenticated daemon clients. App secrets are
+stored separately in `~/.zotigo/channel-secrets.json` with mode `0600`; API
+responses expose only `has_secret`.
+
+`POST /channels/connections` creates a connection. `PUT` replaces its editable
+configuration. An omitted `app_secret` keeps the stored value; a supplied value
+replaces it, and `clear_secret: true` removes it. An enabled connection requires
+a nonempty secret. The first provider is `feishu` and uses
+the official Go Channel SDK long connection. `progress_mode` accepts `auto`,
+`cot`, or `interactive_card`. New UI connections default to `auto`; omitted
+values retain the existing mode and old records remain `interactive_card`.
+`cot_available` reports that this daemon build implements the COT protocol; an
+individual app may still be rejected by Feishu if it lacks COT entitlement.
+`owner_sender_ids` is a read-only connection-level list resolved from the
+provider application owner when the adapter starts. For Feishu this uses the
+application's own `app_id` and requests `open_id`; IDs are application-scoped.
+The Feishu app needs `application:application:self_manage` to resolve its own
+owner.
+Older clients may still send this field, but a successful provider resolution
+replaces it. The resolved list determines the trusted `owner` actor role.
+
+`GET /channels/connections/{id}/groups` asks the running adapter for the group
+chats the bot currently belongs to and merges each group with its rootless
+configuration record. Each result includes official group metadata,
+`chat_mode` (`group` or `topic`), `available`, `conversation_id`, and the current Workspace binding. The Feishu
+implementation pages through `GET /im/v1/chats`; direct messages are not
+returned or supported in this version. A connection can therefore run before
+any group is authorized.
+
+`GET /channels/connections/{id}/groups/{chat_id}/members` returns provider
+member IDs and display names for an authorization picker. Feishu apps need the
+`im:chat.members:read` scope. This endpoint is configuration-time discovery;
+message admission never performs a provider member-list request.
+
+The daemon discards messages from groups without an enabled rootless binding,
+and messages rejected by that binding's `sender_policy`, before retaining their
+content. `sender_policy` is `owners`, `all`, or `selected`; `selected` uses
+`allowed_sender_ids`, while `owners` uses the provider-resolved connection
+owners. Existing records migrate to `selected`, so an upgrade cannot broaden
+access. Sender policy changes apply immediately to existing topics. A group
+binding requires a ready Workspace, a valid Session runtime selection, and at
+least one allowed sender only when `sender_policy` is `selected`.
+The runtime fields are `agent`, `profile_name`, `model`, and
+`reasoning_effort`. `agent` defaults to `zotigo`. A Zotigo binding may leave
+`profile_name` empty to follow the Workspace `default_profile`, or select a
+named profile from that Workspace; `model` and `reasoning_effort` must then be
+empty. A Codex binding requires a model and supported reasoning effort reported
+by the daemon's Codex runtime, while `profile_name` must be empty. For group
+chats, the stable
+binding key is `(connection_id, chat_id, root_id)`: a new top-level message uses
+its own `message_id` as `root_id`, and later replies use Feishu's `root_id` to
+return to that Conversation. `thread_id` is optional delivery metadata because
+Feishu may create the topic only after the bot first replies. Existing group
+bindings migrate to a legacy root scope. Legacy direct-message rows may remain
+readable, but new direct-message events are ignored. The conversation resource
+exposes optional `root_id` and `thread_id`, while `chat_id` remains the containing group used for authorization checks and
+delivery. `chat_name` is the containing group name resolved from Feishu and is
+independent of the topic `display_name`. The first
+observed top-level message supplies a bounded display-name suggestion;
+owners may rename it without later messages overwriting that choice.
+When a top-level message mentions the bot and its sender is allowed by the
+rootless group binding, zotigod creates a fresh Session in the group's
+Workspace using the selected runtime. It resolves an empty Zotigo profile to
+the Workspace default and copies the resolved Agent/Profile or Codex
+Model/Reasoning effort, together with the group policy, into the rooted
+conversation before dispatch. Later group runtime changes affect only new
+topic Sessions. Replies in the same
+Feishu topic continue that Session without requiring another mention. Existing
+rooted conversations still require an enabled Session binding and an allowed
+sender. Other authorized-group
+events remain visible in channel history with a rejection reason. Existing
+events are never executed after an owner later changes the allowed senders. Cached
+messages are pruned to seven days and the newest 500 rows per conversation.
+The receive event supplies a stable sender ID but no display name. After all
+early type/self-message checks, the adapter makes a bounded
+`GET /im/v1/messages/{message_id}?with_sender_name=true` lookup for an uncached
+sender name, or when a reply event lacks the root needed for safe routing. A
+top-level message does not require a thread lookup: its own message ID is the
+root. A reply whose event and lookup both lack a usable root is rejected
+instead of being routed into the legacy group binding.
+Successful names are cached per connection; a failed optional name lookup
+leaves `display_name` empty so clients fall back to the stable sender ID.
+After the same authorization checks, an exact `@bot /stop` is routed to the
+durable session pause command instead of starting or steering an agent turn.
+It is idempotent when the session has no active turn or is already stopping.
+
+Before dispatch, the adapter creates either a COT message or an interactive-card
+reply anchored to the incoming message. `auto` falls back to a card only when
+Feishu explicitly rejects COT creation; transport errors and malformed success
+responses remain delivery-unknown and never start an agent. Channel dispatch uses an
+internal `start_only` input: a concurrent Desktop/Web turn returns a busy error
+instead of becoming steering. COT receives a fixed projection of durable run,
+tool-name/status, and approval events; it never receives reasoning, prompts,
+tool arguments, tool results, secrets, or file contents. Feishu requires the
+final answer to be a separate message, so it is sent as a Markdown interactive
+card using a strict reply in the same thread before `RUN_FINISHED`. Interactive-card mode keeps the final
+answer in the card. The public API intentionally has no arbitrary send-message
+endpoint. Public failures use fixed text; detailed runtime/provider errors remain
+in the owner-authenticated local message status and daemon log.
+
+Before creating provider-side progress, the daemon persists a provider-opaque
+cleanup intent. The Feishu adapter then best-effort adds an `OnIt` reaction to
+the inbound message and replaces that intent with the returned reaction ID.
+The marker is removed at every terminal outcome. Startup retries cleanup for
+interrupted and previously completed deliveries, including an uncertain create
+response, so the remote-success/local-crash window remains recoverable.
+Reaction failure never blocks an otherwise authorized task. Final cards render
+runtime attribution from the durable `turn_started` item for that exact turn;
+older items fall back to the bound Session runtime snapshot.
+The Feishu app needs `im:message` for the recoverable indicator lifecycle.
+Create/delete-only reaction permission is insufficient because uncertain-create
+and idempotent-delete recovery must list the bot's reactions on the message.
+
+Connection prompt fields are owner additions. Zotigo appends system additions
+after its immutable built-in system prompt and appends approval additions after
+the immutable classifier protocol. `review_all_tools` routes otherwise-safe
+calls through the classifier; hard blocks and mandatory approvals still take
+precedence. Conversation prompt modes are `inherit` or `replace`; `replace`
+changes only the owner addition and supports an explicitly empty string. Prompt
+snapshots apply to both Zotigo and Codex Sessions. Group changes apply to future
+topic Sessions; an existing rooted conversation retains both the policy and
+runtime snapshots copied when it was created. At turn admission, zotigod checks
+the stored policy and prompt revision under the session operation lock. Native
+workers also check those values before accepting the command.
+
+For a Codex Channel Session, zotigod passes the snapshotted agent and approval
+guidance to Codex app-server as thread `developerInstructions`. This guidance
+does not grant approval or replace Codex's own approval and safety policies.
+When the snapshot enables `review_all_tools`, zotigod also selects Codex's
+`auto_review` approvals reviewer. On both `thread/start` and `thread/resume`,
+zotigod passes `config.auto_review.policy` as a complete policy made from the
+current immutable Zotigo security baseline plus the snapshotted owner guidance.
+This is necessary because Codex treats that field as a replacement policy. The
+baseline can be strengthened for existing Sessions by a zotigod update; the
+owner portion remains the Session snapshot and may only add restrictions. The
+reviewer evaluates only approval requests surfaced by Codex; selecting it does
+not route every tool call through the reviewer, widen the sandbox, or turn owner
+guidance into an approval grant.
+Each Channel turn carries its host-attributed `RequestContext` separately in
+`turn/start.additionalContext` under `zotigo.request_context`, with kind
+`application`; the user message body remains unchanged, and a later local turn
+does not inherit an earlier Channel identity. This field is part of the Codex
+app-server experimental API negotiated by zotigod during `initialize`; the
+deployed Codex build must expose the corresponding `additionalContext`
+capability. The context includes the provider-resolved bot ID and display name,
+the provider group ID and current group name, the current sender identity and
+owner/member role, and message/root/thread IDs. Display names are untrusted
+metadata; IDs and roles are host attributed.
+
+`GET /channels/conversations` lists cached conversations ordered by recent
+activity. `PUT /channels/conversations/{id}` sets display name, binding, allowed
+senders, Session runtime, prompt overrides, and `session_strategy`. A rootless
+group is enabled with a Workspace and at least one sender ID. Strategy `topic`
+(the default for existing rows and omitted values) clears the rootless
+`session_id`; each top-level mention provisions a rooted Session and topic
+replies continue it. Strategy `shared` keeps one Session on the rootless group:
+an empty `session_id` provisions it on the first mention, while a supplied ID
+must name an idle, unbound Session assigned to the selected Workspace. Existing
+history and the Session's runtime and prompt snapshot are retained. Every
+shared-mode input requires an @mention and is routed to that one Session. A
+top-level mention receives a direct reply in the main group; a mention inside
+an existing topic receives its reply in that topic. Previously rooted Sessions
+remain dormant while the group uses `shared`, preserving their history and
+binding if the group later returns to `topic`. Feishu topic-mode groups require the
+`topic` strategy; both the daemon and clients reject `shared` for those groups.
+Omitting a runtime field preserves its current value, allowing older clients to
+update unrelated settings; send an explicit empty string when switching agents
+requires clearing an incompatible field.
+A rooted topic is enabled with its generated Session and at least one sender
+ID. Its runtime fields are an immutable resolved snapshot while that Session
+stays bound. The Session profile and Codex-settings mutation endpoints return
+`409` for a bound Session. A Session may have at most one active rooted channel
+binding.
+`GET /channels/conversations/{id}/messages` returns up to 100 recent cached
+messages (maximum 200 when `limit` is supplied). Delivery records expose
+`reply_message_id`, the actual `delivery_mode`, optional `cot_id`, optional
+`processing_marker_id`, optional `final_message_id`, and the last durable `projected_sequence` for owner-side
+diagnosis.
+
+Channel-created Sessions record a versioned Channel-tool capability before the
+runtime's provider conversation is created. Codex receives a namespaced
+`channel.read_messages` dynamic tool on `thread/start`; `thread/resume` relies
+on the tool manifest retained by that thread because the resume API cannot add
+dynamic tools. The daemon resolves every call from the bound Session and the
+host-attributed current-turn `RequestContext`; model arguments can select only
+a bounded message count, never a connection or conversation ID. The result is
+the authorized conversation's retained seven-day message history, including
+messages that were stored with `mention_required` and therefore did not start a
+turn. Calls from local turns or mismatched Channel context are rejected.
+
+An idle Codex Session whose provider conversation has not started can acquire
+the capability when it is first bound. A Codex Session with an existing thread
+must already carry the capability; otherwise binding returns `409` with code
+`session_missing_channel_tools`. Session resources expose
+`channel_tools_version` and `channel_tools_eligible` so clients can omit an
+incompatible existing Session before submitting a binding.
+
+Successful Channel replies include the producing runtime plus the completed
+turn's measured duration and provider-reported current-turn token total when
+available. Missing usage is omitted rather than estimated.
+
+On daemon startup, inbox rows left in `received` are failed before adapters
+start. A `claimed` row without a persisted reply receipt is marked
+`delivery_unknown`, because a remote carrier may have been created immediately
+before the crash. A `running` row with a receipt is never replayed as a new
+agent turn. After its connection starts, the daemon closes that same COT/card as
+failed; if a final receipt was already persisted, it instead restores the
+completed carrier state. If that recovery send cannot be confirmed, the row is
+`delivery_unknown`.
 
 ### Workspace Sources
 
@@ -327,7 +548,8 @@ installing a runtime so the runtime registry is rebuilt.
 
 `PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a
 Codex Session. The values apply to the next turn; the Codex thread and Project
-binding do not change.
+binding do not change. The endpoint returns `409` while the Session is bound to
+a Channel conversation because that binding owns an immutable runtime snapshot.
 
 `working_directory` must be an absolute path that resolves to an existing
 directory. If it is omitted, zotigod uses its current working directory for
@@ -365,6 +587,9 @@ generations:
   "profile": "gpt-5.6-sol-high"
 }
 ```
+
+Sessions bound to a Channel conversation return `409`; their resolved profile
+is owned by the immutable Channel runtime snapshot.
 
 Offline and not-yet-started sessions apply the change immediately and return
 `200` with `status: "applied"`. Live sessions accept a durable profile command
@@ -670,7 +895,13 @@ Response data:
         "status": "completed",
         "provider_finish_reason": "stop",
         "last_agent_message": "done",
-        "duration_ms": 1200
+        "duration_ms": 1200,
+        "usage": {
+          "input_tokens": 700,
+          "output_tokens": 50,
+          "total_tokens": 1000,
+          "cache_read_input_tokens": 250
+        }
       },
       "created_at": "2026-01-02T03:04:06Z"
     }
@@ -680,6 +911,10 @@ Response data:
   "has_more": false
 }
 ```
+
+Terminal turn items expose provider-reported current-turn `usage` when it is
+available. The field is omitted when the runtime did not report usage; clients
+must not interpret an omitted field as zero tokens.
 
 Current item types include:
 
@@ -699,6 +934,11 @@ Current item types include:
 - `profile_changed`
 - `profile_change_failed`
 - `approval_policy_changed`
+
+New `turn_started` items may include a `turn.runtime` object with `agent`,
+`profile_name`, `model`, and `reasoning_effort`. These values record the runtime
+selected for that turn and remain stable if Workspace or Channel defaults later
+change. Clients must accept older turn items without this object.
 
 `context_compacted` marks the durable point where the runtime replaced older
 model history with a summary. Display history remains intact. New markers
@@ -749,6 +989,18 @@ user's decision through the public approval endpoint below.
 running. The worker writes it only when the correction is applied, after the
 current provider response and any interrupted tool results, and before the next
 provider response.
+
+Channel-originated `user_message` items include `command.request_context` with
+the provider, connection, containing external conversation ID, optional
+external root-message ID, optional external thread ID, external message ID, and host-resolved
+actor (`id`, optional `display_name`, and `role`). This is the same immutable
+context supplied separately to the main Agent as a contextual user message and
+to the safety classifier as trusted request context. The daemon derives the
+role from `owner_sender_ids`; user-authored claims never alter it. Ordinary
+Desktop/Web inputs omit this object; when one follows a Channel turn, the Agent
+inserts an explicit context-clear marker so the previous external actor does not
+carry into the local request. Clients may use the durable object as a compact
+origin label while rendering the message body unchanged.
 
 `session_command` records durable control requests such as pause. It is a
 command request, not proof that the worker already applied the command.

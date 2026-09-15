@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -9,11 +10,14 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
+	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
 const workerWriteWait = 10 * time.Second
 const defaultWorkerApprovalWait = 30 * time.Second
+const workerRegistrationWait = time.Second
 
 var (
 	errWorkerOffline       = errors.New("worker is offline")
@@ -46,6 +50,8 @@ const (
 	workerMessageInputResult             workerMessageType = "input_result"
 	workerMessageInterruptTurn           workerMessageType = "interrupt_turn"
 	workerMessageIdle                    workerMessageType = "idle"
+	workerMessageRuntimeToolRequest      workerMessageType = "runtime_tool_request"
+	workerMessageRuntimeToolResult       workerMessageType = "runtime_tool_result"
 )
 
 type workerMessage struct {
@@ -65,6 +71,21 @@ type workerMessage struct {
 	InputResult             *workerInputResult             `json:"input_result,omitempty"`
 	InterruptTurn           *workerInterruptTurn           `json:"interrupt_turn,omitempty"`
 	Idle                    *workerIdle                    `json:"idle,omitempty"`
+	RuntimeToolRequest      *workerRuntimeToolRequest      `json:"runtime_tool_request,omitempty"`
+	RuntimeToolResult       *workerRuntimeToolResult       `json:"runtime_tool_result,omitempty"`
+}
+
+type workerRuntimeToolRequest struct {
+	RequestID      string                   `json:"request_id"`
+	Name           string                   `json:"name"`
+	Arguments      json.RawMessage          `json:"arguments,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
+}
+
+type workerRuntimeToolResult struct {
+	RequestID string `json:"request_id"`
+	Text      string `json:"text,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type workerInterruptTurn struct {
@@ -73,10 +94,14 @@ type workerInterruptTurn struct {
 }
 
 type workerInputRequest struct {
-	RequestID      string          `json:"request_id"`
-	Command        commandResponse `json:"command"`
-	SteeringOnly   bool            `json:"steering_only,omitempty"`
-	ExpectedTurnID string          `json:"expected_turn_id,omitempty"`
+	RequestID              string               `json:"request_id"`
+	Command                commandResponse      `json:"command"`
+	SteeringOnly           bool                 `json:"steering_only,omitempty"`
+	StartOnly              bool                 `json:"start_only,omitempty"`
+	ExpectedTurnID         string               `json:"expected_turn_id,omitempty"`
+	RequiredApprovalPolicy agent.ApprovalPolicy `json:"required_approval_policy,omitempty"`
+	RequiredPromptRevision uint64               `json:"required_prompt_revision,omitempty"`
+	RequirePromptRevision  bool                 `json:"require_prompt_revision,omitempty"`
 }
 
 type workerInputResult struct {
@@ -194,6 +219,28 @@ func (r *workerRegistry) Matches(sessionID string, generation string) bool {
 	return worker != nil && !worker.closing && worker.generation == generation
 }
 
+// WaitForMatch bridges the small interval between the WebSocket upgrade
+// response reaching a worker and Register publishing that connection.
+func (r *workerRegistry) WaitForMatch(ctxDone <-chan struct{}, sessionID string, generation string) bool {
+	r.mu.Lock()
+	if worker := r.workers[sessionID]; worker != nil {
+		matched := !worker.closing && worker.generation == generation
+		r.mu.Unlock()
+		return matched
+	}
+	waiter := make(chan struct{})
+	r.waiters[sessionID] = append(r.waiters[sessionID], waiter)
+	r.mu.Unlock()
+
+	select {
+	case <-ctxDone:
+		r.removeWaiter(sessionID, waiter)
+		return false
+	case <-waiter:
+		return r.Matches(sessionID, generation)
+	}
+}
+
 func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result workerConversationBoundResult) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
@@ -203,6 +250,17 @@ func (r *workerRegistry) SendConversationBoundResult(sessionID string, generatio
 		return false
 	}
 	return worker.sendMessage(workerMessage{Type: workerMessageConversationBoundResult, ConversationBoundResult: &result})
+}
+
+func (r *workerRegistry) SendRuntimeToolResult(sessionID string, generation string, result workerRuntimeToolResult) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	available := worker != nil && !worker.closing && worker.generation == generation
+	r.mu.Unlock()
+	if !available {
+		return false
+	}
+	return worker.sendMessage(workerMessage{Type: workerMessageRuntimeToolResult, RuntimeToolResult: &result})
 }
 
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
@@ -345,6 +403,22 @@ func (r *workerRegistry) Close(sessionID string) {
 	if worker != nil {
 		worker.close()
 	}
+}
+
+// CloseAsync makes the worker unavailable before returning and runs lifecycle
+// callbacks asynchronously. Use it when the caller holds a Session operation
+// lock that the disconnect callback also acquires.
+func (r *workerRegistry) CloseAsync(sessionID string) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.closing {
+		r.mu.Unlock()
+		return false
+	}
+	worker.closing = true
+	r.mu.Unlock()
+	go worker.close()
+	return true
 }
 
 func (r *workerRegistry) Detach(sessionID string) *workerConnection {
@@ -844,10 +918,14 @@ func (e *workerInputError) Is(target error) bool {
 		return e.Code == "command_pending"
 	case errNoActiveTurn:
 		return e.Code == "no_active_turn"
+	case errActiveTurn:
+		return e.Code == "active_turn"
 	case errTurnMismatch:
 		return e.Code == "turn_mismatch"
 	case errCommandIDConflict:
 		return e.Code == "command_id_conflict"
+	case errInputPolicyMismatch:
+		return e.Code == "input_policy_mismatch"
 	default:
 		return false
 	}
@@ -946,7 +1024,9 @@ func (c *workerConnection) close() {
 	c.closeOnce.Do(func() {
 		close(c.doneCh)
 		c.registry.unregister(c.sessionID, c)
-		_ = c.conn.Close()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
 	})
 }
 

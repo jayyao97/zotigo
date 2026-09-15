@@ -90,9 +90,10 @@ type commandResponse struct {
 }
 
 type messageCommandPayload struct {
-	Text   string             `json:"text"`
-	Images []commandImageData `json:"images,omitempty"`
-	Skills []string           `json:"skills,omitempty"`
+	Text           string                   `json:"text"`
+	Images         []commandImageData       `json:"images,omitempty"`
+	Skills         []string                 `json:"skills,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 type steeringCommandPayload struct {
@@ -210,7 +211,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
 		return
 	}
-	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", false)
+	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", false, false, nil)
 	if err != nil {
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
@@ -335,7 +336,13 @@ func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, com
 	return command, images, refs, nil
 }
 
-func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool) (commandResponse, error) {
+type sessionInputConstraints struct {
+	approvalPolicy agent.ApprovalPolicy
+	promptRevision uint64
+	requestContext *protocol.RequestContext
+}
+
+func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (commandResponse, error) {
 	if h.workers.InputStopping(id) {
 		return commandResponse{}, errWorkerInputStopping
 	}
@@ -359,17 +366,40 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 			return errInvalidSessionTransition
 		}
+		if constraints != nil {
+			stored, err := h.store.Get(ctx, id)
+			if err != nil {
+				return err
+			}
+			if stored == nil || stored.ApprovalPolicy != constraints.approvalPolicy || stored.PromptConfig.Revision != constraints.promptRevision {
+				return errInputPolicyMismatch
+			}
+			items, _, err := h.items.LoadItems(ctx, id)
+			if err != nil {
+				return err
+			}
+			if pending, _, ok := pendingApprovalPolicyIntent(items); ok && pending != constraints.approvalPolicy {
+				return errInputPolicyMismatch
+			}
+		}
 		var err error
 		command, storedImages, refs, err = h.prepareSessionInputCommand(ctx, id, commandID, text, images, selectedSkills, steeringOnly)
 		if err != nil {
 			return err
 		}
+		if constraints != nil && command.Message != nil {
+			command.Message.RequestContext = constraints.requestContext.Clone()
+		}
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		submission, err = h.workers.BeginInput(id, workerInputRequest{
-			Command: command, SteeringOnly: steeringOnly, ExpectedTurnID: expectedTurnID,
-		})
+		request := workerInputRequest{Command: command, SteeringOnly: steeringOnly, StartOnly: startOnly, ExpectedTurnID: expectedTurnID}
+		if constraints != nil {
+			request.RequiredApprovalPolicy = constraints.approvalPolicy
+			request.RequiredPromptRevision = constraints.promptRevision
+			request.RequirePromptRevision = true
+		}
+		submission, err = h.workers.BeginInput(id, request)
 		if err != nil {
 			return err
 		}
@@ -536,70 +566,81 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	turnID := strings.TrimSpace(req.TurnID)
-	items, _, err := h.items.LoadItems(r.Context(), id)
+	command, err := h.pauseActiveSession(r.Context(), id, session, strings.TrimSpace(req.TurnID))
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
+		switch {
+		case errors.Is(err, errWorkerInputStopping):
+			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is already stopping")
+		case errors.Is(err, errPauseInputStopTimeout):
+			writeAPIErrorCode(w, http.StatusGatewayTimeout, "input_stop_timeout", "timed out waiting for in-flight input to stop")
+		case errors.Is(err, errApprovalPending):
+			writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
+		case errors.Is(err, errTurnMismatch):
+			writeAPIError(w, http.StatusConflict, "pause turn_id does not match active turn")
+		case errors.Is(err, errNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
+			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires an active turn")
+		case errors.Is(err, errWorkerOffline):
+			writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("pause session: %v", err))
+		}
 		return
 	}
-	openTurnID := lastOpenTurnID(items)
-	if openTurnID == "" {
-		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires an active turn")
-		return
+	writeAPIJSON(w, http.StatusAccepted, publicCommandFromCommand(command))
+}
+
+var errPauseInputStopTimeout = errors.New("timed out waiting for in-flight input to stop")
+
+// pauseActiveSession is the shared pause boundary for HTTP and authenticated
+// channel controls. Callers must resolve the live session first so the same
+// agent kind and turn are fenced throughout command creation.
+func (h *handler) pauseActiveSession(ctx context.Context, id string, session Session, requestedTurnID string) (commandResponse, error) {
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return commandResponse{}, fmt.Errorf("load display items: %w", err)
 	}
+	turnID := lastOpenTurnID(items)
 	if turnID == "" {
-		turnID = openTurnID
-	} else if turnID != openTurnID {
-		writeAPIError(w, http.StatusConflict, "pause turn_id does not match active turn")
-		return
+		return commandResponse{}, errNoActiveTurn
+	}
+	if requestedTurnID != "" && requestedTurnID != turnID {
+		return commandResponse{}, errTurnMismatch
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
-		return
+		return commandResponse{}, errApprovalPending
 	}
-	if !h.ensureWorkerOnline(r.Context(), id) {
-		writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
-		return
+	if !h.ensureWorkerOnline(ctx, id) {
+		return commandResponse{}, errWorkerOffline
 	}
-	items, _, err = h.items.LoadItems(r.Context(), id)
+	items, _, err = h.items.LoadItems(ctx, id)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
-		return
+		return commandResponse{}, fmt.Errorf("reload display items: %w", err)
 	}
 	if lastOpenTurnID(items) != turnID {
-		writeAPIError(w, http.StatusConflict, "pause requires an active turn")
-		return
+		return commandResponse{}, errNoActiveTurn
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
-		return
+		return commandResponse{}, errApprovalPending
 	}
 	var interrupt *workerInterruptTurn
 	if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
-		stored, loadErr := h.store.Get(r.Context(), id)
+		stored, loadErr := h.store.Get(ctx, id)
 		if loadErr != nil || stored == nil || stored.ConversationID == "" {
-			writeAPIError(w, http.StatusInternalServerError, "load Codex conversation for pause")
-			return
+			return commandResponse{}, errors.New("load Codex conversation for pause")
 		}
 		interrupt = &workerInterruptTurn{ThreadID: stored.ConversationID, TurnID: turnID}
 	}
 	drained, releaseInputStop, err := h.workers.BeginInputStop(id, interrupt)
 	if err != nil {
-		if errors.Is(err, errWorkerInputStopping) {
-			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is already stopping")
-			return
-		}
-		writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
-		return
+		return commandResponse{}, err
 	}
 	defer releaseInputStop()
-	waitCtx, cancelWait := context.WithTimeout(r.Context(), h.inputStopTimeout)
+	waitCtx, cancelWait := context.WithTimeout(ctx, h.inputStopTimeout)
 	defer cancelWait()
 	select {
 	case <-drained:
 	case <-waitCtx.Done():
-		writeAPIErrorCode(w, http.StatusGatewayTimeout, "input_stop_timeout", "timed out waiting for in-flight input to stop")
-		return
+		return commandResponse{}, fmt.Errorf("%w: %v", errPauseInputStopTimeout, waitCtx.Err())
 	}
 
 	item, err := func() (zotigosession.DisplayItem, error) {
@@ -612,30 +653,21 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		if current.State != SessionStateRunning {
 			return zotigosession.DisplayItem{}, errSessionBusy
 		}
-		item, err := h.appendPauseCommand(r.Context(), id, turnID)
-		if err != nil {
-			return zotigosession.DisplayItem{}, err
+		item, appendErr := h.appendPauseCommand(ctx, id, turnID)
+		if appendErr != nil {
+			return zotigosession.DisplayItem{}, appendErr
 		}
-		if _, err := h.registry.BeginStopping(id); err != nil {
-			return zotigosession.DisplayItem{}, err
+		if _, transitionErr := h.registry.BeginStopping(id); transitionErr != nil {
+			return zotigosession.DisplayItem{}, transitionErr
 		}
 		return item, nil
 	}()
 	if err != nil {
-		if errors.Is(err, errSessionBusy) {
-			writeAPIError(w, http.StatusConflict, "pause requires an active turn")
-			return
-		}
-		if errors.Is(err, errApprovalPending) {
-			writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
-			return
-		}
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append pause command: %v", err))
-		return
+		return commandResponse{}, err
 	}
 	command := pauseCommandFromItem(item)
-	h.sendCommand(r.Context(), id, command)
-	writeAPIJSON(w, http.StatusAccepted, publicCommandFromCommand(command))
+	h.sendCommand(ctx, id, command)
+	return command, nil
 }
 
 func (h *handler) appendPauseCommand(ctx context.Context, id string, turnID string) (zotigosession.DisplayItem, error) {
@@ -701,7 +733,7 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		return
 	}
-	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, nil, expectedTurnID, true)
+	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, nil, expectedTurnID, true, false, nil)
 	if err != nil {
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
@@ -1107,6 +1139,7 @@ func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (com
 	if item.Command != nil {
 		command.Message.Text = item.Command.Text
 		command.Message.Skills = append([]string(nil), item.Command.Skills...)
+		command.Message.RequestContext = item.Command.RequestContext.Clone()
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
 		if err != nil {
 			return commandResponse{}, err

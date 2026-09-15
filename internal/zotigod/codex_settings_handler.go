@@ -36,6 +36,14 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusBadRequest, "model and reasoning_effort are required")
 		return
 	}
+	if h.channels != nil {
+		unlockChannels, err := h.channels.GuardSessionRuntimeMutation(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusConflict, err.Error())
+			return
+		}
+		defer unlockChannels()
+	}
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
 	session, live := h.registry.Get(id)

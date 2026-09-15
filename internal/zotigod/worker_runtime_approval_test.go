@@ -242,6 +242,12 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 		turnDone:   make(chan struct{}),
 		readyDone:  true,
 	}
+	startOnly := runtime.AcceptInput(context.Background(), workerInputRequest{StartOnly: true, Command: commandResponse{
+		ID: "start-only-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "do not steer"},
+	}})
+	if startOnly.ErrorCode != "active_turn" || startOnly.Command != nil {
+		t.Fatalf("start-only input = %#v, want active_turn", startOnly)
+	}
 	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
 		ID: "steering-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "skip this tool"},
 	}})
