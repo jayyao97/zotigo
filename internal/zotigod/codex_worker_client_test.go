@@ -1241,6 +1241,57 @@ func TestStartCodexThreadAppliesAutoReview(t *testing.T) {
 	}
 }
 
+func TestCodexThreadInstallsChannelToolsOnlyOnStart(t *testing.T) {
+	cfg := codexWorkerConfig{WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna", ChannelToolsVersion: 1}
+	startRPC := &codexWorkerRPC{}
+	if _, err := startCodexThread(context.Background(), startRPC, cfg); err != nil {
+		t.Fatal(err)
+	}
+	dynamicTools, ok := startRPC.requests["thread/start"]["dynamicTools"].([]any)
+	if !ok || len(dynamicTools) != 1 {
+		t.Fatalf("thread/start dynamic tools = %#v", startRPC.requests["thread/start"]["dynamicTools"])
+	}
+	namespace := dynamicTools[0].(map[string]any)
+	if namespace["name"] != "channel" {
+		t.Fatalf("namespace = %#v", namespace)
+	}
+
+	resumeRPC := &codexWorkerRPC{}
+	cfg.ThreadID = "thread-1"
+	if err := resumeCodexThread(context.Background(), resumeRPC, cfg); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := resumeRPC.requests["thread/resume"]["dynamicTools"]; exists {
+		t.Fatalf("thread/resume must not send unsupported dynamicTools: %#v", resumeRPC.requests["thread/resume"])
+	}
+}
+
+func TestCodexChannelToolCallUsesWorkerRPC(t *testing.T) {
+	rpc := &codexWorkerRPC{}
+	results := make(chan workerRuntimeToolResult, 1)
+	runtime := &codexWorkerRuntime{
+		cfg: codexWorkerConfig{ChannelToolsVersion: 1}, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
+		writer:               &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})},
+		runtimeToolResults:   results,
+		activeRequestContext: &protocol.RequestContext{Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1"},
+	}
+	request := codexapp.Message{ID: json.RawMessage(`91`), Method: "item/tool/call", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"channel","tool":"read_messages","arguments":{"limit":5}}`)}
+	errCh := make(chan error, 1)
+	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
+	message := <-runtime.writer.sendCh
+	if message.RuntimeToolRequest == nil || message.RuntimeToolRequest.Name != "read_messages" || message.RuntimeToolRequest.RequestContext.ConnectionID != "connection-1" {
+		t.Fatalf("runtime tool request = %#v", message.RuntimeToolRequest)
+	}
+	results <- workerRuntimeToolResult{RequestID: "call-1", Text: `{"messages":[]}`}
+	if err := <-errCh; err != nil {
+		t.Fatal(err)
+	}
+	response := rpc.response.(map[string]any)
+	if response["success"] != true || rpc.responseID != "91" {
+		t.Fatalf("response id=%s value=%#v", rpc.responseID, response)
+	}
+}
+
 func TestCodexTurnStartCarriesRequestContextAsApplicationContext(t *testing.T) {
 	rpc := &codexWorkerRPC{turnID: "turn-context"}
 	runtime, _ := newCodexInputTestRuntime(t, "session-context", rpc)

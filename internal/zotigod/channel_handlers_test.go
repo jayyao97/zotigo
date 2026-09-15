@@ -550,6 +550,127 @@ func TestChannelBindingRejectsSessionWithPendingMessage(t *testing.T) {
 	}
 }
 
+func TestChannelBindingPreparesUnstartedCodexSessionTools(t *testing.T) {
+	ctx := context.Background()
+	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sessionStore.Close() })
+	session := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "codex-unstarted", Agent: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+		ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}}
+	if err := sessionStore.Put(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	if _, err := handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "codex", Model: session.Model, ReasoningEffort: session.ReasoningEffort}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := sessionStore.Get(ctx, session.ID)
+	if err != nil || stored.Capabilities.ChannelToolsVersion != channels.RuntimeToolsVersion {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+}
+
+func TestChannelBindingPreparesExistingZotigoSessionTools(t *testing.T) {
+	ctx := context.Background()
+	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sessionStore.Close() })
+	session := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "zotigo-existing", Agent: "zotigo", ProfileName: "default", ConversationID: "provider-session",
+		ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}}
+	if err := sessionStore.Put(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	if _, err := handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "zotigo", ProfileName: "default"}); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := sessionStore.Get(ctx, session.ID)
+	if err != nil || stored.Capabilities.ChannelToolsVersion != channels.RuntimeToolsVersion {
+		t.Fatalf("stored=%#v err=%v", stored, err)
+	}
+}
+
+func TestChannelBindingRestartsIdleWorkerOutsideDisconnectLock(t *testing.T) {
+	ctx := context.Background()
+	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sessionStore.Close() })
+	session := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "zotigo-idle-worker", Agent: "zotigo", ProfileName: "default",
+		ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}}
+	if err := sessionStore.Put(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	operations := newSessionOperationLocks()
+	workers := newWorkerRegistry()
+	worker := newWorkerConnection(session.ID, "generation-1", nil, workers)
+	workers.mu.Lock()
+	workers.workers[session.ID] = worker
+	workers.mu.Unlock()
+	disconnected := make(chan struct{})
+	workers.SetDisconnectHandler(func(sessionID, generation string) {
+		unlock := operations.lock(sessionID)
+		defer unlock()
+		close(disconnected)
+	})
+	handler := &handler{
+		registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}},
+		store: sessionStore, workers: workers,
+	}
+	done := make(chan error, 1)
+	go func() {
+		unlock := operations.lock(session.ID)
+		_, validateErr := handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "zotigo", ProfileName: "default"})
+		unlock()
+		done <- validateErr
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("binding deadlocked while the disconnect callback waited for the Session operation lock")
+	}
+	select {
+	case <-disconnected:
+	case <-time.After(time.Second):
+		t.Fatal("worker disconnect callback did not complete")
+	}
+}
+
+func TestChannelBindingRejectsStartedCodexSessionWithoutTools(t *testing.T) {
+	ctx := context.Background()
+	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = sessionStore.Close() })
+	session := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "codex-started", Agent: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "medium", ConversationID: "thread-existing",
+		ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: time.Now(), UpdatedAt: time.Now(),
+	}}
+	if err := sessionStore.Put(ctx, session); err != nil {
+		t.Fatal(err)
+	}
+	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	_, err = handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "codex", Model: session.Model, ReasoningEffort: session.ReasoningEffort})
+	if !errors.Is(err, errSessionMissingChannelTools) {
+		t.Fatalf("error = %v", err)
+	}
+}
+
 func TestChannelBindingPersistsImmutablePromptSnapshot(t *testing.T) {
 	ctx := context.Background()
 	sessionStore, err := zotigosession.NewFileStore(t.TempDir())

@@ -32,6 +32,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
@@ -3075,7 +3076,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, _, _, errCh := readWorkerMessages(clientConn, nil)
+	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
 		msg := workerMessage{
 			Type: workerMessageCommand,
@@ -8882,6 +8883,38 @@ func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
 	reloaded := reloadedHandler.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage
 	if reloaded == nil || *reloaded != *got {
 		t.Fatalf("reloaded context usage = %#v, want %#v", reloaded, got)
+	}
+}
+
+func TestLiveSessionGetUsesStoredChannelToolCapability(t *testing.T) {
+	store, err := zotigosession.NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	stored := &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-channel-capability", Agent: "codex", Model: "gpt-5.6-sol", ReasoningEffort: "medium",
+		Capabilities: zotigosession.Capabilities{ChannelToolsVersion: channels.RuntimeToolsVersion},
+		CreatedAt:    now, UpdatedAt: now,
+	}}
+	if err := store.Put(context.Background(), stored); err != nil {
+		t.Fatal(err)
+	}
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: stored.ID, State: SessionStateRunning, Live: true, Agent: "codex", CreatedAt: now})
+	handler := &handler{registry: registry, store: store, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{stored.ID: {}}}}
+	recorder := httptest.NewRecorder()
+	handler.handleSessionGet(recorder, httptest.NewRequest(http.MethodGet, "/sessions/"+stored.ID, nil), stored.ID)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	var session Session
+	if err := decodeAPIData(t, recorder.Body.Bytes(), &session); err != nil {
+		t.Fatal(err)
+	}
+	if session.ChannelToolsVersion != channels.RuntimeToolsVersion || !session.ChannelToolsEligible {
+		t.Fatalf("session capability = version %d eligible %v", session.ChannelToolsVersion, session.ChannelToolsEligible)
 	}
 }
 

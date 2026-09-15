@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -48,6 +50,8 @@ const (
 	workerMessageInputResult             workerMessageType = "input_result"
 	workerMessageInterruptTurn           workerMessageType = "interrupt_turn"
 	workerMessageIdle                    workerMessageType = "idle"
+	workerMessageRuntimeToolRequest      workerMessageType = "runtime_tool_request"
+	workerMessageRuntimeToolResult       workerMessageType = "runtime_tool_result"
 )
 
 type workerMessage struct {
@@ -67,6 +71,21 @@ type workerMessage struct {
 	InputResult             *workerInputResult             `json:"input_result,omitempty"`
 	InterruptTurn           *workerInterruptTurn           `json:"interrupt_turn,omitempty"`
 	Idle                    *workerIdle                    `json:"idle,omitempty"`
+	RuntimeToolRequest      *workerRuntimeToolRequest      `json:"runtime_tool_request,omitempty"`
+	RuntimeToolResult       *workerRuntimeToolResult       `json:"runtime_tool_result,omitempty"`
+}
+
+type workerRuntimeToolRequest struct {
+	RequestID      string                   `json:"request_id"`
+	Name           string                   `json:"name"`
+	Arguments      json.RawMessage          `json:"arguments,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
+}
+
+type workerRuntimeToolResult struct {
+	RequestID string `json:"request_id"`
+	Text      string `json:"text,omitempty"`
+	Error     string `json:"error,omitempty"`
 }
 
 type workerInterruptTurn struct {
@@ -233,6 +252,17 @@ func (r *workerRegistry) SendConversationBoundResult(sessionID string, generatio
 	return worker.sendMessage(workerMessage{Type: workerMessageConversationBoundResult, ConversationBoundResult: &result})
 }
 
+func (r *workerRegistry) SendRuntimeToolResult(sessionID string, generation string, result workerRuntimeToolResult) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	available := worker != nil && !worker.closing && worker.generation == generation
+	r.mu.Unlock()
+	if !available {
+		return false
+	}
+	return worker.sendMessage(workerMessage{Type: workerMessageRuntimeToolResult, RuntimeToolResult: &result})
+}
+
 func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
@@ -373,6 +403,22 @@ func (r *workerRegistry) Close(sessionID string) {
 	if worker != nil {
 		worker.close()
 	}
+}
+
+// CloseAsync makes the worker unavailable before returning and runs lifecycle
+// callbacks asynchronously. Use it when the caller holds a Session operation
+// lock that the disconnect callback also acquires.
+func (r *workerRegistry) CloseAsync(sessionID string) bool {
+	r.mu.Lock()
+	worker := r.workers[sessionID]
+	if worker == nil || worker.closing {
+		r.mu.Unlock()
+		return false
+	}
+	worker.closing = true
+	r.mu.Unlock()
+	go worker.close()
+	return true
 }
 
 func (r *workerRegistry) Detach(sessionID string) *workerConnection {
@@ -978,7 +1024,9 @@ func (c *workerConnection) close() {
 	c.closeOnce.Do(func() {
 		close(c.doneCh)
 		c.registry.unregister(c.sessionID, c)
-		_ = c.conn.Close()
+		if c.conn != nil {
+			_ = c.conn.Close()
+		}
 	})
 }
 

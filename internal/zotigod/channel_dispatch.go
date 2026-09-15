@@ -99,6 +99,7 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 	session.Agent = string(agentKind)
 	session.Model = resolved.Model
 	session.ReasoningEffort = resolved.ReasoningEffort
+	session.ChannelToolsVersion = channels.RuntimeToolsVersion
 	if err := h.persistSession(ctx, session); err != nil {
 		return fmt.Errorf("persist channel session: %w", err)
 	}

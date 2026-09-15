@@ -293,6 +293,24 @@ messages (maximum 200 when `limit` is supplied). Delivery records expose
 `processing_marker_id`, optional `final_message_id`, and the last durable `projected_sequence` for owner-side
 diagnosis.
 
+Channel-created Sessions record a versioned Channel-tool capability before the
+runtime's provider conversation is created. Codex receives a namespaced
+`channel.read_messages` dynamic tool on `thread/start`; `thread/resume` relies
+on the tool manifest retained by that thread because the resume API cannot add
+dynamic tools. The daemon resolves every call from the bound Session and the
+host-attributed current-turn `RequestContext`; model arguments can select only
+a bounded message count, never a connection or conversation ID. The result is
+the authorized conversation's retained seven-day message history, including
+messages that were stored with `mention_required` and therefore did not start a
+turn. Calls from local turns or mismatched Channel context are rejected.
+
+An idle Codex Session whose provider conversation has not started can acquire
+the capability when it is first bound. A Codex Session with an existing thread
+must already carry the capability; otherwise binding returns `409` with code
+`session_missing_channel_tools`. Session resources expose
+`channel_tools_version` and `channel_tools_eligible` so clients can omit an
+incompatible existing Session before submitting a binding.
+
 Successful Channel replies include the producing runtime plus the completed
 turn's measured duration and provider-reported current-turn token total when
 available. Missing usage is omitted rather than estimated.

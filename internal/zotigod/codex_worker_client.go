@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	channelruntime "github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
 )
@@ -35,6 +36,7 @@ type codexWorkerConfig struct {
 	DeveloperInstructions string
 	AutoReview            bool
 	AutoReviewPolicy      string
+	ChannelToolsVersion   uint64
 }
 
 type codexWorkerChannels struct {
@@ -44,6 +46,7 @@ type codexWorkerChannels struct {
 	interactions <-chan workerInteractionResponse
 	boundResults <-chan workerConversationBoundResult
 	interrupts   <-chan workerInterruptTurn
+	runtimeTools <-chan workerRuntimeToolResult
 	errors       <-chan error
 }
 
@@ -74,6 +77,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	cfg.DeveloperInstructions = codexDeveloperInstructions(storedSession.PromptConfig)
 	cfg.AutoReview = storedSession.PromptConfig.ReviewAllTools
 	cfg.AutoReviewPolicy = codexAutoReviewPolicy(storedSession.PromptConfig)
+	cfg.ChannelToolsVersion = storedSession.Capabilities.ChannelToolsVersion
 	var workerConn *websocket.Conn
 	var generation string
 	var writer *workerClientWriter
@@ -172,7 +176,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		defer closeHookDispatcher(ownedHookDispatcher)
 	}
 
-	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), interactions: make(map[string]codexPendingInteraction), approvals: make(map[string]codexPendingApproval), hooks: hookDispatcher}
+	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), interactions: make(map[string]codexPendingInteraction), approvals: make(map[string]codexPendingApproval), hooks: hookDispatcher, runtimeToolResults: channels.runtimeTools}
 	runtime.toolNames = make(map[string]string)
 	runtime.toolArguments = make(map[string]string)
 	runtime.toolNativeNames = make(map[string]string)
@@ -312,7 +316,7 @@ func enqueueCodexCommand(pending []commandResponse, appliedSequence uint64, comm
 }
 
 func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) error {
-	params := codexThreadParams(cfg)
+	params := codexThreadParams(cfg, false)
 	params["threadId"] = cfg.ThreadID
 	var resumed any
 	if err := app.Call(ctx, "thread/resume", params, &resumed); err != nil {
@@ -326,31 +330,33 @@ func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerCon
 }
 
 type codexWorkerRuntime struct {
-	cfg             codexWorkerConfig
-	store           zotigosession.Store
-	writer          *workerClientWriter
-	app             codexapp.RPC
-	threadID        string
-	activeTurnID    string
-	commandSequence uint64
-	messagePending  bool
-	turnStarted     time.Time
-	turnModel       string
-	turnUsage       protocol.Usage
-	totalUsage      protocol.Usage
-	hasTotalUsage   bool
-	messages        map[string]string
-	messageOrder    []string
-	toolNames       map[string]string
-	toolArguments   map[string]string
-	toolNativeNames map[string]string
-	toolOrder       []string
-	hooks           hookEventDispatcher
-	skills          *skills.SkillManager
-	skillTempDir    string
-	skillPaths      map[string]string
-	interactions    map[string]codexPendingInteraction
-	approvals       map[string]codexPendingApproval
+	cfg                  codexWorkerConfig
+	store                zotigosession.Store
+	writer               *workerClientWriter
+	app                  codexapp.RPC
+	threadID             string
+	activeTurnID         string
+	commandSequence      uint64
+	messagePending       bool
+	turnStarted          time.Time
+	turnModel            string
+	turnUsage            protocol.Usage
+	totalUsage           protocol.Usage
+	hasTotalUsage        bool
+	messages             map[string]string
+	messageOrder         []string
+	toolNames            map[string]string
+	toolArguments        map[string]string
+	toolNativeNames      map[string]string
+	toolOrder            []string
+	hooks                hookEventDispatcher
+	skills               *skills.SkillManager
+	skillTempDir         string
+	skillPaths           map[string]string
+	interactions         map[string]codexPendingInteraction
+	approvals            map[string]codexPendingApproval
+	runtimeToolResults   <-chan workerRuntimeToolResult
+	activeRequestContext *protocol.RequestContext
 }
 
 type codexPendingInteraction struct {
@@ -478,6 +484,7 @@ func (r *codexWorkerRuntime) Close() error {
 		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, "interrupted", r.turnModel, r.turnUsage)
 	}
 	r.activeTurnID = ""
+	r.activeRequestContext = nil
 	return errors.Join(interruptErr, appendErr)
 }
 
@@ -661,6 +668,12 @@ func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command comm
 	r.turnStarted = time.Now()
 	r.turnModel = runtime.Model
 	r.turnUsage = protocol.Usage{}
+	if command.Message != nil && command.Message.RequestContext != nil {
+		requestContext := *command.Message.RequestContext
+		r.activeRequestContext = &requestContext
+	} else {
+		r.activeRequestContext = nil
+	}
 	if err := r.append(zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "in_progress", Runtime: &runtime},
@@ -759,9 +772,77 @@ func (r *codexWorkerRuntime) handleServerRequest(ctx context.Context, message co
 		return r.registerCodexUserInput(ctx, message)
 	case "item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval":
 		return r.registerCodexApproval(ctx, message)
+	case "item/tool/call":
+		return r.executeCodexRuntimeTool(ctx, message)
 	default:
 		return fmt.Errorf("codex server request %q is not supported", message.Method)
 	}
+}
+
+func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, message codexapp.Message) error {
+	var params struct {
+		ThreadID  string          `json:"threadId"`
+		TurnID    string          `json:"turnId"`
+		CallID    string          `json:"callId"`
+		Namespace *string         `json:"namespace"`
+		Tool      string          `json:"tool"`
+		Arguments json.RawMessage `json:"arguments"`
+	}
+	if err := sonic.Unmarshal(message.Params, &params); err != nil {
+		return fmt.Errorf("decode Codex runtime tool call: %w", err)
+	}
+	if r.cfg.ChannelToolsVersion < channelruntime.RuntimeToolsVersion || params.Namespace == nil || *params.Namespace != "channel" || params.Tool != channelruntime.RuntimeToolReadMessages {
+		return fmt.Errorf("codex runtime tool %q is not available", params.Tool)
+	}
+	if params.ThreadID != r.threadID || params.TurnID != r.activeTurnID || r.activeRequestContext == nil {
+		return errors.New("channel tool call is outside the active Channel turn")
+	}
+	if strings.TrimSpace(params.CallID) == "" {
+		return errors.New("codex runtime tool call is missing callId")
+	}
+	if r.writer == nil || r.runtimeToolResults == nil {
+		return &codexRequestFatalError{err: errors.New("channel runtime tool transport is unavailable")}
+	}
+	requestContext := *r.activeRequestContext
+	if err := r.writer.SendRuntimeToolRequest(ctx, workerRuntimeToolRequest{
+		RequestID: params.CallID, Name: params.Tool, Arguments: params.Arguments, RequestContext: &requestContext,
+	}); err != nil {
+		return &codexRequestFatalError{err: fmt.Errorf("send Channel runtime tool request: %w", err)}
+	}
+	var result workerRuntimeToolResult
+	for {
+		select {
+		case <-ctx.Done():
+			return &codexRequestFatalError{err: ctx.Err()}
+		case candidate, ok := <-r.runtimeToolResults:
+			if !ok {
+				return &codexRequestFatalError{err: errors.New("channel runtime tool transport closed")}
+			}
+			if candidate.RequestID != params.CallID {
+				continue
+			}
+			result = candidate
+		}
+		break
+	}
+	responder, ok := r.app.(interface {
+		RespondResult(json.RawMessage, any) error
+	})
+	if !ok {
+		return &codexRequestFatalError{err: errors.New("codex client cannot answer runtime tool calls")}
+	}
+	text := result.Text
+	success := result.Error == ""
+	if !success {
+		text = result.Error
+	}
+	if err := responder.RespondResult(message.ID, map[string]any{
+		"success":      success,
+		"contentItems": []map[string]any{{"type": "inputText", "text": text}},
+	}); err != nil {
+		return &codexRequestFatalError{err: fmt.Errorf("answer Codex runtime tool call: %w", err)}
+	}
+	return nil
 }
 
 func (r *codexWorkerRuntime) registerCodexUserInput(ctx context.Context, message codexapp.Message) error {
@@ -1180,7 +1261,7 @@ func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-cha
 }
 
 func startCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) (string, error) {
-	params := codexThreadParams(cfg)
+	params := codexThreadParams(cfg, true)
 	var response struct {
 		Thread struct {
 			ID string `json:"id"`
@@ -1268,7 +1349,7 @@ func applyCodexAutoReview(params map[string]any, enabled bool, policy string) {
 	params["config"] = config
 }
 
-func codexThreadParams(cfg codexWorkerConfig) map[string]any {
+func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[string]any {
 	params := map[string]any{
 		"cwd": cfg.WorkingDirectory, "model": cfg.Model,
 		"approvalPolicy": codexApprovalPolicy(cfg.ApprovalPolicy),
@@ -1277,6 +1358,20 @@ func codexThreadParams(cfg codexWorkerConfig) map[string]any {
 		params["developerInstructions"] = cfg.DeveloperInstructions
 	}
 	applyCodexAutoReview(params, cfg.AutoReview, cfg.AutoReviewPolicy)
+	if includeDynamicTools && cfg.ChannelToolsVersion >= channelruntime.RuntimeToolsVersion {
+		params["dynamicTools"] = []any{map[string]any{
+			"type": "namespace", "name": "channel",
+			"description": "Read-only tools for the Channel conversation bound to this Session.",
+			"tools": []any{map[string]any{
+				"type": "function", "name": channelruntime.RuntimeToolReadMessages,
+				"description": "Read recent messages from the current Channel conversation. Use this when the user refers to group messages that were not included in the request.",
+				"inputSchema": map[string]any{
+					"type": "object", "additionalProperties": false,
+					"properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 20}},
+				},
+			}},
+		}}
+	}
 	return params
 }
 
@@ -1574,6 +1669,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, status, r.turnModel, r.turnUsage)
 		r.activeTurnID = ""
+		r.activeRequestContext = nil
 		commandSequence := r.commandSequence
 		r.turnStarted = time.Time{}
 		r.turnModel = ""
@@ -1962,6 +2058,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 	interactions := make(chan workerInteractionResponse, workerCommandBufferSize)
 	boundResults := make(chan workerConversationBoundResult, 1)
 	interrupts := make(chan workerInterruptTurn, 1)
+	runtimeTools := make(chan workerRuntimeToolResult, workerCommandBufferSize)
 	errorsCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
@@ -1970,6 +2067,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 		defer close(interactions)
 		defer close(boundResults)
 		defer close(interrupts)
+		defer close(runtimeTools)
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -2011,10 +2109,14 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 						return
 					}
 				}
+			case workerMessageRuntimeToolResult:
+				if message.RuntimeToolResult != nil {
+					runtimeTools <- *message.RuntimeToolResult
+				}
 			}
 		}
 	}()
-	return codexWorkerChannels{commands: commands, inputs: inputs, approvals: approvals, interactions: interactions, boundResults: boundResults, interrupts: interrupts, errors: errorsCh}
+	return codexWorkerChannels{commands: commands, inputs: inputs, approvals: approvals, interactions: interactions, boundResults: boundResults, interrupts: interrupts, runtimeTools: runtimeTools, errors: errorsCh}
 }
 
 func serveCodexWorkerInterrupts(ctx context.Context, app codexapp.RPC, interrupts <-chan workerInterruptTurn) {

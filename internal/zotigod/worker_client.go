@@ -35,6 +35,7 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/wiring"
@@ -140,7 +141,8 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	stopKeepalive = clientWriter.Close
 	displayBarrier := newWorkerDisplayBarrierClient(clientWriter)
-	commandCh, inputCh, approvalCh, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	commandCh, inputCh, approvalCh, runtimeToolResults, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	runtimeToolClient := &workerRuntimeToolClient{writer: clientWriter, results: runtimeToolResults}
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
@@ -158,6 +160,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		},
 		NotifyIdle:    clientWriter.SendIdle,
 		NotifyWorking: clientWriter.SendWorking,
+		RuntimeTools:  runtimeToolClient,
 	})
 	if err != nil {
 		return err
@@ -284,17 +287,20 @@ type workerRuntimeConfig struct {
 	NotifyIdle             func(context.Context, workerIdle) error
 	NotifyWorking          func(context.Context) error
 	HookDispatcher         *hooks.Dispatcher
+	RuntimeTools           *workerRuntimeToolClient
 }
 
-func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan error) {
+func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan workerRuntimeToolResult, <-chan error) {
 	commandCh := make(chan commandResponse, workerCommandBufferSize)
 	inputCh := make(chan workerInputRequest, workerCommandBufferSize)
 	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
+	runtimeToolResults := make(chan workerRuntimeToolResult, workerCommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
 		defer close(inputCh)
 		defer close(approvalCh)
+		defer close(runtimeToolResults)
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -347,10 +353,14 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 				if acknowledgeDisplayBarrier != nil {
 					acknowledgeDisplayBarrier(msg.DisplayBarrier.ID)
 				}
+			case workerMessageRuntimeToolResult:
+				if msg.RuntimeToolResult != nil {
+					runtimeToolResults <- *msg.RuntimeToolResult
+				}
 			}
 		}
 	}()
-	return commandCh, inputCh, approvalCh, errCh
+	return commandCh, inputCh, approvalCh, runtimeToolResults, errCh
 }
 
 type workerRuntime struct {
@@ -378,6 +388,7 @@ type workerRuntime struct {
 	notifyIdle       func(context.Context, workerIdle) error
 	notifyWorking    func(context.Context) error
 	hooks            hookEventDispatcher
+	channelTools     *channelRuntimeToolState
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
@@ -567,6 +578,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
+	var channelTools *channelRuntimeToolState
+	if sess.Capabilities.ChannelToolsVersion >= channels.RuntimeToolsVersion && cfg.RuntimeTools != nil {
+		channelTools = &channelRuntimeToolState{client: cfg.RuntimeTools}
+		ag.RegisterTool(&channelReadMessagesTool{state: channelTools})
+	}
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
@@ -592,6 +608,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		notifyIdle:    cfg.NotifyIdle,
 		notifyWorking: cfg.NotifyWorking,
 		hooks:         hookDispatcher,
+		channelTools:  channelTools,
 		hookModel:     profile.Model,
 		promptConfig:  sess.PromptConfig,
 	}
@@ -1317,6 +1334,9 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.readyDone = false
 	r.doneDone = false
 	r.turnCommandSequence = commandSequence
+	if r.channelTools != nil {
+		r.channelTools.setRequestContext(command.RequestContext)
+	}
 	r.mu.Unlock()
 
 	model := r.turnHookModel()
@@ -1491,6 +1511,9 @@ func (r *workerRuntime) finishTurn() {
 	r.turnCancel = nil
 	r.turnActive = false
 	r.turnStopping = false
+	if r.channelTools != nil {
+		r.channelTools.setRequestContext(nil)
+	}
 	r.turnReady = nil
 	r.turnDone = nil
 }
@@ -2231,6 +2254,18 @@ func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversa
 		Type:              workerMessageConversationBound,
 		ConversationBound: &workerConversationBound{ConversationID: conversationID},
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request workerRuntimeToolRequest) error {
+	msg := workerMessage{Type: workerMessageRuntimeToolRequest, RuntimeToolRequest: &request}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

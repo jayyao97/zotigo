@@ -45,9 +45,10 @@ func TestFileStore_PutGet(t *testing.T) {
 				ReviewAllTools:       true,
 				Revision:             7,
 			},
-			LastPrompt: "Hello world",
-			CreatedAt:  time.Now(),
-			UpdatedAt:  time.Now(),
+			Capabilities: Capabilities{ChannelToolsVersion: 1},
+			LastPrompt:   "Hello world",
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
 		},
 		AgentSnapshot: agent.Snapshot{
 			State: agent.StateIdle,
@@ -482,6 +483,9 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 	}
 	if listed[0].PromptConfig != sess.PromptConfig {
 		t.Fatalf("Expected PromptConfig to round trip through SQLite, got %#v", listed[0].PromptConfig)
+	}
+	if listed[0].Capabilities != sess.Capabilities {
+		t.Fatalf("Expected Capabilities to round trip through SQLite, got %#v", listed[0].Capabilities)
 	}
 }
 

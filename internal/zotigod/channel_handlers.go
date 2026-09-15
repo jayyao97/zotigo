@@ -15,6 +15,8 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
 
+var errSessionMissingChannelTools = errors.New("codex session was started without Channel tools")
+
 const maxChannelRequestBytes = 256 << 10
 
 func (h *handler) requireChannels(w http.ResponseWriter) bool {
@@ -196,6 +198,8 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 		if err != nil {
 			if errors.Is(err, channels.ErrNotFound) {
 				h.writeChannelError(w, err)
+			} else if errors.Is(err, errSessionMissingChannelTools) {
+				writeAPIErrorCode(w, http.StatusConflict, "session_missing_channel_tools", err.Error())
 			} else {
 				writeAPIError(w, 400, err.Error())
 			}
@@ -299,6 +303,20 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 	}
 	if err := requireIdleSession(items); err != nil {
 		return runtime, errors.New("a channel can only bind an idle session")
+	}
+	if stored.Capabilities.ChannelToolsVersion < channels.RuntimeToolsVersion {
+		if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentCodex && strings.TrimSpace(stored.ConversationID) != "" {
+			return runtime, errSessionMissingChannelTools
+		}
+		stored.Capabilities.ChannelToolsVersion = channels.RuntimeToolsVersion
+		if err := h.store.Put(ctx, stored); err != nil {
+			return runtime, fmt.Errorf("prepare bound session Channel tools: %w", err)
+		}
+		// An idle worker may have loaded the old capability snapshot already.
+		// Restart it so the runtime loads the Channel tool before the next turn.
+		if h.workers != nil {
+			h.workers.CloseAsync(stored.ID)
+		}
 	}
 	return canonicalRuntime, nil
 }
