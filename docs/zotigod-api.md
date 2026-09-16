@@ -118,13 +118,17 @@ and observed sender IDs, only to authenticated daemon clients. App secrets are
 stored separately in `~/.zotigo/channel-secrets.json` with mode `0600`; API
 responses expose only `has_secret`.
 
+Channel metadata is stored in `~/.zotigo/channels.sqlite`. Its first released
+schema is version 1. zotigod creates that schema atomically for a fresh store
+and rejects unversioned development databases instead of guessing their shape.
+
 `POST /channels/connections` creates a connection. `PUT` replaces its editable
 configuration. An omitted `app_secret` keeps the stored value; a supplied value
 replaces it, and `clear_secret: true` removes it. An enabled connection requires
 a nonempty secret. The first provider is `feishu` and uses
 the official Go Channel SDK long connection. `progress_mode` accepts `auto`,
 `cot`, or `interactive_card`. New UI connections default to `auto`; omitted
-values retain the existing mode and old records remain `interactive_card`.
+values retain the connection's current mode.
 `cot_available` reports that this daemon build implements the COT protocol; an
 individual app may still be rejected by Feishu if it lacks COT entitlement.
 `owner_sender_ids` is a read-only connection-level list resolved from the
@@ -132,8 +136,7 @@ provider application owner when the adapter starts. For Feishu this uses the
 application's own `app_id` and requests `open_id`; IDs are application-scoped.
 The Feishu app needs `application:application:self_manage` to resolve its own
 owner.
-Older clients may still send this field, but a successful provider resolution
-replaces it. The resolved list determines the trusted `owner` actor role.
+The resolved list determines the trusted `owner` actor role.
 
 `GET /channels/connections/{id}/groups` asks the running adapter for the group
 chats the bot currently belongs to and merges each group with its rootless
@@ -152,8 +155,7 @@ The daemon discards messages from groups without an enabled rootless binding,
 and messages rejected by that binding's `sender_policy`, before retaining their
 content. `sender_policy` is `owners`, `all`, or `selected`; `selected` uses
 `allowed_sender_ids`, while `owners` uses the provider-resolved connection
-owners. Existing records migrate to `selected`, so an upgrade cannot broaden
-access. Sender policy changes apply immediately to existing topics. A group
+owners. Sender policy changes apply immediately to existing topics. A group
 binding requires a ready Workspace, a valid Session runtime selection, and at
 least one allowed sender only when `sender_policy` is `selected`.
 The runtime fields are `agent`, `profile_name`, `model`, and
@@ -166,9 +168,8 @@ chats, the stable
 binding key is `(connection_id, chat_id, root_id)`: a new top-level message uses
 its own `message_id` as `root_id`, and later replies use Feishu's `root_id` to
 return to that Conversation. `thread_id` is optional delivery metadata because
-Feishu may create the topic only after the bot first replies. Existing group
-bindings migrate to a legacy root scope. Legacy direct-message rows may remain
-readable, but new direct-message events are ignored. The conversation resource
+Feishu may create the topic only after the bot first replies. Direct-message
+events are ignored. The conversation resource
 exposes optional `root_id` and `thread_id`, while `chat_id` remains the containing group used for authorization checks and
 delivery. `chat_name` is the containing group name resolved from Feishu and is
 independent of the topic `display_name`. The first
@@ -193,7 +194,7 @@ early type/self-message checks, the adapter makes a bounded
 sender name, or when a reply event lacks the root needed for safe routing. A
 top-level message does not require a thread lookup: its own message ID is the
 root. A reply whose event and lookup both lack a usable root is rejected
-instead of being routed into the legacy group binding.
+instead of being routed into the rootless group binding.
 Successful names are cached per connection; a failed optional name lookup
 leaves `display_name` empty so clients fall back to the stable sender ID.
 After the same authorization checks, an exact `@bot /stop` is routed to the
@@ -269,7 +270,7 @@ metadata; IDs and roles are host attributed.
 activity. `PUT /channels/conversations/{id}` sets display name, binding, allowed
 senders, Session runtime, prompt overrides, and `session_strategy`. A rootless
 group is enabled with a Workspace and at least one sender ID. Strategy `topic`
-(the default for existing rows and omitted values) clears the rootless
+(the default when omitted) clears the rootless
 `session_id`; each top-level mention provisions a rooted Session and topic
 replies continue it. Strategy `shared` keeps one Session on the rootless group:
 an empty `session_id` provisions it on the first mention, while a supplied ID
@@ -281,8 +282,8 @@ message quotes or replies to another message. Previously rooted Sessions
 remain dormant while the group uses `shared`, preserving their history and
 binding if the group later returns to `topic`. Feishu topic-mode groups require the
 `topic` strategy; both the daemon and clients reject `shared` for those groups.
-Omitting a runtime field preserves its current value, allowing older clients to
-update unrelated settings; send an explicit empty string when switching agents
+Omitting a runtime field preserves its current value so callers can update
+unrelated settings; send an explicit empty string when switching agents
 requires clearing an incompatible field.
 A rooted topic is enabled with its generated Session and at least one sender
 ID. Its runtime fields are an immutable resolved snapshot while that Session

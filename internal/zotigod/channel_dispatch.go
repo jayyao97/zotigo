@@ -42,7 +42,7 @@ func (h *handler) EnsureChannelSessionPrompt(ctx context.Context, sessionID stri
 		return channels.SessionPromptConfig{AgentInstructions: current.AgentInstructions, ApprovalInstructions: current.ApprovalInstructions, ReviewAllTools: current.ReviewAllTools}, nil
 	}
 	if live, ok := h.registry.Get(sessionID); ok && live.State != SessionStateCreated && live.State != SessionStateOffline {
-		return channels.SessionPromptConfig{}, errors.New("legacy channel prompt snapshot requires an idle session")
+		return channels.SessionPromptConfig{}, errors.New("binding a channel prompt snapshot requires an idle session")
 	}
 	desired.Revision = 1
 	stored.PromptConfig = desired

@@ -855,34 +855,7 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	}
 	previousPrompt := resolvePromptSnapshot(connection, previous)
 	if previous.SessionID != "" && c.SessionID == previous.SessionID && !hasPromptSnapshot(previous) {
-		s.mu.Lock()
-		dispatcher := s.dispatcher
-		s.mu.Unlock()
-		if dispatcher == nil {
-			return c, errors.New("bound session prompt snapshot requires an available dispatcher")
-		}
-		canonical, snapshotErr := dispatcher.EnsureChannelSessionPrompt(ctx, previous.SessionID, previousPrompt)
-		if snapshotErr != nil {
-			return c, fmt.Errorf("resolve bound session prompt snapshot: %w", snapshotErr)
-		}
-		applyPromptSnapshot(&previous, canonical)
-		if _, storeErr := s.store.PutConversation(ctx, previous); storeErr != nil {
-			return c, fmt.Errorf("persist bound conversation prompt snapshot: %w", storeErr)
-		}
-		previousPrompt = canonical
-		// Legacy clients loaded inherit/null fields before this request. Preserve
-		// the canonical Session values for omitted/inherited fields while still
-		// rejecting an explicit attempt to change the immutable snapshot below.
-		if c.AgentInstructionsMode != OverrideReplace {
-			c.AgentInstructionsMode, c.AgentInstructions = OverrideReplace, canonical.AgentInstructions
-		}
-		if c.ApprovalInstructionsMode != OverrideReplace {
-			c.ApprovalInstructionsMode, c.ApprovalInstructions = OverrideReplace, canonical.ApprovalInstructions
-		}
-		if c.ReviewAllTools == nil {
-			reviewAllTools := canonical.ReviewAllTools
-			c.ReviewAllTools = &reviewAllTools
-		}
+		return c, errors.New("bound session prompt snapshot is missing")
 	}
 	effectiveApproval := connection.ApprovalInstructions
 	if c.ApprovalInstructionsMode == OverrideReplace {
@@ -1328,34 +1301,9 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return reject("conversation_not_bound")
 	}
-	// Bound conversations created before prompt snapshots were introduced are
-	// resolved once, then persisted in the same explicit form as new Sessions.
-	if conversation.AgentInstructionsMode != OverrideReplace || conversation.ApprovalInstructionsMode != OverrideReplace || conversation.ReviewAllTools == nil {
-		prompt := resolvePromptSnapshot(connection, conversation)
-		s.mu.Lock()
-		dispatcher := s.dispatcher
-		s.mu.Unlock()
-		if dispatcher == nil {
-			s.configMu.RUnlock()
-			return reject("channel_unavailable")
-		}
-		var snapshotErr error
-		prompt, snapshotErr = dispatcher.EnsureChannelSessionPrompt(ctx, conversation.SessionID, prompt)
-		if snapshotErr != nil {
-			s.configMu.RUnlock()
-			statusCtx, cancelStatus := context.WithTimeout(context.Background(), 5*time.Second)
-			statusErr := s.store.SetMessageStatus(statusCtx, message.ID, "failed", "session_prompt_snapshot_failed")
-			cancelStatus()
-			return errors.Join(snapshotErr, statusErr)
-		}
-		conversation.AgentInstructionsMode, conversation.AgentInstructions = OverrideReplace, prompt.AgentInstructions
-		conversation.ApprovalInstructionsMode, conversation.ApprovalInstructions = OverrideReplace, prompt.ApprovalInstructions
-		conversation.ReviewAllTools = &prompt.ReviewAllTools
-		conversation, err = s.store.PutConversation(ctx, conversation)
-		if err != nil {
-			s.configMu.RUnlock()
-			return err
-		}
+	if !hasPromptSnapshot(conversation) {
+		s.configMu.RUnlock()
+		return reject("conversation_prompt_snapshot_missing")
 	}
 	agentText, approvalText, review := conversation.AgentInstructions, conversation.ApprovalInstructions, *conversation.ReviewAllTools
 	if strings.TrimSpace(approvalText) != "" && !review {

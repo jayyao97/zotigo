@@ -360,34 +360,6 @@ type serialAdmissionDispatcher struct {
 	secondEntered chan struct{}
 }
 
-type retrySnapshotDispatcher struct {
-	mu       sync.Mutex
-	attempts int
-	called   chan Task
-	snapshot *SessionPromptConfig
-}
-
-func (f *retrySnapshotDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.attempts++
-	if f.attempts == 1 {
-		captured := prompt
-		f.snapshot = &captured
-		return SessionPromptConfig{}, errors.New("temporary snapshot failure")
-	}
-	if f.snapshot != nil {
-		return *f.snapshot, nil
-	}
-	return prompt, nil
-}
-
-func (f *retrySnapshotDispatcher) DispatchChannelTask(_ context.Context, task Task, _ func(Progress), admissionComplete func()) (TaskResult, error) {
-	admissionComplete()
-	f.called <- task
-	return TaskResult{Text: "done"}, nil
-}
-
 func (*serialAdmissionDispatcher) EnsureChannelSessionPrompt(_ context.Context, _ string, prompt SessionPromptConfig) (SessionPromptConfig, error) {
 	return prompt, nil
 }
@@ -654,7 +626,7 @@ func TestServiceRequiresMentionBindingAndAllowedSender(t *testing.T) {
 	}
 }
 
-func TestServiceDeliversWithWorkspaceGroupBindingWithoutLegacyAllowlist(t *testing.T) {
+func TestServiceDeliversWithWorkspaceGroupBindingWithoutConnectionAllowlist(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store, err := Open(t.TempDir())
@@ -674,7 +646,7 @@ func TestServiceDeliversWithWorkspaceGroupBindingWithoutLegacyAllowlist(t *testi
 		t.Fatal(err)
 	}
 	if len(connection.AllowChatIDs) != 0 {
-		t.Fatalf("legacy allowlist unexpectedly populated: %v", connection.AllowChatIDs)
+		t.Fatalf("connection allowlist unexpectedly populated: %v", connection.AllowChatIDs)
 	}
 	if err = service.Start(ctx); err != nil {
 		t.Fatal(err)
@@ -1068,68 +1040,7 @@ func TestSessionPromptSnapshotIsStableAcrossConnectionChanges(t *testing.T) {
 	}
 }
 
-func TestLegacyConversationSnapshotMigrationRemainsRetryable(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store, _ := Open(t.TempDir())
-	defer store.Close()
-	secrets, _ := NewSecretStore(t.TempDir())
-	adapter := &fakeAdapter{}
-	dispatcher := &retrySnapshotDispatcher{called: make(chan Task, 1)}
-	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
-	service.SetDispatcher(dispatcher)
-	secret := "secret"
-	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true, AgentInstructions: "legacy agent", ReviewAllTools: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := service.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	bindTestGroup(t, store, "chat", "user")
-	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "chat", "root", "", "group", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	conversation.SessionID, conversation.WorkspaceID, conversation.Enabled = "legacy-session", "workspace-1", true
-	conversation.AllowedSenderIDs = []string{"user"}
-	if _, err = store.PutConversation(ctx, conversation); err != nil {
-		t.Fatal(err)
-	}
-	firstErr := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "first", ChatID: "chat", RootID: "root", ChatType: "group", Sender: Sender{ID: "user"}, Text: "first", CreatedAt: time.Now()})
-	if firstErr == nil {
-		t.Fatal("first snapshot initialization unexpectedly succeeded")
-	}
-	afterFailure, err := store.GetConversation(ctx, conversation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterFailure.AgentInstructionsMode == OverrideReplace || afterFailure.ApprovalInstructionsMode == OverrideReplace || afterFailure.ReviewAllTools != nil {
-		t.Fatalf("failed migration was committed: %+v", afterFailure)
-	}
-	connection, err := service.GetConnection(ctx, "connection-1")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: connection.Name, AppID: connection.AppID, Enabled: true, AgentInstructions: "new connection agent", ReviewAllTools: true}); err != nil {
-		t.Fatal(err)
-	}
-	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "second", ChatID: "chat", RootID: "root", ChatType: "group", Sender: Sender{ID: "user"}, Text: "second", CreatedAt: time.Now()}); err != nil {
-		t.Fatal(err)
-	}
-	task := <-dispatcher.called
-	if task.AgentInstructions != "legacy agent" || !task.ReviewAllTools {
-		t.Fatalf("migrated task=%+v", task)
-	}
-	afterSuccess, err := store.GetConversation(ctx, conversation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if afterSuccess.AgentInstructionsMode != OverrideReplace || afterSuccess.AgentInstructions != "legacy agent" || afterSuccess.ApprovalInstructionsMode != OverrideReplace || afterSuccess.ReviewAllTools == nil || !*afterSuccess.ReviewAllTools {
-		t.Fatalf("successful migration=%+v", afterSuccess)
-	}
-}
-
-func TestServiceRefreshesOfficialGroupNameAcrossLegacyConversations(t *testing.T) {
+func TestServiceRefreshesOfficialGroupNameAcrossConversations(t *testing.T) {
 	ctx := context.Background()
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -1189,6 +1100,53 @@ func TestConnectionPersistsNormalizedOwnerSenderIDs(t *testing.T) {
 	}
 }
 
+func TestOpenInitializesVersionedChannelSchemaAndReopens(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version int
+	if err = store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != channelSchemaVersion {
+		t.Fatalf("schema version=%d err=%v", version, err)
+	}
+	var indexes int
+	if err = store.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name IN ('channel_session_binding','channel_thread_binding','channel_messages_by_conversation')`).Scan(&indexes); err != nil || indexes != 3 {
+		t.Fatalf("schema indexes=%d err=%v", indexes, err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOpenRejectsUnversionedChannelDatabase(t *testing.T) {
+	root := t.TempDir()
+	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = database.Exec(`CREATE TABLE channel_connections (id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+	if err = database.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err := Open(root)
+	if store != nil {
+		_ = store.Close()
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsupported unversioned channels database") {
+		t.Fatalf("Open() error=%v", err)
+	}
+}
+
 func TestStoreScopesConversationsAndSendersByRootMessage(t *testing.T) {
 	store, err := Open(t.TempDir())
 	if err != nil {
@@ -1230,77 +1188,6 @@ func TestStoreScopesConversationsAndSendersByRootMessage(t *testing.T) {
 	messages, err := store.ListMessages(ctx, threadB.ID, 10)
 	if err != nil || len(messages) != 2 {
 		t.Fatalf("messages=%+v err=%v", messages, err)
-	}
-}
-
-func TestStoreMigratesExistingGroupBindingsToRootScope(t *testing.T) {
-	root := t.TempDir()
-	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = database.Exec(`
-CREATE TABLE channel_connections (
- id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
- bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]', owner_sender_ids TEXT NOT NULL DEFAULT '[]',
- agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
- progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE channel_conversations (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- chat_id TEXT NOT NULL, chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
- session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
- allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
- agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
- approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
- last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(connection_id, chat_id)
-);
-CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
-CREATE TABLE channel_messages (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
- provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
- mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
- delivery_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL, UNIQUE(connection_id, provider_message_id)
-);
-CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
-INSERT INTO channel_connections (id,provider,name,app_id,created_at,updated_at) VALUES ('connection-1','feishu','test','app',?,?);
-INSERT INTO channel_conversations (id,connection_id,chat_id,display_name,session_id,last_activity_at,created_at,updated_at) VALUES ('legacy-conversation','connection-1','chat-1','Shadow Test','session-1',?,?,?);
-INSERT INTO channel_messages (id,connection_id,conversation_id,provider_message_id,sender_id,text,mentioned_bot,trigger_status,created_at) VALUES ('message-1','connection-1','legacy-conversation','provider-1','user-1','hello',1,'processed',?);
-`, now, now, now, now, now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = database.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	legacy, err := store.GetConversation(context.Background(), "legacy-conversation")
-	if err != nil || legacy.ThreadID != "" || legacy.SessionID != "session-1" || legacy.Agent != SessionAgentZotigo || legacy.ProfileName != "" || legacy.SenderPolicy != SenderPolicySelected {
-		t.Fatalf("legacy=%+v err=%v", legacy, err)
-	}
-	if _, err = store.GetMessageByProviderID(context.Background(), "connection-1", "provider-1"); err != nil {
-		t.Fatal(err)
-	}
-	rootMessage, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "provider-2", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
-	if err != nil || rootMessage.ConversationID == legacy.ID {
-		t.Fatalf("root message=%+v err=%v", rootMessage, err)
-	}
-	thread, err := store.EnsureConversationRoot(context.Background(), "connection-1", "chat-1", "root-1", "thread-1", "group", time.Now())
-	if err != nil || thread.ID == legacy.ID || thread.ThreadID != "thread-1" {
-		t.Fatalf("thread=%+v err=%v", thread, err)
-	}
-	var violations int
-	if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
-		t.Fatalf("foreign key violations=%d err=%v", violations, err)
 	}
 }
 
@@ -1357,84 +1244,6 @@ func TestAdapterResolvedOwnerReplacesConfiguredOwner(t *testing.T) {
 			t.Fatalf("owner IDs=%v", connection.OwnerSenderIDs)
 		}
 		time.Sleep(time.Millisecond)
-	}
-}
-
-func TestStoreMigratesThreadBindingAndReconcilesRedeliveredRoot(t *testing.T) {
-	root := t.TempDir()
-	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	_, err = database.Exec(`
-CREATE TABLE channel_connections (
- id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
- bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]', owner_sender_ids TEXT NOT NULL DEFAULT '[]',
- agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
- progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-CREATE TABLE channel_conversations (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- chat_id TEXT NOT NULL, thread_id TEXT NOT NULL DEFAULT '', chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
- session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
- allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
- agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
- approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
- last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(connection_id, chat_id, thread_id)
-);
-CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
-CREATE TABLE channel_messages (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
- provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
- mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
- delivery_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL, UNIQUE(connection_id, provider_message_id)
-);
-CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
-INSERT INTO channel_connections (id,provider,name,app_id,created_at,updated_at) VALUES ('connection-1','feishu','test','app',?,?);
-INSERT INTO channel_conversations (id,connection_id,chat_id,thread_id,display_name,session_id,enabled,last_activity_at,created_at,updated_at) VALUES ('legacy-thread','connection-1','chat-1','thread-1','Topic','session-1',1,?,?,?);
-INSERT INTO channel_messages (id,connection_id,conversation_id,provider_message_id,sender_id,text,mentioned_bot,trigger_status,created_at) VALUES ('message-root','connection-1','legacy-thread','root-message','user-1','hello',1,'processed',?);
-`, now, now, now, now, now, now)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err = database.Close(); err != nil {
-		t.Fatal(err)
-	}
-	store, err := Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-
-	redelivered, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "root-message", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
-	if err != nil || redelivered.ConversationID != "legacy-thread" {
-		t.Fatalf("redelivered=%+v err=%v", redelivered, err)
-	}
-	reply, err := store.RecordMessage(context.Background(), "connection-1", InboundMessage{MessageID: "reply-message", ChatID: "chat-1", RootID: "root-message", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1"}})
-	if err != nil || reply.ConversationID != "legacy-thread" {
-		t.Fatalf("reply=%+v err=%v", reply, err)
-	}
-	conversations, err := store.ListConversations(context.Background(), "connection-1")
-	if err != nil || len(conversations) != 2 {
-		t.Fatalf("conversations=%+v err=%v", conversations, err)
-	}
-	var conversation Conversation
-	for _, candidate := range conversations {
-		if candidate.ID == "legacy-thread" {
-			conversation = candidate
-		}
-	}
-	if conversation.RootID != "root-message" || conversation.ThreadID != "thread-1" || conversation.SessionID != "session-1" || conversation.Agent != SessionAgentZotigo || !conversation.Enabled {
-		t.Fatalf("conversation=%+v", conversation)
-	}
-	var violations int
-	if err = store.db.QueryRow(`SELECT COUNT(*) FROM pragma_foreign_key_check`).Scan(&violations); err != nil || violations != 0 {
-		t.Fatalf("foreign key violations=%d err=%v", violations, err)
 	}
 }
 
@@ -1537,36 +1346,6 @@ func TestPutConversationCanceledWriteLeavesBindingUnchanged(t *testing.T) {
 	}
 	if unchanged.SessionID != "" || unchanged.WorkspaceID != "" {
 		t.Fatalf("canceled binding persisted: %+v", unchanged)
-	}
-}
-
-func TestOpenMigratesOwnerSenderIDsForExistingDatabase(t *testing.T) {
-	root := t.TempDir()
-	database, err := sql.Open("sqlite", filepath.Join(root, "channels.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = database.Exec(`CREATE TABLE channel_connections (
- id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
- enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
- bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]',
- agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
- progress_mode TEXT NOT NULL DEFAULT 'interactive_card', created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-)`)
-	if closeErr := database.Close(); err != nil || closeErr != nil {
-		t.Fatalf("seed legacy database: exec=%v close=%v", err, closeErr)
-	}
-	store, err := Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	connection, err := store.PutConnection(context.Background(), Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app", OwnerSenderIDs: []string{"owner-1"}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(connection.OwnerSenderIDs) != 1 || connection.OwnerSenderIDs[0] != "owner-1" {
-		t.Fatalf("owners=%v", connection.OwnerSenderIDs)
 	}
 }
 

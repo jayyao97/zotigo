@@ -191,13 +191,13 @@ func TestProvisionChannelSessionRollsBackFailedOrCanceledBinding(t *testing.T) {
 	}
 }
 
-func TestEnsureLegacyChannelSessionPromptInitializesOnce(t *testing.T) {
+func TestEnsureChannelSessionPromptInitializesOnce(t *testing.T) {
 	handler, store, _, _ := newChannelProvisionFixture(t)
 	session := newSession(t.TempDir(), "default")
 	if err := handler.persistSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	prompt := channels.SessionPromptConfig{AgentInstructions: "legacy agent", ApprovalInstructions: "legacy approval", ReviewAllTools: true}
+	prompt := channels.SessionPromptConfig{AgentInstructions: "channel agent", ApprovalInstructions: "channel approval", ReviewAllTools: true}
 	if _, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt); err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestEnsureLegacyChannelSessionPromptInitializesOnce(t *testing.T) {
 	}
 	prompt.AgentInstructions = "changed"
 	canonical, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt)
-	if err != nil || canonical.AgentInstructions != "legacy agent" {
+	if err != nil || canonical.AgentInstructions != "channel agent" {
 		t.Fatalf("initialized snapshot was not retained: prompt=%+v err=%v", canonical, err)
 	}
 }
@@ -883,82 +883,6 @@ func TestManualCodexChannelBindingDoesNotExposeStoredProfileSentinel(t *testing.
 	}
 	if stored.Agent != channels.SessionAgentCodex || stored.ProfileName != "" || stored.Model != "gpt-channel" || stored.ReasoningEffort != "high" {
 		t.Fatalf("conversation runtime snapshot=%+v", stored)
-	}
-}
-
-func TestLegacyChannelBindingUsesSessionSnapshotBeforeAPIUpdate(t *testing.T) {
-	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = sessionStore.Close() })
-	session := &zotigosession.Session{
-		Metadata: zotigosession.Metadata{
-			ID:             "legacy-session",
-			Agent:          "zotigo",
-			ApprovalPolicy: agent.ApprovalPolicyAuto,
-			CreatedAt:      time.Now(),
-			UpdatedAt:      time.Now(),
-			PromptConfig: zotigosession.PromptConfig{
-				AgentInstructions:    "agent A",
-				ApprovalInstructions: "approval A",
-				ReviewAllTools:       true,
-				Revision:             1,
-			},
-		},
-	}
-	if err := sessionStore.Put(ctx, session); err != nil {
-		t.Fatal(err)
-	}
-
-	channelStore, err := channels.Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = channelStore.Close() })
-	connection := channels.Connection{
-		ID:                   "connection-1",
-		Provider:             channels.ProviderFeishu,
-		Name:                 "test",
-		AppID:                "app",
-		AgentInstructions:    "agent B",
-		ApprovalInstructions: "approval B",
-		ReviewAllTools:       true,
-	}
-	if _, err := channelStore.PutConnection(ctx, connection); err != nil {
-		t.Fatal(err)
-	}
-	conversation, err := channelStore.EnsureConversationRoot(ctx, connection.ID, "chat-1", "legacy-root", "", "group", time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	conversation.SessionID = session.ID
-	conversation.Enabled = true
-	conversation.AllowedSenderIDs = []string{"owner-1"}
-	if _, err := channelStore.PutConversation(ctx, conversation); err != nil {
-		t.Fatal(err)
-	}
-	secretStore, err := channels.NewSecretStore(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, handlerOptions{store: sessionStore, channels: service})
-	body := `{"display_name":"Legacy root","session_id":"legacy-session","enabled":true,"allowed_sender_ids":["owner-1"],"agent_instructions_mode":"replace","agent_instructions":"agent B","approval_instructions_mode":"replace","approval_instructions":"approval B","review_all_tools":true}`
-	recorder := httptest.NewRecorder()
-	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
-	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "prompt snapshot cannot be changed") {
-		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
-	}
-	stored, err := channelStore.GetConversation(ctx, conversation.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if stored.AgentInstructionsMode != channels.OverrideReplace || stored.AgentInstructions != "agent A" ||
-		stored.ApprovalInstructionsMode != channels.OverrideReplace || stored.ApprovalInstructions != "approval A" ||
-		stored.ReviewAllTools == nil || !*stored.ReviewAllTools {
-		t.Fatalf("legacy conversation was not migrated to the Session snapshot: %+v", stored)
 	}
 }
 

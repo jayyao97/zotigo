@@ -17,6 +17,8 @@ import (
 
 var ErrNotFound = errors.New("channel resource not found")
 
+const channelSchemaVersion = 1
+
 type Store struct {
 	db        *sql.DB
 	messageMu sync.Mutex
@@ -50,15 +52,37 @@ func Open(root string) (*Store, error) {
 		return nil, fmt.Errorf("protect channels database: %w", err)
 	}
 	s := &Store{db: db}
-	if err = s.migrate(); err != nil {
+	if err = s.initializeSchema(); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
 	return s, nil
 }
 
-func (s *Store) migrate() error {
-	_, err := s.db.Exec(`
+func (s *Store) initializeSchema() error {
+	var version int
+	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
+		return fmt.Errorf("read channels schema version: %w", err)
+	}
+	if version == channelSchemaVersion {
+		return nil
+	}
+	if version != 0 {
+		return fmt.Errorf("unsupported channels schema version %d", version)
+	}
+	var existingTables int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('channel_connections','channel_conversations','channel_messages')`).Scan(&existingTables); err != nil {
+		return fmt.Errorf("inspect channels schema: %w", err)
+	}
+	if existingTables != 0 {
+		return errors.New("unsupported unversioned channels database; recreate it before starting zotigod")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin channels schema initialization: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`
 CREATE TABLE IF NOT EXISTS channel_connections (
  id TEXT PRIMARY KEY, provider TEXT NOT NULL, name TEXT NOT NULL, app_id TEXT NOT NULL,
  enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
@@ -80,6 +104,7 @@ CREATE TABLE IF NOT EXISTS channel_conversations (
  UNIQUE(connection_id, chat_id, root_id)
 );
 CREATE UNIQUE INDEX IF NOT EXISTS channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS channel_thread_binding ON channel_conversations(connection_id,chat_id,thread_id) WHERE thread_id <> '';
 CREATE TABLE IF NOT EXISTS channel_messages (
  id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
  conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
@@ -90,217 +115,14 @@ CREATE TABLE IF NOT EXISTS channel_messages (
  UNIQUE(connection_id, provider_message_id)
 );
 CREATE INDEX IF NOT EXISTS channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
-`)
-	if err != nil {
-		return fmt.Errorf("migrate channels database: %w", err)
-	}
-	var replyColumn int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_messages') WHERE name='reply_message_id'`).Scan(&replyColumn); err != nil {
-		return fmt.Errorf("inspect channels database: %w", err)
-	}
-	if replyColumn == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE channel_messages ADD COLUMN reply_message_id TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate channel reply receipt: %w", err)
-		}
-	}
-	for _, migration := range []struct{ column, definition string }{
-		{"progress_mode", "TEXT NOT NULL DEFAULT 'interactive_card'"},
-		{"owner_sender_ids", "TEXT NOT NULL DEFAULT '[]'"},
-	} {
-		var count int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_connections') WHERE name=?`, migration.column).Scan(&count); err != nil {
-			return fmt.Errorf("inspect channel connection schema: %w", err)
-		}
-		if count == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE channel_connections ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil {
-				return fmt.Errorf("migrate channel connection %s: %w", migration.column, err)
-			}
-		}
-	}
-	for _, migration := range []struct{ column, definition string }{
-		{"delivery_mode", "TEXT NOT NULL DEFAULT ''"},
-		{"reply_mode", "TEXT NOT NULL DEFAULT ''"},
-		{"cot_id", "TEXT NOT NULL DEFAULT ''"},
-		{"processing_marker_id", "TEXT NOT NULL DEFAULT ''"},
-		{"final_message_id", "TEXT NOT NULL DEFAULT ''"},
-		{"projected_sequence", "INTEGER NOT NULL DEFAULT 0"},
-	} {
-		var count int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_messages') WHERE name=?`, migration.column).Scan(&count); err != nil {
-			return fmt.Errorf("inspect channel message schema: %w", err)
-		}
-		if count == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE channel_messages ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil {
-				return fmt.Errorf("migrate channel message %s: %w", migration.column, err)
-			}
-		}
-	}
-	if err := s.migrateConversationThreadScope(); err != nil {
-		return err
-	}
-	if err := s.migrateConversationRootScope(); err != nil {
-		return err
-	}
-	var parentMessageColumn int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_messages') WHERE name='parent_provider_message_id'`).Scan(&parentMessageColumn); err != nil {
-		return fmt.Errorf("inspect channel parent message schema: %w", err)
-	}
-	if parentMessageColumn == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE channel_messages ADD COLUMN parent_provider_message_id TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate channel parent message: %w", err)
-		}
-	}
-	var chatNameColumn int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_conversations') WHERE name='chat_name'`).Scan(&chatNameColumn); err != nil {
-		return fmt.Errorf("inspect channel conversation chat name: %w", err)
-	}
-	if chatNameColumn == 0 {
-		if _, err := s.db.Exec(`ALTER TABLE channel_conversations ADD COLUMN chat_name TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("migrate channel conversation chat name: %w", err)
-		}
-	}
-	if _, err := s.db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS channel_thread_binding ON channel_conversations(connection_id,chat_id,thread_id) WHERE thread_id <> ''`); err != nil {
-		return fmt.Errorf("migrate channel thread binding index: %w", err)
-	}
-	for _, migration := range []struct{ column, definition string }{
-		{"chat_mode", "TEXT NOT NULL DEFAULT ''"},
-		{"session_strategy", "TEXT NOT NULL DEFAULT 'topic'"},
-		{"sender_policy", "TEXT NOT NULL DEFAULT 'selected'"},
-		{"session_agent", "TEXT NOT NULL DEFAULT 'zotigo'"},
-		{"profile_name", "TEXT NOT NULL DEFAULT ''"},
-		{"model", "TEXT NOT NULL DEFAULT ''"},
-		{"reasoning_effort", "TEXT NOT NULL DEFAULT ''"},
-	} {
-		var count int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_conversations') WHERE name=?`, migration.column).Scan(&count); err != nil {
-			return fmt.Errorf("inspect channel conversation schema: %w", err)
-		}
-		if count == 0 {
-			if _, err := s.db.Exec(`ALTER TABLE channel_conversations ADD COLUMN ` + migration.column + ` ` + migration.definition); err != nil {
-				return fmt.Errorf("migrate channel conversation %s: %w", migration.column, err)
-			}
-		}
-	}
-	return nil
-}
-
-func (s *Store) migrateConversationThreadScope() error {
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_conversations') WHERE name='thread_id'`).Scan(&count); err != nil {
-		return fmt.Errorf("inspect channel conversation schema: %w", err)
-	}
-	if count != 0 {
-		return nil
-	}
-	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("disable channel migration foreign keys: %w", err)
-	}
-	defer func() { _, _ = s.db.Exec(`PRAGMA foreign_keys=ON`) }()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin channel conversation migration: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.Exec(`
-ALTER TABLE channel_messages RENAME TO channel_messages_before_thread_scope;
-ALTER TABLE channel_conversations RENAME TO channel_conversations_before_thread_scope;
-CREATE TABLE channel_conversations (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- chat_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '', thread_id TEXT NOT NULL DEFAULT '', chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
- session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
- allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
- agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
- approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
- last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(connection_id, chat_id, root_id)
-);
-INSERT INTO channel_conversations
-(id,connection_id,chat_id,root_id,thread_id,chat_type,display_name,session_id,workspace_id,enabled,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,last_activity_at,created_at,updated_at)
-SELECT id,connection_id,chat_id,'','',chat_type,display_name,session_id,workspace_id,enabled,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,last_activity_at,created_at,updated_at
-FROM channel_conversations_before_thread_scope;
-CREATE TABLE channel_messages (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
- provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
- mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
- delivery_mode TEXT NOT NULL DEFAULT '', reply_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', processing_marker_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL,
- UNIQUE(connection_id, provider_message_id)
-);
-INSERT INTO channel_messages
-(id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at)
-SELECT id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at
-FROM channel_messages_before_thread_scope;
-DROP TABLE channel_messages_before_thread_scope;
-DROP TABLE channel_conversations_before_thread_scope;
-CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
-CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
 `); err != nil {
-		return fmt.Errorf("migrate channel conversation thread scope: %w", err)
+		return fmt.Errorf("initialize channels schema: %w", err)
+	}
+	if _, err = tx.Exec(`PRAGMA user_version = 1`); err != nil {
+		return fmt.Errorf("set channels schema version: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit channel conversation thread scope: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) migrateConversationRootScope() error {
-	var count int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_conversations') WHERE name='root_id'`).Scan(&count); err != nil {
-		return fmt.Errorf("inspect channel conversation root schema: %w", err)
-	}
-	if count != 0 {
-		return nil
-	}
-	if _, err := s.db.Exec(`PRAGMA foreign_keys=OFF`); err != nil {
-		return fmt.Errorf("disable channel root migration foreign keys: %w", err)
-	}
-	defer func() { _, _ = s.db.Exec(`PRAGMA foreign_keys=ON`) }()
-	tx, err := s.db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin channel conversation root migration: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	if _, err = tx.Exec(`
-ALTER TABLE channel_messages RENAME TO channel_messages_before_root_scope;
-ALTER TABLE channel_conversations RENAME TO channel_conversations_before_root_scope;
-CREATE TABLE channel_conversations (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- chat_id TEXT NOT NULL, root_id TEXT NOT NULL DEFAULT '', thread_id TEXT NOT NULL DEFAULT '', chat_type TEXT NOT NULL DEFAULT 'group', display_name TEXT NOT NULL DEFAULT '',
- session_id TEXT NOT NULL DEFAULT '', workspace_id TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 0,
- allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
- agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
- approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
- last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
- UNIQUE(connection_id, chat_id, root_id)
-);
-INSERT INTO channel_conversations
-(id,connection_id,chat_id,root_id,thread_id,chat_type,display_name,session_id,workspace_id,enabled,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,last_activity_at,created_at,updated_at)
-SELECT id,connection_id,chat_id,CASE WHEN thread_id<>'' THEN 'legacy-thread:'||thread_id ELSE '' END,thread_id,chat_type,display_name,session_id,workspace_id,enabled,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,last_activity_at,created_at,updated_at
-FROM channel_conversations_before_root_scope;
-CREATE TABLE channel_messages (
- id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
- conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
- provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
- mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
- delivery_mode TEXT NOT NULL DEFAULT '', reply_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', processing_marker_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
- created_at TEXT NOT NULL,
- UNIQUE(connection_id, provider_message_id)
-);
-INSERT INTO channel_messages
-(id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at)
-SELECT id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at
-FROM channel_messages_before_root_scope;
-DROP TABLE channel_messages_before_root_scope;
-DROP TABLE channel_conversations_before_root_scope;
-CREATE UNIQUE INDEX channel_session_binding ON channel_conversations(session_id) WHERE session_id <> '';
-CREATE INDEX channel_messages_by_conversation ON channel_messages(conversation_id, created_at DESC);
-CREATE UNIQUE INDEX channel_thread_binding ON channel_conversations(connection_id,chat_id,thread_id) WHERE thread_id <> '';
-`); err != nil {
-		return fmt.Errorf("migrate channel conversation root scope: %w", err)
-	}
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit channel conversation root scope: %w", err)
+		return fmt.Errorf("commit channels schema initialization: %w", err)
 	}
 	return nil
 }
