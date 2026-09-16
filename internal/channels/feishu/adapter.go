@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/internal/channels"
 	lark "github.com/larksuite/oapi-sdk-go/v3"
 	"github.com/larksuite/oapi-sdk-go/v3/channel"
@@ -965,14 +966,33 @@ func renderTaskResultMarkdown(result channels.TaskResult) string {
 		parts = append(parts, formatDuration(result.DurationMS))
 	}
 	if result.Usage != nil {
-		if total := result.Usage.Normalized().TotalTokens; total > 0 {
-			parts = append(parts, formatTokenCount(total)+" tokens")
-		}
+		parts = append(parts, formatTokenUsage(*result.Usage)...)
 	}
 	if len(parts) == 0 {
 		return text
 	}
 	return text + "\n\n---\n<font color='grey'>Powered by " + strings.Join(parts, " · ") + "</font>"
+}
+
+func formatTokenUsage(usage protocol.Usage) []string {
+	inputTokens := usage.TotalInput()
+	parts := make([]string, 0, 2)
+	if inputTokens > 0 {
+		input := formatTokenCount(inputTokens) + " in"
+		if usage.CacheReadInputTokens > 0 {
+			input += " (" + formatTokenCount(usage.CacheReadInputTokens) + " cached)"
+		}
+		parts = append(parts, input)
+	}
+	if usage.OutputTokens > 0 {
+		parts = append(parts, formatTokenCount(usage.OutputTokens)+" out")
+	}
+	if len(parts) == 0 {
+		if total := usage.Normalized().TotalTokens; total > 0 {
+			parts = append(parts, formatTokenCount(total)+" total")
+		}
+	}
+	return parts
 }
 
 func formatDuration(milliseconds int64) string {

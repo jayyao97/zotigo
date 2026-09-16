@@ -579,10 +579,28 @@ func TestFinalCardRendersRuntimeAttributionOutsideAnswer(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, want := range []string{"answer", "Powered by Codex", "gpt-6-astra", "high", "12s", "4.7k tokens"} {
+	for _, want := range []string{"answer", "Powered by Codex", "gpt-6-astra", "high", "12s", "4.2k in", "500 out"} {
 		if !strings.Contains(card, want) {
 			t.Fatalf("card missing %q: %s", want, card)
 		}
+	}
+}
+
+func TestFinalCardSeparatesCachedInputTokens(t *testing.T) {
+	card, err := renderFinalCard(channels.TaskResult{
+		Text:  "answer",
+		Usage: &protocol.Usage{InputTokens: 1200, CacheReadInputTokens: 11_136, OutputTokens: 10, TotalTokens: 12_346},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"12k in (11k cached)", "10 out"} {
+		if !strings.Contains(card, want) {
+			t.Fatalf("card missing %q: %s", want, card)
+		}
+	}
+	if strings.Contains(card, "tokens") {
+		t.Fatalf("card retained ambiguous token total: %s", card)
 	}
 }
 
