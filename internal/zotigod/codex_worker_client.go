@@ -1384,12 +1384,19 @@ func codexAdditionalContext(requestContext *protocol.RequestContext) (map[string
 	if err != nil {
 		return nil, fmt.Errorf("encode Codex request context: %w", err)
 	}
-	return map[string]any{
+	context := map[string]any{
 		"zotigo.request_context": map[string]any{
 			"kind":  "application",
 			"value": encoded,
 		},
-	}, nil
+	}
+	if strings.TrimSpace(requestContext.ExternalParentMessageID) != "" {
+		context["zotigo.channel_reference_guidance"] = map[string]any{
+			"kind":  "application",
+			"value": "The current Channel request directly references another message. Before answering, call channel.read_messages and use referenced_message from its result. Do not claim the referenced content is unavailable before calling the tool.",
+		}
+	}
+	return context, nil
 }
 
 func codexApprovalPolicy(policy string) string {

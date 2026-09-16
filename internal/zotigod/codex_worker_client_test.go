@@ -1327,6 +1327,10 @@ func TestCodexTurnStartCarriesRequestContextAsApplicationContext(t *testing.T) {
 			t.Fatalf("request context %q does not contain %q", value, expected)
 		}
 	}
+	guidance, ok := additional["zotigo.channel_reference_guidance"].(map[string]any)
+	if !ok || guidance["kind"] != "application" || !strings.Contains(fmt.Sprint(guidance["value"]), "call channel.read_messages") || !strings.Contains(fmt.Sprint(guidance["value"]), "referenced_message") {
+		t.Fatalf("reference guidance = %#v", additional["zotigo.channel_reference_guidance"])
+	}
 }
 
 func TestCodexTurnStartOmitsAdditionalContextForLocalInput(t *testing.T) {
@@ -1339,6 +1343,21 @@ func TestCodexTurnStartOmitsAdditionalContextForLocalInput(t *testing.T) {
 	}
 	if _, exists := rpc.requests["turn/start"]["additionalContext"]; exists {
 		t.Fatalf("local turn unexpectedly has additionalContext: %#v", rpc.requests["turn/start"])
+	}
+}
+
+func TestCodexAdditionalContextOmitsReferenceGuidanceWithoutParent(t *testing.T) {
+	additional, err := codexAdditionalContext(&protocol.RequestContext{
+		Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1", ExternalConversation: "oc_chat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := additional["zotigo.request_context"]; !exists {
+		t.Fatalf("request context missing: %#v", additional)
+	}
+	if _, exists := additional["zotigo.channel_reference_guidance"]; exists {
+		t.Fatalf("reference guidance unexpectedly present: %#v", additional)
 	}
 }
 
