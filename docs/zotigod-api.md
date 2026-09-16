@@ -303,7 +303,10 @@ dynamic tools. The daemon resolves every call from the bound Session and the
 host-attributed current-turn `RequestContext`; model arguments can select only
 a bounded message count, never a connection or conversation ID. The result is
 the authorized conversation's retained seven-day message history with provider
-message and parent-message IDs, including
+message and parent-message IDs. When the current request directly references a
+message absent from that cache, the active provider adapter fetches only that
+host-attributed message ID and verifies it belongs to the bound chat. Results
+therefore include an optional `referenced_message`, as well as
 messages that were stored with `mention_required` and therefore did not start a
 turn. Codex's Channel developer instructions direct it to use this tool when a
 request refers to a quoted/replied-to message or omitted earlier messages.

@@ -336,6 +336,25 @@ func TestReceiveUsesRootIDForTopicReply(t *testing.T) {
 	}
 }
 
+func TestReferencedMessageFromAPIVerifiesChatAndParsesText(t *testing.T) {
+	messageID, chatID, messageType := "message-1", "chat-1", "text"
+	content, senderID, senderName, created := `{"text":"1+1"}`, "user-1", "Owner", "1789527600000"
+	item := &larkim.Message{
+		MessageId: &messageID, ChatId: &chatID, MsgType: &messageType, CreateTime: &created,
+		Body: &larkim.MessageBody{Content: &content}, Sender: &larkim.Sender{Id: &senderID, SenderName: &senderName},
+	}
+	resolved, err := referencedMessageFromAPI(item, "chat-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ProviderID != messageID || resolved.Text != "1+1" || resolved.Sender.ID != senderID || resolved.Sender.DisplayName != senderName || resolved.CreatedAt.IsZero() {
+		t.Fatalf("resolved=%+v", resolved)
+	}
+	if _, err := referencedMessageFromAPI(item, "another-chat"); err == nil {
+		t.Fatal("referenced message from another chat was accepted")
+	}
+}
+
 func TestReceiveFailsClosedWhenMissingThreadScopeCannotBeResolved(t *testing.T) {
 	callbacks := 0
 	adapter := &Adapter{

@@ -136,6 +136,14 @@ type fakeAdapter struct {
 	listGroupsFunc     func(context.Context) ([]Group, error)
 	resolveImagesFunc  func(context.Context, []InboundImage) ([]InboundImage, error)
 	resolveImageCalls  int
+	resolveReferenced  func(context.Context, string, string) (ReferencedMessage, error)
+}
+
+func (f *fakeAdapter) ResolveReferencedMessage(ctx context.Context, chatID, messageID string) (ReferencedMessage, error) {
+	if f.resolveReferenced == nil {
+		return ReferencedMessage{}, errors.New("referenced message unavailable")
+	}
+	return f.resolveReferenced(ctx, chatID, messageID)
 }
 
 func (f *fakeAdapter) ResolveInboundImages(ctx context.Context, images []InboundImage) ([]InboundImage, error) {

@@ -221,6 +221,17 @@ type InboundImage struct {
 	Data        []byte
 }
 
+// ReferencedMessage is provider-fetched content for the one message directly
+// referenced by the current request. The service never accepts its ID from
+// model-controlled tool arguments.
+type ReferencedMessage struct {
+	ProviderID       string
+	ParentProviderID string
+	Sender           Sender
+	Text             string
+	CreatedAt        time.Time
+}
+
 // SessionPromptConfig is the fully resolved prompt policy captured when a
 // channel conversation is bound to a Session.
 type SessionPromptConfig struct {

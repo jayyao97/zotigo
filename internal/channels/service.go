@@ -63,6 +63,12 @@ type InboundImageResolver interface {
 	ResolveInboundImages(context.Context, []InboundImage) ([]InboundImage, error)
 }
 
+// ReferencedMessageResolver fetches the one provider message identified by
+// trusted current-turn context and verifies that it belongs to the bound chat.
+type ReferencedMessageResolver interface {
+	ResolveReferencedMessage(context.Context, string, string) (ReferencedMessage, error)
+}
+
 type AdapterCallbacks struct {
 	Inbound func(context.Context, InboundMessage) error
 	Ready   func(botOpenID, botName string)

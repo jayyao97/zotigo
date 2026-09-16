@@ -106,40 +106,51 @@ func (Factory) New(connection channels.Connection, secret string, callbacks chan
 			pageToken = *resp.Data.PageToken
 		}
 	}
-	adapter.lookupMessageDetails = func(ctx context.Context, messageID, senderID string) (messageDetails, error) {
+	getMessage := func(ctx context.Context, messageID string) (*larkim.Message, error) {
 		lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 		defer cancel()
 		req := larkim.NewGetMessageReqBuilder().MessageId(messageID).UserIdType("open_id").WithSenderName(true).Build()
 		resp, err := apiClient.Im.Message.Get(lookupCtx, req)
 		if err != nil {
-			return messageDetails{}, fmt.Errorf("get message details: %w", err)
+			return nil, err
 		}
-		if resp == nil || !resp.Success() {
+		if resp == nil || !resp.Success() || resp.Data == nil {
 			if resp == nil {
-				return messageDetails{}, errors.New("get message details: response missing")
+				return nil, errors.New("response missing")
 			}
-			return messageDetails{}, fmt.Errorf("get message details: %s", resp.Msg)
-		}
-		if resp.Data == nil {
-			return messageDetails{}, errors.New("get message details: response data missing")
+			return nil, errors.New(resp.Msg)
 		}
 		for _, item := range resp.Data.Items {
 			if item == nil || item.MessageId == nil || *item.MessageId != messageID {
 				continue
 			}
-			details := messageDetails{}
-			if item.ThreadId != nil {
-				details.threadID = strings.TrimSpace(*item.ThreadId)
-			}
-			if item.RootId != nil {
-				details.rootID = strings.TrimSpace(*item.RootId)
-			}
-			if item.Sender != nil && item.Sender.Id != nil && *item.Sender.Id == senderID && item.Sender.SenderName != nil {
-				details.senderName = strings.TrimSpace(*item.Sender.SenderName)
-			}
-			return details, nil
+			return item, nil
 		}
-		return messageDetails{}, errors.New("get message details: matching message omitted")
+		return nil, errors.New("matching message omitted")
+	}
+	adapter.lookupMessageDetails = func(ctx context.Context, messageID, senderID string) (messageDetails, error) {
+		item, err := getMessage(ctx, messageID)
+		if err != nil {
+			return messageDetails{}, fmt.Errorf("get message details: %w", err)
+		}
+		details := messageDetails{}
+		if item.ThreadId != nil {
+			details.threadID = strings.TrimSpace(*item.ThreadId)
+		}
+		if item.RootId != nil {
+			details.rootID = strings.TrimSpace(*item.RootId)
+		}
+		if item.Sender != nil && item.Sender.Id != nil && *item.Sender.Id == senderID && item.Sender.SenderName != nil {
+			details.senderName = strings.TrimSpace(*item.Sender.SenderName)
+		}
+		return details, nil
+	}
+	adapter.lookupReferencedMessage = func(ctx context.Context, chatID, messageID string) (channels.ReferencedMessage, error) {
+		item, err := getMessage(ctx, messageID)
+		if err != nil {
+			return channels.ReferencedMessage{}, fmt.Errorf("get referenced message: %w", err)
+		}
+		return referencedMessageFromAPI(item, chatID)
 	}
 	adapter.lookupChatName = func(ctx context.Context, chatID string) (string, error) {
 		lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -412,6 +423,7 @@ type Adapter struct {
 	addProcessingReaction    func(context.Context, string) (string, error)
 	removeProcessingReaction func(context.Context, string, string) error
 	lookupMessageDetails     func(context.Context, string, string) (messageDetails, error)
+	lookupReferencedMessage  func(context.Context, string, string) (channels.ReferencedMessage, error)
 	lookupChatName           func(context.Context, string) (string, error)
 	listGroups               func(context.Context) ([]channels.Group, error)
 	listGroupMembers         func(context.Context, string) ([]channels.Sender, error)
@@ -474,6 +486,59 @@ type messageDetails struct {
 	threadID   string
 }
 
+func referencedMessageFromAPI(item *larkim.Message, expectedChatID string) (channels.ReferencedMessage, error) {
+	if item.ChatId == nil || strings.TrimSpace(*item.ChatId) != expectedChatID {
+		return channels.ReferencedMessage{}, errors.New("get referenced message: message is outside the bound chat")
+	}
+	if item.Deleted != nil && *item.Deleted {
+		return channels.ReferencedMessage{}, errors.New("get referenced message: message was deleted")
+	}
+	if item.MessageId == nil || item.MsgType == nil || item.Body == nil || item.Body.Content == nil {
+		return channels.ReferencedMessage{}, errors.New("get referenced message: content is incomplete")
+	}
+	raw := *item.Body.Content
+	text := ""
+	switch strings.TrimSpace(*item.MsgType) {
+	case "text":
+		var content struct {
+			Text string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(raw), &content); err != nil {
+			return channels.ReferencedMessage{}, fmt.Errorf("get referenced message: parse text: %w", err)
+		}
+		text = strings.TrimSpace(content.Text)
+	case "post":
+		content, err := parseInboundContent("post", raw, channeltypes.BotIdentity{})
+		if err != nil {
+			return channels.ReferencedMessage{}, fmt.Errorf("get referenced message: parse post: %w", err)
+		}
+		text = strings.TrimSpace(content.text)
+	default:
+		return channels.ReferencedMessage{}, fmt.Errorf("get referenced message: unsupported message type %q", strings.TrimSpace(*item.MsgType))
+	}
+	if text == "" {
+		return channels.ReferencedMessage{}, errors.New("get referenced message: text is empty")
+	}
+	message := channels.ReferencedMessage{ProviderID: strings.TrimSpace(*item.MessageId), Text: text}
+	if item.ParentId != nil {
+		message.ParentProviderID = strings.TrimSpace(*item.ParentId)
+	}
+	if item.Sender != nil {
+		if item.Sender.Id != nil {
+			message.Sender.ID = strings.TrimSpace(*item.Sender.Id)
+		}
+		if item.Sender.SenderName != nil {
+			message.Sender.DisplayName = strings.TrimSpace(*item.Sender.SenderName)
+		}
+	}
+	if item.CreateTime != nil {
+		if milliseconds, err := strconv.ParseInt(strings.TrimSpace(*item.CreateTime), 10, 64); err == nil {
+			message.CreatedAt = time.UnixMilli(milliseconds).UTC()
+		}
+	}
+	return message, nil
+}
+
 type chatNameCacheEntry struct {
 	name      string
 	expiresAt time.Time
@@ -483,6 +548,13 @@ const chatNameCacheTTL = 5 * time.Minute
 
 func (a *Adapter) Start(ctx context.Context) error { return a.channel.Start(ctx) }
 func (a *Adapter) Stop(ctx context.Context) error  { return a.channel.Stop(ctx) }
+
+func (a *Adapter) ResolveReferencedMessage(ctx context.Context, chatID, messageID string) (channels.ReferencedMessage, error) {
+	if a.lookupReferencedMessage == nil {
+		return channels.ReferencedMessage{}, errors.New("get referenced message: lookup unavailable")
+	}
+	return a.lookupReferencedMessage(ctx, chatID, messageID)
+}
 
 func (a *Adapter) PrepareRecovery(ctx context.Context) error {
 	if a.resolveBotIdentity == nil {
