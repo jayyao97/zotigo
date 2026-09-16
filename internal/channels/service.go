@@ -738,6 +738,39 @@ func (s *Service) GetConversation(ctx context.Context, id string) (Conversation,
 	}
 	return s.store.GetConversation(ctx, id)
 }
+
+// WithResolvedSessionPrompt resolves the current group and Connection prompt
+// for a bound Session. The callback runs while the Channel configuration read
+// lock is held so a concurrent save cannot cross the Session admission fence.
+func (s *Service) WithResolvedSessionPrompt(ctx context.Context, sessionID string, use func(SessionPromptConfig) error) (bool, error) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.closed {
+		return false, errors.New("channel service is closed")
+	}
+	conversation, err := s.store.GetConversationBySession(ctx, strings.TrimSpace(sessionID))
+	if errors.Is(err, ErrNotFound) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	group, err := s.store.GetConversationByScope(ctx, conversation.ConnectionID, conversation.ChatID, "")
+	if err != nil {
+		return false, err
+	}
+	connection, err := s.store.GetConnection(ctx, conversation.ConnectionID)
+	if err != nil {
+		return false, err
+	}
+	if use != nil {
+		if err := use(resolvePromptSnapshot(connection, group)); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
 func (s *Service) PutConversation(ctx context.Context, id string, input ConversationInput) (Conversation, error) {
 	return s.PutConversationValidated(ctx, id, input, nil)
 }
@@ -758,7 +791,6 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if err != nil {
 		return c, err
 	}
-	previous := c
 	previousSessionID := c.SessionID
 	previousWorkspaceID := c.WorkspaceID
 	previousRuntime := conversationRuntime(c)
@@ -853,10 +885,6 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if c.RootID == "" && c.Enabled && c.SenderPolicy == SenderPolicyOwners && len(connection.OwnerSenderIDs) == 0 {
 		return c, errors.New("application owner has not been resolved")
 	}
-	previousPrompt := resolvePromptSnapshot(connection, previous)
-	if previous.SessionID != "" && c.SessionID == previous.SessionID && !hasPromptSnapshot(previous) {
-		return c, errors.New("bound session prompt snapshot is missing")
-	}
 	effectiveApproval := connection.ApprovalInstructions
 	if c.ApprovalInstructionsMode == OverrideReplace {
 		effectiveApproval = c.ApprovalInstructions
@@ -872,9 +900,6 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if c.AgentInstructionsMode == OverrideReplace {
 		prompt.AgentInstructions = c.AgentInstructions
 	}
-	if previousSessionID != "" && c.SessionID == previousSessionID && previousPrompt != prompt {
-		return c, errors.New("bound session prompt snapshot cannot be changed")
-	}
 	runtime := conversationRuntime(c)
 	if previousSessionID != "" && c.SessionID == previousSessionID && previousRuntime != runtime {
 		return c, errors.New("bound session runtime snapshot cannot be changed")
@@ -889,11 +914,10 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 			applyRuntimeSnapshot(&c, canonicalRuntime)
 		}
 	}
-	// A rooted conversation and its bound Session share one immutable prompt
-	// snapshot. Persist the resolved values after binding validation succeeds so
-	// later Connection changes cannot make the Conversation appear to inherit a
-	// different prompt from the one stored on the Session.
-	if c.SessionID != "" && c.SessionID != previousSessionID {
+	// Rooted conversations retain the prompt that created them for diagnostics.
+	// Their next Channel turn still resolves the current group policy below, so
+	// prompt edits do not rewrite history or strand an existing Session.
+	if c.RootID != "" && c.SessionID != "" && c.SessionID != previousSessionID {
 		applyPromptSnapshot(&c, prompt)
 	}
 	return s.store.PutConversation(ctx, c)
@@ -940,10 +964,6 @@ func applyRuntimeSnapshot(conversation *Conversation, runtime SessionRuntimeConf
 
 func groupRuntime(group Conversation) SessionRuntimeConfig {
 	return conversationRuntime(group)
-}
-
-func hasPromptSnapshot(conversation Conversation) bool {
-	return conversation.AgentInstructionsMode == OverrideReplace && conversation.ApprovalInstructionsMode == OverrideReplace && conversation.ReviewAllTools != nil
 }
 
 func applyPromptSnapshot(conversation *Conversation, prompt SessionPromptConfig) {
@@ -1247,6 +1267,11 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return s.store.SetMessageStatus(ctx, message.ID, "rejected", "connection_replaced")
 	}
+	connection, err = s.store.GetConnection(ctx, connectionID)
+	if err != nil || !connection.Enabled {
+		s.configMu.RUnlock()
+		return s.store.SetMessageStatus(ctx, message.ID, "rejected", "connection_replaced")
+	}
 	group, groupErr = s.store.GetConversationByScope(ctx, connectionID, in.ChatID, "")
 	if groupErr != nil || !group.Enabled || group.WorkspaceID == "" || !senderAllowed(connection, group, in.Sender.ID) {
 		s.configMu.RUnlock()
@@ -1301,11 +1326,8 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return reject("conversation_not_bound")
 	}
-	if !hasPromptSnapshot(conversation) {
-		s.configMu.RUnlock()
-		return reject("conversation_prompt_snapshot_missing")
-	}
-	agentText, approvalText, review := conversation.AgentInstructions, conversation.ApprovalInstructions, *conversation.ReviewAllTools
+	prompt := resolvePromptSnapshot(connection, group)
+	agentText, approvalText, review := prompt.AgentInstructions, prompt.ApprovalInstructions, prompt.ReviewAllTools
 	if strings.TrimSpace(approvalText) != "" && !review {
 		s.configMu.RUnlock()
 		return reject("approval_instructions_require_review_all_tools")

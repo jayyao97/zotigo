@@ -234,22 +234,26 @@ the immutable classifier protocol. `review_all_tools` routes otherwise-safe
 calls through the classifier; hard blocks and mandatory approvals still take
 precedence. Conversation prompt modes are `inherit` or `replace`; `replace`
 changes only the owner addition and supports an explicitly empty string. Prompt
-snapshots apply to both Zotigo and Codex Sessions. Group changes apply to future
-topic Sessions; an existing rooted conversation retains both the policy and
-runtime snapshots copied when it was created. At turn admission, zotigod checks
-the stored policy and prompt revision under the session operation lock. Native
-workers also check those values before accepting the command.
+configurations apply to both Zotigo and Codex Sessions. Each Channel turn
+resolves the current group override against the current Connection defaults.
+Before admitting a new turn from either the Channel or Session API, zotigod
+synchronizes that effective configuration to the bound Session under the
+session operation lock and increments its prompt revision when it changed. An
+active turn or pending human request keeps its current configuration; steering
+continues that turn, and the update is applied when a later new turn can be
+admitted. Native workers also check the revision before accepting the command.
 
-For a Codex Channel Session, zotigod passes the snapshotted agent and approval
+For a Codex Channel Session, zotigod passes the effective agent and approval
 guidance to Codex app-server as thread `developerInstructions`. This guidance
 does not grant approval or replace Codex's own approval and safety policies.
-When the snapshot enables `review_all_tools`, zotigod also selects Codex's
+When the effective configuration enables `review_all_tools`, zotigod also selects Codex's
 `auto_review` approvals reviewer. On both `thread/start` and `thread/resume`,
 zotigod passes `config.auto_review.policy` as a complete policy made from the
-current immutable Zotigo security baseline plus the snapshotted owner guidance.
+current immutable Zotigo security baseline plus the effective owner guidance.
 This is necessary because Codex treats that field as a replacement policy. The
 baseline can be strengthened for existing Sessions by a zotigod update; the
-owner portion remains the Session snapshot and may only add restrictions. The
+owner portion is refreshed on the next admitted Channel turn and may only add
+restrictions. The
 reviewer evaluates only approval requests surfaced by Codex; selecting it does
 not route every tool call through the reviewer, widen the sandbox, or turn owner
 guidance into an approval grant.
@@ -275,7 +279,8 @@ group is enabled with a Workspace and at least one sender ID. Strategy `topic`
 replies continue it. Strategy `shared` keeps one Session on the rootless group:
 an empty `session_id` provisions it on the first mention, while a supplied ID
 must name an idle, unbound Session assigned to the selected Workspace. Existing
-history and the Session's runtime and prompt snapshot are retained. Every
+history and the Session's runtime are retained. The selected group's effective
+prompt is applied on the next admitted Channel turn. Every
 shared-mode input requires an @mention and is routed to that one Session. An
 accepted mention receives a direct reply in the main group, including when the
 message quotes or replies to another message. Previously rooted Sessions

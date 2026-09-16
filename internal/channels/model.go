@@ -232,8 +232,8 @@ type ReferencedMessage struct {
 	CreatedAt        time.Time
 }
 
-// SessionPromptConfig is the fully resolved prompt policy captured when a
-// channel conversation is bound to a Session.
+// SessionPromptConfig is the fully resolved prompt policy applied to a
+// Channel Session. The daemon versions it again when admitting a turn.
 type SessionPromptConfig struct {
 	AgentInstructions    string
 	ApprovalInstructions string

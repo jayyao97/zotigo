@@ -25,32 +25,121 @@ func (h *handler) EnsureChannelSessionPrompt(ctx context.Context, sessionID stri
 		return channels.SessionPromptConfig{}, errors.New("session store is unavailable")
 	}
 	unlock := h.sessionOps.lock(sessionID)
-	defer unlock()
 	stored, err := h.store.Get(ctx, sessionID)
 	if err != nil {
+		unlock()
 		return channels.SessionPromptConfig{}, fmt.Errorf("load channel session prompt: %w", err)
 	}
 	if stored == nil {
+		unlock()
 		return channels.SessionPromptConfig{}, errSessionNotFound
 	}
 	if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
+		unlock()
 		return channels.SessionPromptConfig{}, errors.New("channel sessions must use auto approval policy")
 	}
 	desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
-	if stored.PromptConfig.Revision != 0 {
-		current := stored.PromptConfig
-		return channels.SessionPromptConfig{AgentInstructions: current.AgentInstructions, ApprovalInstructions: current.ApprovalInstructions, ReviewAllTools: current.ReviewAllTools}, nil
-	}
-	if live, ok := h.registry.Get(sessionID); ok && live.State != SessionStateCreated && live.State != SessionStateOffline {
-		return channels.SessionPromptConfig{}, errors.New("binding a channel prompt snapshot requires an idle session")
-	}
-	desired.Revision = 1
-	stored.PromptConfig = desired
-	stored.UpdatedAt = time.Now().UTC()
-	if err := h.store.Put(ctx, stored); err != nil {
+	detached, err := h.reconcileChannelSessionPromptLocked(ctx, stored, &desired)
+	unlock()
+	if err != nil {
 		return channels.SessionPromptConfig{}, err
 	}
+	closeDetachedWorker(detached)
 	return prompt, nil
+}
+
+func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, stored *zotigosession.Session, desired *zotigosession.PromptConfig) (*workerConnection, error) {
+	current := stored.PromptConfig
+	if current.Revision != 0 && current.AgentInstructions == desired.AgentInstructions && current.ApprovalInstructions == desired.ApprovalInstructions && current.ReviewAllTools == desired.ReviewAllTools {
+		desired.Revision = current.Revision
+		return nil, nil
+	}
+	if live, ok := h.registry.Get(stored.ID); ok {
+		if live.Working || (live.State != SessionStateCreated && live.State != SessionStateOffline && live.State != SessionStateRunning) {
+			return nil, errSessionBusy
+		}
+	}
+	items, exists, err := h.items.LoadItems(ctx, stored.ID)
+	if err != nil {
+		return nil, fmt.Errorf("load channel session history: %w", err)
+	}
+	if !exists {
+		return nil, errSessionNotFound
+	}
+	if err := requireIdleSession(items); err != nil || hasPendingHumanRequest(items) {
+		return nil, errSessionBusy
+	}
+	desired.Revision = current.Revision + 1
+	if desired.Revision == 0 {
+		desired.Revision = 1
+	}
+	stored.PromptConfig = *desired
+	stored.UpdatedAt = time.Now().UTC()
+	if err := h.store.Put(ctx, stored); err != nil {
+		return nil, fmt.Errorf("persist channel prompt: %w", err)
+	}
+	if h.workers != nil {
+		return h.workers.Detach(stored.ID), nil
+	}
+	return nil, nil
+}
+
+func closeDetachedWorker(worker *workerConnection) {
+	if worker != nil {
+		worker.close()
+	}
+}
+
+// withRefreshedBoundChannelPrompt keeps the Channel configuration read fence
+// through input admission. Once a group save returns, no later turn can be
+// admitted with the prompt that preceded that save.
+func (h *handler) withRefreshedBoundChannelPrompt(ctx context.Context, sessionID string, admit func(steeringOnly bool) error) error {
+	if h.channels == nil {
+		return admit(false)
+	}
+	var detached *workerConnection
+	bound, err := h.channels.WithResolvedSessionPrompt(ctx, sessionID, func(prompt channels.SessionPromptConfig) error {
+		for attempt := 0; attempt < 2; attempt++ {
+			unlock := h.sessionOps.lock(sessionID)
+			stored, err := h.store.Get(ctx, sessionID)
+			if err != nil {
+				unlock()
+				return fmt.Errorf("load bound session prompt: %w", err)
+			}
+			if stored == nil {
+				unlock()
+				return errSessionNotFound
+			}
+			if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
+				unlock()
+				return errors.New("channel sessions must use auto approval policy")
+			}
+			desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
+			detached, err = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired)
+			unlock()
+			if err == nil {
+				closeDetachedWorker(detached)
+				return admit(false)
+			}
+			if !errors.Is(err, errSessionBusy) {
+				return err
+			}
+			// A prompt cannot change inside an active turn. Admit only as
+			// steering; if the turn ended at this boundary, reconcile once more
+			// before allowing a new turn to start.
+			if err := admit(true); !errors.Is(err, errNoActiveTurn) {
+				return err
+			}
+		}
+		return errSessionBusy
+	})
+	if err != nil {
+		return err
+	}
+	if !bound {
+		return admit(false)
+	}
+	return nil
 }
 
 func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, title string, prompt channels.SessionPromptConfig, runtime channels.SessionRuntimeConfig, bind func(sessionID string, resolved channels.SessionRuntimeConfig) error) error {
@@ -207,6 +296,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		return channels.TaskResult{}, errors.New("channel approval instructions require review_all_tools")
 	}
 	var stored *zotigosession.Session
+	var detached *workerConnection
 	err := func() error {
 		unlock := h.sessionOps.lock(task.SessionID)
 		defer unlock()
@@ -221,16 +311,13 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
 			return errors.New("channel sessions must use auto approval policy")
 		}
-		current := stored.PromptConfig
-		if current.AgentInstructions != desired.AgentInstructions || current.ApprovalInstructions != desired.ApprovalInstructions || current.ReviewAllTools != desired.ReviewAllTools {
-			return errors.New("channel task prompt does not match the bound session snapshot")
-		}
-		desired.Revision = current.Revision
-		return nil
+		detached, loadErr = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired)
+		return loadErr
 	}()
 	if err != nil {
 		return channels.TaskResult{}, err
 	}
+	closeDetachedWorker(detached)
 
 	_, exists, err := h.items.LoadItems(ctx, task.SessionID)
 	if err != nil {

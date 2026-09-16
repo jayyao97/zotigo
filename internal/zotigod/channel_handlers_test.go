@@ -12,6 +12,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -191,12 +192,13 @@ func TestProvisionChannelSessionRollsBackFailedOrCanceledBinding(t *testing.T) {
 	}
 }
 
-func TestEnsureChannelSessionPromptInitializesOnce(t *testing.T) {
+func TestEnsureChannelSessionPromptTracksRevisions(t *testing.T) {
 	handler, store, _, _ := newChannelProvisionFixture(t)
 	session := newSession(t.TempDir(), "default")
 	if err := handler.persistSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
 	prompt := channels.SessionPromptConfig{AgentInstructions: "channel agent", ApprovalInstructions: "channel approval", ReviewAllTools: true}
 	if _, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt); err != nil {
 		t.Fatal(err)
@@ -213,8 +215,12 @@ func TestEnsureChannelSessionPromptInitializesOnce(t *testing.T) {
 	}
 	prompt.AgentInstructions = "changed"
 	canonical, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt)
-	if err != nil || canonical.AgentInstructions != "channel agent" {
-		t.Fatalf("initialized snapshot was not retained: prompt=%+v err=%v", canonical, err)
+	if err != nil || canonical.AgentInstructions != "changed" {
+		t.Fatalf("updated prompt=%+v err=%v", canonical, err)
+	}
+	stored, err = store.Get(context.Background(), session.ID)
+	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "changed" || stored.PromptConfig.Revision != 2 {
+		t.Fatalf("updated prompt snapshot=%+v err=%v", stored, err)
 	}
 }
 
@@ -227,6 +233,7 @@ func TestEnsureChannelSessionPromptSupportsCodex(t *testing.T) {
 	if err := handler.persistSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
+	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
 	prompt := channels.SessionPromptConfig{AgentInstructions: "channel context"}
 	canonical, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt)
 	if err != nil || canonical != prompt {
@@ -235,6 +242,183 @@ func TestEnsureChannelSessionPromptSupportsCodex(t *testing.T) {
 	stored, err := store.Get(context.Background(), session.ID)
 	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "channel context" || stored.PromptConfig.Revision != 1 {
 		t.Fatalf("stored=%+v err=%v", stored, err)
+	}
+}
+
+func TestEnsureChannelSessionPromptDefersWhileSessionIsWorking(t *testing.T) {
+	handler, store, _, _ := newChannelProvisionFixture(t)
+	session := newSession(t.TempDir(), "default")
+	if err := handler.persistSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	storedFixture, err := store.Get(context.Background(), session.ID)
+	if err != nil || storedFixture == nil {
+		t.Fatalf("load fixture: session=%+v err=%v", storedFixture, err)
+	}
+	storedFixture.PromptConfig = zotigosession.PromptConfig{AgentInstructions: "old", Revision: 1}
+	if err := store.Put(context.Background(), storedFixture); err != nil {
+		t.Fatal(err)
+	}
+	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	live := handler.registry.Add(Session{ID: session.ID, State: SessionStateRunning, Working: true})
+	if !live.Working {
+		t.Fatal("fixture session is not working")
+	}
+
+	_, err = handler.EnsureChannelSessionPrompt(context.Background(), session.ID, channels.SessionPromptConfig{AgentInstructions: "new"})
+	if !errors.Is(err, errSessionBusy) {
+		t.Fatalf("error=%v", err)
+	}
+	stored, getErr := store.Get(context.Background(), session.ID)
+	if getErr != nil || stored == nil || stored.PromptConfig.AgentInstructions != "old" || stored.PromptConfig.Revision != 1 {
+		t.Fatalf("active prompt changed: session=%+v err=%v", stored, getErr)
+	}
+}
+
+func TestEnsureChannelSessionPromptRecyclesIdleWorker(t *testing.T) {
+	handler, store, _, _ := newChannelProvisionFixture(t)
+	session := newSession(t.TempDir(), "default")
+	if err := handler.persistSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	storedFixture, err := store.Get(context.Background(), session.ID)
+	if err != nil || storedFixture == nil {
+		t.Fatalf("load fixture: session=%+v err=%v", storedFixture, err)
+	}
+	storedFixture.PromptConfig = zotigosession.PromptConfig{AgentInstructions: "old", Revision: 1}
+	if err := store.Put(context.Background(), storedFixture); err != nil {
+		t.Fatal(err)
+	}
+	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.workers = newWorkerRegistry()
+	worker := newWorkerConnection(session.ID, "generation-1", nil, handler.workers)
+	handler.workers.mu.Lock()
+	handler.workers.workers[session.ID] = worker
+	handler.workers.mu.Unlock()
+
+	if _, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, channels.SessionPromptConfig{AgentInstructions: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-worker.doneCh:
+	case <-time.After(time.Second):
+		t.Fatal("idle worker was not recycled")
+	}
+	stored, err := store.Get(context.Background(), session.ID)
+	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "new" || stored.PromptConfig.Revision != 2 {
+		t.Fatalf("updated session=%+v err=%v", stored, err)
+	}
+}
+
+func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
+	handler, sessionStore, _, _ := newChannelProvisionFixture(t)
+	session := newSession(t.TempDir(), "default")
+	if err := handler.persistSession(context.Background(), session); err != nil {
+		t.Fatal(err)
+	}
+	storedFixture, err := sessionStore.Get(context.Background(), session.ID)
+	if err != nil || storedFixture == nil {
+		t.Fatalf("load fixture: session=%+v err=%v", storedFixture, err)
+	}
+	storedFixture.PromptConfig = zotigosession.PromptConfig{AgentInstructions: "old", Revision: 1}
+	if err := sessionStore.Put(context.Background(), storedFixture); err != nil {
+		t.Fatal(err)
+	}
+	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+
+	channelStore, err := channels.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = channelStore.Close() })
+	if _, err := channelStore.PutConnection(context.Background(), channels.Connection{ID: "connection-1", Provider: channels.ProviderFeishu, Name: "bot", AppID: "app", AgentInstructions: "new"}); err != nil {
+		t.Fatal(err)
+	}
+	group, err := channelStore.EnsureConversationRoot(context.Background(), "connection-1", "chat-1", "", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	group.SessionID = session.ID
+	group.SessionStrategy = channels.SessionStrategyShared
+	if _, err := channelStore.PutConversation(context.Background(), group); err != nil {
+		t.Fatal(err)
+	}
+	secretStore, err := channels.NewSecretStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelService := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
+	handler.channels = channelService
+
+	admitted := false
+	if err := handler.withRefreshedBoundChannelPrompt(context.Background(), session.ID, func(bool) error { admitted = true; return nil }); err != nil {
+		t.Fatal(err)
+	}
+	if !admitted {
+		t.Fatal("local input admission was not invoked")
+	}
+	stored, err := sessionStore.Get(context.Background(), session.ID)
+	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "new" || stored.PromptConfig.Revision != 2 {
+		t.Fatalf("refreshed session=%+v err=%v", stored, err)
+	}
+
+	admissionStarted := make(chan struct{})
+	releaseAdmission := make(chan struct{})
+	messageDone := make(chan error, 1)
+	go func() {
+		messageDone <- handler.withRefreshedBoundChannelPrompt(context.Background(), session.ID, func(bool) error {
+			close(admissionStarted)
+			<-releaseAdmission
+			return nil
+		})
+	}()
+	<-admissionStarted
+	saveDone := make(chan error, 1)
+	go func() {
+		_, saveErr := channelService.PutConnection(context.Background(), "connection-1", channels.ConnectionInput{Provider: channels.ProviderFeishu, Name: "bot", AppID: "app", AgentInstructions: "latest"})
+		saveDone <- saveErr
+	}()
+	select {
+	case saveErr := <-saveDone:
+		t.Fatalf("prompt save crossed input admission fence: %v", saveErr)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(releaseAdmission)
+	if err := <-messageDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-saveDone; err != nil {
+		t.Fatal(err)
+	}
+	if err := handler.withRefreshedBoundChannelPrompt(context.Background(), session.ID, func(bool) error { return nil }); err != nil {
+		t.Fatal(err)
+	}
+	stored, err = sessionStore.Get(context.Background(), session.ID)
+	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "latest" || stored.PromptConfig.Revision != 3 {
+		t.Fatalf("next turn prompt=%+v err=%v", stored, err)
+	}
+
+	if _, err := channelService.PutConnection(context.Background(), "connection-1", channels.ConnectionInput{Provider: channels.ProviderFeishu, Name: "bot", AppID: "app", AgentInstructions: "after-active"}); err != nil {
+		t.Fatal(err)
+	}
+	handler.registry.Add(Session{ID: session.ID, State: SessionStateRunning, Working: true})
+	var modes []bool
+	if err := handler.withRefreshedBoundChannelPrompt(context.Background(), session.ID, func(steeringOnly bool) error {
+		modes = append(modes, steeringOnly)
+		if steeringOnly {
+			handler.registry.MarkIdle(session.ID)
+			return errNoActiveTurn
+		}
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(modes, []bool{true, false}) {
+		t.Fatalf("admission modes = %v, want steering retry followed by new turn", modes)
+	}
+	stored, err = sessionStore.Get(context.Background(), session.ID)
+	if err != nil || stored == nil || stored.PromptConfig.AgentInstructions != "after-active" || stored.PromptConfig.Revision != 4 {
+		t.Fatalf("post-active prompt=%+v err=%v", stored, err)
 	}
 }
 
@@ -269,7 +453,7 @@ func newChannelProvisionFixture(t *testing.T) (*handler, zotigosession.Store, *z
 		t.Fatal(err)
 	}
 	registry := newSessionRegistry()
-	handler := &handler{registry: registry, store: store, catalog: catalog, sessionOps: newSessionOperationLocks(), workspaceOps: newSessionOperationLocks()}
+	handler := &handler{registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, store: store, catalog: catalog, sessionOps: newSessionOperationLocks(), workspaceOps: newSessionOperationLocks()}
 	return handler, store, catalog, workspace
 }
 
@@ -671,7 +855,7 @@ func TestChannelBindingRejectsStartedCodexSessionWithoutTools(t *testing.T) {
 	}
 }
 
-func TestChannelBindingPersistsImmutablePromptSnapshot(t *testing.T) {
+func TestChannelBindingAllowsPromptUpdateWithoutMutatingSessionEagerly(t *testing.T) {
 	ctx := context.Background()
 	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
 	if err != nil {
@@ -765,15 +949,19 @@ func TestChannelBindingPersistsImmutablePromptSnapshot(t *testing.T) {
 	body = `{"display_name":"Root","session_id":"session-snapshot","enabled":true,"allowed_sender_ids":["owner-1"],"agent_instructions_mode":"replace","agent_instructions":"agent B","approval_instructions_mode":"replace","approval_instructions":"approval B","review_all_tools":true}`
 	recorder = httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
-	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "prompt snapshot cannot be changed") {
+	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
 	storedConversation, err = channelStore.GetConversation(ctx, conversation.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if storedConversation.AgentInstructions != "session agent" || storedConversation.ApprovalInstructions != "session approval" {
-		t.Fatalf("rejected update changed prompt snapshot: %+v", storedConversation)
+	if storedConversation.AgentInstructions != "agent B" || storedConversation.ApprovalInstructions != "approval B" {
+		t.Fatalf("conversation prompt update=%+v", storedConversation)
+	}
+	storedSession, err = sessionStore.Get(ctx, session.ID)
+	if err != nil || storedSession == nil || storedSession.PromptConfig.AgentInstructions != "session agent" || storedSession.PromptConfig.Revision != 4 {
+		t.Fatalf("save changed session before turn admission: session=%+v err=%v", storedSession, err)
 	}
 }
 

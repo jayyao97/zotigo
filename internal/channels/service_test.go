@@ -979,7 +979,7 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 	}
 }
 
-func TestSessionPromptSnapshotIsStableAcrossConnectionChanges(t *testing.T) {
+func TestExistingSessionUsesCurrentInheritedPrompt(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store, _ := Open(t.TempDir())
@@ -1025,8 +1025,8 @@ func TestSessionPromptSnapshotIsStableAcrossConnectionChanges(t *testing.T) {
 		t.Fatal(err)
 	}
 	oldReply := <-dispatcher.called
-	if oldReply.AgentInstructions != "connection-old" || oldReply.ApprovalInstructions != "approval-old" {
-		t.Fatalf("old session prompt changed=%+v", oldReply)
+	if oldReply.AgentInstructions != "connection-new" || oldReply.ApprovalInstructions != "approval-new" {
+		t.Fatalf("old session prompt was not refreshed=%+v", oldReply)
 	}
 	if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "new-root", ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "owner-1"}, Text: "new", MentionedBot: true, CreatedAt: time.Now()}); err != nil {
 		t.Fatal(err)

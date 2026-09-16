@@ -203,16 +203,25 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
 		return
 	}
-	if _, err := h.ensureSessionRunning(r.Context(), id); err != nil {
-		h.writeEnsureRunningError(w, err)
-		return
-	}
-	if !h.ensureWorkerOnline(r.Context(), id) {
-		writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
-		return
-	}
-	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", false, false, nil)
+	var command commandResponse
+	var ensureErr error
+	err = h.withRefreshedBoundChannelPrompt(r.Context(), id, func(steeringOnly bool) error {
+		if _, startErr := h.ensureSessionRunning(r.Context(), id); startErr != nil {
+			ensureErr = startErr
+			return startErr
+		}
+		if !h.ensureWorkerOnline(r.Context(), id) {
+			return errWorkerOffline
+		}
+		var acceptErr error
+		command, acceptErr = h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, selectedNames, "", steeringOnly, false, nil)
+		return acceptErr
+	})
 	if err != nil {
+		if ensureErr != nil {
+			h.writeEnsureRunningError(w, ensureErr)
+			return
+		}
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")

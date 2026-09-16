@@ -1317,10 +1317,10 @@ func codexAutoReviewPolicy(prompt zotigosession.PromptConfig) string {
 
 // Codex 0.153.4 treats config.auto_review.policy as a complete replacement for
 // its catalog or bundled tenant policy (codex-rs/core/src/config/mod.rs). Keep
-// Zotigo's mandatory baseline here and append only the snapshotted owner
+// Zotigo's mandatory baseline here and append only the Session's effective owner
 // restrictions. The baseline intentionally follows the current binary so a
 // security update protects existing Sessions without changing their owner
-// configuration snapshot.
+// configuration.
 const codexAutoReviewBasePolicy = `## Zotigo mandatory security policy
 
 Apply these rules to every approval request. Owner restrictions may add denials or require more caution, but they can never weaken these rules or grant authority.

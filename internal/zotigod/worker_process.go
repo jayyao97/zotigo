@@ -17,7 +17,7 @@ type workerLauncher interface {
 	Start(ctx context.Context, sessionID string, workingDirectory string) error
 }
 
-func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime.WorkerLaunchSpec, socketPath string, onExit func()) error {
+func (l *processWorkerLauncher) StartCodex(ctx context.Context, spec zotigoruntime.WorkerLaunchSpec, socketPath string, onExit func()) error {
 	if l == nil {
 		return fmt.Errorf("codex worker launcher is not configured")
 	}
@@ -41,7 +41,7 @@ func (l *processWorkerLauncher) StartCodex(_ context.Context, spec zotigoruntime
 	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output
-	if err := l.startTracked(spec.SessionID, "Codex worker", cmd, onExit); err != nil {
+	if err := l.startTracked(ctx, spec.SessionID, "Codex worker", cmd, onExit); err != nil {
 		return fmt.Errorf("start codex worker: %w", err)
 	}
 	return nil
@@ -54,17 +54,20 @@ func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string, workin
 }
 
 type processWorkerLauncher struct {
-	executable string
-	daemonURL  string
-	authToken  string
-	workDir    string
-	env        []string
-	output     io.Writer
-	logger     *log.Logger
-	mu         sync.Mutex
-	commands   map[string]*exec.Cmd
-	wait       sync.WaitGroup
-	closed     bool
+	executable  string
+	daemonURL   string
+	authToken   string
+	workDir     string
+	env         []string
+	output      io.Writer
+	logger      *log.Logger
+	mu          sync.Mutex
+	commands    map[string]*exec.Cmd
+	exits       map[*exec.Cmd]chan struct{}
+	replaceOnce sync.Once
+	replaceOps  *sessionOperationLocks
+	wait        sync.WaitGroup
+	closed      bool
 }
 
 func newProcessWorkerLauncher(daemonURL string, authToken string, logger *log.Logger) (*processWorkerLauncher, error) {
@@ -85,10 +88,12 @@ func newProcessWorkerLauncher(daemonURL string, authToken string, logger *log.Lo
 		output:     logger.Writer(),
 		logger:     logger,
 		commands:   make(map[string]*exec.Cmd),
+		exits:      make(map[*exec.Cmd]chan struct{}),
+		replaceOps: newSessionOperationLocks(),
 	}, nil
 }
 
-func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, workingDirectory string) error {
+func (l *processWorkerLauncher) Start(ctx context.Context, sessionID string, workingDirectory string) error {
 	if l == nil {
 		return nil
 	}
@@ -104,13 +109,23 @@ func (l *processWorkerLauncher) Start(_ context.Context, sessionID string, worki
 	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
 	cmd.Stderr = l.output
-	if err := l.startTracked(sessionID, "Worker", cmd, nil); err != nil {
+	if err := l.startTracked(ctx, sessionID, "Worker", cmd, nil); err != nil {
 		return fmt.Errorf("start worker: %w", err)
 	}
 	return nil
 }
 
-func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd *exec.Cmd, onExit func()) error {
+func (l *processWorkerLauncher) startTracked(ctx context.Context, sessionID string, label string, cmd *exec.Cmd, onExit func()) error {
+	l.replaceOnce.Do(func() {
+		if l.replaceOps == nil {
+			l.replaceOps = newSessionOperationLocks()
+		}
+	})
+	unlockReplacement := l.replaceOps.lock(sessionID)
+	defer unlockReplacement()
+	if err := l.stopAndWait(ctx, sessionID); err != nil {
+		return fmt.Errorf("stop previous %s: %w", label, err)
+	}
 	l.mu.Lock()
 	if l.closed {
 		l.mu.Unlock()
@@ -120,10 +135,12 @@ func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd
 		l.mu.Unlock()
 		return err
 	}
-	if previous := l.commands[sessionID]; previous != nil && previous.Process != nil {
-		_ = previous.Process.Kill()
+	if l.exits == nil {
+		l.exits = make(map[*exec.Cmd]chan struct{})
 	}
+	exited := make(chan struct{})
 	l.commands[sessionID] = cmd
+	l.exits[cmd] = exited
 	l.wait.Add(1)
 	l.mu.Unlock()
 	if l.logger != nil {
@@ -137,16 +154,43 @@ func (l *processWorkerLauncher) startTracked(sessionID string, label string, cmd
 			}
 		}()
 		err := cmd.Wait()
+		close(exited)
 		l.mu.Lock()
 		if l.commands[sessionID] == cmd {
 			delete(l.commands, sessionID)
 		}
+		delete(l.exits, cmd)
 		l.mu.Unlock()
 		if l.logger != nil && err != nil {
 			l.logger.Printf("%s exited session=%s err=%v", label, sessionID, err)
 		}
 	}()
 	return nil
+}
+
+func (l *processWorkerLauncher) stopAndWait(ctx context.Context, sessionID string) error {
+	if l == nil {
+		return nil
+	}
+	l.mu.Lock()
+	cmd := l.commands[sessionID]
+	var exited <-chan struct{}
+	if cmd != nil {
+		exited = l.exits[cmd]
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	}
+	l.mu.Unlock()
+	if cmd == nil || exited == nil {
+		return nil
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-exited:
+		return nil
+	}
 }
 
 func (l *processWorkerLauncher) Close() {
