@@ -320,8 +320,10 @@ must already carry the capability; otherwise binding returns `409` with code
 incompatible existing Session before submitting a binding.
 
 Successful Channel replies include the producing runtime plus the completed
-turn's measured duration and provider-reported current-turn token total when
-available. Missing usage is omitted rather than estimated.
+turn's measured duration and provider-reported current-turn input and output
+tokens when available. Cached input is shown as a subset of total input so the
+compact attribution does not present it as fresh input. Missing usage is
+omitted rather than estimated.
 
 On daemon startup, inbox rows left in `received` are failed before adapters
 start. A `claimed` row without a persisted reply receipt is marked
