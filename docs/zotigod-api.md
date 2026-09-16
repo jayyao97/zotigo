@@ -275,9 +275,9 @@ replies continue it. Strategy `shared` keeps one Session on the rootless group:
 an empty `session_id` provisions it on the first mention, while a supplied ID
 must name an idle, unbound Session assigned to the selected Workspace. Existing
 history and the Session's runtime and prompt snapshot are retained. Every
-shared-mode input requires an @mention and is routed to that one Session. A
-top-level mention receives a direct reply in the main group; a mention inside
-an existing topic receives its reply in that topic. Previously rooted Sessions
+shared-mode input requires an @mention and is routed to that one Session. An
+accepted mention receives a direct reply in the main group, including when the
+message quotes or replies to another message. Previously rooted Sessions
 remain dormant while the group uses `shared`, preserving their history and
 binding if the group later returns to `topic`. Feishu topic-mode groups require the
 `topic` strategy; both the daemon and clients reject `shared` for those groups.

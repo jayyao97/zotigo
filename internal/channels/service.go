@@ -1252,11 +1252,7 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 	}
 	if group.SessionStrategy == SessionStrategyShared {
 		in.TriggerAllowed = in.MentionedBot
-		if in.StartsConversation {
-			in.ReplyMode = ReplyModeDirect
-		} else {
-			in.ReplyMode = ReplyModeThread
-		}
+		in.ReplyMode = ReplyModeDirect
 	}
 	message, err := s.store.RecordMessage(ctx, connectionID, in)
 	s.configMu.RUnlock()

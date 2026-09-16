@@ -53,6 +53,23 @@ func TestCOTClientUsesDocumentedCreateContract(t *testing.T) {
 	}
 }
 
+func TestCOTClientCreatesDirectCarrierOutsideThread(t *testing.T) {
+	client := &cotClient{do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+		body := req.Body.(map[string]any)
+		if body["origin_message_id"] != "om_test" || body["reply_in_thread"] != false {
+			t.Fatalf("body=%+v", body)
+		}
+		return &larkcore.ApiResp{StatusCode: http.StatusOK, RawBody: []byte(`{"code":0,"msg":"ok","data":{"cot_id":"cot-1","message_id":"om-cot"}}`)}, nil
+	}}
+	receipt, err := client.Create(context.Background(), channels.InboundMessage{ChatID: "oc_test", MessageID: "om_test", ReplyMode: channels.ReplyModeDirect})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if receipt.ReplyMode != channels.ReplyModeDirect {
+		t.Fatalf("receipt=%+v", receipt)
+	}
+}
+
 func TestCOTClientBatchesAppendAndUsesDocumentedCompleteContract(t *testing.T) {
 	calls := 0
 	client := &cotClient{do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
@@ -237,15 +254,17 @@ func TestApprovalEventsKeepDistinctStableStepIDs(t *testing.T) {
 }
 
 func TestCOTCompletionSendsStrictFinalReplyThenFinishesRun(t *testing.T) {
-	api := &fakeCOTAPI{createReceipt: channels.DeliveryReceipt{Mode: channels.ProgressModeCOT, MessageID: "cot-message", COTID: "cot-1"}}
+	api := &fakeCOTAPI{createReceipt: channels.DeliveryReceipt{Mode: channels.ProgressModeCOT, ReplyMode: channels.ReplyModeDirect, MessageID: "cot-message", COTID: "cot-1"}}
 	var replyTarget, replyUUID string
-	handle, err := openCOTProgress(context.Background(), api, func(_ context.Context, target string, result channels.TaskResult, uuid string, _ bool) (string, error) {
+	var replyInThread bool
+	handle, err := openCOTProgress(context.Background(), api, func(_ context.Context, target string, result channels.TaskResult, uuid string, inThread bool) (string, error) {
 		replyTarget, replyUUID = target, uuid
+		replyInThread = inThread
 		if result.Text != "answer" {
 			t.Fatalf("text=%q", result.Text)
 		}
 		return "final-1", nil
-	}, channels.InboundMessage{MessageID: "origin-1", ChatID: "oc-1"})
+	}, channels.InboundMessage{MessageID: "origin-1", ChatID: "oc-1", ReplyMode: channels.ReplyModeDirect})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,8 +279,8 @@ func TestCOTCompletionSendsStrictFinalReplyThenFinishesRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if finalID != "final-1" || replyTarget != "origin-1" || replyUUID != "zotigo-final-origin-1" {
-		t.Fatalf("final=%q target=%q uuid=%q", finalID, replyTarget, replyUUID)
+	if finalID != "final-1" || replyTarget != "origin-1" || replyUUID != "zotigo-final-origin-1" || replyInThread {
+		t.Fatalf("final=%q target=%q uuid=%q reply_in_thread=%v", finalID, replyTarget, replyUUID, replyInThread)
 	}
 	if len(api.appended) != 2 || len(api.appended[0]) != 1 || *api.appended[0][0].EventType != "RUN_STARTED" || len(api.appended[1]) != 1 || *api.appended[1][0].EventType != "RUN_FINISHED" || len(api.completed) != 0 {
 		t.Fatalf("appended=%+v completed=%v", api.appended, api.completed)

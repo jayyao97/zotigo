@@ -930,7 +930,7 @@ func TestServiceProvisionsDistinctSessionForNewTopLevelConversation(t *testing.T
 	}
 }
 
-func TestServiceSharedGroupUsesOneSessionAndPreservesReplyLocation(t *testing.T) {
+func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	store, err := Open(t.TempDir())
@@ -1002,7 +1002,7 @@ func TestServiceSharedGroupUsesOneSessionAndPreservesReplyLocation(t *testing.T)
 	}
 	adapter.mu.Lock()
 	defer adapter.mu.Unlock()
-	if len(adapter.opened) != 2 || adapter.opened[0].ReplyMode != ReplyModeDirect || adapter.opened[1].ReplyMode != ReplyModeThread {
+	if len(adapter.opened) != 2 || adapter.opened[0].ReplyMode != ReplyModeDirect || adapter.opened[1].ReplyMode != ReplyModeDirect {
 		t.Fatalf("opened=%+v", adapter.opened)
 	}
 }
