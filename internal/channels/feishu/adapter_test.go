@@ -327,10 +327,11 @@ func TestReceiveUsesRootIDForTopicReply(t *testing.T) {
 	event.Event.Message.MessageId = stringPointer("reply-1")
 	event.Event.Message.RootId = stringPointer("root-message")
 	event.Event.Message.ThreadId = stringPointer("thread-1")
+	event.Event.Message.ParentId = stringPointer("parent-1")
 	if err := adapter.receive(context.Background(), event); err != nil {
 		t.Fatal(err)
 	}
-	if received.RootID != "root-message" || received.ThreadID != "thread-1" || received.ConversationKey != "allowed\x00root-message" || received.StartsConversation || !received.TriggerAllowed {
+	if received.RootID != "root-message" || received.ThreadID != "thread-1" || received.ParentMessageID != "parent-1" || received.ConversationKey != "allowed\x00root-message" || received.StartsConversation || !received.TriggerAllowed {
 		t.Fatalf("received=%+v", received)
 	}
 }

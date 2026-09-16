@@ -43,6 +43,7 @@ type RequestContext struct {
 	ExternalRootID           string           `json:"external_root_message_id,omitempty"`
 	ExternalThreadID         string           `json:"external_thread_id,omitempty"`
 	ExternalMessageID        string           `json:"external_message_id,omitempty"`
+	ExternalParentMessageID  string           `json:"external_parent_message_id,omitempty"`
 	Actor                    RequestActor     `json:"actor"`
 }
 

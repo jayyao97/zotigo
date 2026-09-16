@@ -260,7 +260,9 @@ app-server experimental API negotiated by zotigod during `initialize`; the
 deployed Codex build must expose the corresponding `additionalContext`
 capability. The context includes the provider-resolved bot ID and display name,
 the provider group ID and current group name, the current sender identity and
-owner/member role, and message/root/thread IDs. Display names are untrusted
+owner/member role, and current/parent/root/thread message IDs. The optional
+`external_parent_message_id` identifies the message directly referenced or
+replied to by the current input. Display names are untrusted
 metadata; IDs and roles are host attributed.
 
 `GET /channels/conversations` lists cached conversations ordered by recent
@@ -300,9 +302,12 @@ on the tool manifest retained by that thread because the resume API cannot add
 dynamic tools. The daemon resolves every call from the bound Session and the
 host-attributed current-turn `RequestContext`; model arguments can select only
 a bounded message count, never a connection or conversation ID. The result is
-the authorized conversation's retained seven-day message history, including
+the authorized conversation's retained seven-day message history with provider
+message and parent-message IDs, including
 messages that were stored with `mention_required` and therefore did not start a
-turn. Calls from local turns or mismatched Channel context are rejected.
+turn. Codex's Channel developer instructions direct it to use this tool when a
+request refers to a quoted/replied-to message or omitted earlier messages.
+Calls from local turns or mismatched Channel context are rejected.
 
 An idle Codex Session whose provider conversation has not started can acquire
 the capability when it is first bound. A Codex Session with an existing thread

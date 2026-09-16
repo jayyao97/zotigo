@@ -83,7 +83,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS channel_session_binding ON channel_conversatio
 CREATE TABLE IF NOT EXISTS channel_messages (
  id TEXT PRIMARY KEY, connection_id TEXT NOT NULL REFERENCES channel_connections(id) ON DELETE CASCADE,
  conversation_id TEXT NOT NULL REFERENCES channel_conversations(id) ON DELETE CASCADE,
- provider_message_id TEXT NOT NULL, sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
+ provider_message_id TEXT NOT NULL, parent_provider_message_id TEXT NOT NULL DEFAULT '', sender_id TEXT NOT NULL, sender_name TEXT NOT NULL DEFAULT '', text TEXT NOT NULL,
  mentioned_bot INTEGER NOT NULL, trigger_status TEXT NOT NULL, status_detail TEXT NOT NULL DEFAULT '', reply_message_id TEXT NOT NULL DEFAULT '',
  delivery_mode TEXT NOT NULL DEFAULT '', reply_mode TEXT NOT NULL DEFAULT '', cot_id TEXT NOT NULL DEFAULT '', processing_marker_id TEXT NOT NULL DEFAULT '', final_message_id TEXT NOT NULL DEFAULT '', projected_sequence INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL,
@@ -140,6 +140,15 @@ CREATE INDEX IF NOT EXISTS channel_messages_by_conversation ON channel_messages(
 	}
 	if err := s.migrateConversationRootScope(); err != nil {
 		return err
+	}
+	var parentMessageColumn int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_messages') WHERE name='parent_provider_message_id'`).Scan(&parentMessageColumn); err != nil {
+		return fmt.Errorf("inspect channel parent message schema: %w", err)
+	}
+	if parentMessageColumn == 0 {
+		if _, err := s.db.Exec(`ALTER TABLE channel_messages ADD COLUMN parent_provider_message_id TEXT NOT NULL DEFAULT ''`); err != nil {
+			return fmt.Errorf("migrate channel parent message: %w", err)
+		}
 	}
 	var chatNameColumn int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('channel_conversations') WHERE name='chat_name'`).Scan(&chatNameColumn); err != nil {
@@ -694,8 +703,8 @@ func (s *Store) RecordMessage(ctx context.Context, connectionID string, in Inbou
 			return Message{}, err
 		}
 	}
-	m := Message{ID: "msg_" + connectionID + "_" + in.MessageID, ConnectionID: connectionID, ConversationID: convID, ProviderID: in.MessageID, Sender: in.Sender, Text: in.Text, MentionedBot: in.MentionedBot, TriggerStatus: "received", ReplyMode: in.ReplyMode, CreatedAt: at}
-	_, err = tx.ExecContext(ctx, `INSERT INTO channel_messages(id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,reply_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id,provider_message_id) DO NOTHING`, m.ID, connectionID, convID, in.MessageID, in.Sender.ID, in.Sender.DisplayName, in.Text, in.MentionedBot, m.TriggerStatus, m.ReplyMode, at.Format(time.RFC3339Nano))
+	m := Message{ID: "msg_" + connectionID + "_" + in.MessageID, ConnectionID: connectionID, ConversationID: convID, ProviderID: in.MessageID, ParentProviderID: in.ParentMessageID, Sender: in.Sender, Text: in.Text, MentionedBot: in.MentionedBot, TriggerStatus: "received", ReplyMode: in.ReplyMode, CreatedAt: at}
+	_, err = tx.ExecContext(ctx, `INSERT INTO channel_messages(id,connection_id,conversation_id,provider_message_id,parent_provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,reply_mode,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(connection_id,provider_message_id) DO NOTHING`, m.ID, connectionID, convID, in.MessageID, in.ParentMessageID, in.Sender.ID, in.Sender.DisplayName, in.Text, in.MentionedBot, m.TriggerStatus, m.ReplyMode, at.Format(time.RFC3339Nano))
 	if err != nil {
 		return Message{}, err
 	}
@@ -712,14 +721,14 @@ func (s *Store) RecordMessage(ctx context.Context, connectionID string, in Inbou
 	return s.GetMessageByProviderID(ctx, connectionID, in.MessageID)
 }
 
-const messageColumns = `id,connection_id,conversation_id,provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at`
+const messageColumns = `id,connection_id,conversation_id,provider_message_id,parent_provider_message_id,sender_id,sender_name,text,mentioned_bot,trigger_status,status_detail,reply_message_id,delivery_mode,reply_mode,cot_id,processing_marker_id,final_message_id,projected_sequence,created_at`
 
 func scanMessage(row interface{ Scan(...any) error }) (Message, error) {
 	var m Message
 	var mentioned int
 	var projected int64
 	var created string
-	err := row.Scan(&m.ID, &m.ConnectionID, &m.ConversationID, &m.ProviderID, &m.Sender.ID, &m.Sender.DisplayName, &m.Text, &mentioned, &m.TriggerStatus, &m.StatusDetail, &m.ReplyMessageID, &m.DeliveryMode, &m.ReplyMode, &m.COTID, &m.ProcessingMarkerID, &m.FinalMessageID, &projected, &created)
+	err := row.Scan(&m.ID, &m.ConnectionID, &m.ConversationID, &m.ProviderID, &m.ParentProviderID, &m.Sender.ID, &m.Sender.DisplayName, &m.Text, &mentioned, &m.TriggerStatus, &m.StatusDetail, &m.ReplyMessageID, &m.DeliveryMode, &m.ReplyMode, &m.COTID, &m.ProcessingMarkerID, &m.FinalMessageID, &projected, &created)
 	if errors.Is(err, sql.ErrNoRows) {
 		return m, ErrNotFound
 	}
@@ -877,7 +886,7 @@ func scanMessages(rows *sql.Rows) ([]Message, error) {
 		var mentioned int
 		var projected int64
 		var created string
-		if err := rows.Scan(&m.ID, &m.ConnectionID, &m.ConversationID, &m.ProviderID, &m.Sender.ID, &m.Sender.DisplayName, &m.Text, &mentioned, &m.TriggerStatus, &m.StatusDetail, &m.ReplyMessageID, &m.DeliveryMode, &m.ReplyMode, &m.COTID, &m.ProcessingMarkerID, &m.FinalMessageID, &projected, &created); err != nil {
+		if err := rows.Scan(&m.ID, &m.ConnectionID, &m.ConversationID, &m.ProviderID, &m.ParentProviderID, &m.Sender.ID, &m.Sender.DisplayName, &m.Text, &mentioned, &m.TriggerStatus, &m.StatusDetail, &m.ReplyMessageID, &m.DeliveryMode, &m.ReplyMode, &m.COTID, &m.ProcessingMarkerID, &m.FinalMessageID, &projected, &created); err != nil {
 			return nil, err
 		}
 		m.MentionedBot = mentioned != 0

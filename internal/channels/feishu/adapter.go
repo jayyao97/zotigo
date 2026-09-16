@@ -602,7 +602,7 @@ func (a *Adapter) receive(ctx context.Context, event *larkim.P2MessageReceiveV1)
 		chatName, _ = a.resolveChatName(ctx, normalized.ChatID)
 	}
 	startsConversation := normalized.ChatType == "group" && rootID == normalized.MessageID
-	in := channels.InboundMessage{EventID: normalized.EventID, MessageID: normalized.MessageID, ChatID: normalized.ChatID, ChatType: normalized.ChatType, ChatName: chatName, RootID: rootID, ThreadID: threadID, Sender: channels.Sender{ID: normalized.UserID, DisplayName: details.senderName}, Text: strings.TrimSpace(text), Images: images, MentionedBot: mentioned, ConversationKey: normalized.ChatID + "\x00" + rootID, StartsConversation: startsConversation, TriggerAllowed: !startsConversation || mentioned, CreatedAt: created}
+	in := channels.InboundMessage{EventID: normalized.EventID, MessageID: normalized.MessageID, ParentMessageID: rawParentID, ChatID: normalized.ChatID, ChatType: normalized.ChatType, ChatName: chatName, RootID: rootID, ThreadID: threadID, Sender: channels.Sender{ID: normalized.UserID, DisplayName: details.senderName}, Text: strings.TrimSpace(text), Images: images, MentionedBot: mentioned, ConversationKey: normalized.ChatID + "\x00" + rootID, StartsConversation: startsConversation, TriggerAllowed: !startsConversation || mentioned, CreatedAt: created}
 	if in.RootID != "" {
 		in.ConversationName = topicDisplayName(in.Text)
 	}

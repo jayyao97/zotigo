@@ -1455,7 +1455,7 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		Origin: TaskOrigin{
 			Provider: connection.Provider, ConnectionName: connection.Name, ChannelID: connection.BotOpenID, ChannelName: connection.BotName, ConversationID: conversation.ID,
 			ConversationName: conversation.DisplayName, ConversationType: conversation.ChatType,
-			ExternalConversation: conversation.ChatID, ExternalConversationName: conversation.ChatName, ExternalRootID: conversation.RootID, ExternalThreadID: conversation.ThreadID, ExternalMessageID: in.MessageID,
+			ExternalConversation: conversation.ChatID, ExternalConversationName: conversation.ChatName, ExternalRootID: conversation.RootID, ExternalThreadID: conversation.ThreadID, ExternalMessageID: message.ProviderID, ExternalParentMessageID: message.ParentProviderID,
 			Sender: in.Sender, ActorRole: actorRole,
 		},
 	}

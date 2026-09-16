@@ -1043,6 +1043,20 @@ func TestProjectChannelItemExposesOnlySafeToolMetadata(t *testing.T) {
 	}
 }
 
+func TestProjectChannelItemNamesMessageHistoryTool(t *testing.T) {
+	item := zotigosession.DisplayItem{
+		ID:   "internal-tool-start",
+		Type: zotigosession.DisplayItemToolExecutionStarted,
+		ToolExecution: &zotigosession.DisplayToolExecution{
+			TurnID: "turn-1", ToolCallID: "exec-1", ToolName: "read_messages",
+		},
+	}
+	events := projectChannelItem(item, "turn-1")
+	if len(events) != 1 || events[0].Tool == nil || events[0].Tool.CallID != "exec-1" || events[0].Tool.Kind != "read_messages" || events[0].Tool.DisplayName != "Read group messages" {
+		t.Fatalf("events=%+v", events)
+	}
+}
+
 func TestProjectChannelApprovalUsesStableApprovalID(t *testing.T) {
 	for _, itemType := range []zotigosession.DisplayItemType{zotigosession.DisplayItemApprovalRequest, zotigosession.DisplayItemApprovalDecision} {
 		item := zotigosession.DisplayItem{ID: string(itemType), Type: itemType, Approval: &zotigosession.DisplayApproval{ID: "approval-2", TurnID: "turn-1"}}

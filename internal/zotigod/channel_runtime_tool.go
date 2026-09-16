@@ -79,7 +79,7 @@ type channelReadMessagesTool struct{ state *channelRuntimeToolState }
 
 func (*channelReadMessagesTool) Name() string { return "channel_read_messages" }
 func (*channelReadMessagesTool) Description() string {
-	return "Read recent messages from the Channel conversation for the current request. Use this when the user refers to group messages that were not included in the request."
+	return "Read recent messages from the Channel conversation for the current request, including message IDs. Use this when the user refers to a quoted/replied-to message or earlier group messages that were not included in the request."
 }
 func (*channelReadMessagesTool) Schema() any {
 	return map[string]any{

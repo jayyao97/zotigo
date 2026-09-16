@@ -633,12 +633,12 @@ func TestServiceRequiresMentionBindingAndAllowedSender(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "run", ChatID: "allowed", RootID: "observe", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", Images: []InboundImage{{ProviderKey: "provider-image"}}}); err != nil {
+	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "run", ParentMessageID: "quoted", ChatID: "allowed", RootID: "observe", ThreadID: "thread-1", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", Images: []InboundImage{{ProviderKey: "provider-image"}}}); err != nil {
 		t.Fatal(err)
 	}
 	select {
 	case task := <-called:
-		if task.SessionID != "session-1" || task.Origin.ActorRole != "owner" || task.Origin.Sender.ID != "user-1" || task.Origin.Sender.DisplayName != "Owner" || task.Origin.ConversationName != "Shadow Test" || task.Origin.ExternalConversation != "allowed" || task.Origin.ExternalRootID != "observe" || task.Origin.ExternalMessageID != "run" || len(task.Images) != 1 || string(task.Images[0].Data) != "image" {
+		if task.SessionID != "session-1" || task.Origin.ActorRole != "owner" || task.Origin.Sender.ID != "user-1" || task.Origin.Sender.DisplayName != "Owner" || task.Origin.ConversationName != "Shadow Test" || task.Origin.ExternalConversation != "allowed" || task.Origin.ExternalRootID != "observe" || task.Origin.ExternalMessageID != "run" || task.Origin.ExternalParentMessageID != "quoted" || len(task.Images) != 1 || string(task.Images[0].Data) != "image" {
 			t.Fatalf("task=%+v", task)
 		}
 	case <-ctx.Done():

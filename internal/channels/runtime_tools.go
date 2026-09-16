@@ -22,10 +22,12 @@ type RuntimeToolResult struct {
 }
 
 type runtimeToolMessage struct {
-	SenderID   string `json:"sender_id"`
-	SenderName string `json:"sender_name,omitempty"`
-	Text       string `json:"text"`
-	CreatedAt  string `json:"created_at"`
+	MessageID       string `json:"message_id"`
+	ParentMessageID string `json:"parent_message_id,omitempty"`
+	SenderID        string `json:"sender_id"`
+	SenderName      string `json:"sender_name,omitempty"`
+	Text            string `json:"text"`
+	CreatedAt       string `json:"created_at"`
 }
 
 // ExecuteRuntimeTool resolves the target exclusively from the bound Session
@@ -85,6 +87,7 @@ func (s *Service) ExecuteRuntimeTool(ctx context.Context, sessionID string, requ
 			continue
 		}
 		result = append(result, runtimeToolMessage{
+			MessageID: message.ProviderID, ParentMessageID: message.ParentProviderID,
 			SenderID: message.Sender.ID, SenderName: message.Sender.DisplayName,
 			Text: text, CreatedAt: message.CreatedAt.UTC().Format(time.RFC3339),
 		})

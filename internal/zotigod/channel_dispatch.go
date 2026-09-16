@@ -263,6 +263,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		ExternalRootID:           task.Origin.ExternalRootID,
 		ExternalThreadID:         task.Origin.ExternalThreadID,
 		ExternalMessageID:        task.Origin.ExternalMessageID,
+		ExternalParentMessageID:  task.Origin.ExternalParentMessageID,
 		Actor:                    protocol.RequestActor{ID: task.Origin.Sender.ID, DisplayName: task.Origin.Sender.DisplayName, Role: task.Origin.ActorRole},
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: agent.ApprovalPolicyAuto, promptRevision: desired.Revision, requestContext: requestContext})
@@ -491,6 +492,8 @@ func publicToolName(name string) string {
 		return "Search workspace"
 	case "web_search", "web_fetch":
 		return "Search the web"
+	case "read_messages", "channel_read_messages":
+		return "Read group messages"
 	case "spawn_agent", "send_message", "wait_agent":
 		return "Delegate task"
 	default:
@@ -500,7 +503,7 @@ func publicToolName(name string) string {
 
 func publicToolKind(name string) string {
 	switch name {
-	case "shell", "exec_command", "read_file", "write_file", "edit", "grep", "glob", "web_search", "web_fetch", "spawn_agent", "send_message", "wait_agent":
+	case "shell", "exec_command", "read_file", "write_file", "edit", "grep", "glob", "web_search", "web_fetch", "spawn_agent", "send_message", "wait_agent", "read_messages", "channel_read_messages":
 		return name
 	default:
 		return "tool"

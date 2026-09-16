@@ -176,6 +176,7 @@ type Message struct {
 	ConnectionID       string    `json:"connection_id"`
 	ConversationID     string    `json:"conversation_id"`
 	ProviderID         string    `json:"provider_message_id"`
+	ParentProviderID   string    `json:"parent_provider_message_id,omitempty"`
 	Sender             Sender    `json:"sender"`
 	Text               string    `json:"text"`
 	MentionedBot       bool      `json:"mentioned_bot"`
@@ -194,6 +195,7 @@ type Message struct {
 type InboundMessage struct {
 	EventID            string
 	MessageID          string
+	ParentMessageID    string
 	ChatID             string
 	ChatType           string
 	ChatName           string
@@ -263,6 +265,7 @@ type TaskOrigin struct {
 	ExternalRootID           string
 	ExternalThreadID         string
 	ExternalMessageID        string
+	ExternalParentMessageID  string
 	Sender                   Sender
 	ActorRole                string
 }

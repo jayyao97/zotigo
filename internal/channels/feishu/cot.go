@@ -336,6 +336,8 @@ func cotToolIcon(name string) string {
 		return "bash"
 	case "read_file", "grep", "glob":
 		return "read"
+	case "read_messages", "channel_read_messages":
+		return "read"
 	case "write_file", "edit":
 		return "write"
 	case "web_search", "web_fetch":

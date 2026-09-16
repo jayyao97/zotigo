@@ -34,11 +34,15 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 	}
 	for _, message := range []InboundMessage{
 		{MessageID: "message-1", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-1", DisplayName: "Alice"}, Text: "not mentioned", CreatedAt: time.Now().Add(-time.Minute)},
-		{MessageID: "message-2", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-2", DisplayName: "Bob"}, Text: "latest", CreatedAt: time.Now()},
+		{MessageID: "message-2", ParentMessageID: "message-1", ChatID: "chat-1", ChatType: "group", Sender: Sender{ID: "user-2", DisplayName: "Bob"}, Text: "latest", CreatedAt: time.Now()},
 	} {
 		if _, err := store.RecordMessage(ctx, "connection-1", message); err != nil {
 			t.Fatal(err)
 		}
+	}
+	stored, err := store.GetMessageByProviderID(ctx, "connection-1", "message-2")
+	if err != nil || stored.ParentProviderID != "message-1" {
+		t.Fatalf("stored parent message = %+v err=%v", stored, err)
 	}
 	secrets, err := NewSecretStore(t.TempDir())
 	if err != nil {
@@ -51,7 +55,7 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(result.Text, `"text":"not mentioned"`) || !strings.Contains(result.Text, `"sender_name":"Bob"`) {
+	if !strings.Contains(result.Text, `"message_id":"message-2"`) || !strings.Contains(result.Text, `"parent_message_id":"message-1"`) || !strings.Contains(result.Text, `"text":"not mentioned"`) || !strings.Contains(result.Text, `"sender_name":"Bob"`) {
 		t.Fatalf("result = %s", result.Text)
 	}
 	if _, err := service.ExecuteRuntimeTool(ctx, "session-1", &protocol.RequestContext{

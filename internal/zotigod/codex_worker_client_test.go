@@ -738,7 +738,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 7 {
+	if len(items) != 8 {
 		t.Fatalf("display items = %#v", items)
 	}
 	if items[0].ID != "message-1" || items[0].Content[0].Text != "Checking files." {
@@ -748,18 +748,22 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	if call == nil || call.ID != "tool-1" || call.Name != "read_file" || !strings.Contains(call.Arguments, `"path":"/tmp/workspace/AGENTS.md"`) {
 		t.Fatalf("tool call = %#v", items[1])
 	}
-	result := items[2].Content[0].ToolResult
+	started := items[2].ToolExecution
+	if items[2].Type != zotigosession.DisplayItemToolExecutionStarted || started == nil || started.TurnID != "turn-1" || started.ToolCallID != "tool-1" || started.ToolName != "read_file" {
+		t.Fatalf("tool execution start = %#v", items[2])
+	}
+	result := items[3].Content[0].ToolResult
 	if result == nil || result.ToolCallID != "tool-1" || result.ToolName != "read_file" || result.Text != "# Instructions\n" || result.IsError {
-		t.Fatalf("tool result = %#v", items[2])
+		t.Fatalf("tool result = %#v", items[3])
 	}
-	if items[3].ID != "compaction-1" || items[3].Type != zotigosession.DisplayItemContextCompacted || items[3].Turn == nil || items[3].Turn.ID != "turn-1" {
-		t.Fatalf("compaction item = %#v", items[3])
+	if items[4].ID != "compaction-1" || items[4].Type != zotigosession.DisplayItemContextCompacted || items[4].Turn == nil || items[4].Turn.ID != "turn-1" {
+		t.Fatalf("compaction item = %#v", items[4])
 	}
-	if items[4].Content[0].Type != string(protocol.ContentTypeReasoning) || items[4].Content[0].Text != "The instructions apply." {
-		t.Fatalf("reasoning item = %#v", items[4])
+	if items[5].Content[0].Type != string(protocol.ContentTypeReasoning) || items[5].Content[0].Text != "The instructions apply." {
+		t.Fatalf("reasoning item = %#v", items[5])
 	}
-	if items[6].Type != zotigosession.DisplayItemTurnCompleted {
-		t.Fatalf("turn item = %#v", items[6])
+	if items[7].Type != zotigosession.DisplayItemTurnCompleted {
+		t.Fatalf("turn item = %#v", items[7])
 	}
 	if len(hookDispatcher.events) != 2 {
 		t.Fatalf("hook events = %#v", hookDispatcher.events)
@@ -1143,7 +1147,7 @@ func TestResumeCodexThreadInjectsChannelDeveloperInstructions(t *testing.T) {
 		t.Fatal(err)
 	}
 	got, _ := rpc.requests["thread/resume"]["developerInstructions"].(string)
-	for _, expected := range []string{"Zotigo channel integration rules", "Stay within the bound workspace.", "Ask before publishing.", "does not grant approval"} {
+	for _, expected := range []string{"Zotigo channel integration rules", "channel.read_messages", "quoted or replied-to message", "Stay within the bound workspace.", "Ask before publishing.", "does not grant approval"} {
 		if !strings.Contains(got, expected) {
 			t.Fatalf("developer instructions %q do not contain %q", got, expected)
 		}
@@ -1296,7 +1300,7 @@ func TestCodexTurnStartCarriesRequestContextAsApplicationContext(t *testing.T) {
 	rpc := &codexWorkerRPC{turnID: "turn-context"}
 	runtime, _ := newCodexInputTestRuntime(t, "session-context", rpc)
 	requestContext := &protocol.RequestContext{
-		Source: "feishu", ConnectionID: "connection-1", ExternalConversation: "oc_chat", ExternalRootID: "om_root",
+		Source: "feishu", ConnectionID: "connection-1", ExternalConversation: "oc_chat", ExternalRootID: "om_root", ExternalParentMessageID: "om_parent",
 		Channel: &protocol.RequestIdentity{ID: "ou_bot", DisplayName: "Shadow Yao"}, ExternalConversationName: "Shadow Test",
 		Actor: protocol.RequestActor{ID: "ou_owner", DisplayName: "Owner name", Role: "owner"},
 	}
@@ -1318,7 +1322,7 @@ func TestCodexTurnStartCarriesRequestContextAsApplicationContext(t *testing.T) {
 		t.Fatalf("request context entry = %#v", additional["zotigo.request_context"])
 	}
 	value, _ := entry["value"].(string)
-	for _, expected := range []string{`"external_conversation_id":"oc_chat"`, `"external_conversation_name":"Shadow Test"`, `"display_name":"Shadow Yao"`, `"id":"ou_owner"`, `"role":"owner"`} {
+	for _, expected := range []string{`"external_conversation_id":"oc_chat"`, `"external_conversation_name":"Shadow Test"`, `"external_parent_message_id":"om_parent"`, `"display_name":"Shadow Yao"`, `"id":"ou_owner"`, `"role":"owner"`} {
 		if !strings.Contains(value, expected) {
 			t.Fatalf("request context %q does not contain %q", value, expected)
 		}
