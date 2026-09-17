@@ -205,3 +205,61 @@ func TestWorkspaceImageMediaTypes(t *testing.T) {
 		})
 	}
 }
+
+func TestExplicitFilePreviewOutsideWorkspace(t *testing.T) {
+	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	outside := filepath.Join(t.TempDir(), "outside.png")
+	if err := os.WriteFile(outside, []byte("\x89PNG\r\n\x1a\npreview"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name, flags string
+		status      int
+		kind        string
+	}{
+		{"automatic", `,"imageOnly":true`, 200, "requires_confirmation"},
+		{"explicit", `,"imageOnly":true,"explicitOpen":true`, 200, "image"},
+		{"ordinary", ``, 403, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rec := requestCatalog(t, h, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, outside)+tc.flags+`}`)
+			if rec.Code != tc.status {
+				t.Fatalf("%d %s", rec.Code, rec.Body)
+			}
+			if tc.kind != "" {
+				var result struct {
+					Kind string `json:"kind"`
+				}
+				decodeCatalogData(t, rec, &result)
+				if result.Kind != tc.kind {
+					t.Fatalf("kind %s", result.Kind)
+				}
+			}
+		})
+	}
+	rec := requestCatalog(t, h, http.MethodPost, "/files/save", `{"path":`+quotedJSON(t, outside)+`,"explicitOpen":true,"content":"overwrite"}`)
+	if rec.Code != 403 {
+		t.Fatalf("explicit read must not permit write: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestExplicitOutsideTextPreviewIsReadOnly(t *testing.T) {
+	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	name := filepath.Join(t.TempDir(), "outside.txt")
+	if err := os.WriteFile(name, []byte("read me"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	rec := requestCatalog(t, h, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, name)+`,"explicitOpen":true}`)
+	var result struct {
+		Kind string           `json:"kind"`
+		File textFileSnapshot `json:"file"`
+	}
+	decodeCatalogData(t, rec, &result)
+	if result.Kind != "text" || !result.File.ReadOnly {
+		t.Fatalf("outside preview %+v", result)
+	}
+	rec = requestCatalog(t, h, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, filepath.Dir(name))+`,"explicitOpen":true,"imageOnly":true}`)
+	if rec.Code != 400 {
+		t.Fatalf("directory image preview %d", rec.Code)
+	}
+}

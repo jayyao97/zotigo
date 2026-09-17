@@ -21,6 +21,8 @@ import (
 var workspaceFileWrites sync.Mutex
 
 type fileRequest struct {
+	ExplicitOpen    bool    `json:"explicitOpen"`
+	ImageOnly       bool    `json:"imageOnly"`
 	Path            string  `json:"path"`
 	SessionID       string  `json:"sessionId"`
 	BasePath        string  `json:"basePath"`
@@ -49,7 +51,7 @@ const maximumImagePreviewBytes = 10 * 1024 * 1024
 
 func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Path == "/files/capabilities" && r.Method == http.MethodGet {
-		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true, "list": true, "image": true})
+		writeAPIJSON(w, http.StatusOK, map[string]bool{"read": true, "write": true, "list": true, "image": true, "explicit_open": true})
 		return
 	}
 	if r.Method != http.MethodPost {
@@ -87,7 +89,16 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		requested = filepath.Join(base, requested)
 	}
 	root, relative, resolved, err := openWorkspaceFileRoot(requested, roots)
+	outsideRoots := err != nil
+	// Explicit user reads may leave registered roots; writes never inherit this permission.
+	if outsideRoots && input.ExplicitOpen && r.URL.Path == "/files/open" {
+		root, relative, resolved, err = openWorkspaceFileRoot(requested, []string{filepath.VolumeName(requested) + string(filepath.Separator)})
+	}
 	if err != nil {
+		if input.ImageOnly && !input.ExplicitOpen && r.URL.Path == "/files/open" {
+			writeAPIJSON(w, 200, map[string]string{"kind": "requires_confirmation"})
+			return
+		}
 		writeAPIError(w, 403, "path does not exist or is outside registered workspaces")
 		return
 	}
@@ -131,6 +142,10 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if info, statErr := root.Stat(relative); statErr == nil && info.IsDir() {
+		if input.ImageOnly {
+			writeAPIError(w, 400, "path is a directory, not an image")
+			return
+		}
 		writeAPIJSON(w, 200, map[string]any{"kind": "directory", "path": resolved})
 		return
 	}
@@ -143,6 +158,10 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 		writeAPIJSON(w, 200, map[string]any{"kind": "image", "file": image})
 		return
 	}
+	if input.ImageOnly {
+		writeAPIError(w, 400, "file is not a supported image or exceeds the preview limit")
+		return
+	}
 	snapshot, err := readWorkspaceText(root, relative, resolved)
 	if err != nil {
 		writeAPIError(w, 400, "file cannot be read")
@@ -151,6 +170,9 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if snapshot == nil {
 		writeAPIJSON(w, 200, map[string]any{"kind": "system", "path": resolved})
 		return
+	}
+	if outsideRoots {
+		snapshot.ReadOnly = true
 	}
 	writeAPIJSON(w, 200, map[string]any{"kind": "text", "file": snapshot})
 }
