@@ -143,6 +143,7 @@ func cloneMessage(message protocol.Message) protocol.Message {
 			usage := *metadata.ToolUsage
 			metadata.ToolUsage = &usage
 		}
+		metadata.RequestContext = metadata.RequestContext.Clone()
 		metadata.Raw = cloneStringAnyMap(metadata.Raw)
 		message.Metadata = &metadata
 	}

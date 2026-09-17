@@ -47,10 +47,14 @@ func (s *Store) AssignSession(ctx context.Context, sessionID string, workspaceID
 		}
 		return SessionOrganization{}, err
 	}
+	organization, err := scanOrganization(tx.QueryRowContext(ctx, organizationSelect+` WHERE session_id = ?`, sessionID))
+	if err != nil {
+		return SessionOrganization{}, err
+	}
 	if err := tx.Commit(); err != nil {
 		return SessionOrganization{}, err
 	}
-	return s.GetSessionOrganization(ctx, sessionID)
+	return organization, nil
 }
 
 func (s *Store) EnsureSessionOrganization(ctx context.Context, sessionID string) (SessionOrganization, error) {
@@ -67,6 +71,19 @@ func (s *Store) EnsureSessionOrganization(ctx context.Context, sessionID string)
 		return SessionOrganization{}, err
 	}
 	return s.GetSessionOrganization(ctx, sessionID)
+}
+
+func (s *Store) RemoveSessionOrganization(ctx context.Context, sessionID string) error {
+	result, err := s.db.ExecContext(ctx, `DELETE FROM session_organization WHERE session_id = ?`, sessionID)
+	if err != nil {
+		return err
+	}
+	if count, err := result.RowsAffected(); err != nil {
+		return err
+	} else if count == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (s *Store) GetSessionOrganization(ctx context.Context, sessionID string) (SessionOrganization, error) {

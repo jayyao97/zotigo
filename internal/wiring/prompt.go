@@ -16,10 +16,17 @@ type PromptConfig struct {
 	Transport                  string
 	IncludeProjectInstructions bool
 	SkillManager               *skills.SkillManager
+	AgentInstructions          string
 }
 
 func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
 	var opts []prompt.SystemPromptOption
+
+	if instructions := strings.TrimSpace(cfg.AgentInstructions); instructions != "" {
+		opts = append(opts, prompt.WithDynamicSection("agent_instructions", func(_ prompt.PromptContext) string {
+			return instructions
+		}))
+	}
 
 	if cfg.SkillManager != nil {
 		opts = append(opts, prompt.WithDynamicSection("available_skills", func(_ prompt.PromptContext) string {

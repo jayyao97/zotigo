@@ -26,6 +26,8 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/buildinfo"
+	"github.com/jayyao97/zotigo/internal/channels"
+	channelsfeishu "github.com/jayyao97/zotigo/internal/channels/feishu"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
@@ -54,28 +56,30 @@ const (
 )
 
 type Session struct {
-	ID               string               `json:"id"`
-	State            SessionState         `json:"state"`
-	Live             bool                 `json:"live"`
-	WorkingDirectory string               `json:"working_directory,omitempty"`
-	Agent            string               `json:"agent"`
-	ProfileName      string               `json:"profile,omitempty"`
-	Model            string               `json:"model,omitempty"`
-	ReasoningEffort  string               `json:"reasoning_effort,omitempty"`
-	ApprovalPolicy   agent.ApprovalPolicy `json:"approval_policy"`
-	CreatedAt        time.Time            `json:"created_at"`
-	UpdatedAt        time.Time            `json:"updated_at"`
-	StartedAt        *time.Time           `json:"started_at,omitempty"`
-	EndedAt          *time.Time           `json:"ended_at,omitempty"`
-	Error            string               `json:"error,omitempty"`
-	ErrorCode        string               `json:"error_code,omitempty"`
-	Working          bool                 `json:"working"`
-	ActiveTool       string               `json:"active_tool,omitempty"`
-	ContextUsage     *SessionContextUsage `json:"context_usage"`
-	seq              uint64
-	activationSource string
-	workerActivation uint64
-	workerGeneration string
+	ID                   string               `json:"id"`
+	State                SessionState         `json:"state"`
+	Live                 bool                 `json:"live"`
+	WorkingDirectory     string               `json:"working_directory,omitempty"`
+	Agent                string               `json:"agent"`
+	ProfileName          string               `json:"profile,omitempty"`
+	Model                string               `json:"model,omitempty"`
+	ReasoningEffort      string               `json:"reasoning_effort,omitempty"`
+	ApprovalPolicy       agent.ApprovalPolicy `json:"approval_policy"`
+	CreatedAt            time.Time            `json:"created_at"`
+	UpdatedAt            time.Time            `json:"updated_at"`
+	StartedAt            *time.Time           `json:"started_at,omitempty"`
+	EndedAt              *time.Time           `json:"ended_at,omitempty"`
+	Error                string               `json:"error,omitempty"`
+	ErrorCode            string               `json:"error_code,omitempty"`
+	Working              bool                 `json:"working"`
+	ActiveTool           string               `json:"active_tool,omitempty"`
+	ContextUsage         *SessionContextUsage `json:"context_usage"`
+	ChannelToolsVersion  uint64               `json:"channel_tools_version,omitempty"`
+	ChannelToolsEligible bool                 `json:"channel_tools_eligible"`
+	seq                  uint64
+	activationSource     string
+	workerActivation     uint64
+	workerGeneration     string
 }
 
 type SessionContextUsage struct {
@@ -158,14 +162,15 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 
 func newSession(workingDirectory string, profileName string) Session {
 	return Session{
-		ID:               newZotigodID("sess"),
-		State:            SessionStateCreated,
-		Live:             true,
-		WorkingDirectory: workingDirectory,
-		Agent:            string(zotigoruntime.AgentZotigo),
-		ProfileName:      profileName,
-		ApprovalPolicy:   agent.ApprovalPolicyAuto,
-		CreatedAt:        time.Now().UTC(),
+		ID:                   newZotigodID("sess"),
+		State:                SessionStateCreated,
+		Live:                 true,
+		WorkingDirectory:     workingDirectory,
+		Agent:                string(zotigoruntime.AgentZotigo),
+		ProfileName:          profileName,
+		ApprovalPolicy:       agent.ApprovalPolicyAuto,
+		CreatedAt:            time.Now().UTC(),
+		ChannelToolsEligible: true,
 	}
 }
 
@@ -480,6 +485,7 @@ type handler struct {
 	codexSync            *codexSessionSyncer
 	logger               *log.Logger
 	hooks                hookEventDispatcher
+	channels             *channels.Service
 	skillsMu             sync.Mutex
 	skillManagers        map[string]*skills.SkillManager
 }
@@ -665,21 +671,52 @@ func Run(args []string) (exitCode int) {
 		defer func() { _ = codexHost.Close() }()
 	}
 	server := &http.Server{
-		Addr: *addr,
-		Handler: newDefaultHandler(handlerOptions{
-			launcher:        launcher,
-			runtimes:        runtimes,
-			codexHost:       codexHost,
-			publicAuthToken: publicAuthToken,
-			workerAuthToken: workerAuthToken,
-			logger:          logger,
-			hooks:           hookDispatcher,
-		}),
+		Addr:              *addr,
+		Handler:           nil,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
+	channelStore, channelStoreErr := channels.Open("")
+	var channelService *channels.Service
+	if channelStoreErr != nil {
+		logger.Printf("Channels disabled: %v", channelStoreErr)
+	} else if secretStore, secretErr := channels.NewSecretStore(""); secretErr != nil {
+		_ = channelStore.Close()
+		logger.Printf("Channels disabled: %v", secretErr)
+	} else {
+		channelService = channels.NewService(channelStore, secretStore, logger, map[string]channels.AdapterFactory{channels.ProviderFeishu: channelsfeishu.Factory{}})
+	}
+	server.Handler = newDefaultHandler(handlerOptions{
+		launcher:        launcher,
+		runtimes:        runtimes,
+		codexHost:       codexHost,
+		publicAuthToken: publicAuthToken,
+		workerAuthToken: workerAuthToken,
+		logger:          logger,
+		hooks:           hookDispatcher,
+		channels:        channelService,
+	})
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var closeChannelsOnce sync.Once
+	closeChannels := func() {
+		closeChannelsOnce.Do(func() {
+			if channelService == nil {
+				return
+			}
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := channelService.Close(shutdownCtx); err != nil {
+				logger.Printf("Channels shutdown failed: %v", err)
+			}
+		})
+	}
+	defer closeChannels()
+	if channelService != nil {
+		if err := channelService.Start(ctx); err != nil {
+			logger.Printf("Channels start failed: %v", err)
+		}
+	}
 
 	errCh := make(chan error, 1)
 	go func() {
@@ -699,6 +736,7 @@ func Run(args []string) (exitCode int) {
 			logger.Printf("Shutdown failed: %v", err)
 			return 1
 		}
+		closeChannels()
 		if err := <-errCh; err != nil {
 			logger.Printf("Server failed: %v", err)
 			return 1
@@ -772,6 +810,7 @@ type handlerOptions struct {
 	codexHost            codexapp.HostProvider
 	logger               *log.Logger
 	hooks                hookEventDispatcher
+	channels             *channels.Service
 }
 
 func newDefaultHandler(opts handlerOptions) http.Handler {
@@ -901,6 +940,10 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		catalogErr:           options.catalogErr,
 		logger:               options.logger,
 		hooks:                options.hooks,
+		channels:             options.channels,
+	}
+	if handler.channels != nil {
+		handler.channels.SetDispatcher(handler)
 	}
 	if options.codexHost != nil && options.store != nil {
 		handler.codexSync = newCodexSessionSyncer(options.codexHost, options.store, items, options.catalog, registry, options.sessionOps)
@@ -952,6 +995,26 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageConversationBound:
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
+		case workerMessageRuntimeToolRequest:
+			if msg.RuntimeToolRequest != nil {
+				request := *msg.RuntimeToolRequest
+				go func() {
+					result := workerRuntimeToolResult{RequestID: request.RequestID}
+					if handler.channels == nil {
+						result.Error = "Channel service is unavailable"
+					} else {
+						toolCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
+						value, err := handler.channels.ExecuteRuntimeTool(toolCtx, sessionID, request.RequestContext, request.Name, request.Arguments)
+						cancel()
+						if err != nil {
+							result.Error = err.Error()
+						} else {
+							result.Text = value.Text
+						}
+					}
+					handler.workers.SendRuntimeToolResult(sessionID, generation, result)
+				}()
+			}
 		case workerMessageIdle:
 			if msg.Idle != nil {
 				if handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle) {
@@ -999,6 +1062,13 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/catalog/sessions/{$}", handler.handleCatalogSessionNotFound)
 	handleOptionalTrailingSlash(mux, "/catalog/sessions/{id}", withPathValue("id", handler.handleCatalogSession))
 	mux.HandleFunc("/catalog/sessions/{id}/{route...}", handler.handleCatalogSessionNotFound)
+	mux.HandleFunc("/channels/connections", handler.handleChannelConnections)
+	mux.HandleFunc("/channels/connections/{id}/groups", withPathValue("id", handler.handleChannelGroups))
+	mux.HandleFunc("/channels/connections/{id}/groups/{chat_id}/members", withPathValue("id", handler.handleChannelGroupMembers))
+	mux.HandleFunc("/channels/connections/{id}", withPathValue("id", handler.handleChannelConnection))
+	mux.HandleFunc("/channels/conversations", handler.handleChannelConversations)
+	mux.HandleFunc("/channels/conversations/{id}", withPathValue("id", handler.handleChannelConversation))
+	mux.HandleFunc("/channels/conversations/{id}/messages", withPathValue("id", handler.handleChannelMessages))
 	mux.HandleFunc("/sessions", handler.handleSessions)
 	mux.HandleFunc("/sessions/{$}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/sessions/{id}", withPathValue("id", handler.handleSessionGet))
@@ -1261,6 +1331,7 @@ func (h *handler) persistSession(ctx context.Context, session Session) error {
 			ApprovalPolicy:   session.ApprovalPolicy,
 			CreatedAt:        session.CreatedAt,
 			UpdatedAt:        session.CreatedAt,
+			Capabilities:     zotigosession.Capabilities{ChannelToolsVersion: session.ChannelToolsVersion},
 		},
 		AgentSnapshot: agent.Snapshot{
 			State:     agent.StateIdle,
@@ -1301,6 +1372,8 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 			sessions[idx].ReasoningEffort = meta.ReasoningEffort
 			sessions[idx].ApprovalPolicy = meta.ApprovalPolicy
 			sessions[idx].UpdatedAt = meta.UpdatedAt
+			sessions[idx].ChannelToolsVersion = meta.Capabilities.ChannelToolsVersion
+			sessions[idx].ChannelToolsEligible = channelToolsEligible(meta)
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -1322,19 +1395,25 @@ func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live b
 		approvalPolicy = agent.ApprovalPolicyAuto
 	}
 	return Session{
-		ID:               meta.ID,
-		State:            state,
-		Live:             live,
-		WorkingDirectory: meta.WorkingDirectory,
-		Agent:            agentKind,
-		ProfileName:      profileName,
-		Model:            meta.Model,
-		ReasoningEffort:  meta.ReasoningEffort,
-		ApprovalPolicy:   approvalPolicy,
-		CreatedAt:        meta.CreatedAt,
-		UpdatedAt:        meta.UpdatedAt,
-		ContextUsage:     unavailableSessionContextUsage(),
+		ID:                   meta.ID,
+		State:                state,
+		Live:                 live,
+		WorkingDirectory:     meta.WorkingDirectory,
+		Agent:                agentKind,
+		ProfileName:          profileName,
+		Model:                meta.Model,
+		ReasoningEffort:      meta.ReasoningEffort,
+		ApprovalPolicy:       approvalPolicy,
+		CreatedAt:            meta.CreatedAt,
+		UpdatedAt:            meta.UpdatedAt,
+		ContextUsage:         unavailableSessionContextUsage(),
+		ChannelToolsVersion:  meta.Capabilities.ChannelToolsVersion,
+		ChannelToolsEligible: channelToolsEligible(meta),
 	}
+}
+
+func channelToolsEligible(meta zotigosession.Metadata) bool {
+	return zotigoruntime.AgentKind(meta.Agent) != zotigoruntime.AgentCodex || meta.Capabilities.ChannelToolsVersion >= channels.RuntimeToolsVersion || strings.TrimSpace(meta.ConversationID) == ""
 }
 
 func (h *handler) storedSession(ctx context.Context, id string) (Session, bool, error) {
@@ -1395,18 +1474,6 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 		}
 		writeAPIJSON(w, http.StatusOK, h.decorateSession(r.Context(), stored, full))
 		return
-	}
-	if h.store != nil {
-		stored, err := h.store.Get(r.Context(), id)
-		if err == nil && stored != nil {
-			session.Agent = stored.Agent
-			if stored.Agent != string(zotigoruntime.AgentCodex) {
-				session.ProfileName = stored.ProfileName
-			}
-			session.Model = stored.Model
-			session.ReasoningEffort = stored.ReasoningEffort
-			session.ApprovalPolicy = stored.ApprovalPolicy
-		}
 	}
 	session.Live = true
 	var full *zotigosession.Session
@@ -1708,19 +1775,23 @@ func (h *handler) sessionWithStoredMetadata(ctx context.Context, session Session
 	if err != nil {
 		return Session{}, fmt.Errorf("load session metadata: %w", err)
 	}
+	return h.decorateSession(ctx, session, stored), nil
+}
+
+func (h *handler) decorateSession(ctx context.Context, session Session, stored *zotigosession.Session) Session {
 	if stored != nil {
 		session.Agent = stored.Agent
-		if stored.Agent != string(zotigoruntime.AgentCodex) {
+		if stored.Agent == string(zotigoruntime.AgentCodex) {
+			session.ProfileName = ""
+		} else {
 			session.ProfileName = stored.ProfileName
 		}
 		session.Model = stored.Model
 		session.ReasoningEffort = stored.ReasoningEffort
 		session.ApprovalPolicy = stored.ApprovalPolicy
+		session.ChannelToolsVersion = stored.Capabilities.ChannelToolsVersion
+		session.ChannelToolsEligible = channelToolsEligible(stored.Metadata)
 	}
-	return h.decorateSession(ctx, session, stored), nil
-}
-
-func (h *handler) decorateSession(ctx context.Context, session Session, stored *zotigosession.Session) Session {
 	session.ContextUsage = unavailableSessionContextUsage()
 	items, _, err := h.items.LoadItems(ctx, session.ID)
 	if err == nil {
@@ -1931,6 +2002,19 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	if req.Generation == "" {
 		writeAPIError(w, http.StatusBadRequest, "worker generation is required")
 		return
+	}
+	if _, ok := h.registry.Get(id); !ok {
+		h.writeTransition(w, Session{}, errSessionNotFound)
+		return
+	}
+	if !h.workers.Matches(id, req.Generation) {
+		waitCtx, cancel := context.WithTimeout(r.Context(), workerRegistrationWait)
+		matched := h.workers.WaitForMatch(waitCtx.Done(), id, req.Generation)
+		cancel()
+		if !matched {
+			writeAPIError(w, http.StatusConflict, "worker ready does not match the active connection")
+			return
+		}
 	}
 
 	unlock := h.sessionOps.lock(id)

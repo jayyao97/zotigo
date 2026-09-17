@@ -51,13 +51,14 @@ type ActionDecision struct {
 
 // SafetyClassifierRequest is the bounded input sent to the classifier.
 type SafetyClassifierRequest struct {
-	UserPrompt    string
-	ToolName      string
-	ToolArguments string
-	RiskLevel     string
-	IsGitRepo     bool
-	HasSnapshot   bool
-	RecentActions []RecentAction
+	UserPrompt     string
+	RequestContext *protocol.RequestContext
+	ToolName       string
+	ToolArguments  string
+	RiskLevel      string
+	IsGitRepo      bool
+	HasSnapshot    bool
+	RecentActions  []RecentAction
 }
 
 // RecentAction captures relevant recent tool activity for classification.
@@ -110,6 +111,7 @@ type TurnSafetyState struct {
 	SnapshotAttempted   bool
 	SnapshotFailed      bool
 	CurrentUserPrompt   string
+	RequestContext      *protocol.RequestContext
 	LastDecisionContext *protocol.ToolCall
 }
 
@@ -128,9 +130,10 @@ const (
 
 // AuditContextSummary stores a compact audit summary instead of full raw context.
 type AuditContextSummary struct {
-	UserPrompt    string   `json:"user_prompt,omitempty"`
-	RecentActions []string `json:"recent_actions,omitempty"`
-	Trigger       string   `json:"trigger,omitempty"`
+	UserPrompt     string                   `json:"user_prompt,omitempty"`
+	RecentActions  []string                 `json:"recent_actions,omitempty"`
+	Trigger        string                   `json:"trigger,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 // AuditEvent stores a compact auditable safety decision tied to a turn.

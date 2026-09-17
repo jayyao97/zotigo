@@ -22,6 +22,7 @@ type workerDisplayLog struct {
 	mu          sync.Mutex
 	turnID      string
 	turnStarted time.Time
+	turnUsage   protocol.Usage
 	terminalID  string
 	terminal    string
 	block       *workerDisplayBlock
@@ -49,9 +50,18 @@ func newWorkerDisplayLog(sessionID string, items displayItemSource) *workerDispl
 }
 
 func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
+	return l.startTurn(ctx, nil)
+}
+
+func (l *workerDisplayLog) StartTurnWithRuntime(ctx context.Context, runtime zotigosession.DisplayRuntime) (string, error) {
+	return l.startTurn(ctx, &runtime)
+}
+
+func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession.DisplayRuntime) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.turnStarted = time.Now()
+	l.turnUsage = protocol.Usage{}
 	l.turnID = fmt.Sprintf("turn_%d", l.turnStarted.UnixNano())
 	l.terminalID = ""
 	l.terminal = ""
@@ -63,7 +73,7 @@ func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
 	l.deltaMuted = false
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
-		Turn: &zotigosession.DisplayTurn{ID: l.turnID},
+		Turn: &zotigosession.DisplayTurn{ID: l.turnID, Runtime: runtime},
 	})
 	return l.turnID, err
 }
@@ -473,6 +483,9 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		}
 		return nil
 	case protocol.EventTypeFinish:
+		if event.Usage != nil {
+			l.turnUsage = l.turnUsage.Add(event.Usage.Normalized()).Normalized()
+		}
 		if event.FinishReason == "need_approval" {
 			return l.flushBlockLocked(ctx)
 		}
@@ -480,6 +493,11 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			return err
 		}
 		turnID := l.turnID
+		usage := l.turnUsage
+		var usagePointer *protocol.Usage
+		if usage != (protocol.Usage{}) {
+			usagePointer = &usage
+		}
 		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemTurnCompleted,
 			Turn: &zotigosession.DisplayTurn{
@@ -487,6 +505,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 				Status:               "completed",
 				ProviderFinishReason: string(event.FinishReason),
 				DurationMS:           time.Since(l.turnStarted).Milliseconds(),
+				Usage:                usagePointer,
 			},
 		})
 		if err == nil {

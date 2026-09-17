@@ -1,6 +1,10 @@
 package session
 
-import "time"
+import (
+	"time"
+
+	"github.com/jayyao97/zotigo/core/protocol"
+)
 
 // SafetyDecisionSource identifies where a safety decision came from.
 type SafetyDecisionSource string
@@ -35,9 +39,10 @@ const (
 
 // ContextSummary stores a compact audit summary instead of full raw context.
 type ContextSummary struct {
-	UserPrompt    string   `json:"user_prompt,omitempty"`
-	RecentActions []string `json:"recent_actions,omitempty"`
-	Trigger       string   `json:"trigger,omitempty"`
+	UserPrompt     string                   `json:"user_prompt,omitempty"`
+	RecentActions  []string                 `json:"recent_actions,omitempty"`
+	Trigger        string                   `json:"trigger,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 // SafetyEvent stores a compact auditable safety decision tied to a turn.

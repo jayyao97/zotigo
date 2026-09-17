@@ -35,6 +35,7 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/wiring"
@@ -140,7 +141,8 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	stopKeepalive = clientWriter.Close
 	displayBarrier := newWorkerDisplayBarrierClient(clientWriter)
-	commandCh, inputCh, approvalCh, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	commandCh, inputCh, approvalCh, runtimeToolResults, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	runtimeToolClient := &workerRuntimeToolClient{writer: clientWriter, results: runtimeToolResults}
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
@@ -158,6 +160,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		},
 		NotifyIdle:    clientWriter.SendIdle,
 		NotifyWorking: clientWriter.SendWorking,
+		RuntimeTools:  runtimeToolClient,
 	})
 	if err != nil {
 		return err
@@ -284,17 +287,20 @@ type workerRuntimeConfig struct {
 	NotifyIdle             func(context.Context, workerIdle) error
 	NotifyWorking          func(context.Context) error
 	HookDispatcher         *hooks.Dispatcher
+	RuntimeTools           *workerRuntimeToolClient
 }
 
-func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan error) {
+func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan workerRuntimeToolResult, <-chan error) {
 	commandCh := make(chan commandResponse, workerCommandBufferSize)
 	inputCh := make(chan workerInputRequest, workerCommandBufferSize)
 	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
+	runtimeToolResults := make(chan workerRuntimeToolResult, workerCommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
 		defer close(inputCh)
 		defer close(approvalCh)
+		defer close(runtimeToolResults)
 		for {
 			_, data, err := conn.ReadMessage()
 			if err != nil {
@@ -347,10 +353,14 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 				if acknowledgeDisplayBarrier != nil {
 					acknowledgeDisplayBarrier(msg.DisplayBarrier.ID)
 				}
+			case workerMessageRuntimeToolResult:
+				if msg.RuntimeToolResult != nil {
+					runtimeToolResults <- *msg.RuntimeToolResult
+				}
 			}
 		}
 	}()
-	return commandCh, inputCh, approvalCh, errCh
+	return commandCh, inputCh, approvalCh, runtimeToolResults, errCh
 }
 
 type workerRuntime struct {
@@ -369,6 +379,7 @@ type workerRuntime struct {
 	profileMu        sync.Mutex
 	profileEpoch     uint64
 	hookModel        string
+	promptConfig     zotigosession.PromptConfig
 	profileOrderMu   sync.Mutex
 	profileOrderTail <-chan struct{}
 	fatalCh          chan error
@@ -377,6 +388,7 @@ type workerRuntime struct {
 	notifyIdle       func(context.Context, workerIdle) error
 	notifyWorking    func(context.Context) error
 	hooks            hookEventDispatcher
+	channelTools     *channelRuntimeToolState
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
@@ -505,17 +517,20 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		Profile:     profile,
 		Executor:    localExec,
 		PromptBuilder: wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-			WorkDir:      cwd,
-			SkillManager: skills,
+			WorkDir:           cwd,
+			SkillManager:      skills,
+			AgentInstructions: sess.PromptConfig.AgentInstructions,
 		}),
 		UserContextBuilder: wiring.NewUserContextBuilder(wiring.PromptConfig{
 			WorkDir:                    cwd,
 			IncludeProjectInstructions: true,
 		}),
-		ApprovalPolicy:      approvalPolicy,
-		TranscriptDir:       transcriptDir,
-		Observer:            observer,
-		ConfigureClassifier: true,
+		ApprovalPolicy:       approvalPolicy,
+		TranscriptDir:        transcriptDir,
+		Observer:             observer,
+		ConfigureClassifier:  true,
+		ApprovalInstructions: sess.PromptConfig.ApprovalInstructions,
+		ReviewAllTools:       sess.PromptConfig.ReviewAllTools,
 		Middleware: []agent.Middleware{
 			hooks.ToolMiddleware(hookDispatcher, hooks.ToolContext{
 				SessionID: cfg.SessionID,
@@ -563,6 +578,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
+	var channelTools *channelRuntimeToolState
+	if sess.Capabilities.ChannelToolsVersion >= channels.RuntimeToolsVersion && cfg.RuntimeTools != nil {
+		channelTools = &channelRuntimeToolState{client: cfg.RuntimeTools}
+		ag.RegisterTool(&channelReadMessagesTool{state: channelTools})
+	}
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
@@ -588,7 +608,9 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		notifyIdle:    cfg.NotifyIdle,
 		notifyWorking: cfg.NotifyWorking,
 		hooks:         hookDispatcher,
+		channelTools:  channelTools,
 		hookModel:     profile.Model,
+		promptConfig:  sess.PromptConfig,
 	}
 	if runtimeWAL != nil {
 		runtimeWAL.onError = func(err error) {
@@ -710,10 +732,24 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequ
 }
 
 func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
+	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
+		r.mu.Lock()
+		promptRevision := r.promptConfig.Revision
+		r.mu.Unlock()
+		if request.RequiredApprovalPolicy != "" && r.agent.RequestedApprovalPolicy() != request.RequiredApprovalPolicy {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+	}
 	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
 		return commandResponse{}, err
 	} else if found {
 		if request.SteeringOnly && existing.Type != sessionCommandSteering {
+			return commandResponse{}, errCommandIDConflict
+		}
+		if request.StartOnly && existing.Type != sessionCommandMessage {
 			return commandResponse{}, errCommandIDConflict
 		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
@@ -723,6 +759,14 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 	}
 
 	turnID := r.display.CurrentTurnID()
+	if request.StartOnly {
+		r.mu.Lock()
+		turnActive := r.turnActive
+		r.mu.Unlock()
+		if turnID != "" || turnActive {
+			return commandResponse{}, errActiveTurn
+		}
+	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID {
 		return commandResponse{}, errTurnMismatch
 	}
@@ -955,11 +999,13 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 		return completion, nil
 	}
 	runtimeProfile, err := wiring.NewRuntimeProfile(wiring.AgentConfig{
-		Config:              appConfig,
-		ProfileName:         target,
-		Profile:             profile,
-		Observer:            r.observer,
-		ConfigureClassifier: true,
+		Config:               appConfig,
+		ProfileName:          target,
+		Profile:              profile,
+		Observer:             r.observer,
+		ConfigureClassifier:  true,
+		ApprovalInstructions: r.promptConfig.ApprovalInstructions,
+		ReviewAllTools:       r.promptConfig.ReviewAllTools,
 	})
 	if err != nil {
 		r.completeProfileFailure(predecessor, ordered, completion, commandID, target, err)
@@ -1288,9 +1334,13 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.readyDone = false
 	r.doneDone = false
 	r.turnCommandSequence = commandSequence
+	if r.channelTools != nil {
+		r.channelTools.setRequestContext(command.RequestContext)
+	}
 	r.mu.Unlock()
 
-	turnID, err := r.display.StartTurn(ctx)
+	model := r.turnHookModel()
+	turnID, err := r.display.StartTurnWithRuntime(ctx, zotigosession.DisplayRuntime{Agent: "zotigo", ProfileName: r.agent.ActiveProfileName(), Model: model})
 	if err != nil {
 		r.finishTurn()
 		return err
@@ -1302,7 +1352,6 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	if r.notifyWorking != nil {
 		_ = r.notifyWorking(ctx)
 	}
-	model := r.turnHookModel()
 	usageBefore := r.agent.Snapshot().CumulativeUsage
 	dispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
 	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
@@ -1357,7 +1406,10 @@ func messageFromCommandWithSkills(commandID string, command *messageCommandPaylo
 	if err != nil {
 		return protocol.Message{}, err
 	}
-	enriched.Metadata = &protocol.MessageMetadata{OriginalText: original.String()}
+	if enriched.Metadata == nil {
+		enriched.Metadata = &protocol.MessageMetadata{}
+	}
+	enriched.Metadata.OriginalText = original.String()
 	return enriched, nil
 }
 
@@ -1398,7 +1450,17 @@ func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
 }
 
 func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
-	return userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+	message, err := userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+	if err != nil {
+		return protocol.Message{}, err
+	}
+	if command.RequestContext != nil {
+		if message.Metadata == nil {
+			message.Metadata = &protocol.MessageMetadata{}
+		}
+		message.Metadata.RequestContext = command.RequestContext.Clone()
+	}
+	return message, nil
 }
 
 func userMessageFromCommand(text string, images []commandImageData, label string) (protocol.Message, error) {
@@ -1449,6 +1511,9 @@ func (r *workerRuntime) finishTurn() {
 	r.turnCancel = nil
 	r.turnActive = false
 	r.turnStopping = false
+	if r.channelTools != nil {
+		r.channelTools.setRequestContext(nil)
+	}
 	r.turnReady = nil
 	r.turnDone = nil
 }
@@ -2189,6 +2254,18 @@ func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversa
 		Type:              workerMessageConversationBound,
 		ConversationBound: &workerConversationBound{ConversationID: conversationID},
 	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-w.done:
+		return errors.New("worker connection is closed")
+	case w.sendCh <- msg:
+		return nil
+	}
+}
+
+func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request workerRuntimeToolRequest) error {
+	msg := workerMessage{Type: workerMessageRuntimeToolRequest, RuntimeToolRequest: &request}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()

@@ -19,6 +19,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/agent/prompt"
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 func TestFileStore_PutGet(t *testing.T) {
@@ -38,9 +39,16 @@ func TestFileStore_PutGet(t *testing.T) {
 			WorkingDirectory: "/tmp/test",
 			ProfileName:      "gpt-high",
 			ApprovalPolicy:   agent.ApprovalPolicyBypass,
-			LastPrompt:       "Hello world",
-			CreatedAt:        time.Now(),
-			UpdatedAt:        time.Now(),
+			PromptConfig: PromptConfig{
+				AgentInstructions:    "Answer for the support team.",
+				ApprovalInstructions: "Ask before network writes.",
+				ReviewAllTools:       true,
+				Revision:             7,
+			},
+			Capabilities: Capabilities{ChannelToolsVersion: 1},
+			LastPrompt:   "Hello world",
+			CreatedAt:    time.Now(),
+			UpdatedAt:    time.Now(),
 		},
 		AgentSnapshot: agent.Snapshot{
 			State: agent.StateIdle,
@@ -63,6 +71,9 @@ func TestFileStore_PutGet(t *testing.T) {
 						ToolName:       "shell",
 						DecisionSource: SafetyDecisionSourceClassifier,
 						Decision:       SafetyDecisionAskUser,
+						ContextSummary: ContextSummary{RequestContext: &protocol.RequestContext{
+							Source: "feishu", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"},
+						}},
 					},
 				},
 			},
@@ -95,6 +106,9 @@ func TestFileStore_PutGet(t *testing.T) {
 	if loaded.ApprovalPolicy != agent.ApprovalPolicyBypass {
 		t.Errorf("ApprovalPolicy mismatch: got %s, want %s", loaded.ApprovalPolicy, agent.ApprovalPolicyBypass)
 	}
+	if loaded.PromptConfig != sess.PromptConfig {
+		t.Fatalf("PromptConfig mismatch: got %#v, want %#v", loaded.PromptConfig, sess.PromptConfig)
+	}
 	if loaded.AgentSnapshot.UserContextState == nil ||
 		loaded.AgentSnapshot.UserContextState.Sections["environment"] != "digest" {
 		t.Fatalf("user context state did not round-trip: %#v", loaded.AgentSnapshot.UserContextState)
@@ -104,6 +118,10 @@ func TestFileStore_PutGet(t *testing.T) {
 	}
 	if len(loaded.Turns[0].SafetyEvents) != 1 {
 		t.Fatalf("Expected 1 safety event, got %d", len(loaded.Turns[0].SafetyEvents))
+	}
+	requestContext := loaded.Turns[0].SafetyEvents[0].ContextSummary.RequestContext
+	if requestContext == nil || requestContext.Actor.ID != "ou_owner" || requestContext.Actor.Role != "owner" {
+		t.Fatalf("request context did not round-trip: %+v", requestContext)
 	}
 }
 
@@ -426,9 +444,15 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 			WorkingDirectory: "/project/sqlite",
 			ProfileName:      "sqlite-profile",
 			ApprovalPolicy:   agent.ApprovalPolicyBypass,
-			LastPrompt:       "hello sqlite",
-			CreatedAt:        time.Now().Add(-time.Hour),
-			UpdatedAt:        time.Now(),
+			PromptConfig: PromptConfig{
+				AgentInstructions:    "Use the channel tone.",
+				ApprovalInstructions: "Only allow workspace reads.",
+				ReviewAllTools:       true,
+				Revision:             4,
+			},
+			LastPrompt: "hello sqlite",
+			CreatedAt:  time.Now().Add(-time.Hour),
+			UpdatedAt:  time.Now(),
 		},
 	}
 	if err := store.Put(ctx, sess); err != nil {
@@ -456,6 +480,12 @@ func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
 	}
 	if listed[0].ApprovalPolicy != agent.ApprovalPolicyBypass {
 		t.Fatalf("Expected ApprovalPolicy to round trip, got %q", listed[0].ApprovalPolicy)
+	}
+	if listed[0].PromptConfig != sess.PromptConfig {
+		t.Fatalf("Expected PromptConfig to round trip through SQLite, got %#v", listed[0].PromptConfig)
+	}
+	if listed[0].Capabilities != sess.Capabilities {
+		t.Fatalf("Expected Capabilities to round trip through SQLite, got %#v", listed[0].Capabilities)
 	}
 }
 
@@ -502,6 +532,9 @@ func TestFileStore_SQLiteIndexMigratesProfileName(t *testing.T) {
 	}
 	if listed[0].ApprovalPolicy != agent.ApprovalPolicyAuto {
 		t.Fatalf("expected migrated approval policy auto, got %#v", listed)
+	}
+	if listed[0].PromptConfig != (PromptConfig{}) {
+		t.Fatalf("expected migrated prompt config to use zero defaults, got %#v", listed[0].PromptConfig)
 	}
 }
 

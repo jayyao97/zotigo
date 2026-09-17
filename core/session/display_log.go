@@ -3,6 +3,8 @@ package session
 import (
 	"fmt"
 	"time"
+
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 type DisplayItemType string
@@ -96,12 +98,21 @@ type DisplayMediaPart struct {
 }
 
 type DisplayTurn struct {
-	ID                   string `json:"id,omitempty"`
-	Reason               string `json:"reason,omitempty"`
-	Status               string `json:"status,omitempty"`
-	ProviderFinishReason string `json:"provider_finish_reason,omitempty"`
-	LastAgentMessage     string `json:"last_agent_message,omitempty"`
-	DurationMS           int64  `json:"duration_ms,omitempty"`
+	ID                   string          `json:"id,omitempty"`
+	Reason               string          `json:"reason,omitempty"`
+	Status               string          `json:"status,omitempty"`
+	ProviderFinishReason string          `json:"provider_finish_reason,omitempty"`
+	LastAgentMessage     string          `json:"last_agent_message,omitempty"`
+	DurationMS           int64           `json:"duration_ms,omitempty"`
+	Usage                *protocol.Usage `json:"usage,omitempty"`
+	Runtime              *DisplayRuntime `json:"runtime,omitempty"`
+}
+
+type DisplayRuntime struct {
+	Agent           string `json:"agent,omitempty"`
+	ProfileName     string `json:"profile_name,omitempty"`
+	Model           string `json:"model,omitempty"`
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 type DisplayApproval struct {
@@ -163,14 +174,15 @@ type DisplayInteractionOption struct {
 }
 
 type DisplayCommand struct {
-	Type           string                `json:"type,omitempty"`
-	Text           string                `json:"text,omitempty"`
-	Skills         []string              `json:"skills,omitempty"`
-	Images         []DisplayCommandImage `json:"images,omitempty"`
-	TurnID         string                `json:"turn_id,omitempty"`
-	Reason         string                `json:"reason,omitempty"`
-	Profile        string                `json:"profile,omitempty"`
-	ApprovalPolicy string                `json:"approval_policy,omitempty"`
+	Type           string                   `json:"type,omitempty"`
+	Text           string                   `json:"text,omitempty"`
+	Skills         []string                 `json:"skills,omitempty"`
+	Images         []DisplayCommandImage    `json:"images,omitempty"`
+	TurnID         string                   `json:"turn_id,omitempty"`
+	Reason         string                   `json:"reason,omitempty"`
+	Profile        string                   `json:"profile,omitempty"`
+	ApprovalPolicy string                   `json:"approval_policy,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 type DisplayProfileChange struct {
