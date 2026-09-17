@@ -1355,8 +1355,11 @@ func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[stri
 		"cwd": cfg.WorkingDirectory, "model": cfg.Model,
 		"approvalPolicy": codexApprovalPolicy(cfg.ApprovalPolicy),
 	}
-	if cfg.DeveloperInstructions != "" {
+	if cfg.DeveloperInstructions != "" || cfg.ChannelToolsVersion > 0 {
 		params["developerInstructions"] = cfg.DeveloperInstructions
+	}
+	if cfg.ChannelToolsVersion > 0 && !cfg.AutoReview {
+		params["approvalsReviewer"] = "user"
 	}
 	applyCodexAutoReview(params, cfg.AutoReview, cfg.AutoReviewPolicy)
 	if includeDynamicTools && cfg.ChannelToolsVersion >= channelruntime.RuntimeToolsVersion {

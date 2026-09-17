@@ -16,6 +16,7 @@ import (
 )
 
 var ErrNotFound = errors.New("channel resource not found")
+var ErrConnectionBound = errors.New("connection has bound sessions; unbind or archive them before deleting")
 
 const channelSchemaVersion = 1
 

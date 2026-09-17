@@ -1,13 +1,10 @@
 # zotigod HTTP API
 
-`zotigod` exposes a small HTTP API for desktop clients. It listens on
-`127.0.0.1:8766` by default. Desktop may cache responses locally, but zotigo
-remains the source of truth for session state and display history.
+`zotigod` exposes a small HTTP API for desktop clients. It listens on `127.0.0.1:8766` by default. Desktop may cache responses locally, but zotigo remains the source of truth for session state and display history.
 
 ## Remote access and authentication
 
-A non-loopback listen address requires a bearer token file. Generate a token on
-the daemon host and start zotigod on a concrete private address:
+A non-loopback listen address requires a bearer token file. Generate a token on the daemon host and start zotigod on a concrete private address:
 
 ```sh
 umask 077
@@ -17,36 +14,19 @@ zotigod \
   --auth-token-file ~/.zotigo/daemon.token
 ```
 
-Desktop sends the token on every public request, including the SSE event
-stream:
+Desktop sends the token on every public request, including the SSE event stream:
 
 ```http
 Authorization: Bearer <token>
 ```
 
-`GET /health` is intentionally unauthenticated so clients can distinguish an
-unreachable daemon from an authentication failure. Its data includes
-`status: "ok"`, `protocol_version: "1"`, and running build identity fields
-`version` (the code-owned release constant) and `commit` (optional Go VCS metadata,
-`unknown` when unavailable), plus `process_id` (the daemon PID as a string, for local service verification). These fields are additive; older daemons may omit them. All other public endpoints return
-`401` with code `unauthorized` when the token is missing or incorrect.
-Clients that discover an occupied daemon address must validate this complete
-health envelope; an arbitrary HTTP `200` is not a compatible zotigod. Starting
-on an address owned by another service fails immediately with
-`daemon_port_occupied` in the daemon log.
+`GET /health` is intentionally unauthenticated so clients can distinguish an unreachable daemon from an authentication failure. Its data includes `status: "ok"`, `protocol_version: "1"`, and running build identity fields `version` (the code-owned release constant) and `commit` (optional Go VCS metadata, `unknown` when unavailable), plus `process_id` (the daemon PID as a string, for local service verification). These fields are additive; older daemons may omit them. All other public endpoints return `401` with code `unauthorized` when the token is missing or incorrect. Clients that discover an occupied daemon address must validate this complete health envelope; an arbitrary HTTP `200` is not a compatible zotigod. Starting on an address owned by another service fails immediately with `daemon_port_occupied` in the daemon log.
 
-Plain HTTP authenticates the caller but does not hide tokens, prompts, or
-results from the network. Use a trusted private network, a VPN, or an HTTPS
-reverse proxy when the network is not trusted. Do not put the token in a query
-parameter.
+Plain HTTP authenticates the caller but does not hide tokens, prompts, or results from the network. Use a trusted private network, a VPN, or an HTTPS reverse proxy when the network is not trusted. Do not put the token in a query parameter.
 
-The daemon generates a separate worker token for each daemon process and passes
-it only to workers that it launches. `/internal/*` HTTP endpoints and the
-internal worker WebSocket accept that worker token, not the desktop token.
+The daemon generates a separate worker token for each daemon process and passes it only to workers that it launches. `/internal/*` HTTP endpoints and the internal worker WebSocket accept that worker token, not the desktop token.
 
-When `--addr` uses a wildcard host, locally spawned workers dial loopback by
-default. `--worker-daemon-url` can override that callback independently of the
-listen address, for example:
+When `--addr` uses a wildcard host, locally spawned workers dial loopback by default. `--worker-daemon-url` can override that callback independently of the listen address, for example:
 
 ```sh
 zotigod \
@@ -107,257 +87,53 @@ zotigod \
 - `GET|PUT /channels/conversations/{id}`
 - `GET /channels/conversations/{id}/messages`
 
-Internal worker endpoints under `/internal/sessions/...` are not public desktop
-API and may change without compatibility guarantees.
+Internal worker endpoints under `/internal/sessions/...` are not public desktop API and may change without compatibility guarantees.
 
 ### Channels
 
-Channels are daemon-owned IM connections. All endpoints use the normal daemon
-Bearer token and therefore expose owner configuration, including prompt text
-and observed sender IDs, only to authenticated daemon clients. App secrets are
-stored separately in `~/.zotigo/channel-secrets.json` with mode `0600`; API
-responses expose only `has_secret`.
+Channels are daemon-owned IM connections. All endpoints use the normal daemon Bearer token and therefore expose owner configuration, including prompt text and observed sender IDs, only to authenticated daemon clients. App secrets are stored separately in `~/.zotigo/channel-secrets.json` with mode `0600`; API responses expose only `has_secret`.
 
-Channel metadata is stored in `~/.zotigo/channels.sqlite`. Its first released
-schema is version 1. zotigod creates that schema atomically for a fresh store
-and rejects unversioned development databases instead of guessing their shape.
+`DELETE /channels/connections/{id}` returns `409` while any conversation still has a bound Session, including disabled or dormant topics. Clients confirm deletion first; the server checks the binding before stopping the connection or removing credentials. Unbound Session history is retained.
 
-`POST /channels/connections` creates a connection. `PUT` replaces its editable
-configuration. An omitted `app_secret` keeps the stored value; a supplied value
-replaces it, and `clear_secret: true` removes it. An enabled connection requires
-a nonempty secret. The first provider is `feishu` and uses
-the official Go Channel SDK long connection. `progress_mode` accepts `auto`,
-`cot`, or `interactive_card`. New UI connections default to `auto`; omitted
-values retain the connection's current mode.
-`cot_available` reports that this daemon build implements the COT protocol; an
-individual app may still be rejected by Feishu if it lacks COT entitlement.
-`owner_sender_ids` is a read-only connection-level list resolved from the
-provider application owner when the adapter starts. For Feishu this uses the
-application's own `app_id` and requests `open_id`; IDs are application-scoped.
-The Feishu app needs `application:application:self_manage` to resolve its own
-owner.
-The resolved list determines the trusted `owner` actor role.
+Channel metadata is stored in `~/.zotigo/channels.sqlite`. Its first released schema is version 1. zotigod creates that schema atomically for a fresh store and rejects unversioned development databases instead of guessing their shape.
 
-`GET /channels/connections/{id}/groups` asks the running adapter for the group
-chats the bot currently belongs to and merges each group with its rootless
-configuration record. Each result includes official group metadata,
-`chat_mode` (`group` or `topic`), `available`, `conversation_id`, and the current Workspace binding. The Feishu
-implementation pages through `GET /im/v1/chats`; direct messages are not
-returned or supported in this version. A connection can therefore run before
-any group is authorized.
+`POST /channels/connections` creates a connection. `PUT` replaces its editable configuration. An omitted `app_secret` keeps the stored value; a supplied value replaces it, and `clear_secret: true` removes it. An enabled connection requires a nonempty secret. The first provider is `feishu` and uses the official Go Channel SDK long connection. `progress_mode` accepts `auto`, `cot`, or `interactive_card`. New UI connections default to `auto`; omitted values retain the connection's current mode. `cot_available` reports that this daemon build implements the COT protocol; an individual app may still be rejected by Feishu if it lacks COT entitlement. `owner_sender_ids` is a read-only connection-level list resolved from the provider application owner when the adapter starts. For Feishu this uses the application's own `app_id` and requests `open_id`; IDs are application-scoped. The Feishu app needs `application:application:self_manage` to resolve its own owner. The resolved list determines the trusted `owner` actor role.
 
-`GET /channels/connections/{id}/groups/{chat_id}/members` returns provider
-member IDs and display names for an authorization picker. Feishu apps need the
-`im:chat.members:read` scope. This endpoint is configuration-time discovery;
-message admission never performs a provider member-list request.
+`GET /channels/connections/{id}/groups` asks the running adapter for the group chats the bot currently belongs to and merges each group with its rootless configuration record. Each result includes official group metadata, `chat_mode` (`group` or `topic`), `available`, `conversation_id`, and the current Workspace binding. The Feishu implementation pages through `GET /im/v1/chats`; direct messages are not returned or supported in this version. A connection can therefore run before any group is authorized.
 
-The daemon discards messages from groups without an enabled rootless binding,
-and messages rejected by that binding's `sender_policy`, before retaining their
-content. `sender_policy` is `owners`, `all`, or `selected`; `selected` uses
-`allowed_sender_ids`, while `owners` uses the provider-resolved connection
-owners. Sender policy changes apply immediately to existing topics. A group
-binding requires a ready Workspace, a valid Session runtime selection, and at
-least one allowed sender only when `sender_policy` is `selected`.
-The runtime fields are `agent`, `profile_name`, `model`, and
-`reasoning_effort`. `agent` defaults to `zotigo`. A Zotigo binding may leave
-`profile_name` empty to follow the Workspace `default_profile`, or select a
-named profile from that Workspace; `model` and `reasoning_effort` must then be
-empty. A Codex binding requires a model and supported reasoning effort reported
-by the daemon's Codex runtime, while `profile_name` must be empty. For group
-chats, the stable
-binding key is `(connection_id, chat_id, root_id)`: a new top-level message uses
-its own `message_id` as `root_id`, and later replies use Feishu's `root_id` to
-return to that Conversation. `thread_id` is optional delivery metadata because
-Feishu may create the topic only after the bot first replies. Direct-message
-events are ignored. The conversation resource
-exposes optional `root_id` and `thread_id`, while `chat_id` remains the containing group used for authorization checks and
-delivery. `chat_name` is the containing group name resolved from Feishu and is
-independent of the topic `display_name`. The first
-observed top-level message supplies a bounded display-name suggestion;
-owners may rename it without later messages overwriting that choice.
-When a top-level message mentions the bot and its sender is allowed by the
-rootless group binding, zotigod creates a fresh Session in the group's
-Workspace using the selected runtime. It resolves an empty Zotigo profile to
-the Workspace default and copies the resolved Agent/Profile or Codex
-Model/Reasoning effort, together with the group policy, into the rooted
-conversation before dispatch. Later group runtime changes affect only new
-topic Sessions. Replies in the same
-Feishu topic continue that Session without requiring another mention. Existing
-rooted conversations still require an enabled Session binding and an allowed
-sender. Other authorized-group
-events remain visible in channel history with a rejection reason. Existing
-events are never executed after an owner later changes the allowed senders. Cached
-messages are pruned to seven days and the newest 500 rows per conversation.
-The receive event supplies a stable sender ID but no display name. After all
-early type/self-message checks, the adapter makes a bounded
-`GET /im/v1/messages/{message_id}?with_sender_name=true` lookup for an uncached
-sender name, or when a reply event lacks the root needed for safe routing. A
-top-level message does not require a thread lookup: its own message ID is the
-root. A reply whose event and lookup both lack a usable root is rejected
-instead of being routed into the rootless group binding.
-Successful names are cached per connection; a failed optional name lookup
-leaves `display_name` empty so clients fall back to the stable sender ID.
-After the same authorization checks, an exact `@bot /stop` is routed to the
-durable session pause command instead of starting or steering an agent turn.
-It is idempotent when the session has no active turn or is already stopping.
+`GET /channels/connections/{id}/groups/{chat_id}/members` returns provider member IDs and display names for an authorization picker. Feishu apps need the `im:chat.members:read` scope. This endpoint is configuration-time discovery; message admission never performs a provider member-list request.
 
-Before dispatch, the adapter creates either a COT message or an interactive-card
-reply anchored to the incoming message. `auto` falls back to a card only when
-Feishu explicitly rejects COT creation; transport errors and malformed success
-responses remain delivery-unknown and never start an agent. Channel dispatch uses an
-internal `start_only` input: a concurrent Desktop/Web turn returns a busy error
-instead of becoming steering. COT receives a fixed projection of durable run,
-tool-name/status, and approval events; it never receives reasoning, prompts,
-tool arguments, tool results, secrets, or file contents. Feishu requires the
-final answer to be a separate message, so it is sent as a Markdown interactive
-card using a strict reply in the same thread before `RUN_FINISHED`. Interactive-card mode keeps the final
-answer in the card. The public API intentionally has no arbitrary send-message
-endpoint. Public failures use fixed text; detailed runtime/provider errors remain
-in the owner-authenticated local message status and daemon log.
+The daemon discards messages from groups without an enabled rootless binding, and messages rejected by that binding's `sender_policy`, before retaining their content. `sender_policy` is `owners`, `all`, or `selected`; `selected` uses `allowed_sender_ids`, while `owners` uses the provider-resolved connection owners. Sender policy changes apply immediately to existing topics. A group binding requires a ready Workspace, a valid Session runtime selection, and at least one allowed sender only when `sender_policy` is `selected`. The runtime fields are `agent`, `profile_name`, `model`, and `reasoning_effort`. `agent` defaults to `zotigo`. A Zotigo binding may leave `profile_name` empty to follow the Workspace `default_profile`, or select a named profile from that Workspace; `model` and `reasoning_effort` must then be empty. A Codex binding requires a model and supported reasoning effort reported by the daemon's Codex runtime, while `profile_name` must be empty. For group chats, the stable binding key is `(connection_id, chat_id, root_id)`: a new top-level message uses its own `message_id` as `root_id`, and later replies use Feishu's `root_id` to return to that Conversation. `thread_id` is optional delivery metadata because Feishu may create the topic only after the bot first replies. Direct-message events are ignored. The conversation resource exposes optional `root_id` and `thread_id`, while `chat_id` remains the containing group used for authorization checks and delivery. `chat_name` is the containing group name resolved from Feishu and is independent of the topic `display_name`. The first observed top-level message supplies a bounded display-name suggestion; owners may rename it without later messages overwriting that choice. When a top-level message mentions the bot and its sender is allowed by the rootless group binding, zotigod creates a fresh Session in the group's Workspace using the selected runtime. It resolves an empty Zotigo profile to the Workspace default and copies the resolved Agent/Profile or Codex Model/Reasoning effort, together with the group policy, into the rooted conversation before dispatch. Later group runtime changes affect only new topic Sessions. Replies in the same Feishu topic continue that Session without requiring another mention. Existing rooted conversations still require an enabled Session binding and an allowed sender. Other authorized-group events remain visible in channel history with a rejection reason. Existing events are never executed after an owner later changes the allowed senders. Cached messages are pruned to seven days and the newest 500 rows per conversation. The receive event supplies a stable sender ID but no display name. After all early type/self-message checks, the adapter makes a bounded `GET /im/v1/messages/{message_id}?with_sender_name=true` lookup for an uncached sender name, or when a reply event lacks the root needed for safe routing. A top-level message does not require a thread lookup: its own message ID is the root. A reply whose event and lookup both lack a usable root is rejected instead of being routed into the rootless group binding. Successful names are cached per connection; a failed optional name lookup leaves `display_name` empty so clients fall back to the stable sender ID. After the same authorization checks, an exact `@bot /stop` is routed to the durable session pause command instead of starting or steering an agent turn. It is idempotent when the session has no active turn or is already stopping.
 
-Before creating provider-side progress, the daemon persists a provider-opaque
-cleanup intent. The Feishu adapter then best-effort adds an `OnIt` reaction to
-the inbound message and replaces that intent with the returned reaction ID.
-The marker is removed at every terminal outcome. Startup retries cleanup for
-interrupted and previously completed deliveries, including an uncertain create
-response, so the remote-success/local-crash window remains recoverable.
-Reaction failure never blocks an otherwise authorized task. Final cards render
-runtime attribution from the durable `turn_started` item for that exact turn;
-older items fall back to the bound Session runtime snapshot.
-The Feishu app needs `im:message` for the recoverable indicator lifecycle.
-Create/delete-only reaction permission is insufficient because uncertain-create
-and idempotent-delete recovery must list the bot's reactions on the message.
+Before dispatch, the adapter creates either a COT message or an interactive-card reply anchored to the incoming message. `auto` falls back to a card only when Feishu explicitly rejects COT creation; transport errors and malformed success responses remain delivery-unknown and never start an agent. Channel dispatch uses an internal `start_only` input: a concurrent Desktop/Web turn returns a busy error instead of becoming steering. COT receives a fixed projection of durable run, tool-name/status, and approval events; it never receives reasoning, prompts, tool arguments, tool results, secrets, or file contents. Feishu requires the final answer to be a separate message, so it is sent as a Markdown interactive card using a strict reply in the same thread before `RUN_FINISHED`. Interactive-card mode keeps the final answer in the card. The public API intentionally has no arbitrary send-message endpoint. Public failures use fixed text; detailed runtime/provider errors remain in the owner-authenticated local message status and daemon log.
 
-Connection prompt fields are owner additions. Zotigo appends system additions
-after its immutable built-in system prompt and appends approval additions after
-the immutable classifier protocol. `review_all_tools` routes otherwise-safe
-calls through the classifier; hard blocks and mandatory approvals still take
-precedence. Conversation prompt modes are `inherit` or `replace`; `replace`
-changes only the owner addition and supports an explicitly empty string. Prompt
-configurations apply to both Zotigo and Codex Sessions. Each Channel turn
-resolves the current group override against the current Connection defaults.
-Before admitting a new turn from either the Channel or Session API, zotigod
-synchronizes that effective configuration to the bound Session under the
-session operation lock and increments its prompt revision when it changed. An
-active turn or pending human request keeps its current configuration; steering
-continues that turn, and the update is applied when a later new turn can be
-admitted. Native workers also check the revision before accepting the command.
+Before creating provider-side progress, the daemon persists a provider-opaque cleanup intent. The Feishu adapter then best-effort adds an `OnIt` reaction to the inbound message and replaces that intent with the returned reaction ID. The marker is removed at every terminal outcome. Startup retries cleanup for interrupted and previously completed deliveries, including an uncertain create response, so the remote-success/local-crash window remains recoverable. Reaction failure never blocks an otherwise authorized task. Final cards render runtime attribution from the durable `turn_started` item for that exact turn; older items fall back to the bound Session runtime snapshot. The Feishu app needs `im:message` for the recoverable indicator lifecycle. Create/delete-only reaction permission is insufficient because uncertain-create and idempotent-delete recovery must list the bot's reactions on the message.
 
-For a Codex Channel Session, zotigod passes the effective agent and approval
-guidance to Codex app-server as thread `developerInstructions`. This guidance
-does not grant approval or replace Codex's own approval and safety policies.
-When the effective configuration enables `review_all_tools`, zotigod also selects Codex's
-`auto_review` approvals reviewer. On both `thread/start` and `thread/resume`,
-zotigod passes `config.auto_review.policy` as a complete policy made from the
-current immutable Zotigo security baseline plus the effective owner guidance.
-This is necessary because Codex treats that field as a replacement policy. The
-baseline can be strengthened for existing Sessions by a zotigod update; the
-owner portion is refreshed on the next admitted Channel turn and may only add
-restrictions. The
-reviewer evaluates only approval requests surfaced by Codex; selecting it does
-not route every tool call through the reviewer, widen the sandbox, or turn owner
-guidance into an approval grant.
-Each Channel turn carries its host-attributed `RequestContext` separately in
-`turn/start.additionalContext` under `zotigo.request_context`, with kind
-`application`; the user message body remains unchanged, and a later local turn
-does not inherit an earlier Channel identity. This field is part of the Codex
-app-server experimental API negotiated by zotigod during `initialize`; the
-deployed Codex build must expose the corresponding `additionalContext`
-capability. The context includes the provider-resolved bot ID and display name,
-the provider group ID and current group name, the current sender identity and
-owner/member role, and current/parent/root/thread message IDs. The optional
-`external_parent_message_id` identifies the message directly referenced or
-replied to by the current input. Display names are untrusted
-metadata; IDs and roles are host attributed.
+Connection prompt fields are owner additions. Zotigo appends system additions after its immutable built-in system prompt and appends approval additions after the immutable classifier protocol. `review_all_tools` routes otherwise-safe calls through the classifier; hard blocks and mandatory approvals still take precedence. Conversation prompt modes are `inherit` or `replace`; `replace` changes only the owner addition and supports an explicitly empty string. Prompt configurations apply to both Zotigo and Codex Sessions. Each Channel turn resolves the current group override against the current Connection defaults. Before admitting a new turn from either the Channel or Session API, zotigod synchronizes that effective configuration to the bound Session under the session operation lock and increments its prompt revision when it changed. An active turn or pending human request keeps its current configuration; steering continues that turn, and the update is applied when a later new turn can be admitted. Native workers also check the revision before accepting the command.
 
-`GET /channels/conversations` lists cached conversations ordered by recent
-activity. `PUT /channels/conversations/{id}` sets display name, binding, allowed
-senders, Session runtime, prompt overrides, and `session_strategy`. A rootless
-group is enabled with a Workspace and at least one sender ID. Strategy `topic`
-(the default when omitted) clears the rootless
-`session_id`; each top-level mention provisions a rooted Session and topic
-replies continue it. Strategy `shared` keeps one Session on the rootless group:
-an empty `session_id` provisions it on the first mention, while a supplied ID
-must name an idle, unbound Session assigned to the selected Workspace. Existing
-history and the Session's runtime are retained. The selected group's effective
-prompt is applied on the next admitted Channel turn. Every
-shared-mode input requires an @mention and is routed to that one Session. An
-accepted mention receives a direct reply in the main group, including when the
-message quotes or replies to another message. Previously rooted Sessions
-remain dormant while the group uses `shared`, preserving their history and
-binding if the group later returns to `topic`. Feishu topic-mode groups require the
-`topic` strategy; both the daemon and clients reject `shared` for those groups.
-Omitting a runtime field preserves its current value so callers can update
-unrelated settings; send an explicit empty string when switching agents
-requires clearing an incompatible field.
-A rooted topic is enabled with its generated Session and at least one sender
-ID. Its runtime fields are an immutable resolved snapshot while that Session
-stays bound. The Session profile and Codex-settings mutation endpoints return
-`409` for a bound Session. A Session may have at most one active rooted channel
-binding.
-`GET /channels/conversations/{id}/messages` returns up to 100 recent cached
-messages (maximum 200 when `limit` is supplied). Delivery records expose
-`reply_message_id`, the actual `delivery_mode`, optional `cot_id`, optional
-`processing_marker_id`, optional `final_message_id`, and the last durable `projected_sequence` for owner-side
-diagnosis.
+For a Codex Channel Session, zotigod passes the effective agent and approval guidance to Codex app-server as thread `developerInstructions`. This guidance does not grant approval or replace Codex's own approval and safety policies. When the effective configuration enables `review_all_tools`, zotigod also selects Codex's `auto_review` approvals reviewer. On both `thread/start` and `thread/resume`, zotigod passes `config.auto_review.policy` as a complete policy made from the current immutable Zotigo security baseline plus the effective owner guidance. This is necessary because Codex treats that field as a replacement policy. The baseline can be strengthened for existing Sessions by a zotigod update; the owner portion is refreshed on the next admitted Channel turn and may only add restrictions. The reviewer evaluates only approval requests surfaced by Codex; selecting it does not route every tool call through the reviewer, widen the sandbox, or turn owner guidance into an approval grant. Each Channel turn carries its host-attributed `RequestContext` separately in `turn/start.additionalContext` under `zotigo.request_context`, with kind `application`; the user message body remains unchanged, and a later local turn does not inherit an earlier Channel identity. This field is part of the Codex app-server experimental API negotiated by zotigod during `initialize`; the deployed Codex build must expose the corresponding `additionalContext` capability. The context includes the provider-resolved bot ID and display name, the provider group ID and current group name, the current sender identity and owner/member role, and current/parent/root/thread message IDs. The optional `external_parent_message_id` identifies the message directly referenced or replied to by the current input. Display names are untrusted metadata; IDs and roles are host attributed.
 
-Channel-created Sessions record a versioned Channel-tool capability before the
-runtime's provider conversation is created. Codex receives a namespaced
-`channel.read_messages` dynamic tool on `thread/start`; `thread/resume` relies
-on the tool manifest retained by that thread because the resume API cannot add
-dynamic tools. The daemon resolves every call from the bound Session and the
-host-attributed current-turn `RequestContext`; model arguments can select only
-a bounded message count, never a connection or conversation ID. The result is
-the authorized conversation's retained seven-day message history with provider
-message and parent-message IDs. When the current request directly references a
-message absent from that cache, the active provider adapter fetches only that
-host-attributed message ID and verifies it belongs to the bound chat. Results
-therefore include an optional `referenced_message`, as well as
-messages that were stored with `mention_required` and therefore did not start a
-turn. Codex's Channel developer instructions direct it to use this tool when a
-request refers to a quoted/replied-to message or omitted earlier messages.
-Calls from local turns or mismatched Channel context are rejected.
+`GET /channels/conversations` lists cached conversations ordered by recent activity. `PUT /channels/conversations/{id}` sets display name, binding, allowed senders, Session runtime, prompt overrides, and `session_strategy`. A rootless group is enabled with a Workspace and at least one sender ID. Strategy `topic` (the default when omitted) clears the rootless `session_id`; each top-level mention provisions a rooted Session and topic replies continue it. Strategy `shared` keeps one Session on the rootless group: an empty `session_id` provisions it on the first mention, while a supplied ID must name an idle, unbound Session assigned to the selected Workspace. Existing history and the Session's runtime are retained. The selected group's effective prompt is applied on the next admitted Channel turn. Every shared-mode input requires an @mention and is routed to that one Session. An accepted mention receives a direct reply in the main group, including when the message quotes or replies to another message. Previously rooted Sessions remain dormant while the group uses `shared`, preserving their history and binding if the group later returns to `topic`. Feishu topic-mode groups require the `topic` strategy; both the daemon and clients reject `shared` for those groups. Omitting a runtime field preserves its current value so callers can update unrelated settings; send an explicit empty string when switching agents requires clearing an incompatible field. A rooted topic is enabled with its generated Session and at least one sender ID. Its runtime fields are an immutable resolved snapshot while that Session stays bound. The Session profile and Codex-settings mutation endpoints return `409` for a bound Session. A Session may have at most one active rooted channel binding. `GET /channels/conversations/{id}/messages` returns up to 100 recent cached messages (maximum 200 when `limit` is supplied). Delivery records expose `reply_message_id`, the actual `delivery_mode`, optional `cot_id`, optional `processing_marker_id`, optional `final_message_id`, and the last durable `projected_sequence` for owner-side diagnosis.
 
-An idle Codex Session whose provider conversation has not started can acquire
-the capability when it is first bound. A Codex Session with an existing thread
-must already carry the capability; otherwise binding returns `409` with code
-`session_missing_channel_tools`. Session resources expose
-`channel_tools_version` and `channel_tools_eligible` so clients can omit an
-incompatible existing Session before submitting a binding.
+`POST /sessions/{id}/archive` requires an idle Session and removes its Channel binding under the same configuration/admission fence. Clients confirm this side effect before archiving. A shared group retains its configuration and creates a new Session on the next mention; a rooted topic is disabled and no longer continues the archived Session. Unarchiving does not restore a binding. If the binding write fails, the daemon attempts to restore the prior archive state and reports the error; the operation is retryable. Session and Channel records live in separate stores, so this is not a crash-atomic transaction.
 
-Successful Channel replies include the producing runtime plus the completed
-turn's measured duration and provider-reported current-turn input and output
-tokens when available. Cached input is shown as a subset of total input so the
-compact attribution does not present it as fresh input. Missing usage is
-omitted rather than estimated.
+After any unbinding (including replacement, disconnect, or archive), the next new Session turn clears its Channel prompt and automatic-review overrides and restarts an idle worker if needed. An existing active turn retains its current configuration until it ends. Codex receives explicit empty `developerInstructions` and `approvalsReviewer: "user"` on resume to remove previous Channel overrides; its registered dynamic tools remain present but cannot read without an authorized binding.
 
-On daemon startup, inbox rows left in `received` are failed before adapters
-start. A `claimed` row without a persisted reply receipt is marked
-`delivery_unknown`, because a remote carrier may have been created immediately
-before the crash. A `running` row with a receipt is never replayed as a new
-agent turn. After its connection starts, the daemon closes that same COT/card as
-failed; if a final receipt was already persisted, it instead restores the
-completed carrier state. If that recovery send cannot be confirmed, the row is
-`delivery_unknown`.
+Channel-created Sessions record a versioned Channel-tool capability before the runtime's provider conversation is created. Codex receives a namespaced `channel.read_messages` dynamic tool on `thread/start`; `thread/resume` relies on the tool manifest retained by that thread because the resume API cannot add dynamic tools. The daemon resolves every call from the bound Session and the host-attributed current-turn `RequestContext`; model arguments can select only a bounded message count, never a connection or conversation ID. The result is the authorized conversation's retained seven-day message history with provider message and parent-message IDs. When the current request directly references a message absent from that cache, the active provider adapter fetches only that host-attributed message ID and verifies it belongs to the bound chat. Results therefore include an optional `referenced_message`, as well as messages that were stored with `mention_required` and therefore did not start a turn. Codex's Channel developer instructions direct it to use this tool when a request refers to a quoted/replied-to message or omitted earlier messages. Calls from local turns or mismatched Channel context are rejected. Every call rechecks that the Connection, group, and conversation are enabled, the group still has a Workspace, and the current actor is still allowed by the group sender policy; revocation blocks subsequent reads within an already active turn.
+
+An idle Codex Session whose provider conversation has not started can acquire the capability when it is first bound. A Codex Session with an existing thread must already carry the capability; otherwise binding returns `409` with code `session_missing_channel_tools`. Session resources expose `channel_tools_version` and `channel_tools_eligible` so clients can omit an incompatible existing Session before submitting a binding.
+
+Successful Channel replies include the producing runtime plus the completed turn's measured duration and provider-reported current-turn input and output tokens when available. Cached input is shown as a subset of total input so the compact attribution does not present it as fresh input. Missing usage is omitted rather than estimated.
+
+On daemon startup, inbox rows left in `received` are failed before adapters start. A `claimed` row without a persisted reply receipt is marked `delivery_unknown`, because a remote carrier may have been created immediately before the crash. A `running` row with a receipt is never replayed as a new agent turn. After its connection starts, the daemon closes that same COT/card as failed; if a final receipt was already persisted, it instead restores the completed carrier state. If that recovery send cannot be confirmed, the row is `delivery_unknown`.
 
 ### Workspace Sources
 
-`DELETE /projects/{id}/sources/{source_id}` deregisters a Source from the
-Project's Source list and future Workspace Source selections. It does not
-remove files, Git branches, worktrees, existing Workspace bindings, or session
-history. Repeating the request for a deregistered Source succeeds. Existing
-bindings retain their Source metadata and support normal Workspace lifecycle
-operations. Adding the same path again reactivates the original Source ID when
-its repository identity and binding defaults still match; conflicting identity
-changes are rejected.
+`DELETE /projects/{id}/sources/{source_id}` deregisters a Source from the Project's Source list and future Workspace Source selections. It does not remove files, Git branches, worktrees, existing Workspace bindings, or session history. Repeating the request for a deregistered Source succeeds. Existing bindings retain their Source metadata and support normal Workspace lifecycle operations. Adding the same path again reactivates the original Source ID when its repository identity and binding defaults still match; conflicting identity changes are rejected.
 
-`GET /workspaces/{id}/sources` returns the Sources currently bound to a
-Workspace together with their binding mode, target path, status, and Git
-checkout configuration when applicable.
+`GET /workspaces/{id}/sources` returns the Sources currently bound to a Workspace together with their binding mode, target path, status, and Git checkout configuration when applicable.
 
-`POST /workspaces/{id}/sources` adds one Source to an existing `ready`
-Workspace. The request uses the same Source selection shape as Workspace
-creation:
+`POST /workspaces/{id}/sources` adds one Source to an existing `ready` Workspace. The request uses the same Source selection shape as Workspace creation:
 
 ```json
 {
@@ -367,42 +143,17 @@ creation:
 }
 ```
 
-For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when
-omitted, zotigod generates a stable `zotigo/<workspace-slug>-<short-id>` branch
-when the Workspace is created. Later display-name changes do not rename it.
-Folder Sources require an explicit `mode` of
-`direct`, `reference`, or `copy`.
+For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when omitted, zotigod generates a stable `zotigo/<workspace-slug>-<short-id>` branch when the Workspace is created. Later display-name changes do not rename it. Folder Sources require an explicit `mode` of `direct`, `reference`, or `copy`.
 
-The Source must be currently registered in the Workspace's Project. A Source registered
-under another Project is rejected with `400`; register that path as a new Source
-under the target Project before binding it. Duplicate bindings and Workspaces
-that are not `ready` return `409`. Failures before Zotigo creates any owned Git
-ref or folder target roll back the planned binding, so the request can be
-corrected and submitted again. Failures after owned state exists remain visible
-on the binding and can be retried through `POST /workspaces/{id}/retry`.
+The Source must be currently registered in the Workspace's Project. A Source registered under another Project is rejected with `400`; register that path as a new Source under the target Project before binding it. Duplicate bindings and Workspaces that are not `ready` return `409`. Failures before Zotigo creates any owned Git ref or folder target roll back the planned binding, so the request can be corrected and submitted again. Failures after owned state exists remain visible on the binding and can be retried through `POST /workspaces/{id}/retry`.
 
 ### Workspace deletion
 
-Workspace deletion removes managed Workspace files and linked Git worktree
-registrations, but preserves original Source directories, runtime session
-history, and all local and remote Git branches. The current checkout may be on
-a different branch or detached HEAD; no branch switch or branch deletion is
-performed. Project deletion uses the same Workspace deletion behavior.
+Workspace deletion removes managed Workspace files and linked Git worktree registrations, but preserves original Source directories, runtime session history, and all local and remote Git branches. The current checkout may be on a different branch or detached HEAD; no branch switch or branch deletion is performed. Project deletion uses the same Workspace deletion behavior.
 
-Both delete-preview responses advertise `preserves_local_branches: true` and
-return an empty `local_branches` deletion-target list. Clients promising branch
-preservation must reject a daemon whose preview omits this flag or returns
-false. Dirty worktree files can still be discarded after explicit deletion
-confirmation. Owner markers, managed paths, repository identity, and active
-session protection remain enforced. An interrupted deletion can be retried;
-already removed worktrees do not require their branches to be removed.
+Both delete-preview responses advertise `preserves_local_branches: true` and return an empty `local_branches` deletion-target list. Clients promising branch preservation must reject a daemon whose preview omits this flag or returns false. Dirty worktree files can still be discarded after explicit deletion confirmation. Owner markers, managed paths, repository identity, and active session protection remain enforced. An interrupted deletion can be retried; already removed worktrees do not require their branches to be removed.
 
-Source deregistration migrates the catalog to schema version 7, with existing
-Sources initially registered. Upgrade zotigod and CLI catalog readers together;
-older binaries reject the newer schema. Before upgrading, stop catalog writers
-and take a consistent backup of the catalog. Database rollback requires that
-backup or an explicit reverse migration; restoring the catalog alone cannot
-restore Workspace files deleted after the backup.
+Source deregistration migrates the catalog to schema version 7, with existing Sources initially registered. Upgrade zotigod and CLI catalog readers together; older binaries reject the newer schema. Before upgrading, stop catalog writers and take a consistent backup of the catalog. Database rollback requires that backup or an explicit reverse migration; restoring the catalog alone cannot restore Workspace files deleted after the backup.
 
 Current internal worker endpoints include:
 
@@ -414,9 +165,7 @@ Current internal worker endpoints include:
 
 ## Response envelope
 
-Public HTTP endpoints return a JSON envelope in addition to the HTTP status
-code. Successful responses use `code: "ok"` and put the endpoint-specific DTO in
-`data`:
+Public HTTP endpoints return a JSON envelope in addition to the HTTP status code. Successful responses use `code: "ok"` and put the endpoint-specific DTO in `data`:
 
 ```json
 {
@@ -437,32 +186,17 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 }
 ```
 
-Current error codes include `unauthorized`, `invalid_request`, `not_found`,
-`method_not_allowed`, `conflict`, `request_too_large`,
-`session_not_live`, `session_in_use`, `profile_not_found`,
-`active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`,
-`command_pending`, `no_active_turn`, `turn_mismatch`, `command_id_conflict`,
-`service_unavailable`, and `internal_error`.
+Current error codes include `unauthorized`, `invalid_request`, `not_found`, `method_not_allowed`, `conflict`, `request_too_large`, `session_not_live`, `session_in_use`, `profile_not_found`, `active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`, `command_pending`, `no_active_turn`, `turn_mismatch`, `command_id_conflict`, `service_unavailable`, and `internal_error`.
 
-Internal HTTP endpoints also use this envelope, except
-`GET /internal/sessions/{id}/commands` successful responses. The commands
-endpoint intentionally returns the raw command page so replayed HTTP commands
-and live WebSocket command frames can share the same command DTO. Command
-endpoint errors still use the structured `{ "code", "message" }` shape.
+Internal HTTP endpoints also use this envelope, except `GET /internal/sessions/{id}/commands` successful responses. The commands endpoint intentionally returns the raw command page so replayed HTTP commands and live WebSocket command frames can share the same command DTO. Command endpoint errors still use the structured `{ "code", "message" }` shape.
 
-Unless a section explicitly says "raw response", response examples below show
-the endpoint-specific `data` payload.
+Unless a section explicitly says "raw response", response examples below show the endpoint-specific `data` payload.
 
 ## Read profiles
 
-`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the
-effective profiles for a project after merging the global and project Zotigo
-configuration. `working_directory` follows the same rules as session creation:
-it must be an absolute path to an existing directory. If omitted, zotigod uses
-its current working directory.
+`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the effective profiles for a project after merging the global and project Zotigo configuration. `working_directory` follows the same rules as session creation: it must be an absolute path to an existing directory. If omitted, zotigod uses its current working directory.
 
-The response is safe for desktop clients and does not expose API keys, base
-URLs, provider parameters, or safety configuration:
+The response is safe for desktop clients and does not expose API keys, base URLs, provider parameters, or safety configuration:
 
 ```json
 {
@@ -479,16 +213,11 @@ URLs, provider parameters, or safety configuration:
 }
 ```
 
-Profiles are ordered by `name`, and `max_output_tokens` is the effective native
-Zotigo value after applying the 32768 default. This endpoint only reads
-configuration and does not start a worker or create a session. Codex app-server
-model settings are separate and do not inherit this value.
+Profiles are ordered by `name`, and `max_output_tokens` is the effective native Zotigo value after applying the 32768 default. This endpoint only reads configuration and does not start a worker or create a session. Codex app-server model settings are separate and do not inherit this value.
 
 ## Discover Agent Skills
 
-`GET /skills` returns builtin and canonical user Skills from
-`~/.agents/skills`. Pass a Session ID to also merge Skills from the Session's
-saved semantic working directory at `<workspace>/.agents/skills`:
+`GET /skills` returns builtin and canonical user Skills from `~/.agents/skills`. Pass a Session ID to also merge Skills from the Session's saved semantic working directory at `<workspace>/.agents/skills`:
 
 ```http
 GET /skills?session_id=sess_8f0e12ab34cd56ef&force_reload=true
@@ -508,17 +237,11 @@ GET /skills?session_id=sess_8f0e12ab34cd56ef&force_reload=true
 }
 ```
 
-`force_reload` defaults to `false`; `true` explicitly rescans the canonical
-directories. Discovery priority is builtin, then user, then workspace, with a
-higher-priority same-name Skill replacing the lower-priority definition and
-adding a diagnostic. Responses never expose local Skill paths. Legacy
-`.zotigo/skills` and client-specific directories such as `.claude/skills` are
-not scanned.
+`force_reload` defaults to `false`; `true` explicitly rescans the canonical directories. Discovery priority is builtin, then user, then workspace, with a higher-priority same-name Skill replacing the lower-priority definition and adding a diagnostic. Responses never expose local Skill paths. Legacy `.zotigo/skills` and client-specific directories such as `.claude/skills` are not scanned.
 
 ## Create sessions
 
-`POST /sessions` creates a zotigod session for a project directory. Desktop
-clients should pass the project root selected by the user:
+`POST /sessions` creates a zotigod session for a project directory. Desktop clients should pass the project root selected by the user:
 
 ```json
 {
@@ -528,8 +251,7 @@ clients should pass the project root selected by the user:
 }
 ```
 
-Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned
-to a ready Workspace and selects a concrete model and reasoning effort:
+Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned to a ready Workspace and selects a concrete model and reasoning effort:
 
 ```json
 {
@@ -540,63 +262,27 @@ to a ready Workspace and selects a concrete model and reasoning effort:
 }
 ```
 
-`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are
-valid only for Codex Sessions and are checked against the paginated `model/list`
-catalog using the runtime model slug. Creating a Codex Session does not create,
-reuse, or modify a Codex local Project. The worker uses the complete Workspace
-root as `cwd`, so `code/`, `notes/`, `artifacts/`, and root-level instructions
-share one context boundary. The first message creates a thread without `projectId`, and
-zotigod persists the returned thread ID as the Session backend binding. Resume
-uses the same `cwd` and does not change any existing Codex Project assignment.
+`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are valid only for Codex Sessions and are checked against the paginated `model/list` catalog using the runtime model slug. Creating a Codex Session does not create, reuse, or modify a Codex local Project. The worker uses the complete Workspace root as `cwd`, so `code/`, `notes/`, `artifacts/`, and root-level instructions share one context boundary. The first message creates a thread without `projectId`, and zotigod persists the returned thread ID as the Session backend binding. Resume uses the same `cwd` and does not change any existing Codex Project assignment.
 
-This bridge version does not expose Codex approval callbacks. Codex Sessions
-therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted
-or set to `bypass_permissions`, and later approval-policy changes return `409`.
-The ordinary Zotigo runtime retains the approval behavior described below.
+This bridge version does not expose Codex approval callbacks. Codex Sessions therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted or set to `bypass_permissions`, and later approval-policy changes return `409`. The ordinary Zotigo runtime retains the approval behavior described below.
 
-`GET /agents` performs binary discovery without starting app-server.
-`POST /agents/codex/prepare` starts the local UDS app-server and returns the
-model/reasoning catalog. Discovery checks `ZOTIGO_CODEX_BINARY` (an absolute
-executable path), then `codex` on `PATH`, then the standard per-user and
-system-wide ChatGPT.app locations on macOS. Codex is omitted from `GET /agents`
-when discovery fails. Restart zotigod after changing its environment or
-installing a runtime so the runtime registry is rebuilt.
+`GET /agents` performs binary discovery without starting app-server. `POST /agents/codex/prepare` starts the local UDS app-server and returns the model/reasoning catalog. Discovery checks `ZOTIGO_CODEX_BINARY` (an absolute executable path), then `codex` on `PATH`, then the standard per-user and system-wide ChatGPT.app locations on macOS. Codex is omitted from `GET /agents` when discovery fails. Restart zotigod after changing its environment or installing a runtime so the runtime registry is rebuilt.
 
-`PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a
-Codex Session. The values apply to the next turn; the Codex thread and Project
-binding do not change. The endpoint returns `409` while the Session is bound to
-a Channel conversation because that binding owns an immutable runtime snapshot.
+`PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a Codex Session. The values apply to the next turn; the Codex thread and Project binding do not change. The endpoint returns `409` while the Session is bound to a Channel conversation because that binding owns an immutable runtime snapshot.
 
-`working_directory` must be an absolute path that resolves to an existing
-directory. If it is omitted, zotigod uses its current working directory for
-CLI/backward compatibility. The directory is persisted in the core session
-store and returned in session responses as `working_directory`.
+`working_directory` must be an absolute path that resolves to an existing directory. If it is omitted, zotigod uses its current working directory for CLI/backward compatibility. The directory is persisted in the core session store and returned in session responses as `working_directory`.
 
-`profile` is an optional profile name returned by `GET /config/profiles`. When
-it is omitted, zotigod resolves the project's current `default_profile` during
-session creation. The resolved profile is persisted and returned as `profile`,
-so worker restarts and offline session recovery keep using the profile selected
-for that session. An unknown explicit profile returns `400`. Legacy sessions
-without a stored profile continue to resolve the current project default when a
-worker starts.
+`profile` is an optional profile name returned by `GET /config/profiles`. When it is omitted, zotigod resolves the project's current `default_profile` during session creation. The resolved profile is persisted and returned as `profile`, so worker restarts and offline session recovery keep using the profile selected for that session. An unknown explicit profile returns `400`. Legacy sessions without a stored profile continue to resolve the current project default when a worker starts.
 
-Changing the project default later does not change new-format sessions. Use the
-profile endpoint below to change the profile selected for an existing session.
+Changing the project default later does not change new-format sessions. Use the profile endpoint below to change the profile selected for an existing session.
 
-For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Desktop clients may also
-set it to `bypass_permissions` for Full access. The value is persisted with the
-session and restored by replacement workers. The public Desktop API does not
-accept `manual`.
+For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Desktop clients may also set it to `bypass_permissions` for Full access. The value is persisted with the session and restored by replacement workers. The public Desktop API does not accept `manual`.
 
-Workers launched for the session use this directory as their process working
-directory and as the source for project config, skills, project instructions,
-tools, shell execution, and LSP state. Legacy sessions without a stored working
-directory fall back to the worker process current directory.
+Workers launched for the session use this directory as their process working directory and as the source for project config, skills, project instructions, tools, shell execution, and LSP state. Legacy sessions without a stored working directory fall back to the worker process current directory.
 
 ## Change a session profile
 
-`PUT /sessions/{id}/profile` changes the profile used by subsequent model
-generations:
+`PUT /sessions/{id}/profile` changes the profile used by subsequent model generations:
 
 ```json
 {
@@ -604,12 +290,9 @@ generations:
 }
 ```
 
-Sessions bound to a Channel conversation return `409`; their resolved profile
-is owned by the immutable Channel runtime snapshot.
+Sessions bound to a Channel conversation return `409`; their resolved profile is owned by the immutable Channel runtime snapshot.
 
-Offline and not-yet-started sessions apply the change immediately and return
-`200` with `status: "applied"`. Live sessions accept a durable profile command
-and return `202` with `status: "pending"`:
+Offline and not-yet-started sessions apply the change immediately and return `200` with `status: "applied"`. Live sessions accept a durable profile command and return `202` with `status: "pending"`:
 
 ```json
 {
@@ -619,50 +302,21 @@ and return `202` with `status: "pending"`:
 }
 ```
 
-An offline session can still be owned by a worker or CLI process that survived
-a daemon restart. In that case profile changes return `409` with code
-`session_in_use`; zotigod does not modify metadata while that process holds the
-session lock.
+An offline session can still be owned by a worker or CLI process that survived a daemon restart. In that case profile changes return `409` with code `session_in_use`; zotigod does not modify metadata while that process holds the session lock.
 
-Profile changes do not cancel an in-flight model stream, tool execution, or
-approval. The worker prepares the new provider and applies the latest pending
-profile before the next model generation. A pending approval and its eventual
-tool execution continue with the old profile. Multiple requests accepted before
-durable apply starts use last-request-wins semantics, including when the latest
-request fails validation or provider construction. Durable apply is the
-linearization point: a request received while a commit is active is processed
-after that commit. When no further generation is needed, the latest valid
-request is applied as the current runtime activity exits.
+Profile changes do not cancel an in-flight model stream, tool execution, or approval. The worker prepares the new provider and applies the latest pending profile before the next model generation. A pending approval and its eventual tool execution continue with the old profile. Multiple requests accepted before durable apply starts use last-request-wins semantics, including when the latest request fails validation or provider construction. Durable apply is the linearization point: a request received while a commit is active is processed after that commit. When no further generation is needed, the latest valid request is applied as the current runtime activity exits.
 
-After preparing the complete runtime profile, the worker updates the session's
-durable `profile_name` and appends `profile_changed` immediately before applying
-the prepared runtime in memory. If either durable write fails, the worker keeps
-the old runtime profile and appends `profile_change_failed`. Invalidated
-configuration and requests superseded before this apply boundary also append
-`profile_change_failed`. API keys and provider-specific configuration never
-appear in commands or display items.
+After preparing the complete runtime profile, the worker updates the session's durable `profile_name` and appends `profile_changed` immediately before applying the prepared runtime in memory. If either durable write fails, the worker keeps the old runtime profile and appends `profile_change_failed`. Invalidated configuration and requests superseded before this apply boundary also append `profile_change_failed`. API keys and provider-specific configuration never appear in commands or display items.
 
-The stored session `profile_name` is the recovery source of truth. The display
-item is the completion marker for the durable profile command. If the worker
-stops after updating session metadata but before appending the marker, command
-replay completes the pending command; if it stops after appending the marker,
-the next worker starts directly from the stored profile.
+The stored session `profile_name` is the recovery source of truth. The display item is the completion marker for the durable profile command. If the worker stops after updating session metadata but before appending the marker, command replay completes the pending command; if it stops after appending the marker, the next worker starts directly from the stored profile.
 
-If both marker append and metadata rollback fail, the worker treats the profile
-state as uncertain. It does not append `profile_change_failed`, exits while
-leaving the command pending, and lets the next worker replay reconcile the
-durable profile and completion marker. An offline retry for the already stored
-target profile similarly repairs a missing marker before returning success.
+If both marker append and metadata rollback fail, the worker treats the profile state as uncertain. It does not append `profile_change_failed`, exits while leaving the command pending, and lets the next worker replay reconcile the durable profile and completion marker. An offline retry for the already stored target profile similarly repairs a missing marker before returning success.
 
-Starting or resuming a session validates its stored `profile_name` against the
-current effective configuration. If that profile was removed, startup returns
-`409` with code `profile_not_found` and does not launch a worker. Select an
-available profile with `PUT /sessions/{id}/profile` before retrying.
+Starting or resuming a session validates its stored `profile_name` against the current effective configuration. If that profile was removed, startup returns `409` with code `profile_not_found` and does not launch a worker. Select an available profile with `PUT /sessions/{id}/profile` before retrying.
 
 ## Change a session approval policy
 
-`PUT /sessions/{id}/approval-policy` changes how subsequent tool calls are
-approved:
+`PUT /sessions/{id}/approval-policy` changes how subsequent tool calls are approved:
 
 ```json
 {
@@ -670,44 +324,21 @@ approved:
 }
 ```
 
-The accepted values are `auto` and `bypass_permissions`. The latter skips tool
-safety classification and approval for the session, so clients should label it
-clearly as Full access.
+The accepted values are `auto` and `bypass_permissions`. The latter skips tool safety classification and approval for the session, so clients should label it clearly as Full access.
 
-Session responses report the policy selected by the client. A profile may make
-the effective runtime policy more restrictive—for example, `auto` may fall back
-to manual approval when its classifier is unavailable. Clients should therefore
-label `auto` as Auto or Default, not as approval-free operation.
+Session responses report the policy selected by the client. A profile may make the effective runtime policy more restrictive—for example, `auto` may fall back to manual approval when its classifier is unavailable. Clients should therefore label `auto` as Auto or Default, not as approval-free operation.
 
-The change is accepted only while the session is idle. An open turn, pending
-approval, or queued first message returns `409`. Offline and not-yet-started
-sessions apply the change immediately and return `200` with
-`status: "applied"`. A running worker receives a durable command and the API
-returns `202` with `status: "pending"` and a `command_id`.
+The change is accepted only while the session is idle. An open turn, pending approval, or queued first message returns `409`. Offline and not-yet-started sessions apply the change immediately and return `200` with `status: "applied"`. A running worker receives a durable command and the API returns `202` with `status: "pending"` and a `command_id`.
 
-The worker applies changes in a fail-safe order. Returning from Full access to
-Auto changes the in-memory Agent before persisting Auto; enabling Full access
-changes the Agent only after persistence succeeds. It then appends an
-`approval_policy_changed` completion item. Command replay uses that item to
-distinguish an applied command from one interrupted by a worker crash. The
-stored session value is used when a replacement worker starts.
+The worker applies changes in a fail-safe order. Returning from Full access to Auto changes the in-memory Agent before persisting Auto; enabling Full access changes the Agent only after persistence succeeds. It then appends an `approval_policy_changed` completion item. Command replay uses that item to distinguish an applied command from one interrupted by a worker crash. The stored session value is used when a replacement worker starts.
 
-Persistence is ordered fail-safe by permission direction. Enabling Full access
-updates the list/index views before the authoritative session JSON; returning to
-Auto updates the authoritative JSON first. A crash can therefore make list
-views temporarily report a more permissive policy than the worker will use,
-but never a less permissive one. Retrying the same Auto selection repairs those
-derived views.
+Persistence is ordered fail-safe by permission direction. Enabling Full access updates the list/index views before the authoritative session JSON; returning to Auto updates the authoritative JSON first. A crash can therefore make list views temporarily report a more permissive policy than the worker will use, but never a less permissive one. Retrying the same Auto selection repairs those derived views.
 
 ## Session liveness and recovery
 
-Session history and session runtime are separate. The session store on disk can
-contain old sessions and display logs even when the current `zotigod` process
-has no worker running for them.
+Session history and session runtime are separate. The session store on disk can contain old sessions and display logs even when the current `zotigod` process has no worker running for them.
 
-For a live registry session, `GET /sessions/{id}` prefers durable profile and
-approval-policy metadata. If the store is temporarily unavailable, it falls
-back to the live registry DTO rather than failing the whole read.
+For a live registry session, `GET /sessions/{id}` prefers durable profile and approval-policy metadata. If the store is temporarily unavailable, it falls back to the live registry DTO rather than failing the whole read.
 
 Read APIs do not start workers:
 
@@ -715,8 +346,7 @@ Read APIs do not start workers:
 - `GET /sessions/{id}`
 - `GET /sessions/{id}/items`
 
-If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}`
-return it as offline:
+If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}` return it as offline:
 
 ```json
 {
@@ -736,25 +366,11 @@ return it as offline:
 }
 ```
 
-`context_usage.tokens` is the latest provider-reported prompt/input occupancy,
-not cumulative session usage or the size of unprocessed history. The last valid
-snapshot survives later notifications that omit usage fields and daemon
-restart. When no reliable snapshot exists, `context_usage` is still present as
-`{"status":"unavailable"}`; clients must not infer zero usage. `source` and
-`updated_at` identify the measurement origin and age. Existing clients may
-ignore these additive fields.
+`context_usage.tokens` is the latest provider-reported prompt/input occupancy, not cumulative session usage or the size of unprocessed history. The last valid snapshot survives later notifications that omit usage fields and daemon restart. When no reliable snapshot exists, `context_usage` is still present as `{"status":"unavailable"}`; clients must not infer zero usage. `source` and `updated_at` identify the measurement origin and age. Existing clients may ignore these additive fields.
 
-`GET /sessions` is an index-backed catalog read: it does not load each session
-snapshot or display log. Live `working` and `active_tool` values come from the
-in-memory runtime registry. Clients that need history-derived context usage or
-other detail for the selected session should use `GET /sessions/{id}`.
+`GET /sessions` is an index-backed catalog read: it does not load each session snapshot or display log. Live `working` and `active_tool` values come from the in-memory runtime registry. Clients that need history-derived context usage or other detail for the selected session should use `GET /sessions/{id}`.
 
-Desktop may request an on-demand best-effort refresh of externally changed
-Codex histories with `GET /sessions?sync_codex=true` or the catalog projection
-`GET /catalog/sessions?sync_codex=true`. The daemon reads the
-saved Codex conversation IDs, merges completed turns into each session display
-log, and returns the normal session list. A refresh failure does not hide the
-list; the response `data` includes a `diagnostics` array such as:
+Desktop may request an on-demand best-effort refresh of externally changed Codex histories with `GET /sessions?sync_codex=true` or the catalog projection `GET /catalog/sessions?sync_codex=true`. The daemon reads the saved Codex conversation IDs, merges completed turns into each session display log, and returns the normal session list. A refresh failure does not hide the list; the response `data` includes a `diagnostics` array such as:
 
 ```json
 {
@@ -769,86 +385,37 @@ list; the response `data` includes a `diagnostics` array such as:
 }
 ```
 
-Successful checks are throttled briefly. Failed checks are not throttled, so a
-later request can retry. The daemon never starts a session worker to perform
-this refresh. Read-only history refresh is allowed while a Codex thread has an
-external active writer and while the Zotigo runtime is active; only Zotigo's
-isolated per-session history-sync lock or a concurrent display-log append can
-defer the commit, in which case the response contains a retryable per-session
-diagnostic instead of reporting false success.
-If `thread/items/list` is not supported, zotigod falls back to
-`thread/turns/list` with full items and atomically imports only completed turn
-boundaries. Failures use `codex_history_sync_failed`, or
-`codex_history_api_unsupported` when neither history API is available, and do
-not change the existing session state or backend checkpoint.
+Successful checks are throttled briefly. Failed checks are not throttled, so a later request can retry. The daemon never starts a session worker to perform this refresh. Read-only history refresh is allowed while a Codex thread has an external active writer and while the Zotigo runtime is active; only Zotigo's isolated per-session history-sync lock or a concurrent display-log append can defer the commit, in which case the response contains a retryable per-session diagnostic instead of reporting false success. If `thread/items/list` is not supported, zotigod falls back to `thread/turns/list` with full items and atomically imports only completed turn boundaries. Failures use `codex_history_sync_failed`, or `codex_history_api_unsupported` when neither history API is available, and do not change the existing session state or backend checkpoint.
 
-`live: false` means desktop may render history but should not show turn-scoped
-controls as usable. Sending a new message or explicitly starting the session can
-make it live again. Stored-only sessions are never reported as `running`;
-`running` means the current daemon has accepted a worker connection for that
-session.
+`live: false` means desktop may render history but should not show turn-scoped controls as usable. Sending a new message or explicitly starting the session can make it live again. Stored-only sessions are never reported as `running`; `running` means the current daemon has accepted a worker connection for that session.
 
-`POST /sessions/{id}/start` is an explicit runtime resume/pre-warm operation. It
-loads a stored session into the daemon registry when needed, launches a worker,
-and waits for that worker to connect. It does not append a user message.
+`POST /sessions/{id}/start` is an explicit runtime resume/pre-warm operation. It loads a stored session into the daemon registry when needed, launches a worker, and waits for that worker to connect. It does not append a user message.
 
-`POST /sessions/{id}/messages` also resumes an offline session before accepting
-the message. Desktop's normal chat flow can call `messages` directly instead of
-calling `start` first. While a prior turn is stopping, an accepted message gets
-`202`, remains durable and replayable, and starts after the worker's turn-done
-barrier; its command cursor is not advanced before `turn_started`.
+`POST /sessions/{id}/messages` also resumes an offline session before accepting the message. Desktop's normal chat flow can call `messages` directly instead of calling `start` first. While a prior turn is stopping, an accepted message gets `202`, remains durable and replayable, and starts after the worker's turn-done barrier; its command cursor is not advanced before `turn_started`.
 
-Worker lifetime is independent of Desktop lifetime. Runtime adapters declare an
-idle policy: Codex workers are released shortly after a completed turn so the
-same Codex thread can be opened by another app-server process, while native
-Zotigo workers remain warm for five minutes before release. A newer durable
-command cancels a pending idle release. The next message relaunches the worker
-and restores the stored runtime state or Codex thread binding.
+Worker lifetime is independent of Desktop lifetime. Runtime adapters declare an idle policy: Codex workers are released shortly after a completed turn so the same Codex thread can be opened by another app-server process, while native Zotigo workers remain warm for five minutes before release. A newer durable command cancels a pending idle release. The next message relaunches the worker and restores the stored runtime state or Codex thread binding.
 
-The Codex UDS app-server is lease-managed with its workers. With zotigod's
-current `StopWhenIdle` host policy enabled, the last released lease also stops
-the app-server so its thread writer locks are immediately available to Codex
-App. The policy is an internal host option and can be disabled later if keeping
-the app-server warm is more important than immediate cross-application handoff.
+The Codex UDS app-server is lease-managed with its workers. With zotigod's current `StopWhenIdle` host policy enabled, the last released lease also stops the app-server so its thread writer locks are immediately available to Codex App. The policy is an internal host option and can be disabled later if keeping the app-server warm is more important than immediate cross-application handoff.
 
-Codex uses a short 250 ms idle grace period so a `start` immediately followed by
-`messages` can reuse the same worker. If another Codex app-server process already
-owns the thread writer lock, start or message returns `409` with code
-`runtime_occupied`. This failure is retryable: after the other application
-releases the thread, the next start or message attempts resume again.
+Codex uses a short 250 ms idle grace period so a `start` immediately followed by `messages` can reuse the same worker. If another Codex app-server process already owns the thread writer lock, start or message returns `409` with code `runtime_occupied`. This failure is retryable: after the other application releases the thread, the next start or message attempts resume again.
 
-Pause, steering, and approval decisions do not auto-resume offline sessions
-because they refer to a currently running turn or a live pending approval. For a
-stored-only session they return `409` with `code: "session_not_live"`.
+Pause, steering, and approval decisions do not auto-resume offline sessions because they refer to a currently running turn or a live pending approval. For a stored-only session they return `409` with `code: "session_not_live"`.
 
 ## Read session display items
 
-`GET /sessions/{id}/items` returns a paginated, read-only display log for a
-session. This log is a persistent read model for CLI and desktop replay; it is
-not `AgentSnapshot.History`, and desktop clients must not read `.zotigo/sessions`
-directly.
+`GET /sessions/{id}/items` returns a paginated, read-only display log for a session. This log is a persistent read model for CLI and desktop replay; it is not `AgentSnapshot.History`, and desktop clients must not read `.zotigo/sessions` directly.
 
-Codex `fileChange` records use `apply_patch` as a backwards-compatible display
-tool name, not as an executable Zotigo core method. The durable tool result
-keeps `json.changes` entries with `path`, `kind`, and `diff`. The public tool-call
-arguments expose only scalar `files` and `change_count` summary fields, avoiding
-JavaScript object coercion such as `[object Object]`; richer clients should build
-file-level diff views from the structured tool result.
+Codex `fileChange` records use `apply_patch` as a backwards-compatible display tool name, not as an executable Zotigo core method. The durable tool result keeps `json.changes` entries with `path`, `kind`, and `diff`. The public tool-call arguments expose only scalar `files` and `change_count` summary fields, avoiding JavaScript object coercion such as `[object Object]`; richer clients should build file-level diff views from the structured tool result.
 
-The current file-store implementation reads the per-session append log before
-applying pagination, so `limit` bounds the HTTP response size but is not yet a
-tail-read optimization for very long sessions. A future store-level query can
-optimize this without changing the public API.
+The current file-store implementation reads the per-session append log before applying pagination, so `limit` bounds the HTTP response size but is not yet a tail-read optimization for very long sessions. A future store-level query can optimize this without changing the public API.
 
 Query parameters:
 
-- `limit`: number of items to return. Defaults to the most recent `50`, maximum
-  `200`.
+- `limit`: number of items to return. Defaults to the most recent `50`, maximum `200`.
 - `after`: return items with `sequence` greater than this cursor.
 - `before`: return items with `sequence` lower than this cursor.
 
-`after` and `before` are mutually exclusive. Responses are always ordered by
-`sequence` ascending, including the default recent page.
+`after` and `before` are mutually exclusive. Responses are always ordered by `sequence` ascending, including the default recent page.
 
 Response data:
 
@@ -928,9 +495,7 @@ Response data:
 }
 ```
 
-Terminal turn items expose provider-reported current-turn `usage` when it is
-available. The field is omitted when the runtime did not report usage; clients
-must not interpret an omitted field as zero tokens.
+Terminal turn items expose provider-reported current-turn `usage` when it is available. The field is omitted when the runtime did not report usage; clients must not interpret an omitted field as zero tokens.
 
 Current item types include:
 
@@ -951,15 +516,9 @@ Current item types include:
 - `profile_change_failed`
 - `approval_policy_changed`
 
-New `turn_started` items may include a `turn.runtime` object with `agent`,
-`profile_name`, `model`, and `reasoning_effort`. These values record the runtime
-selected for that turn and remain stable if Workspace or Channel defaults later
-change. Clients must accept older turn items without this object.
+New `turn_started` items may include a `turn.runtime` object with `agent`, `profile_name`, `model`, and `reasoning_effort`. These values record the runtime selected for that turn and remain stable if Workspace or Channel defaults later change. Clients must accept older turn items without this object.
 
-`context_compacted` marks the durable point where the runtime replaced older
-model history with a summary. Display history remains intact. New markers
-include the measured before/after values; clients must also accept older
-markers without `context_compaction`:
+`context_compacted` marks the durable point where the runtime replaced older model history with a summary. Display history remains intact. New markers include the measured before/after values; clients must also accept older markers without `context_compaction`:
 
 ```json
 {
@@ -973,8 +532,7 @@ markers without `context_compaction`:
 }
 ```
 
-Profile result items expose the command correlation and transition without
-provider credentials:
+Profile result items expose the command correlation and transition without provider credentials:
 
 ```json
 {
@@ -990,124 +548,46 @@ provider credentials:
 }
 ```
 
-`profile_change_failed` uses the same `profile` object and includes a public
-`error` string.
+`profile_change_failed` uses the same `profile` object and includes a public `error` string.
 
-`turn_paused` with `reason: "need_approval"` is not a completed turn. Desktop
-should use explicit turn lifecycle items instead of inferring turn completion
-from runtime state.
+`turn_paused` with `reason: "need_approval"` is not a completed turn. Desktop should use explicit turn lifecycle items instead of inferring turn completion from runtime state.
 
-`approval_request` and `approval_decision` are display-log items, not command
-messages. Desktop clients render approval UI from these items, but submit the
-user's decision through the public approval endpoint below.
+`approval_request` and `approval_decision` are display-log items, not command messages. Desktop clients render approval UI from these items, but submit the user's decision through the public approval endpoint below.
 
-`steering_message` is a user-visible correction sent while a turn is already
-running. The worker writes it only when the correction is applied, after the
-current provider response and any interrupted tool results, and before the next
-provider response.
+`steering_message` is a user-visible correction sent while a turn is already running. The worker writes it only when the correction is applied, after the current provider response and any interrupted tool results, and before the next provider response.
 
-Channel-originated `user_message` items include `command.request_context` with
-the provider, connection, containing external conversation ID, optional
-external root-message ID, optional external thread ID, external message ID, and host-resolved
-actor (`id`, optional `display_name`, and `role`). This is the same immutable
-context supplied separately to the main Agent as a contextual user message and
-to the safety classifier as trusted request context. The daemon derives the
-role from `owner_sender_ids`; user-authored claims never alter it. Ordinary
-Desktop/Web inputs omit this object; when one follows a Channel turn, the Agent
-inserts an explicit context-clear marker so the previous external actor does not
-carry into the local request. Clients may use the durable object as a compact
-origin label while rendering the message body unchanged.
+Channel-originated `user_message` items include `command.request_context` with the provider, connection, containing external conversation ID, optional external root-message ID, optional external thread ID, external message ID, and host-resolved actor (`id`, optional `display_name`, and `role`). This is the same immutable context supplied separately to the main Agent as a contextual user message and to the safety classifier as trusted request context. The daemon derives the role from `owner_sender_ids`; user-authored claims never alter it. Ordinary Desktop/Web inputs omit this object; when one follows a Channel turn, the Agent inserts an explicit context-clear marker so the previous external actor does not carry into the local request. Clients may use the durable object as a compact origin label while rendering the message body unchanged.
 
-`session_command` records durable control requests such as pause. It is a
-command request, not proof that the worker already applied the command.
-Lifecycle confirmation still comes from explicit turn items such as
-`turn_interrupted`.
+`session_command` records durable control requests such as pause. It is a command request, not proof that the worker already applied the command. Lifecycle confirmation still comes from explicit turn items such as `turn_interrupted`.
 
-Message content parts are zotigod display DTOs, not runtime protocol structs.
-Current part types include `text`, `reasoning`, `image`, `tool_call`, and
-`tool_result`.
-For structured parts such as `tool_call` and `tool_result`, desktop clients
-should use the structured `tool_call` and `tool_result` objects for rendering,
-state, filtering, and details. `text` is reserved for actual text content parts.
-Complete `tool_call` and `tool_result` parts are persisted as soon as their
-runtime events finish, rather than waiting for the whole turn. A single model
-turn may therefore produce multiple ordered `assistant_message` items. Text and
-reasoning are persisted once per completed content block instead of creating
-one durable item per token.
+Message content parts are zotigod display DTOs, not runtime protocol structs. Current part types include `text`, `reasoning`, `image`, `tool_call`, and `tool_result`. For structured parts such as `tool_call` and `tool_result`, desktop clients should use the structured `tool_call` and `tool_result` objects for rendering, state, filtering, and details. `text` is reserved for actual text content parts. Complete `tool_call` and `tool_result` parts are persisted as soon as their runtime events finish, rather than waiting for the whole turn. A single model turn may therefore produce multiple ordered `assistant_message` items. Text and reasoning are persisted once per completed content block instead of creating one durable item per token.
 
-Completed Codex `imageGeneration` items and image-bearing dynamic/MCP tool
-results are copied into the session image store. Their display items contain a
-stable session image URL plus `media_type`, dimensions, and byte size; inline
-Base64/data URLs are not retained in the display WAL. The same media reference
-is returned by live events and `/sessions/{id}/items`, including after a daemon
-restart or Codex history synchronization.
+Completed Codex `imageGeneration` items and image-bearing dynamic/MCP tool results are copied into the session image store. Their display items contain a stable session image URL plus `media_type`, dimensions, and byte size; inline Base64/data URLs are not retained in the display WAL. The same media reference is returned by live events and `/sessions/{id}/items`, including after a daemon restart or Codex history synchronization.
 
-Completed `spawn` results may include `tool_result.metadata.subagent` with the
-child name, type, workdir, description, status, usage, and public message
-history. The public projection preserves renderable text, reasoning, tool
-calls, tool results, and media references, but omits provider continuation
-state, signatures, encrypted reasoning, inline media bytes, and nested internal
-metadata.
+Completed `spawn` results may include `tool_result.metadata.subagent` with the child name, type, workdir, description, status, usage, and public message history. The public projection preserves renderable text, reasoning, tool calls, tool results, and media references, but omits provider continuation state, signatures, encrypted reasoning, inline media bytes, and nested internal metadata.
 
-While a spawned child is running, its completed content blocks and tool events
-are persisted as `assistant_message` items carrying `subagent` metadata. Their
-`subagent.tool_call_id` points
-to the parent `spawn` call; the remaining metadata identifies the child and its
-current `running`, `waiting_approval`, `completed`, or `failed` status. Clients
-should render these items in the matching subagent transcript rather than the
-parent conversation timeline. The final `spawn` result remains the authoritative
-complete child history.
+While a spawned child is running, its completed content blocks and tool events are persisted as `assistant_message` items carrying `subagent` metadata. Their `subagent.tool_call_id` points to the parent `spawn` call; the remaining metadata identifies the child and its current `running`, `waiting_approval`, `completed`, or `failed` status. Clients should render these items in the matching subagent transcript rather than the parent conversation timeline. The final `spawn` result remains the authoritative complete child history.
 
-Immediately before invoking a registered tool, the worker appends an internal
-`tool_execution_started` journal item containing `turn_id`, `tool_call_id`, and
-`tool_name`. The worker waits until the corresponding complete `tool_call` is
-durable, then persists this marker, and only then invokes the tool. A durable
-`tool_result` completes that execution for recovery purposes. Internal journal
-items are intentionally filtered before `/items` pagination and are not sent as
-public SSE `item` events, so existing Desktop item parsers remain compatible.
-Once a new worker has written this journal type, downgrading that session to an
-older zotigod is not supported: an older daemon may expose the unknown item to
-clients. Display-log format upgrades are forward-only unless a release states
-otherwise.
+Immediately before invoking a registered tool, the worker appends an internal `tool_execution_started` journal item containing `turn_id`, `tool_call_id`, and `tool_name`. The worker waits until the corresponding complete `tool_call` is durable, then persists this marker, and only then invokes the tool. A durable `tool_result` completes that execution for recovery purposes. Internal journal items are intentionally filtered before `/items` pagination and are not sent as public SSE `item` events, so existing Desktop item parsers remain compatible. Once a new worker has written this journal type, downgrading that session to an older zotigod is not supported: an older daemon may expose the unknown item to clients. Display-log format upgrades are forward-only unless a release states otherwise.
 
-If a worker stops after `tool_execution_started` but before a matching durable
-result, the replacement worker treats the outcome as unknown. When a paused
-snapshot ends with the corresponding assistant tool-call batch, it appends
-matching synthetic error tool results; otherwise it appends an internal
-user-role reminder. Both forms tell the model that the operation may have
-produced side effects and must not be repeated automatically. The worker clears
-stale pending actions and does not replay the call. Repeated restarts do not
-duplicate the same turn-scoped reminder.
+If a worker stops after `tool_execution_started` but before a matching durable result, the replacement worker treats the outcome as unknown. When a paused snapshot ends with the corresponding assistant tool-call batch, it appends matching synthetic error tool results; otherwise it appends an internal user-role reminder. Both forms tell the model that the operation may have produced side effects and must not be repeated automatically. The worker clears stale pending actions and does not replay the call. Repeated restarts do not duplicate the same turn-scoped reminder.
 
-This execution barrier covers worker-process failures and control-channel
-disconnects. The current append-only file store does not call `fsync` for each
-display item, so it does not claim exactly-once recovery across an OS crash,
-power loss, or storage failure. Tools that need that stronger guarantee still
-require their own idempotency key or externally queryable operation ID.
+This execution barrier covers worker-process failures and control-channel disconnects. The current append-only file store does not call `fsync` for each display item, so it does not claim exactly-once recovery across an OS crash, power loss, or storage failure. Tools that need that stronger guarantee still require their own idempotency key or externally queryable operation ID.
 
-Old sessions that do not have a per-session display log return an empty item
-list. zotigo may later add an explicit best-effort migration path, but this
-endpoint does not reconstruct display history from runtime
-`AgentSnapshot.History`.
+Old sessions that do not have a per-session display log return an empty item list. zotigo may later add an explicit best-effort migration path, but this endpoint does not reconstruct display history from runtime `AgentSnapshot.History`.
 
 Status codes:
 
-- `200`: items returned. A known session with no display log returns an empty
-  `items` array.
+- `200`: items returned. A known session with no display log returns an empty `items` array.
 - `400`: invalid pagination parameters.
 - `404`: session not found.
 - `405`: method not allowed.
 
 ## Stream session display events
 
-`GET /sessions/{id}/events` is a raw Server-Sent Events stream carrying durable
-display items plus best-effort live text and reasoning deltas. The display log
-returned by `/items` remains the recovery source of truth. Desktop must retain
-its durable sequence cursor and may use `/items` for explicit history
-pagination or recovery.
+`GET /sessions/{id}/events` is a raw Server-Sent Events stream carrying durable display items plus best-effort live text and reasoning deltas. The display log returned by `/items` remains the recovery source of truth. Desktop must retain its durable sequence cursor and may use `/items` for explicit history pagination or recovery.
 
-Each persisted item is sent with its durable sequence as the SSE event ID and
-the same public item DTO used inside the `/items` response:
+Each persisted item is sent with its durable sequence as the SSE event ID and the same public item DTO used inside the `/items` response:
 
 ```text
 id: 42
@@ -1116,8 +596,7 @@ data: {"id":"item_sess_8f0e12ab34cd56ef_42","sequence":42,"type":"assistant_mess
 
 ```
 
-While a parent or subagent text or reasoning block is being generated, the
-worker may also send volatile `delta` events:
+While a parent or subagent text or reasoning block is being generated, the worker may also send volatile `delta` events:
 
 ```text
 event: delta
@@ -1125,64 +604,36 @@ data: {"item_id":"item_550e8400-e29b-41d4-a716-446655440000","role":"assistant",
 
 ```
 
-Subagent deltas additionally carry a `subagent` object whose `tool_call_id`
-matches the parent `spawn` call. Their durable replacement is a
-`assistant_message` with `subagent` metadata and the same `item_id`.
+Subagent deltas additionally carry a `subagent` object whose `tool_call_id` matches the parent `spawn` call. Their durable replacement is a `assistant_message` with `subagent` metadata and the same `item_id`.
 
-All deltas for one block use the same worker-generated UUID. When the block
-finishes, its complete durable `assistant_message` uses
-that UUID as its item ID and receives the next durable sequence. Desktop should
-append deltas to a temporary block keyed by `item_id`, then replace that block
-with the durable `item` event carrying the same ID.
+All deltas for one block use the same worker-generated UUID. When the block finishes, its complete durable `assistant_message` uses that UUID as its item ID and receives the next durable sequence. Desktop should append deltas to a temporary block keyed by `item_id`, then replace that block with the durable `item` event carrying the same ID.
 
-Delta events intentionally have no SSE `id` and never advance
-`Last-Event-ID`: they are not persisted, replayed, or included in `/items`.
-They may be dropped if a worker, daemon, connection, or slow client fails. On
-reconnect, Desktop should discard unresolved temporary blocks and rebuild from
-durable items. It should also ignore a late delta whose `item_id` is already
-durable.
+Delta events intentionally have no SSE `id` and never advance `Last-Event-ID`: they are not persisted, replayed, or included in `/items`. They may be dropped if a worker, daemon, connection, or slow client fails. On reconnect, Desktop should discard unresolved temporary blocks and rebuild from durable items. It should also ignore a late delta whose `item_id` is already durable.
 
 Reconnect semantics:
 
-- `?after=42` replays durable items whose `sequence` is greater than `42`, then
-  continues streaming new items.
+- `?after=42` replays durable items whose `sequence` is greater than `42`, then continues streaming new items.
 - If `after` is omitted, a valid `Last-Event-ID` header is used instead.
 - If both are present, the `after` query parameter takes precedence.
 - If neither is present, the stream replays the complete durable display log.
-- Items are emitted in ascending sequence order. Clients should still dedupe by
-  sequence so reconnects remain idempotent.
+- Items are emitted in ascending sequence order. Clients should still dedupe by sequence so reconnects remain idempotent.
 
-Durable-item notifications contain no display payload; they only wake active
-SSE handlers to read the durable log. Workers enqueue those wake requests
-through a bounded, coalescing sender, and zotigod also performs low-frequency
-durable catch-up, so a lost wake delays an item briefly but cannot permanently
-omit it.
+Durable-item notifications contain no display payload; they only wake active SSE handlers to read the durable log. Workers enqueue those wake requests through a bounded, coalescing sender, and zotigod also performs low-frequency durable catch-up, so a lost wake delays an item briefly but cannot permanently omit it.
 
-Volatile deltas travel from the worker over its existing internal control
-WebSocket and are fanned out directly to active SSE subscribers. Their bounded
-queues never block model generation; overload may drop preview data, while the
-complete durable block still repairs the UI. Comment-only heartbeat frames keep
-idle connections alive and do not advance the event cursor.
+Volatile deltas travel from the worker over its existing internal control WebSocket and are fanned out directly to active SSE subscribers. Their bounded queues never block model generation; overload may drop preview data, while the complete durable block still repairs the UI. Comment-only heartbeat frames keep idle connections alive and do not advance the event cursor.
 
-Unlike ordinary JSON endpoints, a successful SSE response is not wrapped in
-the `{ "code", "data" }` envelope. Validation failures before streaming use the
-normal structured error response.
+Unlike ordinary JSON endpoints, a successful SSE response is not wrapped in the `{ "code", "data" }` envelope. Validation failures before streaming use the normal structured error response.
 
 Status codes:
 
-- `200`: event stream opened for a known session, including sessions whose log
-  is currently empty.
+- `200`: event stream opened for a known session, including sessions whose log is currently empty.
 - `400`: invalid `after` or `Last-Event-ID` cursor.
 - `404`: session not found.
 - `405`: method not allowed.
 
 ## Generate a conversation title suggestion
 
-`POST /sessions/{id}/title-suggestion` generates a short title from the first
-successfully completed turn. The request has no body. Zotigod reads the first
-`user_message` associated with that turn and the last visible
-`assistant_message` before its `turn_completed` marker from the durable display
-log. Failed and interrupted turns are skipped.
+`POST /sessions/{id}/title-suggestion` generates a short title from the first successfully completed turn. The request has no body. Zotigod reads the first `user_message` associated with that turn and the last visible `assistant_message` before its `turn_completed` marker from the durable display log. Failed and interrupted turns are skipped.
 
 Response data:
 
@@ -1192,124 +643,49 @@ Response data:
 }
 ```
 
-The endpoint uses the session's effective profile for a separate, tool-free
-provider request with low reasoning effort. It does not call the main Agent or
-append anything to `Agent.History`, `AgentSnapshot`, or the display log. It also
-does not start a worker, so a stored completed session can generate a suggestion
-while remaining offline.
+The endpoint uses the session's effective profile for a separate, tool-free provider request with low reasoning effort. It does not call the main Agent or append anything to `Agent.History`, `AgentSnapshot`, or the display log. It also does not start a worker, so a stored completed session can generate a suggestion while remaining offline.
 
-Only text content from the selected successfully completed turn is used.
-Reasoning, tool calls, tool results, steering, later turns, and dynamic user
-context are excluded. For an image-only prompt, the final assistant text may
-provide the title source.
+Only text content from the selected successfully completed turn is used. Reasoning, tool calls, tool results, steering, later turns, and dynamic user context are excluded. For an image-only prompt, the final assistant text may provide the title source.
 
 Status codes:
 
 - `200`: title suggestion generated.
 - `404`: session not found.
 - `405`: method not allowed.
-- `409`: no turn has completed successfully, or the first successfully
-  completed turn has no usable text.
+- `409`: no turn has completed successfully, or the first successfully completed turn has no usable text.
 - `500`: session, display log, or effective configuration could not be read.
 - `502`: provider construction, streaming, or output validation failed.
 - `504`: title generation exceeded 15 seconds.
 
 ## Submit, pause, and steering
 
-Desktop can submit user input, request a running session to pause the current
-turn, or explicitly add steering text for the worker to apply at the next
-provider interruption point. zotigod makes sure a worker is online before
-accepting these requests. Messages, pauses, and steering are durable commands.
+Desktop can submit user input, request a running session to pause the current turn, or explicitly add steering text for the worker to apply at the next provider interruption point. zotigod makes sure a worker is online before accepting these requests. Messages, pauses, and steering are durable commands.
 
-zotigod first ensures that the session worker owner is online, then sends one
-input-admission request to that owner. The owner chooses message or steering and
-durably records the accepted command before acknowledging the HTTP request.
-After a command is recorded, the command log is the recovery source of truth;
-workers replay both message and steering commands after reconnecting.
+zotigod first ensures that the session worker owner is online, then sends one input-admission request to that owner. The owner chooses message or steering and durably records the accepted command before acknowledging the HTTP request. After a command is recorded, the command log is the recovery source of truth; workers replay both message and steering commands after reconnecting.
 
-Starting a session launches an internal worker process from the current
-`zotigod` executable. The worker connects back over WebSocket; connecting a
-`starting` session transitions it to `running`. If zotigod launched a worker but
-it does not connect before the startup timeout, the session is marked `failed`
-and the start or message request returns `503`.
+Starting a session launches an internal worker process from the current `zotigod` executable. The worker connects back over WebSocket; connecting a `starting` session transitions it to `running`. If zotigod launched a worker but it does not connect before the startup timeout, the session is marked `failed` and the start or message request returns `503`.
 
-Worker launch belongs to the daemon rather than to the HTTP request that first
-triggered it. If that request is canceled, the shared launch continues and a
-later request can observe the same `starting` session. A daemon-owned startup
-timeout still marks the session `failed` even when no request remains waiting.
+Worker launch belongs to the daemon rather than to the HTTP request that first triggered it. If that request is canceled, the shared launch continues and a later request can observe the same `starting` session. A daemon-owned startup timeout still marks the session `failed` even when no request remains waiting.
 
-Each worker constructs the configured observability backend once from the
-effective project configuration. The main Agent and classifiers created by
-later profile changes reuse that observer, so one session keeps a consistent
-trace lineage across model changes. Without configured credentials the shared
-observer is a no-op.
+Each worker constructs the configured observability backend once from the effective project configuration. The main Agent and classifiers created by later profile changes reuse that observer, so one session keeps a consistent trace lineage across model changes. Without configured credentials the shared observer is a no-op.
 
-Native worker startup also acquires the same per-session file lock used by the
-CLI session manager. If another CLI, daemon worker, or local process already
-owns that session lock, the worker exits instead of reusing the session
-concurrently. Codex workers retain this runtime session lock and also respect
-the app-server thread writer lease; read-only Codex history refresh uses a
-separate history-sync lock. Native workers store a per-session command cursor
-under `.zotigo/sessions`; cursor writes are atomic renames. Codex workers
-recover their applied sequence from durable display lifecycle markers. In both
-runtimes, pending accepted commands are replayed rather than skipped after
-restart.
+Native worker startup also acquires the same per-session file lock used by the CLI session manager. If another CLI, daemon worker, or local process already owns that session lock, the worker exits instead of reusing the session concurrently. Codex workers retain this runtime session lock and also respect the app-server thread writer lease; read-only Codex history refresh uses a separate history-sync lock. Native workers store a per-session command cursor under `.zotigo/sessions`; cursor writes are atomic renames. Codex workers recover their applied sequence from durable display lifecycle markers. In both runtimes, pending accepted commands are replayed rather than skipped after restart.
 
 Workers attach a live control channel by dialing:
 
 `GET /internal/workers/connect?session_id={id}`
 
-This is a WebSocket endpoint. zotigod keeps one active worker connection per
-session ID, so multiple sessions can run concurrently on independent worker
-processes. Reconnecting the same session replaces the old connection.
-Connecting a `starting` session transitions it to `running`; `running` and
-`pausing` or `paused` sessions may reconnect. `pausing` means the previous turn
-is still stopping and remains `working: true`; it becomes `running` and idle
-only after the worker reports the runtime stopped. `created`, `ended`, and
-`failed` sessions are rejected. A worker WebSocket disconnect only removes that
-live connection; it does not by itself end the session.
+This is a WebSocket endpoint. zotigod keeps one active worker connection per session ID, so multiple sessions can run concurrently on independent worker processes. Reconnecting the same session replaces the old connection. Connecting a `starting` session transitions it to `running`; `running` and `pausing` or `paused` sessions may reconnect. `pausing` means the previous turn is still stopping and remains `working: true`; it becomes `running` and idle only after the worker reports the runtime stopped. `created`, `ended`, and `failed` sessions are rejected. A worker WebSocket disconnect only removes that live connection; it does not by itself end the session.
 
-zotigod sends WebSocket ping frames to workers and expects pong responses. A
-worker connection that stops responding is closed and unregistered, so later
-public commands can relaunch or reconnect a worker instead of writing to a stale
-socket. When a worker reports session finish, zotigod closes and unregisters the
-live worker connection immediately.
+zotigod sends WebSocket ping frames to workers and expects pong responses. A worker connection that stops responding is closed and unregistered, so later public commands can relaunch or reconnect a worker instead of writing to a stale socket. When a worker reports session finish, zotigod closes and unregisters the live worker connection immediately.
 
-Workers also send WebSocket ping frames to zotigod and require pong responses.
-If the worker cannot write a ping or does not receive a pong before its read
-deadline, it closes the WebSocket, cancels any active turn, and exits. Workers do
-not continue tool or model execution after the control channel is lost. If a
-display-log turn is active, the worker appends `turn_interrupted` with reason
-`control_channel_closed` before closing. This prevents a desktop user from
-seeing a disconnected session while tools keep running in the background.
+Workers also send WebSocket ping frames to zotigod and require pong responses. If the worker cannot write a ping or does not receive a pong before its read deadline, it closes the WebSocket, cancels any active turn, and exits. Workers do not continue tool or model execution after the control channel is lost. If a display-log turn is active, the worker appends `turn_interrupted` with reason `control_channel_closed` before closing. This prevents a desktop user from seeing a disconnected session while tools keep running in the background.
 
-Worker command delivery is split into a WebSocket reader and a durable-log
-consumer. The reader handles ping/pong traffic, decodes command notifications,
-and enqueues them into a bounded in-process buffer. A notification only wakes
-the consumer; the consumer fetches commands from the durable log at its saved
-offset and applies them in sequence order. This prevents concurrent HTTP
-handlers from changing execution order through WebSocket scheduling. The
-buffer is intentionally bounded at 32 items; if it fills, the worker treats
-itself as unhealthy and exits instead of staying connected but not applying
-control commands.
+Worker command delivery is split into a WebSocket reader and a durable-log consumer. The reader handles ping/pong traffic, decodes command notifications, and enqueues them into a bounded in-process buffer. A notification only wakes the consumer; the consumer fetches commands from the durable log at its saved offset and applies them in sequence order. This prevents concurrent HTTP handlers from changing execution order through WebSocket scheduling. The buffer is intentionally bounded at 32 items; if it fills, the worker treats itself as unhealthy and exits instead of staying connected but not applying control commands.
 
-After a durable message has produced `turn_started`, workers send an explicit
-`working` lifecycle notification. Ordinary output wakes and deltas do not guess
-lifecycle transitions. Failure to deliver this advisory notification never
-cancels an already-durable turn.
+After a durable message has produced `turn_started`, workers send an explicit `working` lifecycle notification. Ordinary output wakes and deltas do not guess lifecycle transitions. Failure to deliver this advisory notification never cancels an already-durable turn.
 
-If the daemon process restarts, old workers are not treated as still live.
-Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or
-`POST /sessions/{id}/messages` starts a new worker. Worker crash recovery is
-intentionally limited in this version. Final runtime states such as `ended` or
-`failed` are not persisted across daemon restarts; after restart, stored-only
-sessions are reported as `offline` and can be continued by starting a new
-worker. Once a worker accepts a message command and starts a turn, the command
-cursor may be advanced before that turn completes. If the worker process crashes
-mid-turn, zotigod does not currently reconstruct and resume that in-flight turn.
-When a new bundled worker starts and finds an old open display-log turn, it
-appends `turn_interrupted` with reason `worker_restarted` before accepting new
-control commands.
+If the daemon process restarts, old workers are not treated as still live. Stored sessions are returned as `offline` until `POST /sessions/{id}/start` or `POST /sessions/{id}/messages` starts a new worker. Worker crash recovery is intentionally limited in this version. Final runtime states such as `ended` or `failed` are not persisted across daemon restarts; after restart, stored-only sessions are reported as `offline` and can be continued by starting a new worker. Once a worker accepts a message command and starts a turn, the command cursor may be advanced before that turn completes. If the worker process crashes mid-turn, zotigod does not currently reconstruct and resume that in-flight turn. When a new bundled worker starts and finds an old open display-log turn, it appends `turn_interrupted` with reason `worker_restarted` before accepting new control commands.
 
 Server-to-worker command frame:
 
@@ -1341,9 +717,7 @@ Text-only payloads remain supported:
 }
 ```
 
-To explicitly enable one or more discovered Agent Skills for this turn, pass
-their names. The daemon resolves them against the Session's saved working
-directory and persists the normalized, deduplicated selection with the command:
+To explicitly enable one or more discovered Agent Skills for this turn, pass their names. The daemon resolves them against the Session's saved working directory and persists the normalized, deduplicated selection with the command:
 
 ```json
 {
@@ -1352,9 +726,7 @@ directory and persists the normalized, deduplicated selection with the command:
 }
 ```
 
-Clients cannot submit Skill paths. Unknown, disabled, or invalid Skills return
-`400`; omitting `skills` or sending an empty list preserves the existing message
-behavior.
+Clients cannot submit Skill paths. Unknown, disabled, or invalid Skills return `400`; omitting `skills` or sending an empty list preserves the existing message behavior.
 
 Messages may also include image input:
 
@@ -1370,56 +742,21 @@ Messages may also include image input:
 }
 ```
 
-`text` is optional when `images` is non-empty. Requests must include at least one
-non-empty text value or one image. `images` is optional. The first image-input
-version only accepts `image/png`,
-`image/jpeg`, and `image/webp`. A request may include at most 5 images; each
-decoded image is capped at 5 MiB, total decoded image bytes are capped at 20
-MiB, and the JSON request body is capped at 28 MiB. Invalid base64, unsupported
-MIME types, and images whose decoded bytes do not match their declared MIME type
-return `400`. PNG and JPEG validation decodes image config; WebP validation is
-limited to basic RIFF/WebP header sniffing in this first version. Oversized
-request bodies return `413`.
+`text` is optional when `images` is non-empty. Requests must include at least one non-empty text value or one image. `images` is optional. The first image-input version only accepts `image/png`, `image/jpeg`, and `image/webp`. A request may include at most 5 images; each decoded image is capped at 5 MiB, total decoded image bytes are capped at 20 MiB, and the JSON request body is capped at 28 MiB. Invalid base64, unsupported MIME types, and images whose decoded bytes do not match their declared MIME type return `400`. PNG and JPEG validation decodes image config; WebP validation is limited to basic RIFF/WebP header sniffing in this first version. Oversized request bodies return `413`.
 
-Accepted messages append one durable `user_message` display item with a
-`command` payload of `type: "message"`. Workers consume that same item as the
-command source of truth; UI clients render it as the visible user message. This
-keeps the visible transcript and executable command atomic.
+Accepted messages append one durable `user_message` display item with a `command` payload of `type: "message"`. Workers consume that same item as the command source of truth; UI clients render it as the visible user message. This keeps the visible transcript and executable command atomic.
 
-For image messages, the live worker command includes the image payload so the
-runtime receives real `image` content parts. The display log and public
-`/sessions/{id}/items` response do not persist or return full image base64.
-Image bytes are stored separately as per-session blobs for command replay, and
-public responses only include metadata such as `mime_type`, `size_bytes`,
-`width`, `height`, and an image read `url` when available.
+For image messages, the live worker command includes the image payload so the runtime receives real `image` content parts. The display log and public `/sessions/{id}/items` response do not persist or return full image base64. Image bytes are stored separately as per-session blobs for command replay, and public responses only include metadata such as `mime_type`, `size_bytes`, `width`, `height`, and an image read `url` when available.
 
 Historical image bytes are read through a separate public endpoint:
 
 `GET /sessions/{id}/images/{name}`
 
-The `{name}` value is the random image name returned in `/items` image URLs.
-This endpoint does not wrap the response in JSON; it returns the original image
-bytes with `Content-Type` set to `image/png`, `image/jpeg`, or `image/webp`.
-The image must be recorded in zotigod's session image index when the message is
-accepted. Missing sessions, unknown image names, unreferenced blob files, and
-deleted blobs return `404`. This keeps `/items` small and prevents base64 image
-payloads from becoming part of the transcript API.
+The `{name}` value is the random image name returned in `/items` image URLs. This endpoint does not wrap the response in JSON; it returns the original image bytes with `Content-Type` set to `image/png`, `image/jpeg`, or `image/webp`. The image must be recorded in zotigod's session image index when the message is accepted. Missing sessions, unknown image names, unreferenced blob files, and deleted blobs return `404`. This keeps `/items` small and prevents base64 image payloads from becoming part of the transcript API.
 
-`POST /sessions/{id}/messages` is the normal start-or-steer input endpoint. It
-starts or resumes the session when needed, then atomically derives the command
-type inside the session worker owner that also owns the live runtime. Native
-workers make the admission decision under the agent state lock. Codex workers
-make one `turn/start` call and use app-server's start-or-steer admission result.
-If there is no active turn, zotigod records one `message` command. If a turn is
-active, including while paused for approval or while pausing, zotigod records
-one `steering` command tied to that turn. The endpoint no longer returns
-`active_turn` merely because a turn is open. A pending message that has not yet
-started still returns `command_pending`; this endpoint does not model a queue.
+`POST /sessions/{id}/messages` is the normal start-or-steer input endpoint. It starts or resumes the session when needed, then atomically derives the command type inside the session worker owner that also owns the live runtime. Native workers make the admission decision under the agent state lock. Codex workers make one `turn/start` call and use app-server's start-or-steer admission result. If there is no active turn, zotigod records one `message` command. If a turn is active, including while paused for approval or while pausing, zotigod records one `steering` command tied to that turn. The endpoint no longer returns `active_turn` merely because a turn is open. A pending message that has not yet started still returns `command_pending`; this endpoint does not model a queue.
 
-Clients that retry a submission may include `client_message_id`. Reusing the
-same ID with the same input returns the original command response without
-appending or dispatching another command. Reusing it for different input
-returns `409 command_id_conflict`.
+Clients that retry a submission may include `client_message_id`. Reusing the same ID with the same input returns the original command response without appending or dispatching another command. Reusing it for different input returns `409 command_id_conflict`.
 
 Response data:
 
@@ -1454,12 +791,7 @@ Optional request body:
 }
 ```
 
-If `turn_id` is omitted, zotigod uses the last open display-log turn. A pause
-request without an open turn is rejected. When `turn_id` is present, it must
-match the open turn. An accepted pause request appends `session_command` with
-`type: "pause"` and `reason: "user_pause"`. It does not mark the session
-`ended`; the bundled worker applies the command and confirms the lifecycle by
-appending `turn_interrupted`.
+If `turn_id` is omitted, zotigod uses the last open display-log turn. A pause request without an open turn is rejected. When `turn_id` is present, it must match the open turn. An accepted pause request appends `session_command` with `type: "pause"` and `reason: "user_pause"`. It does not mark the session `ended`; the bundled worker applies the command and confirms the lifecycle by appending `turn_interrupted`.
 
 Response data:
 
@@ -1491,20 +823,9 @@ Submit steering input:
 }
 ```
 
-`text` and `images` follow the same input rules as `POST /messages`: either
-field may be omitted, but at least one must be present. Steering images use the
-same limits and accepted MIME types as normal message images. Public responses
-and display items only include image metadata and image read URLs; worker
-commands hydrate the original image bytes.
+`text` and `images` follow the same input rules as `POST /messages`: either field may be omitted, but at least one must be present. Steering images use the same limits and accepted MIME types as normal message images. Public responses and display items only include image metadata and image read URLs; worker commands hydrate the original image bytes.
 
-`expected_turn_id` is optional. When present, it must match the currently open
-display-log turn or the request returns `409 turn_mismatch`. The legacy
-`turn_id` field remains accepted as the same precondition for compatibility.
-When both are supplied, they must match. When neither is supplied, zotigod uses
-the currently open turn. Steering without an open turn returns structured
-`409 no_active_turn`. An open turn remains steerable while paused for approval
-or while pausing. Explicit steering also accepts `client_message_id` with the
-same idempotency semantics as `/messages`.
+`expected_turn_id` is optional. When present, it must match the currently open display-log turn or the request returns `409 turn_mismatch`. The legacy `turn_id` field remains accepted as the same precondition for compatibility. When both are supplied, they must match. When neither is supplied, zotigod uses the currently open turn. Steering without an open turn returns structured `409 no_active_turn`. An open turn remains steerable while paused for approval or while pausing. Explicit steering also accepts `client_message_id` with the same idempotency semantics as `/messages`.
 
 Response data:
 
@@ -1528,16 +849,9 @@ Response data:
 }
 ```
 
-Workers poll durable commands with a display-log cursor. Pending steering is
-stored as an internal `session_command`; once applied, the worker appends the
-visible `steering_message` with the same command ID. Applied steering display
-items are not replayed as commands. `after` is a sequence cursor kept for
-compatibility; workers should prefer the byte `offset` cursor because it avoids
-re-reading the full display log on long sessions.
+Workers poll durable commands with a display-log cursor. Pending steering is stored as an internal `session_command`; once applied, the worker appends the visible `steering_message` with the same command ID. Applied steering display items are not replayed as commands. `after` is a sequence cursor kept for compatibility; workers should prefer the byte `offset` cursor because it avoids re-reading the full display log on long sessions.
 
-Queueing is intentionally separate from steering. A future queue feature should
-use its own durable model and API for input that runs after the current turn;
-ordinary `/messages` input while a turn is open remains start-or-steer.
+Queueing is intentionally separate from steering. A future queue feature should use its own durable model and API for input that runs after the current turn; ordinary `/messages` input while a turn is open remains start-or-steer.
 
 `GET /internal/sessions/{id}/commands?after=0&limit=200`
 
@@ -1584,31 +898,13 @@ Raw response:
 }
 ```
 
-`next_offset` is the next display-log byte offset after the complete lines that
-were scanned. Workers persist both `next_offset` and the highest command
-sequence they have applied, so replay can skip already-applied commands while
-still advancing through the append-only log. If the log ends with a partial
-line, the offset cursor stops at the last complete line and the partial line is
-ignored until it is completed or truncated by a later append.
+`next_offset` is the next display-log byte offset after the complete lines that were scanned. Workers persist both `next_offset` and the highest command sequence they have applied, so replay can skip already-applied commands while still advancing through the append-only log. If the log ends with a partial line, the offset cursor stops at the last complete line and the partial line is ignored until it is completed or truncated by a later append.
 
-Profile commands are complete only after the worker records either
-`profile_changed` or `profile_change_failed`. The worker does not advance the
-durable command cursor past an in-progress or uncertain profile command, and it
-does not execute later commands until that result is known. This keeps replay
-ordered when profile metadata and its display-log completion marker cannot be
-committed consistently.
+Profile commands are complete only after the worker records either `profile_changed` or `profile_change_failed`. The worker does not advance the durable command cursor past an in-progress or uncertain profile command, and it does not execute later commands until that result is known. This keeps replay ordered when profile metadata and its display-log completion marker cannot be committed consistently.
 
-The worker runtime owns steering coalescing. Multiple corrections received
-before the next provider request are merged into one normal `role=user` message.
-The current provider stream finishes first; tool calls that have not started are
-recorded as interrupted, and running tools are canceled when possible. The
-worker then persists each applied `steering_message` and starts the next provider
-request. Stale steering for a completed or different turn is ignored.
+The worker runtime owns steering coalescing. Multiple corrections received before the next provider request are merged into one normal `role=user` message. The current provider stream finishes first; tool calls that have not started are recorded as interrupted, and running tools are canceled when possible. The worker then persists each applied `steering_message` and starts the next provider request. Stale steering for a completed or different turn is ignored.
 
-After applying a pause command, the bundled worker writes `turn_interrupted`
-directly to the display log. The internal endpoint below exists for worker
-implementations that report lifecycle confirmation over HTTP. `turn_id` is
-required and must match the current open display-log turn.
+After applying a pause command, the bundled worker writes `turn_interrupted` directly to the display log. The internal endpoint below exists for worker implementations that report lifecycle confirmation over HTTP. `turn_id` is required and must match the current open display-log turn.
 
 `POST /internal/sessions/{id}/turn/interrupted`
 
@@ -1640,43 +936,22 @@ Response data:
 Status codes:
 
 - `202`: pause or live profile command accepted.
-- `201`: message or steering command created, or worker lifecycle confirmation
-  appended.
-- `200`: internal command list returned, or an offline/created profile change
-  applied.
-- `400`: invalid request body, invalid image input, missing `turn_id`, empty
-  steering text, unknown profile, or invalid command query.
+- `201`: message or steering command created, or worker lifecycle confirmation appended.
+- `200`: internal command list returned, or an offline/created profile change applied.
+- `400`: invalid request body, invalid image input, missing `turn_id`, empty steering text, unknown profile, or invalid command query.
 - `413`: message or steering request body exceeds the public API size limit.
 - `404`: session not found.
-- `409`: command submitted in an incompatible state, a reused client message ID
-  has different input, or an explicit steering precondition mismatches. Stable
-  state codes include `runtime_occupied`, `turn_stopping`, `command_pending`,
-  `no_active_turn`, `turn_mismatch`, and `command_id_conflict`. `active_turn`
-  remains a legacy daemon response code; current `/messages` requests are
-  atomically converted to steering instead.
-- `503`: zotigod could not start or reconnect a worker before accepting the
-  command.
+- `409`: command submitted in an incompatible state, a reused client message ID has different input, or an explicit steering precondition mismatches. Stable state codes include `runtime_occupied`, `turn_stopping`, `command_pending`, `no_active_turn`, `turn_mismatch`, and `command_id_conflict`. `active_turn` remains a legacy daemon response code; current `/messages` requests are atomically converted to steering instead.
+- `503`: zotigod could not start or reconnect a worker before accepting the command.
 - `405`: method not allowed.
 
 ## Human approval flow
 
-When a worker needs human approval, the worker appends the `approval_request`
-display item as the durable record and best-effort appends `turn_paused` with
-`reason: "need_approval"`. It then notifies zotigod over the worker WebSocket,
-which transitions the daemon session state to `paused`. zotigod does not write
-either display item.
+When a worker needs human approval, the worker appends the `approval_request` display item as the durable record and best-effort appends `turn_paused` with `reason: "need_approval"`. It then notifies zotigod over the worker WebSocket, which transitions the daemon session state to `paused`. zotigod does not write either display item.
 
-The persisted approval read model is the display log. zotigod reconstructs
-pending and resolved approval requests from `approval_request` and
-`approval_decision` items for display and request validation. Public approval
-submission still requires the session to be live in the current daemon. If the
-daemon has restarted and the session is only present on disk, desktop can still
-display the pending approval from `/items`, but
-`POST /sessions/{id}/approvals/{approval_id}` returns `409` with
-`code: "session_not_live"`.
+The persisted approval read model is the display log. zotigod reconstructs pending and resolved approval requests from `approval_request` and `approval_decision` items for display and request validation. Public approval submission still requires the session to be live in the current daemon. If the daemon has restarted and the session is only present on disk, desktop can still display the pending approval from `/items`, but `POST /sessions/{id}/approvals/{approval_id}` returns `409` with `code: "session_not_live"`.
 
-Desktop clients using this flow must support the `paused` session state and the
-`approval_request` / `approval_decision` item payloads before enabling HITL UI.
+Desktop clients using this flow must support the `paused` session state and the `approval_request` / `approval_decision` item payloads before enabling HITL UI.
 
 Desktop submit decision:
 
@@ -1707,32 +982,17 @@ Denied decisions can include a reason:
 }
 ```
 
-The decision request must include exactly one decision for each pending tool
-call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected.
-zotigod forwards a valid decision to the live worker over its WebSocket. The
-worker appends the `approval_decision` display item, queues an acknowledgement
-of the durable result, and only then resumes the pending Agent actions. After
-zotigod receives that acknowledgement it moves the daemon session back to
-`running` and returns `200` to the Desktop client. On worker disconnect or
-reconnect, zotigod reconciles a paused session from the durable display log.
-There is no approval polling endpoint.
+The decision request must include exactly one decision for each pending tool call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected. zotigod forwards a valid decision to the live worker over its WebSocket. The worker appends the `approval_decision` display item, queues an acknowledgement of the durable result, and only then resumes the pending Agent actions. After zotigod receives that acknowledgement it moves the daemon session back to `running` and returns `200` to the Desktop client. On worker disconnect or reconnect, zotigod reconciles a paused session from the durable display log. There is no approval polling endpoint.
 
-If a worker disconnects while approval is still pending, the session remains
-paused and may be started again. The replacement worker records denied
-decisions for the abandoned approval, interrupts the old turn, and restores the
-Agent snapshot to an idle state before accepting new work. It never executes an
-approval that was not acknowledged by the user.
+If a worker disconnects while approval is still pending, the session remains paused and may be started again. The replacement worker records denied decisions for the abandoned approval, interrupts the old turn, and restores the Agent snapshot to an idle state before accepting new work. It never executes an approval that was not acknowledged by the user.
 
 Status codes:
 
 - `200`: public decision accepted and durably acknowledged by the worker.
 - `400`: invalid request body or decision set.
 - `404`: session or approval request not found.
-- `409`: already resolved approval request. Public decisions for offline
-  sessions use `code: "session_not_live"`.
-- `503`: the live worker disconnected, timed out, or failed to durably apply the
-  decision. Because a timeout can race with a late durable decision, clients
-  should refresh `/sessions/{id}/items` before retrying.
+- `409`: already resolved approval request. Public decisions for offline sessions use `code: "session_not_live"`.
+- `503`: the live worker disconnected, timed out, or failed to durably apply the decision. Because a timeout can race with a late durable decision, clients should refresh `/sessions/{id}/items` before retrying.
 - `405`: method not allowed.
 
 ## Workspace files

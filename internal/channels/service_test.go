@@ -924,6 +924,7 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 	group := bindTestGroup(t, store, "group-1", "owner-1")
 	group.ChatName = "Actual group"
 	group.SessionStrategy = SessionStrategyShared
+	group.SessionID = "archived-shared"
 	if _, err = store.PutConversation(ctx, group); err != nil {
 		t.Fatal(err)
 	}
@@ -939,8 +940,17 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 	if err = service.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
+	unbind, release, err := service.GuardSessionUnbinding(ctx, "archived-shared")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = unbind()
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
 	inputs := []InboundMessage{
-		{MessageID: "message-0", ChatID: "group-1", ChatType: "group", ChatName: "Actual group", Sender: Sender{ID: "owner-1", DisplayName: "Owner"}, Text: "first", MentionedBot: true, CreatedAt: time.Now()},
+		{MessageID: "message-0", ChatID: "group-1", ChatType: "group", ChatName: "Actual group", RootID: "old-topic", ThreadID: "thread-1", Sender: Sender{ID: "owner-1", DisplayName: "Owner"}, Text: "first", MentionedBot: true, CreatedAt: time.Now()},
 		{MessageID: "message-1", ChatID: "group-1", ChatType: "group", ChatName: "Actual group", RootID: "old-topic", ThreadID: "thread-1", Sender: Sender{ID: "owner-1", DisplayName: "Owner"}, Text: "second", MentionedBot: true, CreatedAt: time.Now()},
 	}
 	for _, input := range inputs {
@@ -2853,6 +2863,20 @@ func TestDeleteConnectionWaitsForActiveProcessingMarkerCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-dispatchEntered
+	if err := service.DeleteConnection(ctx, "connection-1"); !errors.Is(err, ErrConnectionBound) {
+		t.Fatalf("delete active binding: %v", err)
+	}
+	// An explicit unbind may leave an already admitted turn draining. Deletion
+	// must still wait for its provider marker cleanup after the binding is gone.
+	unbind, release, err := service.GuardSessionUnbinding(ctx, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = unbind()
+	release()
+	if err != nil {
+		t.Fatal(err)
+	}
 	firstDeleteCtx, cancelFirstDelete := context.WithTimeout(ctx, 20*time.Millisecond)
 	defer cancelFirstDelete()
 	deleteDone := make(chan error, 1)

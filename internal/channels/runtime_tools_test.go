@@ -19,7 +19,7 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app"}); err != nil {
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	conversation, err := store.EnsureConversation(ctx, "connection-1", "chat-1", "group", time.Now())
@@ -28,6 +28,9 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 	}
 	conversation.SessionStrategy = SessionStrategyShared
 	conversation.SessionID = "session-1"
+	conversation.Enabled = true
+	conversation.WorkspaceID = "workspace-1"
+	conversation.SenderPolicy = SenderPolicyAll
 	conversation, err = store.PutConversation(ctx, conversation)
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +60,7 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 	}}
 	service.runs["connection-1"] = &adapterRun{adapter: adapter, generation: 1}
 	result, err := service.ExecuteRuntimeTool(ctx, "session-1", &protocol.RequestContext{
-		Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
+		Actor: protocol.RequestActor{ID: "user-1"}, Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
 	}, RuntimeToolReadMessages, json.RawMessage(`{"limit":2}`))
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +69,7 @@ func TestExecuteRuntimeToolReadsOnlyBoundConversation(t *testing.T) {
 		t.Fatalf("result = %s", result.Text)
 	}
 	if _, err := service.ExecuteRuntimeTool(ctx, "session-1", &protocol.RequestContext{
-		Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "another-chat",
+		Actor: protocol.RequestActor{ID: "user-1"}, Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "another-chat",
 	}, RuntimeToolReadMessages, nil); err == nil {
 		t.Fatal("mismatched conversation scope was accepted")
 	}
@@ -79,7 +82,7 @@ func TestExecuteRuntimeToolFindsReferencedMessageOutsideRecentWindow(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app"}); err != nil {
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	conversation, err := store.EnsureConversation(ctx, "connection-1", "chat-1", "group", time.Now())
@@ -88,6 +91,9 @@ func TestExecuteRuntimeToolFindsReferencedMessageOutsideRecentWindow(t *testing.
 	}
 	conversation.SessionStrategy = SessionStrategyShared
 	conversation.SessionID = "session-1"
+	conversation.Enabled = true
+	conversation.WorkspaceID = "workspace-1"
+	conversation.SenderPolicy = SenderPolicyAll
 	conversation, err = store.PutConversation(ctx, conversation)
 	if err != nil {
 		t.Fatal(err)
@@ -110,7 +116,7 @@ func TestExecuteRuntimeToolFindsReferencedMessageOutsideRecentWindow(t *testing.
 		return ReferencedMessage{}, nil
 	}}}
 	result, err := service.ExecuteRuntimeTool(ctx, "session-1", &protocol.RequestContext{
-		Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
+		Actor: protocol.RequestActor{ID: "user-1"}, Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
 	}, RuntimeToolReadMessages, json.RawMessage(`{"limit":1}`))
 	if err != nil {
 		t.Fatal(err)
@@ -127,7 +133,7 @@ func TestExecuteRuntimeToolRejectsMismatchedResolvedMessage(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app"}); err != nil {
+	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "bot", AppID: "app", Enabled: true}); err != nil {
 		t.Fatal(err)
 	}
 	conversation, err := store.EnsureConversation(ctx, "connection-1", "chat-1", "group", time.Now())
@@ -136,6 +142,9 @@ func TestExecuteRuntimeToolRejectsMismatchedResolvedMessage(t *testing.T) {
 	}
 	conversation.SessionStrategy = SessionStrategyShared
 	conversation.SessionID = "session-1"
+	conversation.Enabled = true
+	conversation.WorkspaceID = "workspace-1"
+	conversation.SenderPolicy = SenderPolicyAll
 	conversation, err = store.PutConversation(ctx, conversation)
 	if err != nil {
 		t.Fatal(err)
@@ -149,7 +158,7 @@ func TestExecuteRuntimeToolRejectsMismatchedResolvedMessage(t *testing.T) {
 		return ReferencedMessage{ProviderID: "different-message", Text: "wrong"}, nil
 	}}}
 	_, err = service.ExecuteRuntimeTool(ctx, "session-1", &protocol.RequestContext{
-		Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
+		Actor: protocol.RequestActor{ID: "user-1"}, Source: "feishu", ConnectionID: "connection-1", ConversationID: conversation.ID, ExternalConversation: "chat-1", ExternalParentMessageID: "quoted-message",
 	}, RuntimeToolReadMessages, nil)
 	if err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("error = %v", err)

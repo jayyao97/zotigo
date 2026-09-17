@@ -502,12 +502,33 @@ func sameIDSet(left, right []string) bool {
 func (s *Service) DeleteConnection(ctx context.Context, id string) error {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
-	s.configMu.RLock()
+	s.configMu.Lock()
 	if s.closed {
-		s.configMu.RUnlock()
+		s.configMu.Unlock()
 		return errors.New("channel service is closed")
 	}
-	s.configMu.RUnlock()
+	conversations, err := s.store.ListConversations(ctx, id)
+	if err != nil {
+		s.configMu.Unlock()
+		return err
+	}
+	for _, conversation := range conversations {
+		if conversation.SessionID != "" {
+			s.configMu.Unlock()
+			return ErrConnectionBound
+		}
+	}
+	// Revoke admission under the same fence as the binding check, so a new
+	// Session cannot be provisioned while deletion drains provider operations.
+	s.mu.Lock()
+	currentRun := s.runs[id]
+	s.mu.Unlock()
+	if currentRun != nil {
+		currentRun.sendMu.Lock()
+		currentRun.revoked = true
+		currentRun.sendMu.Unlock()
+	}
+	s.configMu.Unlock()
 	// Provider-side processing markers need the live adapter and its credentials.
 	// Attempt cleanup before removing either one.
 	run, err := s.quiesce(ctx, id)
@@ -742,7 +763,7 @@ func (s *Service) GetConversation(ctx context.Context, id string) (Conversation,
 // WithResolvedSessionPrompt resolves the current group and Connection prompt
 // for a bound Session. The callback runs while the Channel configuration read
 // lock is held so a concurrent save cannot cross the Session admission fence.
-func (s *Service) WithResolvedSessionPrompt(ctx context.Context, sessionID string, use func(SessionPromptConfig) error) (bool, error) {
+func (s *Service) WithResolvedSessionPrompt(ctx context.Context, sessionID string, use func(SessionPromptConfig, bool) error) (bool, error) {
 	s.configMu.RLock()
 	defer s.configMu.RUnlock()
 	if s.closed {
@@ -750,6 +771,9 @@ func (s *Service) WithResolvedSessionPrompt(ctx context.Context, sessionID strin
 	}
 	conversation, err := s.store.GetConversationBySession(ctx, strings.TrimSpace(sessionID))
 	if errors.Is(err, ErrNotFound) {
+		if use != nil {
+			return false, use(SessionPromptConfig{}, false)
+		}
 		return false, nil
 	}
 	if err != nil {
@@ -764,11 +788,38 @@ func (s *Service) WithResolvedSessionPrompt(ctx context.Context, sessionID strin
 		return false, err
 	}
 	if use != nil {
-		if err := use(resolvePromptSnapshot(connection, group)); err != nil {
+		if err := use(resolvePromptSnapshot(connection, group), true); err != nil {
 			return true, err
 		}
 	}
 	return true, nil
+}
+
+// GuardSessionUnbinding serializes archive/unbind with admission and binding
+// edits. Callers acquire their Session lock after this guard, and invoke unbind
+// only after the idle Session has been archived successfully.
+func (s *Service) GuardSessionUnbinding(ctx context.Context, sessionID string) (unbind func() error, release func(), err error) {
+	s.configMu.Lock()
+	if s.closed {
+		s.configMu.Unlock()
+		return nil, nil, errors.New("channel service is closed")
+	}
+	conversation, err := s.store.GetConversationBySession(ctx, sessionID)
+	if errors.Is(err, ErrNotFound) {
+		return func() error { return nil }, s.configMu.Unlock, nil
+	}
+	if err != nil {
+		s.configMu.Unlock()
+		return nil, nil, err
+	}
+	return func() error {
+		conversation.SessionID = ""
+		if conversation.RootID != "" {
+			conversation.Enabled = false
+		}
+		_, err := s.store.PutConversation(ctx, conversation)
+		return err
+	}, s.configMu.Unlock, nil
 }
 
 func (s *Service) PutConversation(ctx context.Context, id string, input ConversationInput) (Conversation, error) {
@@ -1291,7 +1342,7 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return reject("mention_required")
 	}
-	if conversation.SessionID == "" && in.StartsConversation {
+	if conversation.SessionID == "" && (in.StartsConversation || group.SessionStrategy == SessionStrategyShared) {
 		s.mu.Lock()
 		provisioner, canProvision := s.dispatcher.(SessionProvisioner)
 		s.mu.Unlock()

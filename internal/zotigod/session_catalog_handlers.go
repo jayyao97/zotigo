@@ -258,28 +258,37 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	unlock := h.sessionOps.lock(id)
 	var idleWorker *workerConnection
-	defer func() {
-		unlock()
-		if idleWorker != nil {
-			idleWorker.close()
+	defer func() { closeDetachedWorker(idleWorker) }()
+	unbind := func() error { return nil }
+	if archived && h.channels != nil {
+		var release func()
+		var err error
+		unbind, release, err = h.channels.GuardSessionUnbinding(r.Context(), id)
+		if err != nil {
+			h.writeChannelError(w, err)
+			return
 		}
-	}()
+		defer release()
+	}
+	unlock := h.sessionOps.lock(id)
+	defer unlock()
 	releaseIdleWorker := false
 	if archived {
-		ownsIdleWorker := false
-		if session, ok := h.registry.Get(id); ok && sessionIsActive(session) {
-			if session.State != SessionStateRunning {
-				writeAPIError(w, http.StatusConflict, "session is active")
-				return
-			}
+		if h.items != nil {
 			items, _, err := h.items.LoadItems(r.Context(), id)
 			if err != nil {
 				writeAPIError(w, http.StatusInternalServerError, "load session activity failed")
 				return
 			}
-			if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items) {
+			if requireIdleSession(items) != nil || hasPendingHumanRequest(items) {
+				writeAPIError(w, http.StatusConflict, "session is active")
+				return
+			}
+		}
+		ownsIdleWorker := false
+		if session, ok := h.registry.Get(id); ok && sessionIsActive(session) {
+			if session.State != SessionStateRunning {
 				writeAPIError(w, http.StatusConflict, "session is active")
 				return
 			}
@@ -306,12 +315,22 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 		}
 		return
 	}
-	if _, err := h.catalog.EnsureSessionOrganization(r.Context(), id); err != nil {
+	organization, err := h.catalog.EnsureSessionOrganization(r.Context(), id)
+	if err != nil {
 		h.writeCatalogError(w, err)
 		return
 	}
 	if _, err := h.catalog.SetSessionArchived(r.Context(), id, archived); err != nil {
 		h.writeCatalogError(w, err)
+		return
+	}
+	if err := unbind(); err != nil {
+		// The two stores cannot share a transaction. Restore availability on a
+		// failed unbind; a retry is safe, including an already archived Session.
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		_, restoreErr := h.catalog.SetSessionArchived(rollbackCtx, id, organization.SelfArchivedAt != nil)
+		cancel()
+		h.writeChannelError(w, errors.Join(err, restoreErr))
 		return
 	}
 	if releaseIdleWorker {

@@ -60,6 +60,10 @@ func (s *Service) ExecuteRuntimeTool(ctx context.Context, sessionID string, requ
 	if requestContext.Source != connection.Provider {
 		return RuntimeToolResult{}, errors.New("channel provider does not match the active request")
 	}
+	group, err := s.store.GetConversationByScope(ctx, connection.ID, conversation.ChatID, "")
+	if err != nil || !connection.Enabled || !group.Enabled || group.WorkspaceID == "" || !conversation.Enabled || !senderAllowed(connection, group, requestContext.Actor.ID) {
+		return RuntimeToolResult{}, errors.New("channel access is no longer allowed")
+	}
 
 	var input struct {
 		Limit int `json:"limit"`

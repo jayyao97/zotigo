@@ -349,6 +349,10 @@ func (h *handler) handleChannelMessages(w http.ResponseWriter, r *http.Request, 
 }
 
 func (h *handler) writeChannelError(w http.ResponseWriter, err error) {
+	if errors.Is(err, channels.ErrConnectionBound) {
+		writeAPIError(w, http.StatusConflict, err.Error())
+		return
+	}
 	if errors.Is(err, channels.ErrNotFound) {
 		writeAPIError(w, http.StatusNotFound, "channel resource not found")
 		return
