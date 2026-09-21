@@ -389,6 +389,7 @@ type workerRuntime struct {
 	notifyWorking    func(context.Context) error
 	hooks            hookEventDispatcher
 	channelTools     *channelRuntimeToolState
+	runtimeTools     *workerRuntimeToolClient
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
@@ -579,6 +580,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
 	var channelTools *channelRuntimeToolState
+	if sess.Capabilities.SessionToolsVersion >= 1 && cfg.RuntimeTools != nil {
+		for _, spec := range sessionToolSpecs() {
+			ag.RegisterTool(&sessionRuntimeTool{spec: spec, client: cfg.RuntimeTools, turnID: display.CurrentTurnID})
+		}
+	}
 	if sess.Capabilities.ChannelToolsVersion >= channels.RuntimeToolsVersion && cfg.RuntimeTools != nil {
 		channelTools = &channelRuntimeToolState{client: cfg.RuntimeTools}
 		ag.RegisterTool(&channelReadMessagesTool{state: channelTools})
@@ -609,6 +615,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		notifyWorking: cfg.NotifyWorking,
 		hooks:         hookDispatcher,
 		channelTools:  channelTools,
+		runtimeTools:  cfg.RuntimeTools,
 		hookModel:     profile.Model,
 		promptConfig:  sess.PromptConfig,
 	}
@@ -882,6 +889,9 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command commandRespon
 	}
 	switch command.Type {
 	case sessionCommandMessage:
+		if err := authorizeRuntimeToolReplay(ctx, r.runtimeTools, command.ID); err != nil {
+			return nil, err
+		}
 		return nil, r.startMessageTurn(ctx, command.ID, command.Sequence, command.Message)
 	case sessionCommandPause:
 		r.noteTurnCommandSequence(command.Sequence)
@@ -1362,7 +1372,11 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		}
 		_ = r.agent.WaitForRuntimeIdle(context.Background())
 		snapshot := r.snapshotAfterTurn(turnID)
-		saveErr := r.saveSnapshot(context.Background(), snapshot)
+		completedTurnID := ""
+		if status, terminal := r.display.TerminalStatus(turnID); terminal && status == "completed" {
+			completedTurnID = turnID
+		}
+		saveErr := r.saveSnapshot(context.Background(), snapshot, completedTurnID)
 		if saveErr != nil {
 			r.fail(fmt.Errorf("persist terminal turn state: %w", saveErr))
 		} else {
@@ -1540,7 +1554,7 @@ func (r *workerRuntime) closeTurnDoneLocked() {
 	r.doneDone = true
 }
 
-func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot) error {
+func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot, completedTurnIDs ...string) error {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
 	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, "")
@@ -1548,6 +1562,12 @@ func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot) e
 		return err
 	}
 	sessionadapter.ApplySnapshot(sess, snap, sessionadapter.LastUserPrompt(snap.History))
+	if len(completedTurnIDs) == 1 && completedTurnIDs[0] != "" && snap.State == agent.StateIdle && len(snap.PendingActions) == 0 && len(snap.DeferredActions) == 0 {
+		if sess.ForkPoints == nil {
+			sess.ForkPoints = make(map[string]zotigosession.ForkPoint)
+		}
+		sess.ForkPoints[completedTurnIDs[0]] = zotigosession.ForkPoint{HistoryLength: len(snap.History), HistoryDigest: zotigosession.SnapshotDigest(snap)}
+	}
 	if r.runtimeWAL != nil {
 		return r.runtimeWAL.Commit(ctx, sess, r.store.Put)
 	}

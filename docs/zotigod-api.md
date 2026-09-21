@@ -76,6 +76,7 @@ zotigod \
 - `GET /sessions/{id}/events`
 - `POST /sessions/{id}/title-suggestion`
 - `POST /sessions/{id}/messages`
+- `POST /sessions/{id}/fork`
 - `POST /sessions/{id}/pause`
 - `POST /sessions/{id}/steering`
 - `POST /sessions/{id}/approvals/{approval_id}`
@@ -88,6 +89,8 @@ zotigod \
 - `GET /channels/conversations/{id}/messages`
 
 Internal worker endpoints under `/internal/sessions/...` are not public desktop API and may change without compatibility guarantees.
+
+For `POST /sessions/{id}/fork`, idempotency and runtime compatibility, and the Session tools' time filters, see [Session time queries and fork](session-tools-time-and-fork.md).
 
 ### Channels
 

@@ -77,6 +77,9 @@ type workerMessage struct {
 
 type workerRuntimeToolRequest struct {
 	RequestID      string                   `json:"request_id"`
+	Namespace      string                   `json:"namespace,omitempty"`
+	TurnID         string                   `json:"turn_id,omitempty"`
+	CallID         string                   `json:"call_id,omitempty"`
 	Name           string                   `json:"name"`
 	Arguments      json.RawMessage          `json:"arguments,omitempty"`
 	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -64,11 +65,27 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		_ = index.close()
 		return nil, err
 	}
+	if err := store.initDisplayIndex(); err != nil {
+		_ = index.close()
+		return nil, err
+	}
 	return store, nil
 }
 
 func (s *FileStore) RootDir() string {
 	return s.rootDir
+}
+
+// GetMetadata reads the derived metadata index without loading runtime history.
+// Security-sensitive decisions must continue to use the authoritative Get.
+func (s *FileStore) GetMetadata(ctx context.Context, id string) (*Metadata, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	meta, err := scanSessionMetadata(s.index.db.QueryRowContext(ctx, sessionMetadataQuery+` WHERE id=?`, id))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return meta, err
 }
 
 // Get retrieves a session by ID.
@@ -462,6 +479,9 @@ func (s *FileStore) appendDisplayItems(ctx context.Context, id string, expectedS
 		_ = os.Truncate(path, originalSize)
 		return nil, fmt.Errorf("close display log batch: %w", err)
 	}
+	// The log is authoritative: do not report a failed append after it has
+	// committed. A stale index fails closed and background repair catches up.
+	_ = s.syncDisplayIndex(ctx, id)
 	return stored, nil
 }
 
@@ -564,6 +584,7 @@ func (s *FileStore) appendDisplayItemDataLocked(id string, item DisplayItem) (Di
 	if _, err := file.Write(append(data, '\n')); err != nil {
 		return DisplayItem{}, fmt.Errorf("write display log: %w", err)
 	}
+	_ = s.syncDisplayIndex(context.Background(), id)
 	return item, nil
 }
 
@@ -625,6 +646,9 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 		return fmt.Errorf("failed to delete session image blobs: %w", err)
 	}
 	if err := s.index.delete(ctx, id); err != nil {
+		return err
+	}
+	if _, err := s.index.db.ExecContext(ctx, `DELETE FROM display_items WHERE session_id=?; DELETE FROM display_index_files WHERE session_id=?`, id, id); err != nil {
 		return err
 	}
 

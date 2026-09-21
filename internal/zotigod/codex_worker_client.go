@@ -37,6 +37,7 @@ type codexWorkerConfig struct {
 	AutoReview            bool
 	AutoReviewPolicy      string
 	ChannelToolsVersion   uint64
+	SessionToolsVersion   uint64
 }
 
 type codexWorkerChannels struct {
@@ -78,6 +79,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	cfg.AutoReview = storedSession.PromptConfig.ReviewAllTools
 	cfg.AutoReviewPolicy = codexAutoReviewPolicy(storedSession.PromptConfig)
 	cfg.ChannelToolsVersion = storedSession.Capabilities.ChannelToolsVersion
+	cfg.SessionToolsVersion = storedSession.Capabilities.SessionToolsVersion
 	var workerConn *websocket.Conn
 	var generation string
 	var writer *workerClientWriter
@@ -780,6 +782,8 @@ func (r *codexWorkerRuntime) handleServerRequest(ctx context.Context, message co
 }
 
 func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, message codexapp.Message) error {
+	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
+	defer cancel()
 	var params struct {
 		ThreadID  string          `json:"threadId"`
 		TurnID    string          `json:"turnId"`
@@ -791,10 +795,18 @@ func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, messag
 	if err := sonic.Unmarshal(message.Params, &params); err != nil {
 		return fmt.Errorf("decode Codex runtime tool call: %w", err)
 	}
-	if r.cfg.ChannelToolsVersion < channelruntime.RuntimeToolsVersion || params.Namespace == nil || *params.Namespace != "channel" || params.Tool != channelruntime.RuntimeToolReadMessages {
+	sessionTool := false
+	if params.Namespace != nil && *params.Namespace == "zotigo" && r.cfg.SessionToolsVersion >= 1 {
+		for _, spec := range sessionToolSpecs() {
+			if spec.Name == params.Tool {
+				sessionTool = true
+			}
+		}
+	}
+	if !sessionTool && (r.cfg.ChannelToolsVersion < channelruntime.RuntimeToolsVersion || params.Namespace == nil || *params.Namespace != "channel" || params.Tool != channelruntime.RuntimeToolReadMessages) {
 		return fmt.Errorf("codex runtime tool %q is not available", params.Tool)
 	}
-	if params.ThreadID != r.threadID || params.TurnID != r.activeTurnID || r.activeRequestContext == nil {
+	if params.ThreadID != r.threadID || params.TurnID == "" || params.TurnID != r.activeTurnID || (!sessionTool && r.activeRequestContext == nil) {
 		return errors.New("channel tool call is outside the active Channel turn")
 	}
 	if strings.TrimSpace(params.CallID) == "" {
@@ -803,9 +815,9 @@ func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, messag
 	if r.writer == nil || r.runtimeToolResults == nil {
 		return &codexRequestFatalError{err: errors.New("channel runtime tool transport is unavailable")}
 	}
-	requestContext := *r.activeRequestContext
+	requestContext := r.activeRequestContext.Clone()
 	if err := r.writer.SendRuntimeToolRequest(ctx, workerRuntimeToolRequest{
-		RequestID: params.CallID, Name: params.Tool, Arguments: params.Arguments, RequestContext: &requestContext,
+		RequestID: params.CallID, Namespace: *params.Namespace, TurnID: params.TurnID, CallID: params.CallID, Name: params.Tool, Arguments: params.Arguments, RequestContext: requestContext,
 	}); err != nil {
 		return &codexRequestFatalError{err: fmt.Errorf("send Channel runtime tool request: %w", err)}
 	}
@@ -1099,6 +1111,10 @@ func (r *codexWorkerRuntime) expireApproval(req approvalRequest, reason string) 
 func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) error {
 	switch command.Type {
 	case sessionCommandMessage:
+		client := &workerRuntimeToolClient{writer: r.writer, results: r.runtimeToolResults}
+		if err := authorizeRuntimeToolReplay(ctx, client, command.ID); err != nil {
+			return err
+		}
 		if r.activeTurnID != "" {
 			return errActiveTurn
 		}
@@ -1375,6 +1391,10 @@ func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[stri
 				},
 			}},
 		}}
+	}
+	if includeDynamicTools && cfg.SessionToolsVersion >= 1 {
+		dynamicTools, _ := params["dynamicTools"].([]any)
+		params["dynamicTools"] = append(dynamicTools, codexSessionToolNamespace())
 	}
 	return params
 }

@@ -12,21 +12,33 @@ import (
 )
 
 type workerRuntimeToolClient struct {
-	writer  *workerClientWriter
-	results <-chan workerRuntimeToolResult
-	mu      sync.Mutex
+	writer   *workerClientWriter
+	results  <-chan workerRuntimeToolResult
+	gateOnce sync.Once
+	gate     chan struct{}
 }
 
 func (c *workerRuntimeToolClient) call(ctx context.Context, requestContext *protocol.RequestContext, name, arguments string) (string, error) {
+	return c.request(ctx, workerRuntimeToolRequest{Name: name, Arguments: []byte(arguments), RequestContext: requestContext})
+}
+
+func (c *workerRuntimeToolClient) request(ctx context.Context, request workerRuntimeToolRequest) (string, error) {
 	if c == nil || c.writer == nil || c.results == nil {
 		return "", errors.New("channel runtime tool transport is unavailable")
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.gateOnce.Do(func() { c.gate = make(chan struct{}, 1) })
+	select {
+	case c.gate <- struct{}{}:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	defer func() { <-c.gate }()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	requestID := newZotigodID("runtime_tool")
-	if err := c.writer.SendRuntimeToolRequest(ctx, workerRuntimeToolRequest{
-		RequestID: requestID, Name: name, Arguments: []byte(arguments), RequestContext: requestContext,
-	}); err != nil {
+	request.RequestID = requestID
+	if err := c.writer.SendRuntimeToolRequest(ctx, request); err != nil {
 		return "", err
 	}
 	for {

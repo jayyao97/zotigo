@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -78,7 +79,7 @@ func sameRequestContext(left, right *protocol.RequestContext) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
-	return *left == *right
+	return reflect.DeepEqual(left, right)
 }
 
 func commandInput(command commandResponse) (string, []commandImageData, []string) {

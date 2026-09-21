@@ -215,8 +215,7 @@ func (i *sessionIndex) deleteExcept(ctx context.Context, keep map[string]struct{
 
 func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata, error) {
 	var query strings.Builder
-	query.WriteString(`SELECT id, working_directory, agent, profile_name, model, reasoning_effort,
-		conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, prompt_config, capabilities, last_prompt, created_at, updated_at FROM sessions`)
+	query.WriteString(sessionMetadataQuery)
 	args := make([]any, 0, 2)
 	if filter.WorkingDirectory != "" {
 		query.WriteString(` WHERE working_directory = ?`)
@@ -248,32 +247,40 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 
 	var result []Metadata
 	for rows.Next() {
-		var meta Metadata
-		var createdAt int64
-		var updatedAt int64
-		var backendUpdatedAt int64
-		var promptConfig string
-		var capabilities string
-		if err := rows.Scan(&meta.ID, &meta.WorkingDirectory, &meta.Agent, &meta.ProfileName,
-			&meta.Model, &meta.ReasoningEffort, &meta.ConversationID, &meta.BackendVersion,
-			&backendUpdatedAt, &meta.BackendSyncVersion, &meta.ApprovalPolicy, &promptConfig, &capabilities, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
-			return nil, fmt.Errorf("scan session index: %w", err)
+		meta, err := scanSessionMetadata(rows)
+		if err != nil {
+			return nil, err
 		}
-		if err := json.Unmarshal([]byte(promptConfig), &meta.PromptConfig); err != nil {
-			return nil, fmt.Errorf("decode session prompt config: %w", err)
-		}
-		if err := json.Unmarshal([]byte(capabilities), &meta.Capabilities); err != nil {
-			return nil, fmt.Errorf("decode session capabilities: %w", err)
-		}
-		meta.CreatedAt = parseIndexTime(createdAt)
-		meta.UpdatedAt = parseIndexTime(updatedAt)
-		meta.BackendUpdatedAt = parseOptionalIndexTime(backendUpdatedAt)
-		result = append(result, meta)
+		result = append(result, *meta)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate session index: %w", err)
 	}
 	return result, nil
+}
+
+const sessionMetadataQuery = `SELECT id, working_directory, agent, profile_name, model, reasoning_effort,
+	conversation_id, backend_version, backend_updated_at, backend_sync_version, approval_policy, prompt_config, capabilities, last_prompt, created_at, updated_at FROM sessions`
+
+func scanSessionMetadata(row interface{ Scan(...any) error }) (*Metadata, error) {
+	var meta Metadata
+	var createdAt, updatedAt, backendUpdatedAt int64
+	var promptConfig, capabilities string
+	if err := row.Scan(&meta.ID, &meta.WorkingDirectory, &meta.Agent, &meta.ProfileName,
+		&meta.Model, &meta.ReasoningEffort, &meta.ConversationID, &meta.BackendVersion,
+		&backendUpdatedAt, &meta.BackendSyncVersion, &meta.ApprovalPolicy, &promptConfig, &capabilities, &meta.LastPrompt, &createdAt, &updatedAt); err != nil {
+		return nil, fmt.Errorf("scan session index: %w", err)
+	}
+	if err := json.Unmarshal([]byte(promptConfig), &meta.PromptConfig); err != nil {
+		return nil, fmt.Errorf("decode session prompt config: %w", err)
+	}
+	if err := json.Unmarshal([]byte(capabilities), &meta.Capabilities); err != nil {
+		return nil, fmt.Errorf("decode session capabilities: %w", err)
+	}
+	meta.CreatedAt = parseIndexTime(createdAt)
+	meta.UpdatedAt = parseIndexTime(updatedAt)
+	meta.BackendUpdatedAt = parseOptionalIndexTime(backendUpdatedAt)
+	return &meta, nil
 }
 
 // ImageRef indexes an accepted per-session image blob without storing its bytes.

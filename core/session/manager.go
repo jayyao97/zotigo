@@ -33,6 +33,7 @@ type Metadata struct {
 // created depends on that runtime; validators enforce those constraints.
 type Capabilities struct {
 	ChannelToolsVersion uint64 `json:"channel_tools_version,omitempty"`
+	SessionToolsVersion uint64 `json:"session_tools_version,omitempty"`
 }
 
 // PromptConfig captures session-scoped prompt and approval behavior. Empty
@@ -47,11 +48,28 @@ type PromptConfig struct {
 // Session represents the full state on disk.
 type Session struct {
 	Metadata
-	AgentSnapshot          agent.Snapshot `json:"agent_snapshot"`
-	SnapshotVersion        uint64         `json:"snapshot_version,omitempty"`
-	CommittedRuntimeWALID  string         `json:"committed_runtime_wal_id,omitempty"`
-	CommittedRuntimeWALSeq uint64         `json:"committed_runtime_wal_seq,omitempty"`
-	Turns                  []Turn         `json:"turns,omitempty"`
+	ForkedFrom             *ForkOrigin          `json:"forked_from,omitempty"`
+	ForkPoints             map[string]ForkPoint `json:"fork_points,omitempty"`
+	AgentSnapshot          agent.Snapshot       `json:"agent_snapshot"`
+	SnapshotVersion        uint64               `json:"snapshot_version,omitempty"`
+	CommittedRuntimeWALID  string               `json:"committed_runtime_wal_id,omitempty"`
+	CommittedRuntimeWALSeq uint64               `json:"committed_runtime_wal_seq,omitempty"`
+	Turns                  []Turn               `json:"turns,omitempty"`
+}
+
+// ForkOrigin is provenance, not authority. A branch does not inherit live
+// commands, approvals, worker bindings, or channel delivery ownership.
+type ForkOrigin struct {
+	SessionID     string `json:"session_id"`
+	ThroughTurnID string `json:"through_turn_id"`
+}
+
+// ForkPoint proves that a prefix still represents a completed native turn.
+// Compression may replace that prefix; in that case exact historical forks
+// fail closed rather than using a later summary containing future information.
+type ForkPoint struct {
+	HistoryLength int    `json:"history_length"`
+	HistoryDigest string `json:"history_digest"`
 }
 
 // Manager handles session storage, retrieval, and locking.
