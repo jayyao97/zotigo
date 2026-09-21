@@ -105,7 +105,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 	if err != nil {
 		return false, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil {
 		return false, err
@@ -123,7 +123,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 	if err != nil {
 		return false, err
 	}
-	defer tx.Rollback()
+	defer func() { _ = tx.Rollback() }()
 	// Appends preserve offsets. Replacements must invalidate the index first.
 	if offset >= info.Size() || missing {
 		offset = 0
@@ -139,7 +139,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 	if err != nil {
 		return false, err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 	complete := false
 	for count := 0; count < 256; count++ {
 		line, readErr := reader.ReadBytes('\n')
@@ -289,13 +289,13 @@ func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query Displa
 	for rows.Next() {
 		var value span
 		if err = rows.Scan(&value.offset, &value.length); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return page, true, err
 		}
 		spans = append(spans, value)
 	}
 	err = rows.Err()
-	rows.Close()
+	err = errors.Join(err, rows.Close())
 	if err != nil {
 		return page, true, err
 	}
@@ -306,7 +306,7 @@ func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query Displa
 	if err != nil {
 		return page, true, err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	for _, value := range spans {
 		data := make([]byte, value.length)
 		if _, err = file.ReadAt(data, value.offset); err != nil {

@@ -118,7 +118,7 @@ func readNativeTranscript(ctx context.Context, dir, path string, remaining *int6
 	if err != nil {
 		return nil, errors.New("compacted transcript directory unavailable")
 	}
-	defer root.Close()
+	defer func() { _ = root.Close() }()
 	info, err := root.Lstat(name)
 	if err != nil || !info.Mode().IsRegular() {
 		return nil, errors.New("compacted transcript missing or not a regular file")
@@ -127,7 +127,7 @@ func readNativeTranscript(ctx context.Context, dir, path string, remaining *int6
 	if err != nil {
 		return nil, errors.New("cannot open compacted transcript")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(io.LimitReader(file, *remaining+1))
 	scanner.Buffer(make([]byte, 64<<10), 16<<20)
 	var messages []protocol.Message

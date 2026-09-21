@@ -159,7 +159,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		}
 	case "codex":
 		if h.codexSync == nil {
-			return nil, errors.New("Codex fork host is unavailable")
+			return nil, errors.New("codex fork host is unavailable")
 		}
 	default:
 		return nil, fmt.Errorf("fork is unsupported for runtime %q", source.Agent)

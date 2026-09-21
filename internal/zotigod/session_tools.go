@@ -80,7 +80,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	}
 	caller.Origin = input.Command.RequestContext.Clone()
 	if caller.Origin == nil && strings.HasPrefix(input.ID, "channel:") {
-		return caller, errors.New("Channel input has no trusted origin")
+		return caller, errors.New("channel input has no trusted origin")
 	}
 	if h.catalog == nil {
 		return caller, errors.New("session tools require a workspace catalog")
@@ -225,7 +225,7 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 		return errors.New("session_id is required")
 	}
 	if read && caller.Origin != nil && id != caller.SessionID {
-		return errors.New("Channel history is restricted to its bound session")
+		return errors.New("channel history is restricted to its bound session")
 	}
 	organization, err := h.catalog.GetSessionOrganization(ctx, id)
 	if err != nil {
@@ -655,13 +655,14 @@ func saveSessionToolOperation(dir, path string, operation any) error {
 	if err != nil {
 		return err
 	}
-	defer os.Remove(file.Name())
+	// After rename the temporary path is absent; cleanup must not mask write errors.
+	defer func() { _ = os.Remove(file.Name()) }()
 	if _, err = file.Write(data); err != nil {
-		file.Close()
+		_ = file.Close()
 		return err
 	}
 	if err = file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close()
 		return err
 	}
 	if err = file.Close(); err != nil {
@@ -674,7 +675,7 @@ func saveSessionToolOperation(dir, path string, operation any) error {
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	return directory.Sync()
 }
 

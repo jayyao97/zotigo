@@ -2,9 +2,10 @@ package channels
 
 import (
 	"context"
-	"github.com/jayyao97/zotigo/core/protocol"
 	"testing"
 	"time"
+
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 func TestSessionToolAccessRequiresCurrentBotOwner(t *testing.T) {

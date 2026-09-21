@@ -14,7 +14,7 @@ import (
 // unbound child thread, and retrying the RPC would create another child.
 func forkCodexConversation(ctx context.Context, host codexapp.HostProvider, source *zotigosession.Session, throughTurnID string) (string, error) {
 	if host == nil || source == nil || strings.TrimSpace(source.ConversationID) == "" || strings.TrimSpace(throughTurnID) == "" {
-		return "", fmt.Errorf("Codex fork requires a configured host, source conversation, and completed turn")
+		return "", fmt.Errorf("codex fork requires a configured host, source conversation, and completed turn")
 	}
 	lease, err := host.Acquire(ctx)
 	if err != nil {
@@ -41,7 +41,7 @@ func forkCodexConversation(ctx context.Context, host codexapp.HostProvider, sour
 	}
 	childID := response.Thread.ID
 	if childID == "" || childID == source.ConversationID {
-		return "", fmt.Errorf("Codex fork did not return a distinct child thread")
+		return "", fmt.Errorf("codex fork did not return a distinct child thread")
 	}
 	// Older servers may ignore unknown fields. Do not bind a child containing
 	// later turns if lastTurnId was silently ignored. Only read the last turn,
@@ -53,7 +53,7 @@ func forkCodexConversation(ctx context.Context, host codexapp.HostProvider, sour
 		return "", fmt.Errorf("verify Codex fork boundary: %w", err)
 	}
 	if len(tail.Data) != 1 || tail.Data[0].ID != throughTurnID || tail.Data[0].Status != "completed" {
-		return "", fmt.Errorf("Codex fork boundary mismatch: exact completed-turn fork is unsupported or source changed")
+		return "", fmt.Errorf("codex fork boundary mismatch: exact completed-turn fork is unsupported or source changed")
 	}
 	return childID, nil
 }
