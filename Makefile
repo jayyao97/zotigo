@@ -43,6 +43,13 @@ help: ## Show this help message
 	@awk 'BEGIN {FS = ":.*?## "} /^[a-zA-Z_-]+:.*?## / {printf "  \033[36m%-20s\033[0m %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 # Development targets
+.PHONY: catalog-diff catalog-check
+catalog-diff: ## Generate catalog up/down SQL from schema.sql (NAME=change_name)
+	python3 scripts/catalog_migration.py $(NAME)
+
+catalog-check: ## Verify catalog schema.sql matches migration history
+	python3 scripts/catalog_migration.py --check
+
 .PHONY: dev
 dev: ## Run in development mode with hot reload
 	@echo "Starting development mode..."

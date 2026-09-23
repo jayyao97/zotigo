@@ -3,21 +3,24 @@ package workspace
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
 
+	"github.com/gofrs/flock"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 8
+const schemaVersion = 9
 
 type Store struct {
 	db          *sql.DB
 	rootDir     string
 	operationMu sync.Mutex
+	writerLock  *flock.Flock
 }
 
 // OpenReadOnly opens an existing catalog without running migrations or writing
@@ -54,6 +57,20 @@ func OpenReadOnly(rootDir string) (*Store, error) {
 }
 
 func Open(rootDir string) (*Store, error) {
+	store, err := openWriter(rootDir, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := store.migrate(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, err
+	}
+	return store, nil
+}
+
+// openWriter holds a process-wide file lock for the lifetime of the store.
+// Migration commands use the same lock and never open a serving catalog.
+func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 	if rootDir == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -66,354 +83,45 @@ func Open(rootDir string) (*Store, error) {
 	}
 
 	dbPath := filepath.Join(rootDir, "catalog.sqlite")
+	if existingOnly {
+		if _, err := os.Stat(dbPath); err != nil {
+			return nil, fmt.Errorf("open existing workspace catalog: %w", err)
+		}
+	}
+	lock := flock.New(filepath.Join(rootDir, "catalog.lock"))
+	locked, err := lock.TryLock()
+	if err != nil {
+		return nil, fmt.Errorf("lock workspace catalog: %w", err)
+	}
+	if !locked {
+		return nil, fmt.Errorf("workspace catalog is in use; stop zotigod before migrating")
+	}
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
+		_ = lock.Close()
 		return nil, fmt.Errorf("open workspace catalog: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, rootDir: rootDir}
-	if err := store.migrate(context.Background()); err != nil {
-		_ = db.Close()
+	store := &Store{db: db, rootDir: rootDir, writerLock: lock}
+	if err := db.Ping(); err != nil {
+		_ = store.Close()
 		return nil, err
 	}
 	if err := os.Chmod(dbPath, 0o600); err != nil {
-		_ = db.Close()
+		_ = store.Close()
 		return nil, fmt.Errorf("protect workspace catalog: %w", err)
 	}
 	return store, nil
 }
 
 func (s *Store) Close() error {
-	return s.db.Close()
+	err := s.db.Close()
+	if s.writerLock != nil {
+		err = errors.Join(err, s.writerLock.Close())
+	}
+	return err
 }
 
 func (s *Store) RootDir() string {
 	return s.rootDir
-}
-
-func (s *Store) migrate(ctx context.Context) error {
-	for _, pragma := range []string{
-		`PRAGMA foreign_keys = ON`,
-		`PRAGMA journal_mode = WAL`,
-		`PRAGMA busy_timeout = 5000`,
-	} {
-		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
-			return fmt.Errorf("configure workspace catalog: %w", err)
-		}
-	}
-
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("begin workspace catalog migration: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	statements := []string{
-		`CREATE TABLE IF NOT EXISTS schema_meta (
-			singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
-			version INTEGER NOT NULL CHECK(version > 0)
-		)`,
-		`CREATE TABLE IF NOT EXISTS projects (
-			id TEXT PRIMARY KEY,
-			name TEXT NOT NULL CHECK(length(trim(name)) BETWEEN 1 AND 200),
-			storage_name TEXT NOT NULL UNIQUE,
-			status TEXT NOT NULL DEFAULT 'active'
-				CHECK(status IN ('active', 'archiving', 'archived', 'deleting')),
-			archived_at INTEGER,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		)`,
-		`CREATE TABLE IF NOT EXISTS sources (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
-			kind TEXT NOT NULL CHECK(kind IN ('git', 'folder')),
-			canonical_path TEXT NOT NULL,
-			git_common_dir TEXT,
-			git_object_format TEXT,
-			folder_mode TEXT,
-			source_key TEXT NOT NULL,
-			registered INTEGER NOT NULL DEFAULT 1 CHECK(registered IN (0, 1)),
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			UNIQUE(project_id, canonical_path),
-			UNIQUE(project_id, source_key),
-			CHECK(
-				(kind = 'git' AND git_common_dir IS NOT NULL
-				 AND git_object_format IN ('sha1', 'sha256') AND folder_mode IS NULL)
-				OR
-				(kind = 'folder' AND git_common_dir IS NULL
-				 AND git_object_format IS NULL
-				 AND folder_mode IN ('direct', 'reference', 'copy'))
-			)
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS sources_project_git_common_dir
-			ON sources(project_id, git_common_dir) WHERE git_common_dir IS NOT NULL`,
-		`CREATE TABLE IF NOT EXISTS workspaces (
-			id TEXT PRIMARY KEY,
-			project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE RESTRICT,
-			title TEXT NOT NULL CHECK(length(trim(title)) BETWEEN 1 AND 200),
-			storage_name TEXT NOT NULL,
-			root_path TEXT NOT NULL UNIQUE,
-			owner_nonce TEXT NOT NULL,
-			status TEXT NOT NULL CHECK(status IN
-				('provisioning', 'ready', 'error', 'archiving', 'archived', 'deleting', 'deleted')),
-			error TEXT,
-			archived_at INTEGER,
-			deleted_at INTEGER,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			CHECK((status = 'error') = (error IS NOT NULL)),
-			CHECK((status = 'deleted') = (deleted_at IS NOT NULL))
-		)`,
-		`CREATE TABLE IF NOT EXISTS workspace_checkouts (
-			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
-			worktree_path TEXT NOT NULL UNIQUE,
-			base_ref TEXT NOT NULL,
-			base_commit TEXT NOT NULL,
-			branch_name TEXT NOT NULL,
-			owned_head TEXT NOT NULL,
-			status TEXT NOT NULL CHECK(status IN ('planned', 'ready', 'error', 'archived')),
-			error TEXT,
-			PRIMARY KEY(workspace_id, source_id),
-			CHECK((status = 'error') = (error IS NOT NULL))
-		)`,
-		`CREATE TABLE IF NOT EXISTS workspace_folders (
-			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-			source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
-			mode TEXT NOT NULL CHECK(mode IN ('direct', 'reference', 'copy')),
-			target_path TEXT NOT NULL UNIQUE,
-			direct_canonical_path TEXT,
-			status TEXT NOT NULL CHECK(status IN ('planned', 'ready', 'error')),
-			error TEXT,
-			PRIMARY KEY(workspace_id, source_id),
-			CHECK((status = 'error') = (error IS NOT NULL)),
-			CHECK((mode = 'direct') = (direct_canonical_path IS NOT NULL))
-		)`,
-		`CREATE UNIQUE INDEX IF NOT EXISTS workspace_folders_one_direct_source
-			ON workspace_folders(direct_canonical_path) WHERE direct_canonical_path IS NOT NULL`,
-		`CREATE TABLE IF NOT EXISTS session_organization (
-			session_id TEXT PRIMARY KEY,
-			project_id TEXT REFERENCES projects(id) ON DELETE RESTRICT,
-			workspace_id TEXT REFERENCES workspaces(id) ON DELETE RESTRICT,
-			title TEXT,
-			pinned_at INTEGER,
-			pinned_position INTEGER,
-			workspace_position INTEGER,
-			self_archived_at INTEGER,
-			workspace_archived_at INTEGER,
-			revision INTEGER NOT NULL DEFAULT 1 CHECK(revision > 0),
-			created_at INTEGER NOT NULL,
-			activity_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			CHECK((project_id IS NULL) = (workspace_id IS NULL)),
-			CHECK((pinned_at IS NULL) = (pinned_position IS NULL))
-		)`,
-		`CREATE TABLE IF NOT EXISTS runtime_workspace_bindings (
-			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-			agent TEXT NOT NULL,
-			state TEXT NOT NULL CHECK(state IN ('creating', 'bound')),
-			external_id TEXT,
-			create_key TEXT,
-			create_name TEXT,
-			create_root TEXT,
-			revision INTEGER NOT NULL CHECK(revision > 0),
-			backend_version TEXT,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(workspace_id, agent),
-			CHECK(
-				(state = 'creating' AND external_id IS NULL AND create_key IS NOT NULL
-				 AND create_name IS NOT NULL AND create_root IS NOT NULL)
-				OR
-				(state = 'bound' AND external_id IS NOT NULL)
-			)
-		)`,
-	}
-	for _, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("migrate workspace catalog: %w", err)
-		}
-	}
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO schema_meta(singleton, version) VALUES(1, ?)
-		ON CONFLICT(singleton) DO NOTHING
-	`, schemaVersion); err != nil {
-		return fmt.Errorf("record workspace catalog version: %w", err)
-	}
-	var version int
-	if err := tx.QueryRowContext(ctx, `SELECT version FROM schema_meta WHERE singleton = 1`).Scan(&version); err != nil {
-		return fmt.Errorf("read workspace catalog version: %w", err)
-	}
-	if version == 1 {
-		if _, err := tx.ExecContext(ctx, `
-			ALTER TABLE projects ADD COLUMN status TEXT NOT NULL DEFAULT 'active'
-			CHECK(status IN ('active', 'archiving', 'archived', 'deleting'))
-		`); err != nil {
-			return fmt.Errorf("migrate projects status: %w", err)
-		}
-		if _, err := tx.ExecContext(ctx, `ALTER TABLE projects ADD COLUMN archived_at INTEGER`); err != nil {
-			return fmt.Errorf("migrate projects archived_at: %w", err)
-		}
-		version = 2
-	}
-	if version == 2 {
-		var hasOwnedHead bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM pragma_table_info('workspace_checkouts') WHERE name = 'owned_head'
-			)
-		`).Scan(&hasOwnedHead); err != nil {
-			return fmt.Errorf("inspect workspace checkout ownership schema: %w", err)
-		}
-		if !hasOwnedHead {
-			for _, statement := range []string{
-				`ALTER TABLE workspace_checkouts RENAME TO workspace_checkouts_v2`,
-				`CREATE TABLE workspace_checkouts (
-					workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-					source_id TEXT NOT NULL REFERENCES sources(id) ON DELETE RESTRICT,
-					worktree_path TEXT NOT NULL UNIQUE,
-					base_ref TEXT NOT NULL,
-					base_commit TEXT NOT NULL,
-					branch_name TEXT NOT NULL,
-					owned_head TEXT NOT NULL,
-					status TEXT NOT NULL CHECK(status IN ('planned', 'ready', 'error', 'archived')),
-					error TEXT,
-					PRIMARY KEY(workspace_id, source_id),
-					CHECK((status = 'error') = (error IS NOT NULL))
-				)`,
-				`INSERT INTO workspace_checkouts(
-					workspace_id, source_id, worktree_path, base_ref, base_commit,
-					branch_name, owned_head, status, error
-				) SELECT
-					workspace_id, source_id, worktree_path, base_ref, base_commit,
-					branch_name, base_commit, status, error
-				FROM workspace_checkouts_v2`,
-				`DROP TABLE workspace_checkouts_v2`,
-			} {
-				if _, err := tx.ExecContext(ctx, statement); err != nil {
-					return fmt.Errorf("migrate workspace checkout ownership: %w", err)
-				}
-			}
-		}
-		version = 3
-	}
-	if version == 3 {
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS runtime_workspace_bindings (
-			workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
-			agent TEXT NOT NULL,
-			state TEXT NOT NULL CHECK(state IN ('creating', 'bound')),
-			external_id TEXT,
-			create_key TEXT,
-			create_name TEXT,
-			create_root TEXT,
-			revision INTEGER NOT NULL CHECK(revision > 0),
-			backend_version TEXT,
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL,
-			PRIMARY KEY(workspace_id, agent),
-			CHECK(
-				(state = 'creating' AND external_id IS NULL AND create_key IS NOT NULL
-				 AND create_name IS NOT NULL AND create_root IS NOT NULL)
-				OR
-				(state = 'bound' AND external_id IS NOT NULL)
-			)
-		)`); err != nil {
-			return fmt.Errorf("migrate runtime workspace bindings: %w", err)
-		}
-		version = 4
-	}
-	if version == 4 {
-		for _, table := range []string{"projects", "workspaces"} {
-			var hasStorageName bool
-			query := fmt.Sprintf(`SELECT EXISTS(
-				SELECT 1 FROM pragma_table_info('%s') WHERE name = 'storage_name'
-			)`, table)
-			if err := tx.QueryRowContext(ctx, query).Scan(&hasStorageName); err != nil {
-				return fmt.Errorf("inspect %s storage name schema: %w", table, err)
-			}
-			if hasStorageName {
-				continue
-			}
-			statement := fmt.Sprintf(`ALTER TABLE %s ADD COLUMN storage_name TEXT NOT NULL DEFAULT ''`, table)
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate semantic storage names: %w", err)
-			}
-		}
-		for _, statement := range []string{
-			`UPDATE projects SET storage_name = id WHERE storage_name = ''`,
-			`CREATE UNIQUE INDEX IF NOT EXISTS projects_storage_name ON projects(storage_name)`,
-			`UPDATE workspaces SET storage_name = id WHERE storage_name = ''`,
-		} {
-			if _, err := tx.ExecContext(ctx, statement); err != nil {
-				return fmt.Errorf("migrate semantic storage names: %w", err)
-			}
-		}
-		version = 5
-	}
-	if version == 5 {
-		var hasActivityAt bool
-		if err := tx.QueryRowContext(ctx, `
-			SELECT EXISTS(
-				SELECT 1 FROM pragma_table_info('session_organization') WHERE name = 'activity_at'
-			)
-		`).Scan(&hasActivityAt); err != nil {
-			return fmt.Errorf("inspect session activity timestamp schema: %w", err)
-		}
-		if !hasActivityAt {
-			if _, err := tx.ExecContext(ctx, `ALTER TABLE session_organization ADD COLUMN activity_at INTEGER NOT NULL DEFAULT 0`); err != nil {
-				return fmt.Errorf("migrate session activity timestamp: %w", err)
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE session_organization SET activity_at = updated_at WHERE activity_at = 0`); err != nil {
-			return fmt.Errorf("backfill session activity timestamp: %w", err)
-		}
-		version = 6
-	}
-	if version == 6 {
-		var hasRegistered bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(
-			SELECT 1 FROM pragma_table_info('sources') WHERE name = 'registered'
-		)`).Scan(&hasRegistered); err != nil {
-			return fmt.Errorf("inspect source registration schema: %w", err)
-		}
-		if !hasRegistered {
-			if _, err := tx.ExecContext(ctx, `ALTER TABLE sources ADD COLUMN registered INTEGER NOT NULL DEFAULT 1 CHECK(registered IN (0, 1))`); err != nil {
-				return fmt.Errorf("migrate source registration: %w", err)
-			}
-		}
-		version = 7
-	}
-	// Navigation is shared by all clients connected to this catalog. Session
-	// pin columns already exist; project/workspace ordering remains independent
-	// of their position in Pinned.
-	if version == 7 || version == 8 {
-		for _, table := range []string{"projects", "workspaces"} {
-			for _, column := range []string{"position", "pinned_at", "pinned_position"} {
-				var exists bool
-				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('%s') WHERE name = ?)`, table), column).Scan(&exists); err != nil {
-					return err
-				}
-				if !exists {
-					if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s INTEGER`, table, column)); err != nil {
-						return err
-					}
-				}
-			}
-		}
-		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS navigation_migration (singleton INTEGER PRIMARY KEY CHECK(singleton = 1))`); err != nil {
-			return err
-		}
-		version = 8
-	}
-	if version != schemaVersion {
-		return fmt.Errorf("workspace catalog version %d is not supported", version)
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE schema_meta SET version = ? WHERE singleton = 1`, version); err != nil {
-		return fmt.Errorf("update workspace catalog version: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit workspace catalog migration: %w", err)
-	}
-	return nil
 }

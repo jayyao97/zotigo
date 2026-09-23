@@ -515,6 +515,9 @@ type workerReadyRequest struct {
 
 // Run starts zotigod and returns a process exit code.
 func Run(args []string) (exitCode int) {
+	if len(args) > 0 && args[0] == "catalog-migrate" {
+		return runCatalogMigrate(args[1:], os.Stdout, os.Stderr)
+	}
 	fs := flag.NewFlagSet("zotigod", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	versionFlag := fs.Bool("version", false, "Print program release version")

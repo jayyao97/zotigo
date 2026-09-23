@@ -178,6 +178,10 @@ func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
 	if _, err := store.db.Exec("UPDATE schema_meta SET version = 7"); err != nil {
 		t.Fatal(err)
 	}
+	// Recreate a pre-SQL-migration catalog, including its absent journal/marker.
+	if _, err := store.db.Exec("DROP TABLE catalog_migrations; DROP TABLE navigation_migration"); err != nil {
+		t.Fatal(err)
+	}
 	if err := store.migrate(ctx); err != nil {
 		t.Fatal(err)
 	}
