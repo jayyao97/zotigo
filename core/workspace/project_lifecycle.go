@@ -196,7 +196,7 @@ func (s *Store) setProjectStatus(ctx context.Context, projectID string, status P
 		archivedMillis = unixMillis(*archivedAt)
 	}
 	result, err := s.db.ExecContext(ctx, `
-		UPDATE projects SET status = ?, archived_at = ?, updated_at = ? WHERE id = ?
+UPDATE projects SET status = ?, archived_at = ?, pinned_at = NULL, pinned_position = NULL, updated_at = ? WHERE id = ?
 	`, status, archivedMillis, unixMillis(now), projectID)
 	if err != nil {
 		return fmt.Errorf("update project status: %w", err)

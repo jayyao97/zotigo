@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 7
+const schemaVersion = 8
 
 type Store struct {
 	db          *sql.DB
@@ -383,6 +383,28 @@ func (s *Store) migrate(ctx context.Context) error {
 			}
 		}
 		version = 7
+	}
+	// Navigation is shared by all clients connected to this catalog. Session
+	// pin columns already exist; project/workspace ordering remains independent
+	// of their position in Pinned.
+	if version == 7 || version == 8 {
+		for _, table := range []string{"projects", "workspaces"} {
+			for _, column := range []string{"position", "pinned_at", "pinned_position"} {
+				var exists bool
+				if err := tx.QueryRowContext(ctx, fmt.Sprintf(`SELECT EXISTS(SELECT 1 FROM pragma_table_info('%s') WHERE name = ?)`, table), column).Scan(&exists); err != nil {
+					return err
+				}
+				if !exists {
+					if _, err := tx.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s INTEGER`, table, column)); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS navigation_migration (singleton INTEGER PRIMARY KEY CHECK(singleton = 1))`); err != nil {
+			return err
+		}
+		version = 8
 	}
 	if version != schemaVersion {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)

@@ -130,6 +130,17 @@ Successful Channel replies include the producing runtime plus the completed turn
 
 On daemon startup, inbox rows left in `received` are failed before adapters start. A `claimed` row without a persisted reply receipt is marked `delivery_unknown`, because a remote carrier may have been created immediately before the crash. A `running` row with a receipt is never replayed as a new agent turn. After its connection starts, the daemon closes that same COT/card as failed; if a final receipt was already persisted, it instead restores the completed carrier state. If that recovery send cannot be confirmed, the row is `delivery_unknown`.
 
+### Shared navigation
+
+Navigation belongs to the daemon catalog; client selection and expansion state remain client-local.
+
+- `GET /catalog/navigation` returns `{projects, workspaces, pinned, legacy_order_imported}`. Each list contains `{kind: "project" | "workspace" | "session", id}` entries in display order. Projects/workspaces include active nodes, and Pinned mixes all three kinds. Session order inside a workspace remains exposed through `organization.workspace_position`.
+- `PUT /catalog/navigation/pin` takes `{item: {kind, id}, pinned: boolean}`. Repeating a pin preserves its position. Pinning never changes membership or regular tree position. Archiving clears the pin. The existing session `/pinned` endpoint uses the same storage.
+- `PUT /catalog/navigation/order` takes `{scope: "projects" | "workspaces" | "sessions" | "pinned", parent_id?, items: [{kind, id}]}`. Workspace/session scopes require their project/workspace parent ID respectively. Other scopes must omit it. A visible subset may be reordered; hidden nodes retain their slots. Duplicate items return 400 and stale, wrong-kind, or out-of-scope items return 409. Validation and writes are atomic. A manual reorder prevents subsequent legacy import.
+- `POST /catalog/navigation/import` takes `{orders: [{scope, parent_id?, items}]}` for projects, workspaces and pinned only. The first import wins atomically; later imports are no-ops. Clients materialize their full legacy display order first, including new nodes absent from their saved preferences. Deleted/unpinned IDs are ignored. Existing session pins survive schema migration. If clients have different old local orders, the first connecting client determines the initial shared order.
+
+Catalog schema 8 adds project/workspace position and pin columns plus a one-time import marker. Deploy the new daemon before the paired UI and update the UI repository's `daemon-version` to that daemon revision before release. Old daemons/CLI builds reject schema 8; rollback requires restoring a pre-upgrade catalog backup with the daemon stopped, including a consistent SQLite WAL snapshot. Do not point an old daemon at the migrated database. Old UI preferences are retained but no longer consulted after import.
+
 ### Workspace Sources
 
 `DELETE /projects/{id}/sources/{source_id}` deregisters a Source from the Project's Source list and future Workspace Source selections. It does not remove files, Git branches, worktrees, existing Workspace bindings, or session history. Repeating the request for a deregistered Source succeeds. Existing bindings retain their Source metadata and support normal Workspace lifecycle operations. Adding the same path again reactivates the original Source ID when its repository identity and binding defaults still match; conflicting identity changes are rejected.

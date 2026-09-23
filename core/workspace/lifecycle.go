@@ -595,7 +595,7 @@ func (s *Store) finishArchive(ctx context.Context, workspaceID string) (Workspac
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE workspaces SET status = 'archived', archived_at = ?, error = NULL, updated_at = ? WHERE id = ?
+UPDATE workspaces SET status = 'archived', archived_at = ?, error = NULL, pinned_at = NULL, pinned_position = NULL, updated_at = ? WHERE id = ?
 	`, unixMillis(now), unixMillis(now), workspaceID); err != nil {
 		return Workspace{}, err
 	}
