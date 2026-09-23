@@ -119,22 +119,10 @@ func (s *Store) SetSessionTitle(ctx context.Context, sessionID string, title str
 }
 
 func (s *Store) SetSessionPinned(ctx context.Context, sessionID string, pinned bool) (SessionOrganization, error) {
-	organization, err := s.GetSessionOrganization(ctx, sessionID)
-	if err != nil {
+	if err := s.SetNavigationPinned(ctx, NavigationItem{Kind: "session", ID: sessionID}, pinned); err != nil {
 		return SessionOrganization{}, err
 	}
-	if organization.EffectiveArchived() {
-		return SessionOrganization{}, fmt.Errorf("%w: archived session cannot be pinned", ErrConflict)
-	}
-	if !pinned {
-		return s.updateOrganization(ctx, sessionID, `pinned_at = NULL, pinned_position = NULL`)
-	}
-	var position int64
-	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(pinned_position), 0) + 1000 FROM session_organization`).Scan(&position); err != nil {
-		return SessionOrganization{}, err
-	}
-	now := unixMillis(time.Now().UTC())
-	return s.updateOrganization(ctx, sessionID, `pinned_at = ?, pinned_position = ?`, now, position)
+	return s.GetSessionOrganization(ctx, sessionID)
 }
 
 func (s *Store) SetSessionPosition(ctx context.Context, sessionID string, position int64) (SessionOrganization, error) {

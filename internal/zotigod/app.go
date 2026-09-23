@@ -515,6 +515,9 @@ type workerReadyRequest struct {
 
 // Run starts zotigod and returns a process exit code.
 func Run(args []string) (exitCode int) {
+	if len(args) > 0 && args[0] == "catalog-migrate" {
+		return runCatalogMigrate(args[1:], os.Stdout, os.Stderr)
+	}
 	fs := flag.NewFlagSet("zotigod", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	versionFlag := fs.Bool("version", false, "Print program release version")
@@ -1063,6 +1066,10 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/retry", withPathValue("workspace_id", handler.handleWorkspaceRetry))
 	mux.HandleFunc("/workspaces/{workspace_id}/{route...}", handler.handleWorkspaceRouteNotFound)
 	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
+	mux.HandleFunc("/catalog/navigation", handler.handleNavigation)
+	mux.HandleFunc("/catalog/navigation/import", handler.handleNavigationImport)
+	mux.HandleFunc("/catalog/navigation/order", handler.handleNavigationOrder)
+	mux.HandleFunc("/catalog/navigation/pin", handler.handleNavigationPin)
 	mux.HandleFunc("/catalog/sessions/{$}", handler.handleCatalogSessionNotFound)
 	handleOptionalTrailingSlash(mux, "/catalog/sessions/{id}", withPathValue("id", handler.handleCatalogSession))
 	mux.HandleFunc("/catalog/sessions/{id}/{route...}", handler.handleCatalogSessionNotFound)
