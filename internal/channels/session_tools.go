@@ -10,7 +10,7 @@ import (
 
 // WithSessionToolAccess holds the configuration fence through admission. The
 // group's existing workspace binding is the grant, not mere project membership.
-func (s *Service) WithSessionToolAccess(ctx context.Context, sessionID string, origin *protocol.RequestContext, workspaceID string, write bool, run func() error) error {
+func (s *Service) WithSessionToolAccess(ctx context.Context, sessionID string, origin *protocol.RequestContext, workspaceID string, write bool, run func(isOwner bool) error) error {
 	if origin == nil || origin.ConnectionID == "" || origin.ConversationID == "" || origin.Actor.ID == "" {
 		return errors.New("session tools require a trusted Channel origin")
 	}
@@ -37,8 +37,9 @@ func (s *Service) WithSessionToolAccess(ctx context.Context, sessionID string, o
 	if !connection.Enabled || connection.Provider != origin.Source || !group.Enabled || !conversation.Enabled || group.WorkspaceID != workspaceID || conversation.WorkspaceID != workspaceID || !senderAllowed(connection, group, origin.Actor.ID) {
 		return errors.New("channel session tool access is no longer allowed")
 	}
-	if write && !slices.Contains(connection.OwnerSenderIDs, origin.Actor.ID) {
+	isOwner := slices.Contains(connection.OwnerSenderIDs, origin.Actor.ID)
+	if write && !isOwner {
 		return errors.New("only the robot connection owner may send messages or create sessions")
 	}
-	return run()
+	return run(isOwner)
 }

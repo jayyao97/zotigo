@@ -2,7 +2,7 @@
 
 ## Usage
 
-Session tools retain the daemon's workspace/channel authorization rules. Desktop callers can read authorized workspaces. Channel callers can read only their currently bound session; bot-owner status does not expand access to conversation history.
+Session tools retain the daemon's workspace/channel authorization rules. Desktop callers can read authorized workspaces. Channel connection owners can read other non-archived sessions in the bound workspace; other Channel callers can read only their currently bound session. Channel owners may also fork readable sessions in the same workspace, subject to the existing runtime, approval and prompt constraints. Every call resolves current ownership from the stored connection and trusted input actor, so revocation applies to subsequent calls.
 
 `zotigo.list_sessions` adds optional `activity_since` and `activity_until` parameters. `zotigo.read_session` adds optional `since` and `until` parameters. All accept RFC3339 timestamps with a timezone. Intervals are half-open, `[since, until)`, with an omitted endpoint leaving that side unbounded. Listing matches any user, assistant, or steering message within the window, not just the session's last update time. Reading combines time filters with exclusive sequence cursors.
 

@@ -34,17 +34,21 @@ func TestSessionToolAccessRequiresCurrentBotOwner(t *testing.T) {
 	service := NewService(store, nil, nil, nil)
 	origin := &protocol.RequestContext{Source: ProviderFeishu, ConnectionID: "bot", ConversationID: conversation.ID, ExternalConversation: "chat", Actor: protocol.RequestActor{ID: "member", Role: "owner"}}
 	called := false
-	run := func() error { called = true; return nil }
+	var ownerGrant bool
+	run := func(isOwner bool) error { called = true; ownerGrant = isOwner; return nil }
 	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", true, run); err == nil || called {
 		t.Fatal("self-reported owner bypassed authorization")
 	}
-	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", false, run); err != nil || !called {
+	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", false, run); err != nil || !called || ownerGrant {
 		t.Fatalf("member read err=%v", err)
 	}
 	origin.Actor.ID = "owner"
 	called = false
-	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", true, run); err != nil || !called {
+	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", true, run); err != nil || !called || !ownerGrant {
 		t.Fatalf("owner write err=%v", err)
+	}
+	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", false, run); err != nil || !ownerGrant {
+		t.Fatalf("owner read err=%v", err)
 	}
 	connection.OwnerSenderIDs = nil
 	if _, err := store.PutConnection(ctx, connection); err != nil {
@@ -53,6 +57,9 @@ func TestSessionToolAccessRequiresCurrentBotOwner(t *testing.T) {
 	called = false
 	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", true, run); err == nil || called {
 		t.Fatal("revoked owner authorized")
+	}
+	if err := service.WithSessionToolAccess(ctx, "session", origin, "workspace", false, run); err != nil || ownerGrant {
+		t.Fatalf("revoked owner read grant=%v err=%v", ownerGrant, err)
 	}
 	if err := service.WithSessionToolAccess(ctx, "session", origin, "other-workspace", false, run); err == nil {
 		t.Fatal("workspace escape authorized")
