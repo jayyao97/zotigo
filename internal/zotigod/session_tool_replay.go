@@ -105,7 +105,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if h.channels == nil {
 			return "", errors.New("channel authorization is unavailable")
 		}
-		err = h.channels.WithSessionToolAccess(ctx, source.ID, operation.Origin, operation.WorkspaceID, true, validate)
+		err = h.channels.WithSessionToolAccess(ctx, source.ID, operation.Origin, operation.WorkspaceID, true, func(_ bool) error { return validate() })
 	} else {
 		err = validate()
 	}

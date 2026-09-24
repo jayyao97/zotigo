@@ -847,58 +847,92 @@ func TestServiceDoesNotShareSessionBindingAcrossTopics(t *testing.T) {
 	}
 }
 
-func TestServiceProvisionsDistinctSessionForNewTopLevelConversation(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	store, err := Open(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	secrets, _ := NewSecretStore(t.TempDir())
-	adapter := &fakeAdapter{}
-	dispatcher := provisioningDispatcher{called: make(chan Task, 1), workspaceIDs: make(chan string, 1), runtimes: make(chan SessionRuntimeConfig, 1)}
-	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
-	service.SetDispatcher(dispatcher)
-	secret := "secret"
-	owners := []string{"user-1"}
-	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners}); err != nil {
-		t.Fatal(err)
-	}
-	now := time.Now().UTC().Format(time.RFC3339Nano)
-	if _, err = store.db.Exec(`INSERT INTO channel_conversations(id,connection_id,chat_id,root_id,chat_type,chat_name,display_name,workspace_id,session_agent,model,reasoning_effort,enabled,allowed_sender_ids,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "group-default", "connection-1", "allowed", "", "group", "Shadow Test", "Shadow Test", "workspace-1", SessionAgentCodex, "gpt-test", "high", true, `["user-1"]`, now, now, now); err != nil {
-		t.Fatal(err)
-	}
-	if err = service.Start(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "topic-new", ChatID: "allowed", ChatType: "group", ChatName: "Shadow Test", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", MentionedBot: true}); err != nil {
-		t.Fatal(err)
-	}
-	select {
-	case workspaceID := <-dispatcher.workspaceIDs:
-		if workspaceID != "workspace-1" {
-			t.Fatalf("workspace = %q", workspaceID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("session was not provisioned")
-	}
-	if runtime := <-dispatcher.runtimes; runtime.Agent != SessionAgentCodex || runtime.Model != "gpt-test" || runtime.ReasoningEffort != "high" {
-		t.Fatalf("runtime=%+v", runtime)
-	}
-	select {
-	case task := <-dispatcher.called:
-		if task.SessionID != "session-new" {
-			t.Fatalf("task session = %q", task.SessionID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("task was not dispatched")
-	}
-	conversation, err := store.GetConversationByScope(ctx, "connection-1", "allowed", "topic-new")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if conversation.SessionID != "session-new" || conversation.WorkspaceID != "workspace-1" || conversation.Agent != SessionAgentCodex || conversation.Model != "gpt-test" || conversation.ReasoningEffort != "high" || !conversation.Enabled || conversation.ChatName != "Shadow Test" || !slices.Contains(conversation.AllowedSenderIDs, "user-1") {
-		t.Fatalf("conversation = %+v", conversation)
+func TestServiceProvisionsSessionForFirstMentionInTopic(t *testing.T) {
+	for _, rootID := range []string{"", "existing-topic"} {
+		t.Run("root="+rootID, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			store, err := Open(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			secrets, _ := NewSecretStore(t.TempDir())
+			adapter := &fakeAdapter{}
+			dispatcher := provisioningDispatcher{called: make(chan Task, 1), workspaceIDs: make(chan string, 1), runtimes: make(chan SessionRuntimeConfig, 1)}
+			service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: fakeFactory{adapter}})
+			service.SetDispatcher(dispatcher)
+			secret := "secret"
+			owners := []string{"user-1"}
+			if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, AllowChatIDs: []string{"allowed"}, OwnerSenderIDs: &owners}); err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC().Format(time.RFC3339Nano)
+			if _, err = store.db.Exec(`INSERT INTO channel_conversations(id,connection_id,chat_id,root_id,chat_type,chat_name,display_name,workspace_id,session_agent,model,reasoning_effort,enabled,allowed_sender_ids,last_activity_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, "group-default", "connection-1", "allowed", "", "group", "Shadow Test", "Shadow Test", "workspace-1", SessionAgentCodex, "gpt-test", "high", true, `["user-1"]`, now, now, now); err != nil {
+				t.Fatal(err)
+			}
+			if err = service.Start(ctx); err != nil {
+				t.Fatal(err)
+			}
+			if rootID != "" {
+				if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "unmentioned-reply", RootID: rootID, ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "discussion"}); err != nil {
+					t.Fatal(err)
+				}
+				message, getErr := store.GetMessageByProviderID(ctx, "connection-1", "unmentioned-reply")
+				if getErr != nil || message.StatusDetail != "conversation_not_bound" {
+					t.Fatalf("unmentioned reply = %+v, err = %v", message, getErr)
+				}
+			}
+			if err = adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: "topic-new", RootID: rootID, ChatID: "allowed", ChatType: "group", ChatName: "Shadow Test", Sender: Sender{ID: "user-1", DisplayName: "Owner"}, Text: "hello", MentionedBot: true}); err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case workspaceID := <-dispatcher.workspaceIDs:
+				if workspaceID != "workspace-1" {
+					t.Fatalf("workspace = %q", workspaceID)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("session was not provisioned")
+			}
+			if runtime := <-dispatcher.runtimes; runtime.Agent != SessionAgentCodex || runtime.Model != "gpt-test" || runtime.ReasoningEffort != "high" {
+				t.Fatalf("runtime=%+v", runtime)
+			}
+			select {
+			case task := <-dispatcher.called:
+				if task.SessionID != "session-new" {
+					t.Fatalf("task session = %q", task.SessionID)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("task was not dispatched")
+			}
+			if rootID == "" {
+				rootID = "topic-new"
+			}
+			conversation, err := store.GetConversationByScope(ctx, "connection-1", "allowed", rootID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if conversation.SessionID != "session-new" || conversation.WorkspaceID != "workspace-1" || conversation.Agent != SessionAgentCodex || conversation.Model != "gpt-test" || conversation.ReasoningEffort != "high" || !conversation.Enabled || conversation.ChatName != "Shadow Test" || !slices.Contains(conversation.AllowedSenderIDs, "user-1") {
+				t.Fatalf("conversation = %+v", conversation)
+			}
+			for index, mentioned := range []bool{true, false} {
+				if err := adapter.callbacks.Inbound(ctx, InboundMessage{MessageID: fmt.Sprintf("followup-%d", index), RootID: rootID, ChatID: "allowed", ChatType: "group", Sender: Sender{ID: "user-1"}, Text: "continue", MentionedBot: mentioned}); err != nil {
+					t.Fatal(err)
+				}
+				select {
+				case task := <-dispatcher.called:
+					if task.SessionID != conversation.SessionID || task.Origin.ExternalRootID != rootID {
+						t.Fatalf("follow-up changed topic binding: %+v", task)
+					}
+				case <-time.After(time.Second):
+					t.Fatal("follow-up was not dispatched")
+				}
+			}
+			select {
+			case <-dispatcher.workspaceIDs:
+				t.Fatal("follow-up provisioned another Session")
+			default:
+			}
+		})
 	}
 }
 

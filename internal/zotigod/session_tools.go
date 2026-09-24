@@ -27,6 +27,7 @@ type sessionToolCaller struct {
 	SessionID, TurnID, WorkspaceID string
 	Generation                     string
 	Origin                         *protocol.RequestContext
+	CanReadWorkspaceSessions       bool
 	Stored                         *session.Session
 }
 
@@ -181,7 +182,10 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 		if h.channels == nil {
 			return "", errors.New("channel authorization is unavailable")
 		}
-		err = h.channels.WithSessionToolAccess(ctx, id, caller.Origin, caller.WorkspaceID, spec.Write, run)
+		err = h.channels.WithSessionToolAccess(ctx, id, caller.Origin, caller.WorkspaceID, spec.Write, func(isOwner bool) error {
+			caller.CanReadWorkspaceSessions = isOwner
+			return run()
+		})
 	} else {
 		err = run()
 	}
@@ -224,7 +228,7 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 	if id == "" {
 		return errors.New("session_id is required")
 	}
-	if read && caller.Origin != nil && id != caller.SessionID {
+	if read && caller.Origin != nil && !caller.CanReadWorkspaceSessions && id != caller.SessionID {
 		return errors.New("channel history is restricted to its bound session")
 	}
 	organization, err := h.catalog.GetSessionOrganization(ctx, id)
@@ -296,7 +300,7 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 	results := make([]toolSessionSummary, 0, limit)
 	hasMore := false
 	for _, org := range organizations {
-		if org.SessionID <= req.AfterID || org.WorkspaceID == nil || *org.WorkspaceID != caller.WorkspaceID || org.EffectiveArchived() || (caller.Origin != nil && org.SessionID != caller.SessionID) {
+		if org.SessionID <= req.AfterID || org.WorkspaceID == nil || *org.WorkspaceID != caller.WorkspaceID || org.EffectiveArchived() || (caller.Origin != nil && !caller.CanReadWorkspaceSessions && org.SessionID != caller.SessionID) {
 			continue
 		}
 		var matched *time.Time
