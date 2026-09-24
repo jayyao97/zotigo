@@ -1342,7 +1342,8 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return reject("mention_required")
 	}
-	if conversation.SessionID == "" && (in.StartsConversation || group.SessionStrategy == SessionStrategyShared) {
+	// A bot can first be mentioned in a reply to an existing topic.
+	if conversation.SessionID == "" && (in.StartsConversation || in.MentionedBot || group.SessionStrategy == SessionStrategyShared) {
 		s.mu.Lock()
 		provisioner, canProvision := s.dispatcher.(SessionProvisioner)
 		s.mu.Unlock()
