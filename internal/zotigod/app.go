@@ -1037,6 +1037,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/agents/codex/prepare", handler.handleCodexPrepare)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
 	mux.HandleFunc("/sources/inspect", handler.handleSourceInspection)
+	mux.HandleFunc("/files/events", handler.handleFileEvents)
 	mux.HandleFunc("/files/capabilities", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/open", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/save", handler.handleWorkspaceFile)

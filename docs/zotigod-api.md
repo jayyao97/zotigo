@@ -1038,3 +1038,29 @@ Both endpoints enumerate at most 1,001 immediate entries, return at most 1,000, 
 `GET /sessions/{id}/images/codex-input-{sequence}-{content_index}` serves a local image already recorded in a user-message content part. The sequence and zero-based content index identify the attachment; the caller cannot supply a filesystem path. This uses the same public bearer authentication as stored session images. Web proxies and Desktop requests retain their selected host context.
 
 The daemon reads the original file on its own host, including for existing imported history. Only regular PNG, JPEG, or WebP images up to 5 MiB are served. Missing, invalid, oversized, non-image, or unrecorded attachments return 404; responses use `Cache-Control: private, no-store`. This endpoint does not copy temporary Codex attachments, so files already removed by the OS cannot be recovered.
+
+### Open-file change notifications
+
+`POST /files/events` opens an authenticated SSE stream. The JSON body is
+`{"files":[{"path":"/absolute/path/file.txt","sessionId":"optional","explicitOpen":false}]}`.
+Accepts 1–64 paths (4 KiB each), bounded to a 320 KiB request. Default scope is the
+same registered workspace/session roots as file reads. `explicitOpen: true`
+is for files explicitly opened by the user, including read-only previews outside
+those roots; it does not grant write access.
+
+Frames contain `data: {"type":"ready"|"changed","paths":[...]}`. `ready` is sent
+after installing the watches; its paths are files that could not be watched.
+Clients should reread visible snapshots on every `ready` (including reconnects)
+to catch changes in the read/subscribe gap. `changed` invalidates the listed
+snapshots; no file content is sent. Notifications are coalesced over 100 ms.
+Only immediate parent directories are watched, deduplicated within a connection;
+sibling filenames are filtered and no recursive tree scans or polling occur.
+Atomic replacement, deletion and recreation invalidate the same path. Closing the
+stream releases its watches. Parent removal and watcher overflow close the stream;
+clients reconnect with backoff and catch up, preserving unsaved edits. A 15-second
+comment heartbeat keeps idle connections alive without reading files.
+
+Clients should retain a manual refresh action for unavailable watches or older
+daemons (404/405), and refresh on returning to the foreground. Inactive tabs can
+stay stale until selected. Changes on filesystems that do not provide native
+notifications require manual or foreground refresh.
