@@ -2,7 +2,6 @@ package zotigod
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,6 +12,49 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
+
+func TestWorkspaceDeleteHidesSessionsButPreservesHistoryProjection(t *testing.T) {
+	for _, parent := range []string{"workspace", "project"} {
+		t.Run(parent, func(t *testing.T) {
+			handler, _, catalog, workspace := newCatalogSessionFixture(t)
+			writeTestProfileConfig(t, workspace.RootPath)
+			created := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+			if created.Code != http.StatusCreated {
+				t.Fatalf("create = %d: %s", created.Code, created.Body.String())
+			}
+			var session Session
+			decodeCatalogData(t, created, &session)
+			if _, err := catalog.SetSessionPinned(t.Context(), session.ID, true); err != nil {
+				t.Fatal(err)
+			}
+			path, title := "/workspaces/"+workspace.ID+"/delete", workspace.Title
+			if parent == "project" {
+				path, title = "/projects/"+workspace.ProjectID+"/delete", "Catalog"
+			}
+			deleted := requestCatalog(t, handler, http.MethodPost, path, `{"confirmation":`+quotedJSON(t, title)+`}`)
+			if deleted.Code != http.StatusOK {
+				t.Fatalf("delete = %d: %s", deleted.Code, deleted.Body.String())
+			}
+			for _, query := range []string{"", "?pinned=true", "?include_archived=true"} {
+				response := requestCatalog(t, handler, http.MethodGet, "/catalog/sessions"+query, "")
+				if response.Code != http.StatusOK {
+					t.Fatalf("list = %d: %s", response.Code, response.Body.String())
+				}
+				var listed catalogSessionListResponse
+				decodeCatalogData(t, response, &listed)
+				if query != "?include_archived=true" {
+					if len(listed.Sessions) != 0 {
+						t.Fatalf("active list %s contains deleted workspace sessions: %+v", query, listed.Sessions)
+					}
+					continue
+				}
+				if len(listed.Sessions) != 1 || listed.Sessions[0].Availability != "archived" || listed.Sessions[0].Runtime == nil || listed.Sessions[0].Runtime.ID != session.ID {
+					t.Fatalf("archived history missing: %+v", listed.Sessions)
+				}
+			}
+		})
+	}
+}
 
 func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
@@ -279,7 +321,7 @@ func TestArchivedWorkspaceBlocksSessionActivation(t *testing.T) {
 	}
 }
 
-func TestProjectDeletePreservesRuntimeSessionAndRemovesOrganization(t *testing.T) {
+func TestProjectDeletePreservesRuntimeSessionAndArchivesOrganization(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
 	writeTestProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
@@ -295,8 +337,9 @@ func TestProjectDeletePreservesRuntimeSessionAndRemovesOrganization(t *testing.T
 	if _, ok := registry.Get(session.ID); !ok {
 		t.Fatal("runtime session was removed")
 	}
-	if _, err := catalog.GetSessionOrganization(context.Background(), session.ID); !errors.Is(err, zotigoworkspace.ErrNotFound) {
-		t.Fatalf("session organization error = %v, want not found", err)
+	organization, err := catalog.GetSessionOrganization(context.Background(), session.ID)
+	if err != nil || organization.SelfArchivedAt == nil {
+		t.Fatalf("session organization = %+v, err=%v", organization, err)
 	}
 }
 
