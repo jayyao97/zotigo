@@ -119,6 +119,9 @@ func TestProjectArchiveAllowsAlreadyArchivedGitWorkspace(t *testing.T) {
 func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 	store, project, workspace, source := createFolderProjectFixture(t)
 	ctx := context.Background()
+	if _, err := store.AssignSession(ctx, "retained-session", workspace.ID); err != nil {
+		t.Fatal(err)
+	}
 	projectDir := filepath.Join(store.RootDir(), "projects", project.storageName)
 	unknownPath := filepath.Join(projectDir, "unknown.txt")
 	if err := os.WriteFile(unknownPath, []byte("keep"), 0o600); err != nil {
@@ -162,6 +165,10 @@ func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 	}
 	if _, err := store.GetProject(ctx, project.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted project lookup = %v, want not found", err)
+	}
+	organization, err := store.EnsureSessionOrganization(ctx, "retained-session")
+	if err != nil || organization.SelfArchivedAt == nil || organization.WorkspaceID != nil || organization.ProjectID != nil {
+		t.Fatalf("session after project delete retry = %+v, err=%v", organization, err)
 	}
 	for table, column := range map[string]string{"projects": "id", "sources": "project_id", "workspaces": "project_id"} {
 		var count int

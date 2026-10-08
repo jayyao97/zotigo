@@ -645,8 +645,18 @@ func (s *Store) finishDelete(ctx context.Context, workspaceID string) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	// Keep archive state after detaching history, including later discovery/import.
+	if _, err := tx.ExecContext(ctx, `
+		UPDATE session_organization SET
+		    self_archived_at = COALESCE(self_archived_at, ?),
+		    pinned_at = NULL, pinned_position = NULL,
+		    project_id = NULL, workspace_id = NULL, workspace_position = NULL,
+		    workspace_archived_at = NULL, revision = revision + 1, updated_at = ?
+		WHERE workspace_id = ?
+	`, unixMillis(now), unixMillis(now), workspaceID); err != nil {
+		return err
+	}
 	for _, statement := range []string{
-		`DELETE FROM session_organization WHERE workspace_id = ?`,
 		`DELETE FROM workspace_checkouts WHERE workspace_id = ?`,
 		`DELETE FROM workspace_folders WHERE workspace_id = ?`,
 	} {

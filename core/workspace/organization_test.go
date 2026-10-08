@@ -197,24 +197,62 @@ func TestRecordSessionActivityOrderDoesNotDependOnCallOrder(t *testing.T) {
 	}
 }
 
-func TestDeleteWorkspaceRemovesOrganizationAndKeepsPathTombstone(t *testing.T) {
+func TestDeleteWorkspaceArchivesOrganizationAndKeepsPathTombstone(t *testing.T) {
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "session-1", workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetSessionPinned(ctx, "session-1", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetSessionTitle(ctx, "session-1", "Keep my title"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignSession(ctx, "already-archived", workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	archived, err := store.SetSessionArchived(ctx, "already-archived", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.EnsureSessionOrganization(ctx, "unrelated"); err != nil {
 		t.Fatal(err)
 	}
 	impact, err := store.PreviewDelete(ctx, workspace.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(impact.SessionIDs) != 1 || impact.SessionIDs[0] != "session-1" {
+	if len(impact.SessionIDs) != 2 {
 		t.Fatalf("delete impact sessions = %v", impact.SessionIDs)
+	}
+	if err := store.DeleteWorkspace(ctx, workspace.ID, "wrong"); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("incorrect confirmation = %v", err)
+	}
+	before, err := store.GetSessionOrganization(ctx, "session-1")
+	if err != nil || before.SelfArchivedAt != nil || before.PinnedAt == nil {
+		t.Fatalf("failed delete modified session: %+v, err=%v", before, err)
 	}
 	if err := store.DeleteWorkspace(ctx, workspace.ID, workspace.Title); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.GetSessionOrganization(ctx, "session-1"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("organization after delete = %v, want not found", err)
+	organization, err := store.EnsureSessionOrganization(ctx, "session-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if organization.SelfArchivedAt == nil || organization.PinnedAt != nil || organization.WorkspaceID != nil || organization.ProjectID != nil || organization.Title == nil || *organization.Title != "Keep my title" {
+		t.Fatalf("organization after delete = %+v", organization)
+	}
+	if organization.PinnedPosition != nil || organization.WorkspacePosition != nil || organization.WorkspaceArchivedAt != nil || organization.Revision != before.Revision+1 || !organization.CreatedAt.Equal(before.CreatedAt) {
+		t.Fatalf("organization metadata after delete = %+v", organization)
+	}
+	retained, err := store.GetSessionOrganization(ctx, "already-archived")
+	if err != nil || retained.SelfArchivedAt == nil || !retained.SelfArchivedAt.Equal(*archived.SelfArchivedAt) {
+		t.Fatalf("archive timestamp changed: %+v, err=%v", retained, err)
+	}
+	unrelated, err := store.GetSessionOrganization(ctx, "unrelated")
+	if err != nil || unrelated.SelfArchivedAt != nil {
+		t.Fatalf("unrelated session modified: %+v, err=%v", unrelated, err)
 	}
 	owned, err := store.DeletedWorkspaceOwnsPath(ctx, workspace.RootPath)
 	if err != nil {
