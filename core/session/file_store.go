@@ -51,7 +51,7 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create sessions directory: %w", err)
 	}
 
-	index, err := openSessionIndex(filepath.Join(rootDir, "session_index.sqlite"))
+	index, err := openSessionIndex(rootDir)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +62,6 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		index:        index,
 	}
 	if err := store.bootstrapSessionIndex(); err != nil {
-		_ = index.close()
-		return nil, err
-	}
-	if err := store.initDisplayIndex(); err != nil {
 		_ = index.close()
 		return nil, err
 	}

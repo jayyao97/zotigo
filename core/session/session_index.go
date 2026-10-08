@@ -4,123 +4,35 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
+	"github.com/gofrs/flock"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/catalogschema"
 	_ "modernc.org/sqlite"
 )
 
 type sessionIndex struct {
-	db *sql.DB
+	db         *sql.DB
+	schemaLock *flock.Flock
 }
 
-func openSessionIndex(path string) (*sessionIndex, error) {
-	db, err := sql.Open("sqlite", path)
+func openSessionIndex(root string) (*sessionIndex, error) {
+	db, err := catalogschema.OpenDatabase(root)
 	if err != nil {
 		return nil, fmt.Errorf("open session index: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	index := &sessionIndex{db: db}
-	if err := index.migrate(context.Background()); err != nil {
+	lease, err := catalogschema.Acquire(context.Background(), root, db, false)
+	if err != nil {
 		_ = db.Close()
 		return nil, err
 	}
-	return index, nil
-}
-
-func (i *sessionIndex) migrate(ctx context.Context) error {
-	stmts := []string{
-		`PRAGMA busy_timeout = 5000`,
-		`PRAGMA journal_mode = WAL`,
-		`CREATE TABLE IF NOT EXISTS sessions (
-			id TEXT PRIMARY KEY,
-			working_directory TEXT NOT NULL,
-			agent TEXT NOT NULL DEFAULT 'zotigo',
-			profile_name TEXT NOT NULL DEFAULT '',
-			model TEXT NOT NULL DEFAULT '',
-			reasoning_effort TEXT NOT NULL DEFAULT '',
-			conversation_id TEXT NOT NULL DEFAULT '',
-			backend_version TEXT NOT NULL DEFAULT '',
-			backend_updated_at INTEGER NOT NULL DEFAULT 0,
-			backend_sync_version INTEGER NOT NULL DEFAULT 0,
-			approval_policy TEXT NOT NULL DEFAULT 'auto',
-			prompt_config TEXT NOT NULL DEFAULT '{}',
-			capabilities TEXT NOT NULL DEFAULT '{}',
-			last_prompt TEXT NOT NULL DEFAULT '',
-			created_at INTEGER NOT NULL,
-			updated_at INTEGER NOT NULL
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_updated_at ON sessions(updated_at)`,
-		`CREATE INDEX IF NOT EXISTS idx_sessions_working_directory_updated_at ON sessions(working_directory, updated_at)`,
-		`CREATE TABLE IF NOT EXISTS session_images (
-			session_id TEXT NOT NULL,
-			name TEXT NOT NULL,
-			blob_path TEXT NOT NULL,
-			mime_type TEXT NOT NULL,
-			size_bytes INTEGER NOT NULL,
-			width INTEGER NOT NULL,
-			height INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			PRIMARY KEY (session_id, name)
-		)`,
-		`CREATE INDEX IF NOT EXISTS idx_session_images_session_id ON session_images(session_id)`,
-		`CREATE TABLE IF NOT EXISTS metadata (
-			key TEXT PRIMARY KEY,
-			value TEXT NOT NULL
-		)`,
-	}
-	for _, stmt := range stmts {
-		if _, err := i.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate session index: %w", err)
-		}
-	}
-	var profileColumnCount int
-	if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'profile_name'`).Scan(&profileColumnCount); err != nil {
-		return fmt.Errorf("inspect session index profile column: %w", err)
-	}
-	if profileColumnCount == 0 {
-		if _, err := i.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN profile_name TEXT NOT NULL DEFAULT ''`); err != nil {
-			return fmt.Errorf("add session index profile column: %w", err)
-		}
-	}
-	var approvalPolicyColumnCount int
-	if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = 'approval_policy'`).Scan(&approvalPolicyColumnCount); err != nil {
-		return fmt.Errorf("inspect session index approval policy column: %w", err)
-	}
-	if approvalPolicyColumnCount == 0 {
-		if _, err := i.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN approval_policy TEXT NOT NULL DEFAULT 'auto'`); err != nil {
-			return fmt.Errorf("add session index approval policy column: %w", err)
-		}
-	}
-	for _, column := range []struct {
-		name       string
-		definition string
-	}{
-		{name: "agent", definition: "TEXT NOT NULL DEFAULT 'zotigo'"},
-		{name: "model", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "reasoning_effort", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "conversation_id", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "backend_version", definition: "TEXT NOT NULL DEFAULT ''"},
-		{name: "backend_updated_at", definition: "INTEGER NOT NULL DEFAULT 0"},
-		{name: "backend_sync_version", definition: "INTEGER NOT NULL DEFAULT 0"},
-		{name: "prompt_config", definition: "TEXT NOT NULL DEFAULT '{}'"},
-		{name: "capabilities", definition: "TEXT NOT NULL DEFAULT '{}'"},
-	} {
-		var count int
-		if err := i.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('sessions') WHERE name = ?`, column.name).Scan(&count); err != nil {
-			return fmt.Errorf("inspect session index %s column: %w", column.name, err)
-		}
-		if count == 0 {
-			if _, err := i.db.ExecContext(ctx, `ALTER TABLE sessions ADD COLUMN `+column.name+` `+column.definition); err != nil {
-				return fmt.Errorf("add session index %s column: %w", column.name, err)
-			}
-		}
-	}
-	return nil
+	return &sessionIndex{db: db, schemaLock: lease}, nil
 }
 
 func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
@@ -417,7 +329,7 @@ func (i *sessionIndex) setMetadata(ctx context.Context, key string, value any) e
 }
 
 func (i *sessionIndex) close() error {
-	return i.db.Close()
+	return errors.Join(i.db.Close(), i.schemaLock.Close())
 }
 
 func (s *FileStore) bootstrapSessionIndex() error {

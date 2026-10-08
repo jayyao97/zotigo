@@ -22,27 +22,6 @@ var ErrDisplayIndexPending = errors.New("conversation index is rebuilding; retry
 
 type DisplayTimeWindow struct{ Since, Until *time.Time }
 
-func (s *FileStore) initDisplayIndex() error {
-	_, err := s.index.db.Exec(`CREATE TABLE IF NOT EXISTS display_items (
-	 session_id TEXT NOT NULL, sequence INTEGER NOT NULL, message_at INTEGER NOT NULL,
-	 dialogue INTEGER NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL,
-	 PRIMARY KEY(session_id, sequence));
-	 CREATE INDEX IF NOT EXISTS idx_display_time ON display_items(session_id, message_at, sequence);
-	 CREATE INDEX IF NOT EXISTS idx_display_dialogue_time ON display_items(session_id, dialogue, message_at);
-	 CREATE TABLE IF NOT EXISTS display_index_files (session_id TEXT PRIMARY KEY, size INTEGER NOT NULL, mtime INTEGER NOT NULL, observed_size INTEGER NOT NULL DEFAULT -1);`)
-	if err != nil {
-		return err
-	}
-	var found int
-	if err = s.index.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('display_index_files') WHERE name='observed_size'`).Scan(&found); err != nil {
-		return err
-	}
-	if found == 0 {
-		_, err = s.index.db.Exec(`ALTER TABLE display_index_files ADD COLUMN observed_size INTEGER NOT NULL DEFAULT -1`)
-	}
-	return err
-}
-
 // InvalidateDisplayIndex must precede replacing/truncating a display log. Normal
 // display writes are append-only; importers must not reuse old file offsets.
 func (s *FileStore) InvalidateDisplayIndex(ctx context.Context, id string) error {

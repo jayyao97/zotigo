@@ -11,16 +11,18 @@ import (
 	"sync"
 
 	"github.com/gofrs/flock"
+	"github.com/jayyao97/zotigo/core/catalogschema"
 	_ "modernc.org/sqlite"
 )
 
-const schemaVersion = 9
+const schemaVersion = catalogschema.Version
 
 type Store struct {
 	db          *sql.DB
 	rootDir     string
 	operationMu sync.Mutex
 	writerLock  *flock.Flock
+	schemaLock  *flock.Flock
 }
 
 // OpenReadOnly opens an existing catalog without running migrations or writing
@@ -96,7 +98,7 @@ func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 	if !locked {
 		return nil, fmt.Errorf("workspace catalog is in use; stop zotigod before migrating")
 	}
-	db, err := sql.Open("sqlite", dbPath)
+	db, err := catalogschema.OpenDatabase(rootDir)
 	if err != nil {
 		_ = lock.Close()
 		return nil, fmt.Errorf("open workspace catalog: %w", err)
@@ -116,6 +118,9 @@ func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 
 func (s *Store) Close() error {
 	err := s.db.Close()
+	if s.schemaLock != nil {
+		err = errors.Join(err, s.schemaLock.Close())
+	}
 	if s.writerLock != nil {
 		err = errors.Join(err, s.writerLock.Close())
 	}

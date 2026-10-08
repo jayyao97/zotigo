@@ -8,12 +8,62 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
-func TestStorePersistsCatalogIndependentlyFromSessionIndex(t *testing.T) {
+func TestCatalogMutationsDuringSessionWrites(t *testing.T) {
+	root, ctx := t.TempDir(), context.Background()
+	catalog, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer catalog.Close()
+	project, err := catalog.CreateProject(ctx, "Concurrent session writer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sessions.Close()
+	start := make(chan struct{})
+	failures := make(chan error, 2)
+	var group sync.WaitGroup
+	group.Go(func() {
+		<-start
+		for range 200 {
+			err := sessions.Put(ctx, &zotigosession.Session{Metadata: zotigosession.Metadata{
+				ID: "worker", WorkingDirectory: "/work", CreatedAt: time.Now(), UpdatedAt: time.Now(),
+			}})
+			if err != nil {
+				failures <- err
+				return
+			}
+		}
+	})
+	group.Go(func() {
+		<-start
+		for i := range 200 {
+			if err := catalog.SetNavigationPinned(ctx, NavigationItem{Kind: "project", ID: project.ID}, i%2 == 0); err != nil {
+				failures <- err
+				return
+			}
+		}
+	})
+	close(start)
+	group.Wait()
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+}
+
+func TestStorePersistsCatalogWhenDerivedSessionIndexIsCleared(t *testing.T) {
 	root := t.TempDir()
 	ctx := context.Background()
 	store, err := Open(root)
@@ -35,7 +85,21 @@ func TestStorePersistsCatalogIndependentlyFromSessionIndex(t *testing.T) {
 	if err := sessionStore.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Remove(filepath.Join(root, "session_index.sqlite")); err != nil {
+	// Rebuilding an index now clears only derived tables, never catalog.sqlite.
+	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec("DELETE FROM sessions; DELETE FROM session_images; DELETE FROM display_items; DELETE FROM display_index_files; DELETE FROM metadata WHERE key='bootstrapped'")
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionStore, err = zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := sessionStore.Close(); err != nil {
 		t.Fatal(err)
 	}
 

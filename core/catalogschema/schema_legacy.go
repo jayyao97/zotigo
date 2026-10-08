@@ -1,4 +1,4 @@
-package workspace
+package catalogschema
 
 import (
 	"context"
@@ -10,7 +10,7 @@ import (
 // belong in migrations/, never here.
 const legacySchemaVersion = 8
 
-func (s *Store) migrateLegacy(ctx context.Context) error {
+func (s *store) MigrateLegacy(ctx context.Context) error {
 	for _, pragma := range []string{
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA journal_mode = WAL`,

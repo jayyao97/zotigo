@@ -95,7 +95,7 @@ func TestSessionDiscoverySQLPagingAndPlan(t *testing.T) {
 	if _, err := h.listToolSessions(ctx, caller, raw); !errors.Is(err, session.ErrDisplayIndexPending) {
 		t.Fatalf("later page failed to detect stale log: %v", err)
 	}
-	db, err := openSessionDiscovery(ctx, h.catalog.RootDir(), h.sessionStoreRoot())
+	db, err := openSessionDiscovery(ctx, h.catalog.RootDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +129,7 @@ func TestSessionDiscoverySQLPagingAndPlan(t *testing.T) {
 	if strings.Contains(plan.String(), "TEMP B-TREE") || !strings.Contains(plan.String(), "idx_display_dialogue_time") || !strings.Contains(plan.String(), "session_id>?") {
 		t.Fatalf("query lost indexed seek/time lookup: %s", plan.String())
 	}
-	if _, err := db.ExecContext(ctx, `DELETE FROM history.sessions`); err == nil {
+	if _, err := db.ExecContext(ctx, `DELETE FROM sessions`); err == nil {
 		t.Fatal("history connection must be read-only")
 	}
 	if _, err := db.ExecContext(ctx, `DELETE FROM session_organization`); err == nil {

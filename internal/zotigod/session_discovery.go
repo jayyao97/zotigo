@@ -21,18 +21,15 @@ type sessionDiscoveryQuery struct {
 	ActivityUntil string `json:"activity_until"`
 }
 
-// Discovery is a read-only projection across the catalog and history index.
-// Its private connection keeps ATTACH state out of both stores' writer pools.
-func openSessionDiscovery(ctx context.Context, catalogRoot, sessionRoot string) (*sql.DB, error) {
-	readOnlyURI := func(path string) string {
-		return (&url.URL{Scheme: "file", Path: path, RawQuery: "mode=ro"}).String()
-	}
-	db, err := sql.Open("sqlite", readOnlyURI(filepath.Join(catalogRoot, "catalog.sqlite")))
+// Discovery reads organization and history indexes in one SQLite snapshot.
+func openSessionDiscovery(ctx context.Context, root string) (*sql.DB, error) {
+	uri := (&url.URL{Scheme: "file", Path: filepath.Join(root, "catalog.sqlite"), RawQuery: "mode=ro&_pragma=busy_timeout(5000)"}).String()
+	db, err := sql.Open("sqlite", uri)
 	if err != nil {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1)
-	if _, err = db.ExecContext(ctx, `ATTACH DATABASE ? AS history`, readOnlyURI(filepath.Join(sessionRoot, "session_index.sqlite"))); err != nil {
+	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
 		return nil, err
 	}
@@ -61,7 +58,7 @@ func sessionDiscoveryScope(caller sessionToolCaller, req sessionDiscoveryQuery) 
 	return where, args
 }
 
-const discoveryFrom = ` FROM session_organization o JOIN history.sessions s ON s.id = o.session_id `
+const discoveryFrom = ` FROM session_organization o JOIN sessions s ON s.id = o.session_id `
 
 func sessionDiscoverySQL(where string, args []any, window session.DisplayTimeWindow, limit int) (string, []any) {
 	matched := `NULL`
@@ -76,8 +73,8 @@ func sessionDiscoverySQL(where string, args []any, window session.DisplayTimeWin
 			timeWhere += ` AND d.message_at < ?`
 			timeArgs = append(timeArgs, window.Until.UnixNano())
 		}
-		matched = `(SELECT MAX(d.message_at) FROM history.display_items d WHERE ` + timeWhere + `)`
-		where += ` AND EXISTS (SELECT 1 FROM history.display_items d WHERE ` + timeWhere + `)`
+		matched = `(SELECT MAX(d.message_at) FROM display_items d WHERE ` + timeWhere + `)`
+		where += ` AND EXISTS (SELECT 1 FROM display_items d WHERE ` + timeWhere + `)`
 	}
 	params := append([]any{}, timeArgs...)
 	params = append(params, args...)
@@ -91,7 +88,7 @@ func sessionDiscoverySQL(where string, args []any, window session.DisplayTimeWin
 // or rebuild indexes on this request path. File stats preserve the existing
 // readiness contract, including logs appended by another process.
 func checkDiscoveryIndexes(ctx context.Context, tx *sql.Tx, root, where string, args []any) error {
-	rows, err := tx.QueryContext(ctx, `SELECT o.session_id, f.observed_size, f.mtime`+discoveryFrom+` LEFT JOIN history.display_index_files f ON f.session_id=o.session_id WHERE `+where, args...)
+	rows, err := tx.QueryContext(ctx, `SELECT o.session_id, f.observed_size, f.mtime`+discoveryFrom+` LEFT JOIN display_index_files f ON f.session_id=o.session_id WHERE `+where, args...)
 	if err != nil {
 		return err
 	}
@@ -124,7 +121,7 @@ func (h *handler) discoverToolSessions(ctx context.Context, caller sessionToolCa
 	if root == "" {
 		return nil, "", errors.New("session discovery requires indexed history storage")
 	}
-	db, err := openSessionDiscovery(ctx, h.catalog.RootDir(), root)
+	db, err := openSessionDiscovery(ctx, h.catalog.RootDir())
 	if err != nil {
 		return nil, "", err
 	}

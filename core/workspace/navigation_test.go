@@ -179,7 +179,7 @@ func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recreate a pre-SQL-migration catalog, including its absent journal/marker.
-	if _, err := store.db.Exec("DROP TABLE catalog_migrations; DROP TABLE navigation_migration"); err != nil {
+	if _, err := store.db.Exec("DROP TABLE catalog_migrations; DROP TABLE navigation_migration; DROP TABLE sessions; DROP TABLE session_images; DROP TABLE metadata; DROP TABLE display_items; DROP TABLE display_index_files"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.migrate(ctx); err != nil {
