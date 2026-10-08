@@ -6,6 +6,10 @@ Desktop/Web callers can list and read non-archived sessions across all workspace
 
 `zotigo.list_sessions` adds optional `activity_since` and `activity_until` parameters. `zotigo.read_session` adds optional `since` and `until` parameters. All accept RFC3339 timestamps with a timezone. Intervals are half-open, `[since, until)`, with an omitted endpoint leaving that side unbounded. Listing matches any user, assistant, or steering message within the window, not just the session's last update time. Reading combines time filters with exclusive sequence cursors.
 
+Session discovery uses a private read-only SQLite connection joining `catalog.sqlite` and `session_index.sqlite`. Authorization, project/workspace filters, dialogue time matching, ID ordering and cursor pagination execute in SQL; at most `limit + 1` summary rows are fetched. The extra row determines whether a next cursor is needed. There is no full catalog materialization or per-session metadata lookup in Go.
+
+Time-filtered queries also stream index file markers and check JSONL file size/mtime for scoped candidates through the lookahead row (or all remaining candidates if there is no lookahead). This preserves detection of stale indexes even for sessions that currently appear not to match the time window. It does not read message bodies or rebuild indexes. Sparse time windows can still require many file-stat checks; a stale index yields a retryable pending error rather than an incomplete result. Unfiltered queries do not perform these checks.
+
 ```json
 {"activity_since":"2026-09-13T00:00:00+08:00","activity_until":"2026-09-20T00:00:00+08:00","limit":20}
 ```
