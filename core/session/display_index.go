@@ -183,31 +183,6 @@ func displayTimeSQL(window DisplayTimeWindow) (string, []any) {
 	return where, args
 }
 
-// SessionDialogueActivity uses a covering index and never reads message bodies.
-func (s *FileStore) SessionDialogueActivity(ctx context.Context, id string, window DisplayTimeWindow) (*time.Time, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	unlock, err := s.lockDisplayLogAppendLocked(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	defer unlock()
-	if err := s.displayIndexReady(ctx, id); err != nil {
-		return nil, err
-	}
-	where, args := displayTimeSQL(window)
-	args = append([]any{id}, args...)
-	var stamp sql.NullInt64
-	if err := s.index.db.QueryRowContext(ctx, `SELECT MAX(message_at) FROM display_items WHERE session_id=? AND dialogue=1`+where, args...).Scan(&stamp); err != nil {
-		return nil, err
-	}
-	if !stamp.Valid {
-		return nil, nil
-	}
-	at := time.Unix(0, stamp.Int64).UTC()
-	return &at, nil
-}
-
 // ReadDisplayPage reads only the selected JSONL records, not the full history.
 func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query DisplayPageQuery, window DisplayTimeWindow) (DisplayPage, bool, error) {
 	s.mu.RLock()

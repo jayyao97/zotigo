@@ -103,17 +103,7 @@ func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("open workspace catalog: %w", err)
 	}
-	db.SetMaxOpenConns(1)
-	store := &Store{db: db, rootDir: rootDir, writerLock: lock}
-	if err := db.Ping(); err != nil {
-		_ = store.Close()
-		return nil, err
-	}
-	if err := os.Chmod(dbPath, 0o600); err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("protect workspace catalog: %w", err)
-	}
-	return store, nil
+	return &Store{db: db, rootDir: rootDir, writerLock: lock}, nil
 }
 
 func (s *Store) Close() error {

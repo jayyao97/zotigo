@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,18 +69,6 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 
 func (s *FileStore) RootDir() string {
 	return s.rootDir
-}
-
-// GetMetadata reads the derived metadata index without loading runtime history.
-// Security-sensitive decisions must continue to use the authoritative Get.
-func (s *FileStore) GetMetadata(ctx context.Context, id string) (*Metadata, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	meta, err := scanSessionMetadata(s.index.db.QueryRowContext(ctx, sessionMetadataQuery+` WHERE id=?`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	return meta, err
 }
 
 // Get retrieves a session by ID.

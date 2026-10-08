@@ -137,6 +137,35 @@ func TestSessionDiscoverySQLPagingAndPlan(t *testing.T) {
 	}
 }
 
+// Activity matching belongs to discovery's SQL join, including the half-open
+// interval and the exclusion of configuration events from dialogue activity.
+func TestSessionDiscoveryDialogueActivity(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := context.Background()
+	start := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	end := start.Add(24 * time.Hour)
+	for _, item := range []session.DisplayItem{
+		{Type: session.DisplayItemUserMessage, CreatedAt: start},
+		{Type: session.DisplayItemAssistantMessage, CreatedAt: start.Add(time.Hour)},
+		{Type: session.DisplayItemUserMessage, CreatedAt: end},
+		{Type: session.DisplayItemProfileChanged, CreatedAt: end.Add(time.Hour)},
+	} {
+		if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	req := sessionDiscoveryQuery{Limit: 20, WorkspaceID: caller.WorkspaceID}
+	rows, _, err := h.discoverToolSessions(ctx, caller, req, session.DisplayTimeWindow{Since: &start, Until: &end})
+	if err != nil || len(rows) != 1 || rows[0].ID != caller.SessionID || rows[0].LastMatchedMessageAt == nil || !rows[0].LastMatchedMessageAt.Equal(start.Add(time.Hour)) {
+		t.Fatalf("dialogue activity: %+v, %v", rows, err)
+	}
+	after := end.Add(time.Minute)
+	rows, _, err = h.discoverToolSessions(ctx, caller, req, session.DisplayTimeWindow{Since: &after})
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("configuration counted as dialogue: %+v, %v", rows, err)
+	}
+}
+
 func TestSessionDiscoveryRejectsStaleTimeIndex(t *testing.T) {
 	h, caller := newSessionToolFixture(t)
 	ctx := context.Background()

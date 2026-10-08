@@ -21,35 +21,25 @@ var migrations embed.FS
 
 const Version = 10
 
-type store struct{ db *sql.DB }
-
-func Migrate(ctx context.Context, db *sql.DB, target uint) error {
-	return (&store{db: db}).migrateTo(ctx, target)
-}
-func CatalogVersion(ctx context.Context, db *sql.DB) (int, error) {
-	return (&store{db: db}).catalogVersion(ctx)
-}
-func MigrateLegacy(ctx context.Context, db *sql.DB) error { return (&store{db: db}).MigrateLegacy(ctx) }
-
 // NewDriver preserves foreign keys during SQLite table rebuilds.
 func NewDriver(ctx context.Context, db *sql.DB, underlying database.Driver) *Driver {
 	return &Driver{Driver: underlying, db: db, ctx: ctx}
 }
 
-func (s *store) migrateTo(ctx context.Context, target uint) error {
+func Migrate(ctx context.Context, db *sql.DB, target uint) error {
 	for _, pragma := range []string{"PRAGMA foreign_keys = ON", "PRAGMA journal_mode = WAL", "PRAGMA busy_timeout = 5000"} {
-		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			return fmt.Errorf("configure workspace catalog: %w", err)
 		}
 	}
-	version, err := s.catalogVersion(ctx)
+	version, err := CatalogVersion(ctx, db)
 	if err != nil {
 		return err
 	}
 	if version > Version || version < 0 {
 		return fmt.Errorf("workspace catalog version %d is not supported", version)
 	}
-	driver, err := migratesqlite.WithInstance(s.db, &migratesqlite.Config{MigrationsTable: "catalog_migrations"})
+	driver, err := migratesqlite.WithInstance(db, &migratesqlite.Config{MigrationsTable: "catalog_migrations"})
 	if err != nil {
 		return err
 	}
@@ -57,7 +47,7 @@ func (s *store) migrateTo(ctx context.Context, target uint) error {
 	// treats every query error as an uninitialized database.
 	var recorded int
 	var dirty bool
-	err = s.db.QueryRowContext(ctx, "SELECT version, dirty FROM catalog_migrations").Scan(&recorded, &dirty)
+	err = db.QueryRowContext(ctx, "SELECT version, dirty FROM catalog_migrations").Scan(&recorded, &dirty)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("read catalog migration journal: %w", err)
 	}
@@ -69,7 +59,7 @@ func (s *store) migrateTo(ctx context.Context, target uint) error {
 	}
 	if errors.Is(err, sql.ErrNoRows) && version > 0 {
 		if version < Baseline {
-			if err := s.MigrateLegacy(ctx); err != nil {
+			if err := MigrateLegacy(ctx, db); err != nil {
 				return err
 			}
 			version = legacySchemaVersion
@@ -85,14 +75,14 @@ func (s *store) migrateTo(ctx context.Context, target uint) error {
 		return err
 	}
 	defer func() { _ = source.Close() }()
-	m, err := migrate.NewWithInstance("iofs", source, "sqlite", &Driver{Driver: driver, db: s.db, ctx: ctx})
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", &Driver{Driver: driver, db: db, ctx: ctx})
 	if err != nil {
 		return err
 	}
 	if err := m.Migrate(target); err != nil && !errors.Is(err, migrate.ErrNoChange) {
 		return fmt.Errorf("migrate workspace catalog: %w", err)
 	}
-	version, err = s.catalogVersion(ctx)
+	version, err = CatalogVersion(ctx, db)
 	if err != nil {
 		return err
 	}
@@ -102,16 +92,16 @@ func (s *store) migrateTo(ctx context.Context, target uint) error {
 	return nil
 }
 
-func (s *store) catalogVersion(ctx context.Context) (int, error) {
+func CatalogVersion(ctx context.Context, db *sql.DB) (int, error) {
 	var exists bool
-	if err := s.db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta')").Scan(&exists); err != nil {
+	if err := db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_meta')").Scan(&exists); err != nil {
 		return 0, err
 	}
 	if !exists {
 		return 0, nil
 	}
 	var version int
-	err := s.db.QueryRowContext(ctx, "SELECT version FROM schema_meta WHERE singleton=1").Scan(&version)
+	err := db.QueryRowContext(ctx, "SELECT version FROM schema_meta WHERE singleton=1").Scan(&version)
 	return version, err
 }
 
