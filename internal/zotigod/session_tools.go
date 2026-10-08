@@ -235,7 +235,10 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 	if err != nil {
 		return errors.New("target session is unavailable")
 	}
-	if organization.WorkspaceID == nil || *organization.WorkspaceID != caller.WorkspaceID || organization.EffectiveArchived() {
+	// Local UI input may read across the daemon's catalog. Channel authority and
+	// all mutations remain tied to the source workspace.
+	workspaceScoped := !read || caller.Origin != nil
+	if organization.WorkspaceID == nil || organization.EffectiveArchived() || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
 		return errors.New("target session is outside the authorized workspace")
 	}
 	return nil
@@ -300,7 +303,10 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 	results := make([]toolSessionSummary, 0, limit)
 	hasMore := false
 	for _, org := range organizations {
-		if org.SessionID <= req.AfterID || org.WorkspaceID == nil || *org.WorkspaceID != caller.WorkspaceID || org.EffectiveArchived() || (caller.Origin != nil && !caller.CanReadWorkspaceSessions && org.SessionID != caller.SessionID) {
+		if org.SessionID <= req.AfterID || org.WorkspaceID == nil || org.EffectiveArchived() {
+			continue
+		}
+		if caller.Origin != nil && (*org.WorkspaceID != caller.WorkspaceID || (!caller.CanReadWorkspaceSessions && org.SessionID != caller.SessionID)) {
 			continue
 		}
 		var matched *time.Time
@@ -341,7 +347,7 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 			hasMore = true
 			break
 		}
-		row := toolSessionSummary{ID: org.SessionID, WorkspaceID: caller.WorkspaceID, Agent: stored.Agent, State: SessionStateOffline}
+		row := toolSessionSummary{ID: org.SessionID, WorkspaceID: *org.WorkspaceID, Agent: stored.Agent, State: SessionStateOffline}
 		row.LastMatchedMessageAt = matched
 		if org.Title != nil {
 			row.Title = boundedToolText(*org.Title, 200)
@@ -521,6 +527,11 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 			return nil, errors.New("fork_from requires through_turn_id")
 		}
 		if err := h.authorizeToolTarget(ctx, caller, input.ForkFrom.SessionID, true); err != nil {
+			return nil, err
+		}
+		// Forking remains a same-workspace operation even when history is readable
+		// across workspaces. Preserve the separate Channel read restriction too.
+		if err := h.authorizeToolTarget(ctx, caller, input.ForkFrom.SessionID, false); err != nil {
 			return nil, err
 		}
 		source, err := h.store.Get(ctx, input.ForkFrom.SessionID)
