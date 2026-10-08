@@ -3,6 +3,7 @@ package workspace
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -181,8 +182,8 @@ func TestCatalogMigrationFailureRollsBackAndStaysDirty(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := iofs.New(fstest.MapFS{
-		"000010_existing.up.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
-		"000011_broken.up.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE must_rollback(id INTEGER); UPDATE schema_meta SET version=11; INSERT INTO missing_table VALUES(1);")},
+		fmt.Sprintf("%06d_existing.up.sql", schemaVersion): &fstest.MapFile{Data: []byte("SELECT 1;")},
+		fmt.Sprintf("%06d_broken.up.sql", schemaVersion+1): &fstest.MapFile{Data: []byte(fmt.Sprintf("CREATE TABLE must_rollback(id INTEGER); UPDATE schema_meta SET version=%d; INSERT INTO missing_table VALUES(1);", schemaVersion+1))},
 	}, ".")
 	if err != nil {
 		t.Fatal(err)
@@ -192,7 +193,7 @@ func TestCatalogMigrationFailureRollsBackAndStaysDirty(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Migrate(11); err == nil {
+	if err := m.Migrate(uint(schemaVersion + 1)); err == nil {
 		t.Fatal("invalid migration succeeded")
 	}
 	var exists bool

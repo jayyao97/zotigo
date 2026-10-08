@@ -1,5 +1,6 @@
-h1:Vsk5RNv+24Npq6q1m1Jn23T7QVywmqJiAIORxueiHMM=
+h1:OgLti+6+9EFyYuTNBxfMix/zdgRdMlozCiAzp/9q6u0=
 000007_baseline.up.sql h1:9flDUqRBsoT4YtS00x6n6r4gLbr+Ixsewwf5jbaDLVU=
 000008_navigation.up.sql h1:bm93kTppC01byspyFIjknFz2yf3pOMHmwUeIo75e/6g=
 000009_canonical_schema.up.sql h1:RM3Ryt4HXeuuAguxvt+D7Cm6vP39MmvvMg/nlHPcfkk=
 000010_unify_session_storage.up.sql h1:/e/hE0pxe+L7/M6Hh6crHw6kLo/KvMFFI9AtWqCnmio=
+000011_display_content_kind.up.sql h1:UKrRw6H8wrfbHCf/CVNPrRRI5dx9FoFCTiSO77epRf0=

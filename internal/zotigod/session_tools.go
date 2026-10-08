@@ -310,28 +310,39 @@ func boundedToolText(text string, limit int) string {
 }
 
 type toolHistoryItem struct {
-	Sequence  uint64                  `json:"sequence"`
-	Type      session.DisplayItemType `json:"type"`
-	Text      string                  `json:"text,omitempty"`
-	Truncated bool                    `json:"truncated,omitempty"`
-	Timestamp time.Time               `json:"timestamp"`
-	TurnID    string                  `json:"turn_id,omitempty"`
+	Sequence       uint64                  `json:"sequence"`
+	Type           session.DisplayItemType `json:"type"`
+	Text           string                  `json:"text,omitempty"`
+	Truncated      bool                    `json:"truncated,omitempty"`
+	Timestamp      time.Time               `json:"timestamp"`
+	TurnID         string                  `json:"turn_id,omitempty"`
+	Attachments    []toolHistoryAttachment `json:"attachments,omitempty"`
+	TextOffset     int                     `json:"text_offset,omitempty"`
+	NextTextOffset *int                    `json:"next_text_offset,omitempty"`
 }
 
 func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller, raw json.RawMessage) (any, error) {
 	var req struct {
-		SessionID string  `json:"session_id"`
-		Limit     int     `json:"limit"`
-		After     *uint64 `json:"after"`
-		Before    *uint64 `json:"before"`
-		Since     string  `json:"since"`
-		Until     string  `json:"until"`
+		SessionID       string  `json:"session_id"`
+		Limit           int     `json:"limit"`
+		After           *uint64 `json:"after"`
+		Before          *uint64 `json:"before"`
+		Since           string  `json:"since"`
+		Until           string  `json:"until"`
+		MessageSequence *uint64 `json:"message_sequence"`
+		TextOffset      int     `json:"text_offset"`
 	}
 	if err := decodeSessionToolArguments(raw, &req); err != nil {
 		return nil, err
 	}
 	if req.After != nil && req.Before != nil {
 		return nil, errors.New("after and before are mutually exclusive")
+	}
+	if req.TextOffset < 0 || req.TextOffset != 0 && req.MessageSequence == nil {
+		return nil, errors.New("text_offset must be non-negative and requires message_sequence")
+	}
+	if req.MessageSequence != nil && (*req.MessageSequence == 0 || req.After != nil || req.Before != nil || req.Limit != 0) {
+		return nil, errors.New("message_sequence must be positive and cannot be combined with after, before or limit")
 	}
 	limit, err := toolLimit(req.Limit)
 	if err != nil {
@@ -344,7 +355,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 	if err != nil {
 		return nil, err
 	}
-	query := session.DisplayPageQuery{Limit: limit}
+	query := session.DisplayPageQuery{Limit: limit, ContentKind: session.DisplayContentConversation}
 	if req.After != nil {
 		query.After = *req.After
 		query.HasAfter = true
@@ -352,6 +363,11 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 	if req.Before != nil {
 		query.Before = *req.Before
 		query.HasBefore = true
+	}
+	if req.MessageSequence != nil {
+		query.After = *req.MessageSequence - 1
+		query.HasAfter = true
+		query.Limit = 1
 	}
 	var page session.DisplayPage
 	if indexed, ok := h.store.(interface {
@@ -378,32 +394,16 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 		}
 		page = session.PageDisplayItems(items, query)
 	}
-	result := make([]toolHistoryItem, 0, len(page.Items))
-	budget := 8 * 1024
-	for _, item := range page.Items {
-		row := toolHistoryItem{Sequence: item.Sequence, Type: item.Type, Timestamp: item.CreatedAt}
-		if item.Turn != nil {
-			row.TurnID = item.Turn.ID
-		} else if item.ToolExecution != nil {
-			row.TurnID = item.ToolExecution.TurnID
-		} else if item.Command != nil {
-			row.TurnID = item.Command.TurnID
+	if req.MessageSequence != nil {
+		if len(page.Items) != 1 || page.Items[0].Sequence != *req.MessageSequence {
+			return nil, errors.New("conversation message not found in the requested time range")
 		}
-		if item.Type == session.DisplayItemUserMessage || item.Type == session.DisplayItemAssistantMessage || item.Type == session.DisplayItemSteeringMessage {
-			for _, part := range item.Content {
-				if part.Type == "text" {
-					row.Text += part.Text
-				}
-			}
-		}
-		cap := min(8192, budget)
-		text := boundedToolText(row.Text, cap)
-		row.Truncated = len(text) < len(row.Text)
-		row.Text = text
-		budget -= len(text)
-		result = append(result, row)
+		page.NextCursor, page.PrevCursor, page.HasMore = "", "", false
 	}
-	// 8 KiB of text leaves room for envelopes after worst-case JSON escaping.
+	result, err := projectToolHistory(&page, query.HasAfter, req.TextOffset)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"session_id": req.SessionID, "items": result, "next_cursor": page.NextCursor, "prev_cursor": page.PrevCursor, "has_more": page.HasMore}, nil
 }
 

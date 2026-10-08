@@ -80,6 +80,12 @@ JOIN pragma_table_info(?, 'legacy_sessions') s ON s.name=d.name ORDER BY d.cid`,
 			}
 		}
 	}
+	// A direct upgrade from the separate legacy index imports offsets after SQL
+	// migrations have run. Those logs still need their content classification.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM display_index_files WHERE session_id IN
+(SELECT session_id FROM display_items WHERE content_kind='unknown')`); err != nil {
+		return err
+	}
 	if _, err := tx.ExecContext(ctx, "INSERT INTO metadata(key,value) VALUES(?, '1')", importMarker); err != nil {
 		return err
 	}

@@ -114,7 +114,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 		return false, err
 	}
 	reader := bufio.NewReader(file)
-	stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO display_items VALUES(?,?,?,?,?,?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO display_items(session_id,sequence,message_at,dialogue,offset,length,content_kind) VALUES(?,?,?,?,?,?,?)`)
 	if err != nil {
 		return false, err
 	}
@@ -138,7 +138,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 			return false, err
 		}
 		dialogue := item.Type == DisplayItemUserMessage || item.Type == DisplayItemAssistantMessage || item.Type == DisplayItemSteeringMessage
-		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line)); err != nil {
+		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line), item.ContentKind()); err != nil {
 			return false, err
 		}
 		offset += int64(len(line))
@@ -207,6 +207,10 @@ func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query Displa
 	where, args := displayTimeSQL(window)
 	base := "session_id=?" + where
 	args = append([]any{id}, args...)
+	if query.ContentKind != "" {
+		base += " AND content_kind=?"
+		args = append(args, query.ContentKind)
+	}
 	var first, last int64
 	for _, bound := range []struct {
 		order  string
