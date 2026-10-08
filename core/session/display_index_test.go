@@ -28,10 +28,6 @@ func TestDisplayIndexWindowAndPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	window := DisplayTimeWindow{Since: &yesterday, Until: &today}
-	matched, err := store.SessionDialogueActivity(ctx, sess.ID, window)
-	if err != nil || matched == nil || !matched.Equal(yesterday.Add(time.Hour)) {
-		t.Fatalf("match=%v err=%v", matched, err)
-	}
 	page, exists, err := store.ReadDisplayPage(ctx, sess.ID, DisplayPageQuery{Limit: 1}, window)
 	if err != nil || !exists || len(page.Items) != 1 || page.Items[0].Sequence != 2 || page.PrevCursor != "2" || page.NextCursor != "" {
 		t.Fatalf("page=%+v err=%v", page, err)
@@ -39,11 +35,6 @@ func TestDisplayIndexWindowAndPagination(t *testing.T) {
 	page, _, err = store.ReadDisplayPage(ctx, sess.ID, DisplayPageQuery{Limit: 1, HasBefore: true, Before: 2}, window)
 	if err != nil || len(page.Items) != 1 || page.Items[0].Sequence != 1 || page.NextCursor != "1" {
 		t.Fatalf("page=%+v err=%v", page, err)
-	}
-	start := today.Add(time.Minute)
-	matched, err = store.SessionDialogueActivity(ctx, sess.ID, DisplayTimeWindow{Since: &start})
-	if err != nil || matched != nil {
-		t.Fatalf("configuration is not dialogue: %v %v", matched, err)
 	}
 }
 

@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/fstest"
 
+	"github.com/jayyao97/zotigo/core/catalogschema"
+
 	"github.com/golang-migrate/migrate/v4"
 	migratesqlite "github.com/golang-migrate/migrate/v4/database/sqlite"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
@@ -112,7 +114,7 @@ func TestCatalogMigrationAdoptsLegacyV8(t *testing.T) {
 	defer s.Close()
 	// Use the actual frozen initializer: a new SQL database with its journal
 	// deleted cannot reproduce historical inline UNIQUE constraints/defaults.
-	if err := s.migrateLegacy(context.Background()); err != nil {
+	if err := catalogschema.MigrateLegacy(context.Background(), s.db); err != nil {
 		t.Fatal(err)
 	}
 	project, err := s.CreateProject(context.Background(), "Before adoption")
@@ -155,7 +157,7 @@ WHERE sql IS NOT NULL AND name NOT IN ('schema_meta', 'navigation_migration', 'c
 		t.Fatal("adopted catalog differs physically from fresh SQL migration schema")
 	}
 	// Subsequent Atlas migrations can address the same indexes in both catalogs.
-	if err := (&catalogMigrationDriver{db: s.db, ctx: context.Background()}).Run(strings.NewReader(`
+	if err := (catalogschema.NewDriver(context.Background(), s.db, nil)).Run(strings.NewReader(`
 DROP INDEX projects_storage_name;
 CREATE UNIQUE INDEX projects_storage_name ON projects(storage_name);`)); err != nil {
 		t.Fatal(err)
@@ -179,25 +181,25 @@ func TestCatalogMigrationFailureRollsBackAndStaysDirty(t *testing.T) {
 		t.Fatal(err)
 	}
 	source, err := iofs.New(fstest.MapFS{
-		"000009_existing.up.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
-		"000010_broken.up.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE must_rollback(id INTEGER); UPDATE schema_meta SET version=10; INSERT INTO missing_table VALUES(1);")},
+		"000010_existing.up.sql": &fstest.MapFile{Data: []byte("SELECT 1;")},
+		"000011_broken.up.sql":   &fstest.MapFile{Data: []byte("CREATE TABLE must_rollback(id INTEGER); UPDATE schema_meta SET version=11; INSERT INTO missing_table VALUES(1);")},
 	}, ".")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer source.Close()
-	m, err := migrate.NewWithInstance("iofs", source, "sqlite", &catalogMigrationDriver{Driver: driver, db: s.db, ctx: context.Background()})
+	m, err := migrate.NewWithInstance("iofs", source, "sqlite", catalogschema.NewDriver(context.Background(), s.db, driver))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := m.Migrate(10); err == nil {
+	if err := m.Migrate(11); err == nil {
 		t.Fatal("invalid migration succeeded")
 	}
 	var exists bool
 	if err := s.db.QueryRow("SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='must_rollback')").Scan(&exists); err != nil || exists {
 		t.Fatalf("partial DDL survived: %v, %v", exists, err)
 	}
-	version, err := s.catalogVersion(context.Background())
+	version, err := catalogschema.CatalogVersion(context.Background(), s.db)
 	if err != nil || version != schemaVersion {
 		t.Fatalf("partial version survived: %d, %v", version, err)
 	}
@@ -218,7 +220,7 @@ INSERT INTO parent VALUES(1); INSERT INTO child VALUES(1);`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	driver := &catalogMigrationDriver{db: s.db, ctx: context.Background()}
+	driver := catalogschema.NewDriver(context.Background(), s.db, nil)
 	if err := driver.Run(strings.NewReader(`CREATE TABLE new_parent(id INTEGER PRIMARY KEY, added TEXT);
 INSERT INTO new_parent(id) SELECT id FROM parent;
 DROP TABLE parent; ALTER TABLE new_parent RENAME TO parent;`)); err != nil {

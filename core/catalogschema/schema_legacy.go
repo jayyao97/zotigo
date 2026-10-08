@@ -1,7 +1,8 @@
-package workspace
+package catalogschema
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 )
 
@@ -10,18 +11,18 @@ import (
 // belong in migrations/, never here.
 const legacySchemaVersion = 8
 
-func (s *Store) migrateLegacy(ctx context.Context) error {
+func MigrateLegacy(ctx context.Context, db *sql.DB) error {
 	for _, pragma := range []string{
 		`PRAGMA foreign_keys = ON`,
 		`PRAGMA journal_mode = WAL`,
 		`PRAGMA busy_timeout = 5000`,
 	} {
-		if _, err := s.db.ExecContext(ctx, pragma); err != nil {
+		if _, err := db.ExecContext(ctx, pragma); err != nil {
 			return fmt.Errorf("configure workspace catalog: %w", err)
 		}
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin workspace catalog migration: %w", err)
 	}

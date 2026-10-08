@@ -75,6 +75,145 @@ func TestSessionToolsResolveTrustedInput(t *testing.T) {
 	}
 }
 
+func TestSessionToolsReadAcrossProjects(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := context.Background()
+	project, err := h.catalog.CreateProject(ctx, "Other project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err := h.catalog.CreateWorkspace(ctx, project.ID, "Other workspace")
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace, err = h.catalog.ProvisionWorkspace(ctx, workspace.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := newSession(workspace.RootPath, "channel-default")
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.AssignSession(ctx, target.ID, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.AppendDisplayItem(ctx, target.ID, session.DisplayItem{Type: session.DisplayItemAssistantMessage, Content: []session.DisplayContentPart{{Type: "text", Text: "Other project result"}}}); err != nil {
+		t.Fatal(err)
+	}
+	invoke := func(name string, args json.RawMessage) (string, error) {
+		return h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, workerRuntimeToolRequest{Namespace: "zotigo", Name: name, TurnID: caller.TurnID, CallID: name, Arguments: args})
+	}
+	listed, err := invoke("list_sessions", json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var page struct {
+		Sessions []toolSessionSummary `json:"sessions"`
+	}
+	if err := json.Unmarshal([]byte(listed), &page); err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, row := range page.Sessions {
+		if row.ID == target.ID {
+			found = true
+			if row.WorkspaceID != workspace.ID || row.ProjectID != project.ID {
+				t.Fatalf("incorrect source workspace/project: %+v", row)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("cross-project session missing: %s", listed)
+	}
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"workspace", map[string]any{"workspace_id": workspace.ID}, target.ID},
+		{"project", map[string]any{"project_id": project.ID}, target.ID},
+		{"intersection", map[string]any{"workspace_id": workspace.ID, "project_id": project.ID, "limit": 1}, target.ID},
+		{"current workspace", map[string]any{"workspace_id": caller.WorkspaceID}, caller.SessionID},
+		{"mismatch", map[string]any{"workspace_id": caller.WorkspaceID, "project_id": project.ID}, ""},
+		{"unknown project", map[string]any{"project_id": "missing"}, ""},
+		{"unknown workspace", map[string]any{"workspace_id": "missing"}, ""},
+		{"cursor", map[string]any{"workspace_id": workspace.ID, "after_id": target.ID}, ""},
+		{"time", map[string]any{"project_id": project.ID, "activity_until": "2000-01-01T00:00:00Z"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, _ := json.Marshal(tc.args)
+			result, err := invoke("list_sessions", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var filtered struct {
+				Sessions []toolSessionSummary `json:"sessions"`
+				Next     string               `json:"next_after_id"`
+			}
+			if err := json.Unmarshal([]byte(result), &filtered); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if len(filtered.Sessions) != 0 {
+					t.Fatalf("expected empty result: %s", result)
+				}
+			} else if len(filtered.Sessions) != 1 || filtered.Sessions[0].ID != tc.want {
+				t.Fatalf("wrong filtered result: %s", result)
+			}
+			if filtered.Next != "" {
+				t.Fatalf("unexpected next page: %s", result)
+			}
+		})
+	}
+	args, _ := json.Marshal(map[string]any{"session_id": target.ID})
+	read, err := invoke("read_session", args)
+	if err != nil || !strings.Contains(read, "Other project result") {
+		t.Fatalf("read=%s err=%v", read, err)
+	}
+	if err := h.authorizeToolTarget(ctx, caller, target.ID, false); err == nil {
+		t.Fatal("cross-workspace write authorized")
+	}
+	fork, _ := json.Marshal(map[string]any{"workspace_id": caller.WorkspaceID, "initial_message": "review", "fork_from": map[string]any{"session_id": target.ID, "through_turn_id": "turn"}})
+	if _, err := invoke("create_session", fork); err == nil || !strings.Contains(err.Error(), "outside the authorized workspace") {
+		t.Fatalf("cross-workspace fork: %v", err)
+	}
+	for _, owner := range []bool{false, true} {
+		channelCaller := caller
+		channelCaller.Origin = &protocol.RequestContext{Source: "feishu"}
+		channelCaller.CanReadWorkspaceSessions = owner
+		list, err := h.listToolSessions(ctx, channelCaller, json.RawMessage(`{}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(list)
+		if strings.Contains(string(encoded), target.ID) {
+			t.Fatalf("channel owner=%v escaped workspace", owner)
+		}
+		filter, _ := json.Marshal(map[string]any{"project_id": project.ID, "workspace_id": workspace.ID})
+		list, err = h.listToolSessions(ctx, channelCaller, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ = json.Marshal(list)
+		if strings.Contains(string(encoded), target.ID) {
+			t.Fatalf("filters widened Channel authority: %s", encoded)
+		}
+		if _, err := h.readToolSession(ctx, channelCaller, args); err == nil {
+			t.Fatalf("channel owner=%v read cross-workspace", owner)
+		}
+	}
+	if _, err := h.catalog.ArchiveWorkspace(ctx, workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	listed, err = invoke("list_sessions", json.RawMessage(`{}`))
+	if err != nil || strings.Contains(listed, target.ID) {
+		t.Fatalf("archived target listed: %s %v", listed, err)
+	}
+	if _, err := invoke("read_session", args); err == nil {
+		t.Fatal("archived target readable")
+	}
+}
+
 func TestSessionToolsRejectDelegatedAndMissingOrigin(t *testing.T) {
 	for _, id := range []string{"session_tool:parent:call", "channel:connection:message"} {
 		t.Run(id, func(t *testing.T) {

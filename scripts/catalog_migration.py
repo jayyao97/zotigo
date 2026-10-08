@@ -18,7 +18,7 @@ def main():
     if not re.fullmatch(r"[a-z][a-z0-9_]*", args.name):
         parser.error("name must contain lowercase letters, digits and underscores")
     root = Path(__file__).resolve().parent.parent
-    directory = root / "core/workspace/migrations"
+    directory = root / "core/catalogschema/migrations"
     atlas = os.environ.get("ATLAS", "atlas")
 
     def run(*arguments):
@@ -54,10 +54,10 @@ def main():
             path.unlink()
             (staging / f"{version:06d}_{args.name}.{direction}.sql").write_text(body)
         run("migrate", "hash", "--dir", url)
-        schema_go = root / "core/workspace/schema.go"
-        source, count = re.subn(r"const schemaVersion = \d+", f"const schemaVersion = {version}", schema_go.read_text())
+        schema_go = root / "core/catalogschema/migrations.go"
+        source, count = re.subn(r"const Version = \d+", f"const Version = {version}", schema_go.read_text())
         if count != 1:
-            raise SystemExit("Cannot locate schemaVersion; repository was not changed")
+            raise SystemExit("Cannot locate catalogschema.Version; repository was not changed")
         for path in staging.glob(f"{version:06d}_*.sql"):
             shutil.copyfile(path, directory / path.name)
             print(f"Generated {directory / path.name}")

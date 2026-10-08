@@ -12,7 +12,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -235,7 +234,10 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 	if err != nil {
 		return errors.New("target session is unavailable")
 	}
-	if organization.WorkspaceID == nil || *organization.WorkspaceID != caller.WorkspaceID || organization.EffectiveArchived() {
+	// Local UI input may read across the daemon's catalog. Channel authority and
+	// all mutations remain tied to the source workspace.
+	workspaceScoped := !read || caller.Origin != nil
+	if organization.WorkspaceID == nil || organization.EffectiveArchived() || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
 		return errors.New("target session is outside the authorized workspace")
 	}
 	return nil
@@ -245,6 +247,7 @@ type toolSessionSummary struct {
 	ID                   string       `json:"session_id"`
 	Title                string       `json:"title,omitempty"`
 	WorkspaceID          string       `json:"workspace_id"`
+	ProjectID            string       `json:"project_id"`
 	Agent                string       `json:"agent"`
 	State                SessionState `json:"state"`
 	LastMatchedMessageAt *time.Time   `json:"last_matched_message_at,omitempty"`
@@ -275,12 +278,7 @@ func toolTimeWindow(since, until string) (session.DisplayTimeWindow, error) {
 }
 
 func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller, raw json.RawMessage) (any, error) {
-	var req struct {
-		Limit         int    `json:"limit"`
-		AfterID       string `json:"after_id"`
-		ActivitySince string `json:"activity_since"`
-		ActivityUntil string `json:"activity_until"`
-	}
+	var req sessionDiscoveryQuery
 	if err := decodeSessionToolArguments(raw, &req); err != nil {
 		return nil, err
 	}
@@ -292,68 +290,10 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 	if err != nil {
 		return nil, err
 	}
-	organizations, err := h.catalog.ListSessionOrganizations(ctx)
+	req.Limit = limit
+	results, next, err := h.discoverToolSessions(ctx, caller, req, window)
 	if err != nil {
 		return nil, err
-	}
-	sort.Slice(organizations, func(i, j int) bool { return organizations[i].SessionID < organizations[j].SessionID })
-	results := make([]toolSessionSummary, 0, limit)
-	hasMore := false
-	for _, org := range organizations {
-		if org.SessionID <= req.AfterID || org.WorkspaceID == nil || *org.WorkspaceID != caller.WorkspaceID || org.EffectiveArchived() || (caller.Origin != nil && !caller.CanReadWorkspaceSessions && org.SessionID != caller.SessionID) {
-			continue
-		}
-		var matched *time.Time
-		if window.Since != nil || window.Until != nil {
-			indexed, ok := h.store.(interface {
-				SessionDialogueActivity(context.Context, string, session.DisplayTimeWindow) (*time.Time, error)
-			})
-			if !ok {
-				return nil, errors.New("time filtering requires indexed history storage")
-			}
-			matched, err = indexed.SessionDialogueActivity(ctx, org.SessionID, window)
-			if err != nil {
-				return nil, err
-			}
-			if matched == nil {
-				continue
-			}
-		}
-		var stored *session.Metadata
-		if indexed, ok := h.store.(interface {
-			GetMetadata(context.Context, string) (*session.Metadata, error)
-		}); ok {
-			stored, err = indexed.GetMetadata(ctx, org.SessionID)
-		} else {
-			var full *session.Session
-			full, err = h.store.Get(ctx, org.SessionID)
-			if full != nil {
-				stored = &full.Metadata
-			}
-		}
-		if err != nil {
-			return nil, err
-		}
-		if stored == nil {
-			continue
-		}
-		if len(results) == limit {
-			hasMore = true
-			break
-		}
-		row := toolSessionSummary{ID: org.SessionID, WorkspaceID: caller.WorkspaceID, Agent: stored.Agent, State: SessionStateOffline}
-		row.LastMatchedMessageAt = matched
-		if org.Title != nil {
-			row.Title = boundedToolText(*org.Title, 200)
-		}
-		if live, ok := h.registry.Get(org.SessionID); ok {
-			row.State = live.State
-		}
-		results = append(results, row)
-	}
-	next := ""
-	if hasMore {
-		next = results[len(results)-1].ID
 	}
 	return map[string]any{"sessions": results, "next_after_id": next}, nil
 }
@@ -521,6 +461,11 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 			return nil, errors.New("fork_from requires through_turn_id")
 		}
 		if err := h.authorizeToolTarget(ctx, caller, input.ForkFrom.SessionID, true); err != nil {
+			return nil, err
+		}
+		// Forking remains a same-workspace operation even when history is readable
+		// across workspaces. Preserve the separate Channel read restriction too.
+		if err := h.authorizeToolTarget(ctx, caller, input.ForkFrom.SessionID, false); err != nil {
 			return nil, err
 		}
 		source, err := h.store.Get(ctx, input.ForkFrom.SessionID)

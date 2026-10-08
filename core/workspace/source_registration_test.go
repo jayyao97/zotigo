@@ -110,7 +110,7 @@ func TestSourceRegistrationMigration(t *testing.T) {
 	if _, err := store.db.Exec(`UPDATE schema_meta SET version = 6`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.db.Exec(`DROP TABLE catalog_migrations`); err != nil {
+	if _, err := store.db.Exec(`DROP TABLE catalog_migrations; DROP TABLE sessions; DROP TABLE session_images; DROP TABLE metadata; DROP TABLE display_items; DROP TABLE display_index_files`); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -51,7 +50,7 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		return nil, fmt.Errorf("failed to create sessions directory: %w", err)
 	}
 
-	index, err := openSessionIndex(filepath.Join(rootDir, "session_index.sqlite"))
+	index, err := openSessionIndex(rootDir)
 	if err != nil {
 		return nil, err
 	}
@@ -65,27 +64,11 @@ func NewFileStore(rootDir string) (*FileStore, error) {
 		_ = index.close()
 		return nil, err
 	}
-	if err := store.initDisplayIndex(); err != nil {
-		_ = index.close()
-		return nil, err
-	}
 	return store, nil
 }
 
 func (s *FileStore) RootDir() string {
 	return s.rootDir
-}
-
-// GetMetadata reads the derived metadata index without loading runtime history.
-// Security-sensitive decisions must continue to use the authoritative Get.
-func (s *FileStore) GetMetadata(ctx context.Context, id string) (*Metadata, error) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	meta, err := scanSessionMetadata(s.index.db.QueryRowContext(ctx, sessionMetadataQuery+` WHERE id=?`, id))
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	return meta, err
 }
 
 // Get retrieves a session by ID.

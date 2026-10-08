@@ -39,6 +39,9 @@ func TestNewLocal(t *testing.T) {
 
 func TestNewLocal_DefaultDataDir(t *testing.T) {
 	tmpDir := t.TempDir()
+	// Default-path startup now migrates the shared catalog. Never open the
+	// developer's real data directory while testing that default.
+	t.Setenv("HOME", t.TempDir())
 
 	// Empty dataDir should use default (~/.zotigo)
 	env, err := NewLocal(tmpDir, "")
