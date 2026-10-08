@@ -117,13 +117,53 @@ func TestSessionToolsReadAcrossProjects(t *testing.T) {
 	for _, row := range page.Sessions {
 		if row.ID == target.ID {
 			found = true
-			if row.WorkspaceID != workspace.ID {
-				t.Fatalf("incorrect source workspace: %+v", row)
+			if row.WorkspaceID != workspace.ID || row.ProjectID != project.ID {
+				t.Fatalf("incorrect source workspace/project: %+v", row)
 			}
 		}
 	}
 	if !found {
 		t.Fatalf("cross-project session missing: %s", listed)
+	}
+	for _, tc := range []struct {
+		name string
+		args map[string]any
+		want string
+	}{
+		{"workspace", map[string]any{"workspace_id": workspace.ID}, target.ID},
+		{"project", map[string]any{"project_id": project.ID}, target.ID},
+		{"intersection", map[string]any{"workspace_id": workspace.ID, "project_id": project.ID, "limit": 1}, target.ID},
+		{"current workspace", map[string]any{"workspace_id": caller.WorkspaceID}, caller.SessionID},
+		{"mismatch", map[string]any{"workspace_id": caller.WorkspaceID, "project_id": project.ID}, ""},
+		{"unknown project", map[string]any{"project_id": "missing"}, ""},
+		{"unknown workspace", map[string]any{"workspace_id": "missing"}, ""},
+		{"cursor", map[string]any{"workspace_id": workspace.ID, "after_id": target.ID}, ""},
+		{"time", map[string]any{"project_id": project.ID, "activity_until": "2000-01-01T00:00:00Z"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			raw, _ := json.Marshal(tc.args)
+			result, err := invoke("list_sessions", raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var filtered struct {
+				Sessions []toolSessionSummary `json:"sessions"`
+				Next     string               `json:"next_after_id"`
+			}
+			if err := json.Unmarshal([]byte(result), &filtered); err != nil {
+				t.Fatal(err)
+			}
+			if tc.want == "" {
+				if len(filtered.Sessions) != 0 {
+					t.Fatalf("expected empty result: %s", result)
+				}
+			} else if len(filtered.Sessions) != 1 || filtered.Sessions[0].ID != tc.want {
+				t.Fatalf("wrong filtered result: %s", result)
+			}
+			if filtered.Next != "" {
+				t.Fatalf("unexpected next page: %s", result)
+			}
+		})
 	}
 	args, _ := json.Marshal(map[string]any{"session_id": target.ID})
 	read, err := invoke("read_session", args)
@@ -148,6 +188,15 @@ func TestSessionToolsReadAcrossProjects(t *testing.T) {
 		encoded, _ := json.Marshal(list)
 		if strings.Contains(string(encoded), target.ID) {
 			t.Fatalf("channel owner=%v escaped workspace", owner)
+		}
+		filter, _ := json.Marshal(map[string]any{"project_id": project.ID, "workspace_id": workspace.ID})
+		list, err = h.listToolSessions(ctx, channelCaller, filter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ = json.Marshal(list)
+		if strings.Contains(string(encoded), target.ID) {
+			t.Fatalf("filters widened Channel authority: %s", encoded)
 		}
 		if _, err := h.readToolSession(ctx, channelCaller, args); err == nil {
 			t.Fatalf("channel owner=%v read cross-workspace", owner)

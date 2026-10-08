@@ -248,6 +248,7 @@ type toolSessionSummary struct {
 	ID                   string       `json:"session_id"`
 	Title                string       `json:"title,omitempty"`
 	WorkspaceID          string       `json:"workspace_id"`
+	ProjectID            string       `json:"project_id"`
 	Agent                string       `json:"agent"`
 	State                SessionState `json:"state"`
 	LastMatchedMessageAt *time.Time   `json:"last_matched_message_at,omitempty"`
@@ -281,6 +282,8 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 	var req struct {
 		Limit         int    `json:"limit"`
 		AfterID       string `json:"after_id"`
+		WorkspaceID   string `json:"workspace_id"`
+		ProjectID     string `json:"project_id"`
 		ActivitySince string `json:"activity_since"`
 		ActivityUntil string `json:"activity_until"`
 	}
@@ -307,6 +310,12 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 			continue
 		}
 		if caller.Origin != nil && (*org.WorkspaceID != caller.WorkspaceID || (!caller.CanReadWorkspaceSessions && org.SessionID != caller.SessionID)) {
+			continue
+		}
+		if req.WorkspaceID != "" && *org.WorkspaceID != req.WorkspaceID {
+			continue
+		}
+		if req.ProjectID != "" && (org.ProjectID == nil || *org.ProjectID != req.ProjectID) {
 			continue
 		}
 		var matched *time.Time
@@ -348,6 +357,9 @@ func (h *handler) listToolSessions(ctx context.Context, caller sessionToolCaller
 			break
 		}
 		row := toolSessionSummary{ID: org.SessionID, WorkspaceID: *org.WorkspaceID, Agent: stored.Agent, State: SessionStateOffline}
+		if org.ProjectID != nil {
+			row.ProjectID = *org.ProjectID
+		}
 		row.LastMatchedMessageAt = matched
 		if org.Title != nil {
 			row.Title = boundedToolText(*org.Title, 200)
