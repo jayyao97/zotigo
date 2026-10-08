@@ -69,6 +69,21 @@ file cannot overwrite new data or resurrect deleted sessions. The legacy file is
 retained unchanged as a pre-upgrade artifact and is no longer a live database.
 Fresh installs create only `catalog.sqlite` for these two stores.
 
+Schema 11 adds `display_items.content_kind`: `conversation`, `tool`, or `event`.
+`unknown` is the temporary default for pre-upgrade/imported rows. User and steering
+messages are conversations even when image-only; assistant records are conversations
+when they contain any non-tool part, and tool-only assistant records are tools.
+JSONL remains authoritative. The migration invalidates display freshness markers;
+existing background maintenance rebuilds offsets and classification in resumable
+256-record transactions. Reads report the index as pending until the selected log
+is fully caught up. Direct imports from the pre-10 index also invalidate affected
+markers. New appends calculate the same classification while indexing.
+
+Conversation reads filter by kind in SQLite before pagination, using
+`idx_display_content_sequence`; UI event reads and activity matching retain their
+existing semantics. Downgrading 11 to 10 removes only classification and its index,
+preserving records and offsets. Re-upgrading reclassifies from JSONL.
+
 To rebuild a derived index, clear only its rows in `sessions`, `session_images`,
 `display_items`, `display_index_files` and its bootstrap metadata as appropriate.
 Never delete `catalog.sqlite`: it also contains authoritative project/workspace
@@ -91,7 +106,7 @@ zotigod catalog-migrate --root /path/to/.zotigo --to 7
 
 The command requires an existing catalog and an explicit target between 7 and the
 binary's latest schema version. To upgrade explicitly, pass the latest version
-(currently 10). Normal startup automatically upgrades; downgrade first, then launch
+(currently 11). Normal startup automatically upgrades; downgrade first, then launch
 the matching older binary, otherwise startup will upgrade again.
 
 Downgrading 8 to 7 discards project/workspace pins, their ordering, and the legacy

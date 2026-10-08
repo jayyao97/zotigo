@@ -181,10 +181,12 @@ CREATE TABLE display_items (
   dialogue INTEGER NOT NULL,
   offset INTEGER NOT NULL,
   length INTEGER NOT NULL,
+  content_kind TEXT NOT NULL DEFAULT 'unknown' CHECK (content_kind IN ('unknown', 'conversation', 'tool', 'event')),
   PRIMARY KEY(session_id, sequence)
 );
 CREATE INDEX idx_display_time ON display_items(session_id, message_at, sequence);
 CREATE INDEX idx_display_dialogue_time ON display_items(session_id, dialogue, message_at);
+CREATE INDEX idx_display_content_sequence ON display_items(session_id, content_kind, sequence, message_at);
 CREATE TABLE display_index_files (
   session_id TEXT PRIMARY KEY,
   size INTEGER NOT NULL,

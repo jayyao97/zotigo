@@ -235,11 +235,12 @@ type DisplayItem struct {
 }
 
 type DisplayPageQuery struct {
-	Limit     int
-	After     uint64
-	Before    uint64
-	HasAfter  bool
-	HasBefore bool
+	ContentKind DisplayContentKind
+	Limit       int
+	After       uint64
+	Before      uint64
+	HasAfter    bool
+	HasBefore   bool
 }
 
 type DisplayPage struct {
@@ -250,6 +251,15 @@ type DisplayPage struct {
 }
 
 func PageDisplayItems(items []DisplayItem, query DisplayPageQuery) DisplayPage {
+	if query.ContentKind != "" {
+		filtered := make([]DisplayItem, 0, len(items))
+		for _, item := range items {
+			if item.ContentKind() == query.ContentKind {
+				filtered = append(filtered, item)
+			}
+		}
+		items = filtered
+	}
 	total := len(items)
 	start, end := displayWindow(items, query)
 	pageItems := make([]DisplayItem, end-start)

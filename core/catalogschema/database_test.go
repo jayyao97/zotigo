@@ -100,6 +100,20 @@ INSERT INTO display_index_files VALUES('s',96,1234,96);`)
 	}
 	for _, table := range sessionTables {
 		got := tableRows(t, db, table)
+		want := before[table]
+		if table == "display_items" {
+			for i, row := range got {
+				if row[len(row)-1] != "unknown" {
+					t.Fatalf("legacy content must await classification: %v", row)
+				}
+				got[i] = row[:len(row)-1]
+			}
+		}
+		if table == "display_index_files" {
+			// Imported logs must be reclassified, but the legacy file below stays
+			// untouched, including its original freshness markers.
+			want = nil
+		}
 		if table == "metadata" {
 			var filtered [][]any
 			for _, row := range got {
@@ -109,8 +123,8 @@ INSERT INTO display_index_files VALUES('s',96,1234,96);`)
 			}
 			got = filtered
 		}
-		if !reflect.DeepEqual(got, before[table]) {
-			t.Fatalf("%s changed during import: got %v want %v", table, got, before[table])
+		if !reflect.DeepEqual(got, want) {
+			t.Fatalf("%s changed during import: got %v want %v", table, got, want)
 		}
 		if !reflect.DeepEqual(tableRows(t, legacy, table), before[table]) {
 			t.Fatalf("legacy %s was modified", table)
