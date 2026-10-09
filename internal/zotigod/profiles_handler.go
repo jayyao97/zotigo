@@ -55,10 +55,25 @@ func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	workingDirectory, err := resolveWorkingDirectory(r.URL.Query().Get("working_directory"))
-	if err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
+	query := r.URL.Query()
+	scope := query.Get("scope")
+	if scope != "" && scope != "global" {
+		writeAPIError(w, http.StatusBadRequest, "scope must be global when specified")
 		return
+	}
+	workingDirectory := ""
+	if scope == "global" {
+		if query.Has("working_directory") {
+			writeAPIError(w, http.StatusBadRequest, "global scope cannot include working_directory")
+			return
+		}
+	} else {
+		var err error
+		workingDirectory, err = resolveWorkingDirectory(query.Get("working_directory"))
+		if err != nil {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	appConfig, err := config.NewManager().LoadForDir(workingDirectory)

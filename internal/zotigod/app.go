@@ -1041,6 +1041,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/files/capabilities", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/open", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/save", handler.handleWorkspaceFile)
+	mux.HandleFunc("/files/upload", handler.handleAttachmentUpload)
 	mux.HandleFunc("/files/list", handler.handleDirectoryList)
 	mux.HandleFunc("/sources/directories", handler.handleDirectoryList)
 	mux.HandleFunc("/projects", handler.handleProjects)
@@ -1186,6 +1187,7 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 			return
 		}
+		session := newSession("", "")
 		workingDirectory := ""
 		var assignedWorkspaceID string
 		if req.WorkspaceID != "" {
@@ -1208,6 +1210,13 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			}
 			workingDirectory = workspace.RootPath
 			assignedWorkspaceID = workspace.ID
+		} else if strings.TrimSpace(req.WorkingDirectory) == "" {
+			root := h.sessionStoreRoot()
+			if root == "" {
+				writeAPIError(w, http.StatusInternalServerError, "scratch sessions require persistent session storage")
+				return
+			}
+			workingDirectory = filepath.Join(root, "scratch", session.ID)
 		} else {
 			var err error
 			workingDirectory, err = resolveWorkingDirectory(req.WorkingDirectory)
@@ -1276,12 +1285,22 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "unsupported agent")
 			return
 		}
-		session := newSession(workingDirectory, profileName)
+		session.WorkingDirectory = workingDirectory
+		session.ProfileName = profileName
+		if assignedWorkspaceID == "" && strings.TrimSpace(req.WorkingDirectory) == "" {
+			if err := os.MkdirAll(session.WorkingDirectory, 0700); err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "could not create scratch directory")
+				return
+			}
+		}
 		session.Agent = string(agentKind)
 		session.Model = strings.TrimSpace(req.Model)
 		session.ReasoningEffort = strings.TrimSpace(req.ReasoningEffort)
 		session.ApprovalPolicy = approvalPolicy
 		if err := h.persistSession(r.Context(), session); err != nil {
+			if assignedWorkspaceID == "" && strings.TrimSpace(req.WorkingDirectory) == "" {
+				_ = os.Remove(session.WorkingDirectory)
+			}
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
 		}
