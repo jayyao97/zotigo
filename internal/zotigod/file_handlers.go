@@ -21,6 +21,7 @@ import (
 var workspaceFileWrites sync.Mutex
 
 type fileRequest struct {
+	IncludeVideo    bool    `json:"includeVideo"`
 	ExplicitOpen    bool    `json:"explicitOpen"`
 	ImageOnly       bool    `json:"imageOnly"`
 	Path            string  `json:"path"`
@@ -161,6 +162,17 @@ func (h *handler) handleWorkspaceFile(w http.ResponseWriter, r *http.Request) {
 	if input.ImageOnly {
 		writeAPIError(w, 400, "file is not a supported image or exceeds the preview limit")
 		return
+	}
+	if input.IncludeVideo {
+		video, videoErr := readWorkspaceVideo(root, relative, resolved)
+		if videoErr != nil {
+			writeAPIError(w, 400, videoErr.Error())
+			return
+		}
+		if video != nil {
+			writeAPIJSON(w, 200, map[string]any{"kind": "video", "file": video})
+			return
+		}
 	}
 	snapshot, err := readWorkspaceText(root, relative, resolved)
 	if err != nil {
@@ -356,4 +368,49 @@ func (h *handler) workspaceFileRoots(r *http.Request, sessionID string) ([]strin
 		}
 	}
 	return roots, nil
+}
+
+// Video snapshots are opt-in so existing clients keep their supported result kinds.
+func readWorkspaceVideo(root *os.Root, relative, resolved string) (*imageFileSnapshot, error) {
+	extension := strings.ToLower(filepath.Ext(resolved))
+	mediaType := ""
+	switch extension {
+	case ".mp4", ".m4v":
+		mediaType = "video/mp4"
+	case ".mov":
+		mediaType = "video/quicktime"
+	case ".webm":
+		mediaType = "video/webm"
+	default:
+		return nil, nil
+	}
+	const limit = 32 * 1024 * 1024
+	file, err := root.Open(relative)
+	if err != nil {
+		return nil, errors.New("video cannot be read")
+	}
+	defer func() { _ = file.Close() }()
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		return nil, errors.New("video is not a regular file")
+	}
+	if info.Size() > limit {
+		return nil, errors.New("video preview is limited to 32 MB")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, limit+1))
+	if err != nil {
+		return nil, errors.New("video cannot be read")
+	}
+	if len(data) > limit {
+		return nil, errors.New("video preview is limited to 32 MB")
+	}
+	valid := len(data) >= 12 && string(data[4:8]) == "ftyp"
+	if extension == ".webm" {
+		valid = bytes.HasPrefix(data, []byte{0x1a, 0x45, 0xdf, 0xa3})
+	}
+	if !valid {
+		return nil, errors.New("file is not a supported video")
+	}
+	return &imageFileSnapshot{Path: resolved, Name: filepath.Base(resolved), MediaType: mediaType,
+		DataBase64: base64.StdEncoding.EncodeToString(data), SizeBytes: int64(len(data)), MtimeMs: float64(info.ModTime().UnixMilli())}, nil
 }

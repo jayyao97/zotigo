@@ -1064,3 +1064,5 @@ Clients should retain a manual refresh action for unavailable watches or older
 daemons (404/405), and refresh on returning to the foreground. Inactive tabs can
 stay stale until selected. Changes on filesystems that do not provide native
 notifications require manual or foreground refresh.
+
+Video file previews: `/files/open` accepts optional `includeVideo: true`. After the same path authorization as other previews, MP4/M4V, MOV and WebM files up to 32 MiB return `kind: "video"` with `file` fields `path`, `name`, `mediaType`, `dataBase64`, `sizeBytes`, and `mtimeMs`. Video bytes are read as a bounded snapshot; this is not a streaming endpoint. Playback codec support depends on the client browser. `imageOnly` requests never return video; clients omitting `includeVideo` retain the previous behavior.
