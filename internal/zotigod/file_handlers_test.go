@@ -263,3 +263,57 @@ func TestExplicitOutsideTextPreviewIsReadOnly(t *testing.T) {
 		t.Fatalf("directory image preview %d", rec.Code)
 	}
 }
+
+func TestVideoPreviewOptInAndLimits(t *testing.T) {
+	dir := t.TempDir()
+	file := filepath.Join(dir, "clip.mp4")
+	data := []byte{0, 0, 0, 20, 'f', 't', 'y', 'p', 'i', 's', 'o', 'm'}
+	if err := os.WriteFile(file, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{})
+	for _, tc := range []struct {
+		extra  string
+		status int
+		kind   string
+	}{
+		{`,"includeVideo":true`, 200, "video"},
+		{"", 200, "system"},
+		{`,"includeVideo":true,"imageOnly":true`, 400, ""},
+	} {
+		rec := requestCatalog(t, h, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, file)+`,"explicitOpen":true`+tc.extra+`}`)
+		if rec.Code != tc.status {
+			t.Fatalf("%s: %d %s", tc.extra, rec.Code, rec.Body)
+		}
+		if tc.status == 200 {
+			var result struct {
+				Kind string `json:"kind"`
+			}
+			decodeCatalogData(t, rec, &result)
+			if result.Kind != tc.kind {
+				t.Fatalf("got %s want %s", result.Kind, tc.kind)
+			}
+		}
+	}
+	denied := requestCatalog(t, h, http.MethodPost, "/files/open", `{"path":`+quotedJSON(t, file)+`,"includeVideo":true}`)
+	if denied.Code != 403 {
+		t.Fatalf("unauthorized video: %d", denied.Code)
+	}
+	if err := os.Truncate(file, 32*1024*1024+1); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = root.Close() }()
+	if _, err := readWorkspaceVideo(root, "clip.mp4", file); err == nil {
+		t.Fatal("oversized video accepted")
+	}
+	if err := os.WriteFile(file, []byte("not video"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readWorkspaceVideo(root, "clip.mp4", file); err == nil {
+		t.Fatal("invalid video accepted")
+	}
+}

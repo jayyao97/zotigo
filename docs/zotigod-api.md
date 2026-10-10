@@ -210,7 +210,9 @@ Unless a section explicitly says "raw response", response examples below show th
 
 ## Read profiles
 
-`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the effective profiles for a project after merging the global and project Zotigo configuration. `working_directory` follows the same rules as session creation: it must be an absolute path to an existing directory. If omitted, zotigod uses its current working directory.
+`GET /config/profiles?working_directory=/Users/me/workspace/project` returns the effective profiles for a project after merging the global and project Zotigo configuration. An explicit `working_directory` must be an absolute path to an existing directory. If omitted, zotigod uses its current working directory.
+
+For a new Scratch session, use `GET /config/profiles?scope=global`: it reads global configuration only, matching the initial configuration of the new isolated Scratch directory. `scope=global` cannot be combined with `working_directory`; other scope values return `400`. For an existing session, pass its persisted `working_directory`, including Scratch sessions, so later local configuration changes and legacy directories are respected.
 
 The response is safe for desktop clients and does not expose API keys, base URLs, provider parameters, or safety configuration:
 
@@ -286,7 +288,7 @@ This bridge version does not expose Codex approval callbacks. Codex Sessions the
 
 `PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a Codex Session. The values apply to the next turn; the Codex thread and Project binding do not change. The endpoint returns `409` while the Session is bound to a Channel conversation because that binding owns an immutable runtime snapshot.
 
-`working_directory` must be an absolute path that resolves to an existing directory. If it is omitted, zotigod uses its current working directory for CLI/backward compatibility. The directory is persisted in the core session store and returned in session responses as `working_directory`.
+An explicit `working_directory` must be an absolute path that resolves to an existing directory. A workspace session uses the workspace root. A new session without either `workspace_id` or `working_directory` receives its own `<session-store-root>/scratch/<session-id>` directory (normally `~/.zotigo/scratch/<session-id>`); persistent session storage is required. Its profile is resolved against that directory and global configuration, not the daemon's launch directory. Existing sessions and explicitly supplied directories are unchanged. The directory is persisted and returned as `working_directory`. Codex sessions still require `workspace_id`.
 
 `profile` is an optional profile name returned by `GET /config/profiles`. When it is omitted, zotigod resolves the project's current `default_profile` during session creation. The resolved profile is persisted and returned as `profile`, so worker restarts and offline session recovery keep using the profile selected for that session. An unknown explicit profile returns `400`. Legacy sessions without a stored profile continue to resolve the current project default when a worker starts.
 
@@ -1018,6 +1020,7 @@ These endpoints use the daemon's normal Bearer authentication and success/error 
 - `GET /files/capabilities`: returns `data: {"read": true, "write": true, "list": true, "image": true, "explicit_open": true}`. Clients should check this before enabling remote workspace operations; older daemons return 404, and daemons without `image` do not return image previews.
 - `POST /files/open`: accepts `path`, optional `sessionId`, and `basePath`/`baseKind` (`file` or directory) for relative links. Paths use the daemon's operating-system conventions. File URLs may have an empty or `localhost` authority.
 - `POST /files/save`: accepts the resolved absolute `path`, optional `sessionId`, new `content`, and the `expectedMtimeMs` from the opened file.
+- `POST /files/upload?sessionId=<id>&name=<filename>`: authenticated binary attachment upload (`application/octet-stream`, maximum 20 MiB). The target is always the session's persisted working directory under `artifacts/attachments/<session-id>/<sha256>/<filename>`. Clients cannot select a destination path. Filenames must be a single component, at most 180 UTF-8 bytes. The response contains `path`, `name`, and `sizeBytes`; the client sends a Markdown reference to that path in the normal message API. Video/file bytes are not sent as model inputs. Uploads use confined filesystem access and publish only complete files; identical retries reuse the path, while modified existing targets return 409. Receiving the request body does not hold the session lifecycle lock. Before publishing, the daemon rechecks session availability and working directory; an intervening archive or deletion rejects the upload. Interrupted or oversized uploads remove their temporary file. Published files remain available if message submission fails, so retry can reuse them. File references and their contents share the working directory's lifecycle; uploads do not change existing image attachment storage.
 
 Open returns `data: {"kind":"text","file":{"path":"/workspace/notes.md","name":"notes.md","content":"text","sizeBytes":4,"mtimeMs":1234.5,"readOnly":false}}`. PNG, JPEG, GIF, WebP, AVIF, BMP, ICO and SVG files up to 10 MiB return `kind: "image"` with `path`, `name`, `mediaType`, `dataBase64`, `sizeBytes`, and `mtimeMs`. Image signatures are validated instead of trusting the extension. Directories return `data: {"kind":"directory","path":"..."}`. Other binary files and oversized files return `data: {"kind":"system","path":"..."}`; remote clients must not interpret that path as a local operating-system file. UTF-8 text over 1 MiB is preview-only. Save returns the updated text-file snapshot directly in `data`.
 
@@ -1064,3 +1067,5 @@ Clients should retain a manual refresh action for unavailable watches or older
 daemons (404/405), and refresh on returning to the foreground. Inactive tabs can
 stay stale until selected. Changes on filesystems that do not provide native
 notifications require manual or foreground refresh.
+
+Video file previews: `/files/open` accepts optional `includeVideo: true`. After the same path authorization as other previews, MP4/M4V, MOV and WebM files up to 32 MiB return `kind: "video"` with `file` fields `path`, `name`, `mediaType`, `dataBase64`, `sizeBytes`, and `mtimeMs`. Video bytes are read as a bounded snapshot; this is not a streaming endpoint. Playback codec support depends on the client browser. `imageOnly` requests never return video; clients omitting `includeVideo` retain the previous behavior.
