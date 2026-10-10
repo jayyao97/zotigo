@@ -3081,19 +3081,39 @@ func TestRecoverClaimedMessageMarksDeliveryUnknown(t *testing.T) {
 
 func TestRecordMessagePrunesConversationHistory(t *testing.T) {
 	ctx := context.Background()
-	store, _ := Open(t.TempDir())
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	defer store.Close()
 	if _, err := store.PutConnection(ctx, Connection{ID: "connection-1", Provider: ProviderFeishu, Name: "test", AppID: "app"}); err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < 501; index++ {
-		_, err := store.RecordMessage(ctx, "connection-1", InboundMessage{MessageID: fmt.Sprintf("message-%03d", index), ChatID: "allowed", RootID: "root-message", ChatType: "group", CreatedAt: time.Now().Add(time.Duration(index) * time.Millisecond)})
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "root-message", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Seed the retained history in one transaction; only the boundary write
+	// needs the full ingestion path and its pruning work.
+	at := time.Now().UTC()
+	tx, err := store.db.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	for index := 0; index < 500; index++ {
+		providerID := fmt.Sprintf("message-%03d", index)
+		_, err = tx.ExecContext(ctx, `INSERT INTO channel_messages
+			(id,connection_id,conversation_id,provider_message_id,sender_id,text,mentioned_bot,trigger_status,created_at)
+			VALUES(?,?,?,?,?,?,?,?,?)`, "msg_connection-1_"+providerID, "connection-1", conversation.ID, providerID, "", "", false, "received", at.Add(time.Duration(index)*time.Millisecond).Format(time.RFC3339Nano))
 		if err != nil {
 			t.Fatal(err)
 		}
 	}
-	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "allowed", "root-message", "", "group", time.Now())
-	if err != nil {
+	if err = tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.RecordMessage(ctx, "connection-1", InboundMessage{MessageID: "message-500", ChatID: "allowed", RootID: "root-message", ChatType: "group", CreatedAt: at.Add(500 * time.Millisecond)}); err != nil {
 		t.Fatal(err)
 	}
 	var count int
@@ -3102,6 +3122,12 @@ func TestRecordMessagePrunesConversationHistory(t *testing.T) {
 	}
 	if count != 500 {
 		t.Fatalf("retained messages=%d", count)
+	}
+	if _, err = store.GetMessageByProviderID(ctx, "connection-1", "message-000"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("oldest message was not pruned: %v", err)
+	}
+	if _, err = store.GetMessageByProviderID(ctx, "connection-1", "message-001"); err != nil {
+		t.Fatalf("retention boundary message was pruned: %v", err)
 	}
 	old := time.Now().Add(-8 * 24 * time.Hour).UTC().Format(time.RFC3339Nano)
 	if _, err := store.db.ExecContext(ctx, `UPDATE channel_messages SET created_at=?`, old); err != nil {
