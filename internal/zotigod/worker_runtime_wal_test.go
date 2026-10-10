@@ -30,7 +30,7 @@ func (s *failRuntimeWALAppendStore) AppendRuntimeWAL(ctx context.Context, sessio
 }
 
 func TestRecoverRuntimeWALReplaysHistoryAndIgnoresCommittedStaleFile(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -78,7 +78,7 @@ func TestRecoverRuntimeWALReplaysHistoryAndIgnoresCommittedStaleFile(t *testing.
 }
 
 func TestRecoverRuntimeWALPreservesCumulativeUsageAcrossReplacement(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestRuntimeWALBeginAcceptsPersistedSemanticSnapshot(t *testing.T) {
 		"large_integer": int64(9007199254740993),
 	}}
 	snapshot := agent.Snapshot{State: agent.StatePaused, History: []protocol.Message{message}}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,7 +166,7 @@ func TestRuntimeWALBeginAcceptsPersistedSemanticSnapshot(t *testing.T) {
 }
 
 func TestRecoverLegacyRuntimeWALReplaysStartedTool(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -255,7 +255,7 @@ func legacyRuntimeWALRecordChecksum(record zotigosession.RuntimeWALRecord) strin
 }
 
 func TestRecoverUnansweredToolCallAddsNonExecutedResult(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestRecoverUnansweredToolCallAddsNonExecutedResult(t *testing.T) {
 }
 
 func TestRecoverRuntimeWALMarksStartedToolOutcomeUnknown(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestRecoverRuntimeWALMarksStartedToolOutcomeUnknown(t *testing.T) {
 }
 
 func TestRecoverRuntimeWALPreservesCompletedToolResult(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -368,7 +368,7 @@ func TestRecoverRuntimeWALPreservesCompletedToolResult(t *testing.T) {
 }
 
 func TestPoisonedRuntimeWALCannotCommitAwayStartedToolEvidence(t *testing.T) {
-	fileStore, err := zotigosession.NewFileStore(t.TempDir())
+	fileStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

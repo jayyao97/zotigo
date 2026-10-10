@@ -73,7 +73,7 @@ func (r *blockingCodexTurnStartRPC) Notify(string, any) error { return nil }
 
 func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*codexWorkerRuntime, *zotigosession.FileStore) {
 	t.Helper()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -260,7 +260,7 @@ func TestCodexExplicitSteeringReportsCompletionRaceStructurally(t *testing.T) {
 
 func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +294,7 @@ func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 
 func TestCodexWorkerCloseCompletesPendingToolAsInterrupted(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -334,7 +334,7 @@ func TestCodexWorkerCloseCompletesPendingToolAsInterrupted(t *testing.T) {
 
 func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 
 func TestCodexWorkerMissingUsageFieldsDoNotReplaceLastValidSnapshot(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -585,7 +585,7 @@ func TestCodexWorkerContinuesPastUnavailableDynamicToolImage(t *testing.T) {
 
 func TestCodexWorkerContinuesPastUnavailableGeneratedImage(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -631,7 +631,7 @@ func TestCodexWorkerDoesNotAttributeUsageFromAnotherTurn(t *testing.T) {
 
 func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -673,7 +673,7 @@ func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing
 
 func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -720,7 +720,7 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 
 func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -999,7 +999,7 @@ func TestCodexPauseAcknowledgesAlreadyInterruptedTurn(t *testing.T) {
 
 func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1049,7 +1049,7 @@ func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testin
 
 func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 	t.Parallel()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

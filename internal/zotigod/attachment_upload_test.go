@@ -143,7 +143,7 @@ func TestAttachmentUploadConfinesFilesAndRetriesWithoutOverwriting(t *testing.T)
 type zeroReader struct{}
 
 func TestAttachmentUploadToPersistedOfflineSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

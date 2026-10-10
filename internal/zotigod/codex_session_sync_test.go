@@ -100,7 +100,7 @@ func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result
 func (*codexSyncRPC) Notify(string, any) error { return nil }
 
 func TestCodexSessionSyncFallsBackWhenItemsListUnsupportedWhileRuntimeActive(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -217,7 +217,7 @@ func TestSyncCompletedCodexTurnsRejectsConcurrentLiveAppend(t *testing.T) {
 }
 
 func TestCodexSessionSyncReportsConcurrentHistoryCommitInsteadOfFalseSuccess(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -244,7 +244,7 @@ func TestCodexSessionSyncReportsConcurrentHistoryCommitInsteadOfFalseSuccess(t *
 }
 
 func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 }
 
 func TestCodexSessionSyncOrchestratesAndThrottlesSuccessfulRefresh(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -363,7 +363,7 @@ func TestCodexSessionSyncOrchestratesAndThrottlesSuccessfulRefresh(t *testing.T)
 }
 
 func TestCodexSessionSyncProcessesOlderBackendActivityFirst(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -414,7 +414,7 @@ func TestCodexSessionSyncProcessesOlderBackendActivityFirst(t *testing.T) {
 }
 
 func TestSyncCompletedCodexTurnsIsIdempotent(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -445,7 +445,7 @@ func TestSyncCompletedCodexTurnsIsIdempotent(t *testing.T) {
 }
 
 func TestSyncCompletedCodexTurnsIsIdempotentWithoutCompletedAt(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -469,7 +469,7 @@ func TestSyncCompletedCodexTurnsIsIdempotentWithoutCompletedAt(t *testing.T) {
 }
 
 func TestSyncCompletedCodexTurnsBackfillsItemsAfterInterruptedTerminal(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -518,7 +518,7 @@ func TestSyncCompletedCodexTurnsBackfillsItemsAfterInterruptedTerminal(t *testin
 }
 
 func TestSyncCompletedCodexTurnsUsesClientIDForLocalSteering(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestSyncCompletedCodexTurnsUsesClientIDForLocalSteering(t *testing.T) {
 }
 
 func TestSyncCompletedCodexTurnsMatchesPendingLocalUserWithoutClientID(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -663,7 +663,7 @@ func TestListCodexThreadActivityIncludesArchivedWithoutCWDFilter(t *testing.T) {
 }
 
 func TestCodexSyncCandidateHoldsOperationAndHistorySyncLocks(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -744,7 +744,7 @@ func TestCodexSyncFailureDoesNotStartThrottleWindow(t *testing.T) {
 }
 
 func TestCodexSyncDoesNotAdvanceCheckpointWhenDisplayMergeFails(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -800,7 +800,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenCatalogActivityFails(t *testing.T)
 }
 
 func TestBackendActivityCheckpointIsMonotonic(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -885,7 +885,7 @@ func TestCodexSyncDiagnosticsIdentifyUnsupportedHistoryAPIBySession(t *testing.T
 }
 
 func TestSyncCompletedCodexTurnsDoesNotDuplicateLocalUserPrompt(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

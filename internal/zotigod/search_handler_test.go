@@ -12,7 +12,7 @@ import (
 
 func TestSessionSearchAndBoundedWindow(t *testing.T) {
 	ctx := context.Background()
-	store, err := session.NewFileStore(t.TempDir())
+	store, err := session.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -87,7 +87,7 @@ func TestWorkerFinishDispatchesSessionEndAfterTransition(t *testing.T) {
 func TestSessionEndHookIncludesModelAndUsage(t *testing.T) {
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -37,7 +37,7 @@ func TestTranslationDoesNotCreateSessionOrHistory(t *testing.T) {
 	registry := newSessionRegistry()
 	// Stored profile metadata can be newer than the daemon's runtime registry.
 	session := registry.Add(newSession(cwd, "stale-profile"))
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

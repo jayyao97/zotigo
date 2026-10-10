@@ -33,7 +33,7 @@ func (s failingApprovalPolicyStore) UpdateApprovalPolicy(context.Context, string
 
 func TestSessionsCreatePersistsApprovalPolicy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -102,7 +102,7 @@ func TestSessionsCreateRejectsUnsupportedApprovalPolicy(t *testing.T) {
 }
 
 func TestSessionApprovalPolicyChangeAppliesOfflineAndRejectsBusySession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -200,7 +200,7 @@ func TestSessionApprovalPolicyChangeQueuesRunningWorkerCommand(t *testing.T) {
 }
 
 func TestSessionApprovalPolicyChangeAppliesToOfflineCodexSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -321,7 +321,7 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -479,7 +479,7 @@ func TestWorkerRuntimeApprovalPolicyPersistenceFailureKeepsSaferPolicy(t *testin
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := zotigosession.NewFileStore(t.TempDir())
+			store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 			if err != nil {
 				t.Fatalf("create store: %v", err)
 			}
