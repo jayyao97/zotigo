@@ -103,10 +103,10 @@ INSERT INTO display_index_files VALUES('s',96,1234,96);`)
 		want := before[table]
 		if table == "display_items" {
 			for i, row := range got {
-				if row[len(row)-1] != "unknown" {
-					t.Fatalf("legacy content must await classification: %v", row)
+				if len(row) != 9 || row[6] != "unknown" || row[7] != "" || row[8] != "" {
+					t.Fatalf("legacy content and search text must await backfill: %v", row)
 				}
-				got[i] = row[:len(row)-1]
+				got[i] = row[:6]
 			}
 		}
 		if table == "display_index_files" {

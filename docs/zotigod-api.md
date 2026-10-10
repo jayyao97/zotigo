@@ -1069,3 +1069,42 @@ stay stale until selected. Changes on filesystems that do not provide native
 notifications require manual or foreground refresh.
 
 Video file previews: `/files/open` accepts optional `includeVideo: true`. After the same path authorization as other previews, MP4/M4V, MOV and WebM files up to 32 MiB return `kind: "video"` with `file` fields `path`, `name`, `mediaType`, `dataBase64`, `sizeBytes`, and `mtimeMs`. Video bytes are read as a bounded snapshot; this is not a streaming endpoint. Playback codec support depends on the client browser. `imageOnly` requests never return video; clients omitting `includeVideo` retain the previous behavior.
+
+### Translate selected conversation text
+
+`POST /sessions/{id}/translate` accepts `{ "text": "...", "target_language": "zh-CN" | "en" }` and returns `{ "text": "translated text" }` in the normal API envelope. The existing session supplies the working-directory/profile configuration, including when its runtime is offline. This makes an isolated, tool-free provider request; it does not start an agent, create a session, or append display/history items. Codex sessions use their configured Zotigo profile, as title suggestions do.
+
+Input is limited to 8,000 Unicode characters and a 64 KiB request body. Translation has a 30-second deadline and a 128 KiB output bound. Invalid input returns 400, unknown session 404, provider failure 502, and deadline expiry 504. Source text is treated as untrusted translation material. The endpoint uses the daemon's existing authentication.
+
+### Search a session without loading its history
+
+`GET /sessions/{id}/search?q=<literal text>` searches persisted conversational
+text (user/steering input and assistant text parts). It excludes reasoning and
+tool payloads. Matching is a case-insensitive literal substring of the stored
+message text, including its Markdown source; `%` and `_` are not wildcards.
+`q` must contain 1–256 characters. No runtime or provider is started.
+
+The normal `data` envelope contains `{hits: [{id, sequence}], truncated}`.
+Results are matching **messages**, newest first, limited to 250. A message with
+multiple occurrences appears once. `truncated: true` means refine the query;
+the server does not count or send every matching message. Clients may merge
+recent/streaming local messages by ID and should debounce and serialize queries.
+Each server search has a two-second deadline. Searches use a separate, lazy
+read-only connection pool (one connection) to the same catalog.sqlite. They do
+not occupy the writer connection; WAL permits concurrent display appends.
+
+The SQLite projection is filled alongside the existing display index. Migration
+12 invalidates old index checkpoints; background maintenance replays JSONL in
+256-record transactions. During rebuilding, search/window reads return 503 with
+`Retry-After: 2`, rather than returning incomplete history or backfilling during
+a request. The `(session_id, content_kind, sequence)` index bounds the scan to
+one session and supplies result order; arbitrary substring matching still scans
+candidate text. There is no full-text/tokenizer dependency.
+
+`GET /sessions/{id}/items/window?sequence=<positive sequence>` (or
+`?message_id=<item ID>`) returns the existing items response shape with at most
+10 conversational records before the target and 11 from the target onward.
+SQLite selects offsets, then only those JSONL records are read. This independent
+window must not be merged into a contiguous history cache while ignoring its
+gaps. Clients restore their regular timeline when leaving search. Message-ID
+lookup uses `(session_id, item_id)`.
