@@ -7,10 +7,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestProvisionWorkspaceScaffoldIsIdempotent(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -54,7 +56,7 @@ func TestProvisionWorkspaceScaffoldIsIdempotent(t *testing.T) {
 }
 
 func TestProvisionWorkspaceScaffoldRestoresMissingAgentInstructions(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +107,7 @@ func TestWorkspaceAgentInstructionsUpgradeLegacyDirectoryNamesWithoutLosingNotes
 }
 
 func TestProvisionWorkspaceScaffoldRejectsUnknownTarget(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

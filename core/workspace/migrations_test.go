@@ -18,7 +18,7 @@ import (
 )
 
 func TestCatalogMigrationRoundTrip(t *testing.T) {
-	s, ws, _ := createGitWorkspaceFixture(t)
+	s, ws, _ := createGitWorkspaceFixtureInRoot(t, t.TempDir())
 	ctx := context.Background()
 	if _, err := s.AssignSession(ctx, "preserved", ws.ID); err != nil {
 		t.Fatal(err)

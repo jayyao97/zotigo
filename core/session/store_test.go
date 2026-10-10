@@ -20,10 +20,11 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestFileStore_PutGet(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -126,7 +127,7 @@ func TestFileStore_PutGet(t *testing.T) {
 }
 
 func TestFileStoreGetRejectsTrailingJSON(t *testing.T) {
-	rootDir := t.TempDir()
+	rootDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(rootDir)
 	if err != nil {
 		t.Fatal(err)
@@ -150,7 +151,7 @@ func TestFileStoreGetRejectsTrailingJSON(t *testing.T) {
 }
 
 func TestFileStoreUpdateProfileRestoresSessionWhenIndexUpdateFails(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -204,7 +205,7 @@ func TestFileStoreUpdateApprovalPolicyFailsSafeWhenIndexUpdateFails(t *testing.T
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			rootDir := t.TempDir()
+			rootDir := catalogtest.NewRoot(t)
 			store, err := NewFileStore(rootDir)
 			if err != nil {
 				t.Fatalf("create store: %v", err)
@@ -266,7 +267,7 @@ func TestFileStoreUpdateApprovalPolicyFailsSafeWhenIndexUpdateFails(t *testing.T
 }
 
 func TestFileStore_GetNotFound(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -286,7 +287,7 @@ func TestFileStore_GetNotFound(t *testing.T) {
 }
 
 func TestFileStore_Delete(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -358,7 +359,7 @@ func TestFileStore_Delete(t *testing.T) {
 }
 
 func TestFileStore_List(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -430,7 +431,7 @@ func TestFileStore_List(t *testing.T) {
 }
 
 func TestFileStore_ListUsesSQLiteIndex(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -539,7 +540,7 @@ func TestFileStore_SQLiteIndexMigratesProfileName(t *testing.T) {
 }
 
 func TestFileStore_RuntimeMetadataAndBackendBindingRoundTrip(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -580,7 +581,7 @@ func TestFileStore_RuntimeMetadataAndBackendBindingRoundTrip(t *testing.T) {
 }
 
 func TestFileStore_GetDefaultsMissingApprovalPolicyToAuto(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -604,7 +605,7 @@ func TestFileStore_GetDefaultsMissingApprovalPolicyToAuto(t *testing.T) {
 }
 
 func TestFileStore_SQLiteIndexOrdersAndLimits(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -641,7 +642,7 @@ func TestFileStore_SQLiteIndexOrdersAndLimits(t *testing.T) {
 }
 
 func TestFileStore_SQLiteIndexOrdersZeroAndNonZeroNanosecondTimes(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -677,7 +678,7 @@ func TestFileStore_SQLiteIndexOrdersZeroAndNonZeroNanosecondTimes(t *testing.T) 
 }
 
 func TestFileStore_SQLiteIndexOrdersEqualTimestampsByID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -714,7 +715,7 @@ func TestFileStore_SQLiteIndexOrdersEqualTimestampsByID(t *testing.T) {
 }
 
 func TestFileStore_SQLiteImageRefs(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -954,7 +955,7 @@ func TestFileStore_SQLiteIndexDoesNotResyncOwnLegacyRegistryWrite(t *testing.T) 
 }
 
 func TestFileStore_Lock(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -1060,7 +1061,7 @@ func TestFileStore_LockAcrossProcesses(t *testing.T) {
 }
 
 func TestFileStore_LockCleansStalePID(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -1087,7 +1088,7 @@ func TestFileStore_LockCleansStalePID(t *testing.T) {
 }
 
 func TestFileStore_LockIsExclusive(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -1115,7 +1116,7 @@ func TestFileStore_LockIsExclusive(t *testing.T) {
 }
 
 func TestManager_CreateAndLoad(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)
@@ -1193,7 +1194,7 @@ func TestFileStore_Get_BackfillsMissingTurns(t *testing.T) {
 }
 
 func TestManager_ListByDir(t *testing.T) {
-	tmpDir := t.TempDir()
+	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to create store: %v", err)

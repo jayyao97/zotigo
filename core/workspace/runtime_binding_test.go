@@ -5,10 +5,12 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestRuntimeWorkspaceBindingCreatingToBound(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +54,7 @@ func TestRuntimeWorkspaceBindingCreatingToBound(t *testing.T) {
 }
 
 func TestReuseRuntimeWorkspaceDoesNotOverwriteWinner(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +77,7 @@ func TestReuseRuntimeWorkspaceDoesNotOverwriteWinner(t *testing.T) {
 }
 
 func TestRuntimeWorkspaceBindingRebuildAndReplaceAreRevisionFenced(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestManagerAppendDisplayItemAssignsMonotonicSequence(t *testing.T) {
@@ -40,7 +41,7 @@ func TestManagerAppendDisplayItemAssignsMonotonicSequence(t *testing.T) {
 }
 
 func TestFileStoreAppendDisplayItemsAssignsOneContiguousBatch(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func TestFileStoreAppendDisplayItemsAssignsOneContiguousBatch(t *testing.T) {
 }
 
 func TestFileStoreAppendDisplayItemsAfterRejectsStaleProjection(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +90,7 @@ func TestFileStoreAppendDisplayItemsAfterRejectsStaleProjection(t *testing.T) {
 }
 
 func TestManagerAppendDisplayItemTruncatesPartialTail(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -123,7 +124,7 @@ func TestManagerAppendDisplayItemTruncatesPartialTail(t *testing.T) {
 }
 
 func TestFileStoreAppendDisplayItemSerializesAcrossStoreInstances(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	firstStore, err := NewFileStore(root)
 	if err != nil {
 		t.Fatalf("create first store: %v", err)
@@ -173,7 +174,7 @@ func TestFileStoreAppendDisplayItemSerializesAcrossStoreInstances(t *testing.T) 
 }
 
 func TestFileStoreAppendDisplayItemAtomicallySerializesDecisionWithTurnBoundary(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	inputStore, err := NewFileStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -227,7 +228,7 @@ func TestFileStoreAppendDisplayItemAtomicallySerializesDecisionWithTurnBoundary(
 }
 
 func TestManagerListDisplayItemsIgnoresPartialFinalLine(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -254,7 +255,7 @@ func TestManagerListDisplayItemsIgnoresPartialFinalLine(t *testing.T) {
 }
 
 func TestFileStoreAppendDisplayItemIfIgnoresValidNoNewlineTail(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -294,7 +295,7 @@ func TestFileStoreAppendDisplayItemIfIgnoresValidNoNewlineTail(t *testing.T) {
 }
 
 func TestManagerListDisplayItemsRejectsMalformedCompleteLine(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -316,7 +317,7 @@ func TestManagerListDisplayItemsRejectsMalformedCompleteLine(t *testing.T) {
 }
 
 func TestFileStoreListDisplayItemsFromOffset(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -452,7 +453,7 @@ func TestDisplayLogDoesNotFollowRuntimeHistoryReplacement(t *testing.T) {
 }
 
 func TestDisplayLogIsStoredOutsideSessionJSON(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -487,7 +488,7 @@ func TestDisplayLogIsStoredOutsideSessionJSON(t *testing.T) {
 
 func newDisplayLogTestManager(t *testing.T) *Manager {
 	t.Helper()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

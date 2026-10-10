@@ -10,10 +10,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestProvisionWorkspaceFolderBindings(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +98,7 @@ func TestProvisionWorkspaceFolderBindings(t *testing.T) {
 func TestProvisionRejectsAbsoluteSymlinkInCopiedBindings(t *testing.T) {
 	for _, mode := range []FolderMode{FolderModeCopy, FolderModeReference} {
 		t.Run(string(mode), func(t *testing.T) {
-			store, err := Open(t.TempDir())
+			store, err := Open(catalogtest.NewRoot(t))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -134,7 +136,7 @@ func TestProvisionRejectsAbsoluteSymlinkInCopiedBindings(t *testing.T) {
 }
 
 func TestProvisionWorkspaceGitWorktree(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +194,7 @@ func TestProvisionWorkspaceGitWorktree(t *testing.T) {
 }
 
 func TestProvisionWorkspaceUsesSemanticStorageNames(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
@@ -485,7 +487,7 @@ func TestReadyWorkspaceRetryReconcilesInterruptedLegacyWorktreeRename(t *testing
 }
 
 func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +688,7 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 }
 
 func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -838,7 +840,7 @@ func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
 }
 
 func TestFolderBindingRecoveryRetainsOwnedTargets(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

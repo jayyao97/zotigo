@@ -353,7 +353,7 @@ func newCatalogSessionFixtureWithWorkspaceOps(t *testing.T, workspaceOps *sessio
 
 func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items displayItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
-	root := t.TempDir()
+	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
 	if err != nil {
 		t.Fatal(err)

@@ -425,7 +425,7 @@ func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
 func newChannelProvisionFixture(t *testing.T) (*handler, zotigosession.Store, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	root := t.TempDir()
+	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
 	if err != nil {
 		t.Fatal(err)
