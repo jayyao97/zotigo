@@ -114,7 +114,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 		return false, err
 	}
 	reader := bufio.NewReader(file)
-	stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO display_items(session_id,sequence,message_at,dialogue,offset,length,content_kind) VALUES(?,?,?,?,?,?,?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT OR REPLACE INTO display_items(session_id,sequence,message_at,dialogue,offset,length,content_kind,item_id,search_text) VALUES(?,?,?,?,?,?,?,?,?)`)
 	if err != nil {
 		return false, err
 	}
@@ -138,7 +138,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 			return false, err
 		}
 		dialogue := item.Type == DisplayItemUserMessage || item.Type == DisplayItemAssistantMessage || item.Type == DisplayItemSteeringMessage
-		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line), item.ContentKind()); err != nil {
+		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line), item.ContentKind(), item.ID, displaySearchText(item)); err != nil {
 			return false, err
 		}
 		offset += int64(len(line))
@@ -154,6 +154,10 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 }
 
 func (s *FileStore) displayIndexReady(ctx context.Context, id string) error {
+	return s.displayIndexReadyWithDB(ctx, id, s.index.db)
+}
+
+func (s *FileStore) displayIndexReadyWithDB(ctx context.Context, id string, db *sql.DB) error {
 	info, err := os.Stat(s.displayLogPath(id))
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
@@ -162,7 +166,7 @@ func (s *FileStore) displayIndexReady(ctx context.Context, id string) error {
 		return err
 	}
 	var size, mtime int64
-	err = s.index.db.QueryRowContext(ctx, `SELECT observed_size,mtime FROM display_index_files WHERE session_id=?`, id).Scan(&size, &mtime)
+	err = db.QueryRowContext(ctx, `SELECT observed_size,mtime FROM display_index_files WHERE session_id=?`, id).Scan(&size, &mtime)
 	if errors.Is(err, sql.ErrNoRows) || err == nil && (size != info.Size() || mtime != info.ModTime().UnixNano()) {
 		return ErrDisplayIndexPending
 	}

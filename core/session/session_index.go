@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,6 +20,7 @@ import (
 
 type sessionIndex struct {
 	db         *sql.DB
+	searchDB   *sql.DB
 	schemaLock *flock.Flock
 }
 
@@ -32,7 +34,18 @@ func openSessionIndex(root string) (*sessionIndex, error) {
 		_ = db.Close()
 		return nil, err
 	}
-	return &sessionIndex{db: db, schemaLock: lease}, nil
+	// A lazy, read-only pool prevents substring scans from occupying the sole
+	// writer connection. WAL allows appends while a search snapshot is open.
+	searchURL := (&url.URL{Scheme: "file", Path: filepath.Join(root, "catalog.sqlite"), RawQuery: "mode=ro&_pragma=busy_timeout(2000)"}).String()
+	searchDB, err := sql.Open("sqlite", searchURL)
+	if err != nil {
+		_ = db.Close()
+		_ = lease.Close()
+		return nil, err
+	}
+	searchDB.SetMaxOpenConns(1)
+	searchDB.SetMaxIdleConns(1)
+	return &sessionIndex{db: db, searchDB: searchDB, schemaLock: lease}, nil
 }
 
 func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
@@ -329,7 +342,7 @@ func (i *sessionIndex) setMetadata(ctx context.Context, key string, value any) e
 }
 
 func (i *sessionIndex) close() error {
-	return errors.Join(i.db.Close(), i.schemaLock.Close())
+	return errors.Join(i.searchDB.Close(), i.db.Close(), i.schemaLock.Close())
 }
 
 func (s *FileStore) bootstrapSessionIndex() error {

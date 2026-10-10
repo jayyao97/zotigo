@@ -19,7 +19,7 @@ const Baseline = 7
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-const Version = 11
+const Version = 12
 
 // NewDriver preserves foreign keys during SQLite table rebuilds.
 func NewDriver(ctx context.Context, db *sql.DB, underlying database.Driver) *Driver {
