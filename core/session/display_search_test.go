@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/catalogschema"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestDisplaySearchBoundsAndContent(t *testing.T) {
 	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -69,7 +70,7 @@ func TestDisplaySearchBoundsAndContent(t *testing.T) {
 }
 
 func TestDisplaySearchQueryPlan(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestDisplaySearchMigrationBackfill(t *testing.T) {
 func TestDisplaySearchDoesNotOccupyWriterConnection(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -126,7 +126,7 @@ func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T) {
 	const sessionID = "sess-subagent-active-wal"
 	ctx := context.Background()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestWorkerRuntimeRecoversPendingApprovalFromPreviousWorker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

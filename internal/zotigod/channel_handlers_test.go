@@ -425,7 +425,7 @@ func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
 func newChannelProvisionFixture(t *testing.T) (*handler, zotigosession.Store, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
 	t.Setenv("HOME", t.TempDir())
-	root := t.TempDir()
+	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
 	if err != nil {
 		t.Fatal(err)
@@ -606,7 +606,7 @@ func TestChannelGroupBindingValidatesWorkspaceAndClearsSession(t *testing.T) {
 
 func TestChannelBindingRejectsBypassSession(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -636,7 +636,7 @@ func TestChannelBindingRejectsBypassSession(t *testing.T) {
 
 func TestChannelBindingAllowsIdleRunningSessionWithHistory(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -686,7 +686,7 @@ func TestChannelBindingAllowsIdleRunningSessionWithHistory(t *testing.T) {
 
 func TestChannelBindingRejectsSessionWithOpenTurn(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +711,7 @@ func TestChannelBindingRejectsSessionWithOpenTurn(t *testing.T) {
 
 func TestChannelBindingRejectsSessionWithPendingMessage(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -736,7 +736,7 @@ func TestChannelBindingRejectsSessionWithPendingMessage(t *testing.T) {
 
 func TestChannelBindingPreparesUnstartedCodexSessionTools(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -760,7 +760,7 @@ func TestChannelBindingPreparesUnstartedCodexSessionTools(t *testing.T) {
 
 func TestChannelBindingPreparesExistingZotigoSessionTools(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -784,7 +784,7 @@ func TestChannelBindingPreparesExistingZotigoSessionTools(t *testing.T) {
 
 func TestChannelBindingRestartsIdleWorkerOutsideDisconnectLock(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +836,7 @@ func TestChannelBindingRestartsIdleWorkerOutsideDisconnectLock(t *testing.T) {
 
 func TestChannelBindingRejectsStartedCodexSessionWithoutTools(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -857,7 +857,7 @@ func TestChannelBindingRejectsStartedCodexSessionWithoutTools(t *testing.T) {
 
 func TestChannelBindingAllowsPromptUpdateWithoutMutatingSessionEagerly(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -967,7 +967,7 @@ func TestChannelBindingAllowsPromptUpdateWithoutMutatingSessionEagerly(t *testin
 
 func TestChannelBoundSessionRejectsRuntimeMutationEndpoints(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1025,7 +1025,7 @@ func TestChannelBoundSessionRejectsRuntimeMutationEndpoints(t *testing.T) {
 
 func TestManualCodexChannelBindingDoesNotExposeStoredProfileSentinel(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1076,7 +1076,7 @@ func TestManualCodexChannelBindingDoesNotExposeStoredProfileSentinel(t *testing.
 
 func TestDuplicateChannelBindingRejectsBeforeSessionValidation(t *testing.T) {
 	ctx := context.Background()
-	sessionStore, err := zotigosession.NewFileStore(t.TempDir())
+	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

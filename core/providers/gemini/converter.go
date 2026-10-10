@@ -88,6 +88,7 @@ func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool, tool
 
 		case protocol.RoleTool:
 			var parts []*genai.Part
+			var images []*genai.Part
 			for _, p := range msg.Content {
 				if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
 					tr := p.ToolResult
@@ -103,9 +104,21 @@ func convertToGeminiParams(msgs []protocol.Message, toolsList []tools.Tool, tool
 							Response: response,
 						},
 					}
+					for _, content := range tr.Content {
+						if content.Type == protocol.ContentTypeImage && content.Image != nil && len(content.Image.Data) > 0 {
+							mime := content.Image.MediaType
+							if mime == "" {
+								mime = "image/png"
+							}
+							images = append(images, genai.NewPartFromText("Image returned by tool call "+tr.ToolCallID+":"), genai.NewPartFromBytes(content.Image.Data, mime))
+						}
+					}
 					parts = append(parts, part)
 				}
 			}
+			// Nested FunctionResponse.Parts requires Gemini 3. Use ordinary media
+			// parts after the function responses to also support earlier models.
+			parts = append(parts, images...)
 			if len(parts) > 0 {
 				contents = append(contents, genai.NewContentFromParts(parts, genai.RoleUser))
 			}

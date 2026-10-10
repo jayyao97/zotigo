@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
@@ -265,7 +267,12 @@ func TestArchivedWorkspaceRejectsRecreatedBranchGeneration(t *testing.T) {
 
 func createGitWorkspaceFixture(t *testing.T) (*Store, Workspace, Source) {
 	t.Helper()
-	store, err := Open(t.TempDir())
+	return createGitWorkspaceFixtureInRoot(t, catalogtest.NewRoot(t))
+}
+
+func createGitWorkspaceFixtureInRoot(t *testing.T, root string) (*Store, Workspace, Source) {
+	t.Helper()
+	store, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
 	}

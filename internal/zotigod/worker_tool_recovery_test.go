@@ -386,7 +386,7 @@ func waitForToolCallWaiter(t *testing.T, display *workerDisplayLog, toolCallID s
 
 func newToolRecoveryStore(t *testing.T) (*zotigosession.FileStore, string) {
 	t.Helper()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

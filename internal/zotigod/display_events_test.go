@@ -205,7 +205,7 @@ func TestInternalToolExecutionMarkerIsHiddenFromPublicItemsAndEvents(t *testing.
 }
 
 func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -244,7 +244,7 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 }
 
 func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -490,7 +490,7 @@ func TestSessionEventsCatchesUpWhenWakeIsLost(t *testing.T) {
 }
 
 func TestSessionEventsRejectsInvalidRequests(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -525,7 +525,7 @@ func TestSessionEventsRejectsInvalidRequests(t *testing.T) {
 
 func newDisplayEventTestServer(t *testing.T) (*zotigosession.FileStore, *displayEventBroker, *httptest.Server, string) {
 	t.Helper()
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}

@@ -67,7 +67,7 @@ func TestWorkerRuntimeDispatchesTurnHooksWithUsage(t *testing.T) {
 		return &turnUsageProvider{release: release}, nil
 	})
 
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {
 		return &turnErrorProvider{}, nil
 	})
 
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

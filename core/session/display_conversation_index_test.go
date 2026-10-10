@@ -9,11 +9,12 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/catalogschema"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestConversationIndexFiltersBeforePagination(t *testing.T) {
 	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

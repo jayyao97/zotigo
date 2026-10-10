@@ -152,8 +152,12 @@ vet: ## Run go vet
 	@echo "Running go vet..."
 	@go vet ./...
 
+.PHONY: check-testutil-imports
+check-testutil-imports: ## Reject test helper imports in production sources
+	@go run ./scripts/check_testutil_imports
+
 .PHONY: check
-check: format vet lint test ## Run all checks (format, vet, lint, test)
+check: check-testutil-imports format vet lint test ## Run all checks (imports, format, vet, lint, test)
 
 # Documentation targets
 .PHONY: docs

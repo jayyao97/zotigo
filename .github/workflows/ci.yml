@@ -50,7 +50,31 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false
+
+      - name: Locate Go caches
+        id: go-cache
+        run: |
+          echo "modules=$(go env GOMODCACHE)" >> "$GITHUB_OUTPUT"
+          echo "build=$(go env GOCACHE)" >> "$GITHUB_OUTPUT"
+          echo "version=$(go env GOVERSION)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache.outputs.modules }}
+          key: go-modules-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('go.sum') }}
+
+      # Keep the check job's race builds separate from installer builds.
+      # A new commit restores the last build and saves its updated artifacts.
+      - uses: actions/cache@v4
+        with:
+          path: ${{ steps.go-cache.outputs.build }}
+          key: go-check-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('go.sum') }}-${{ github.sha }}
+          restore-keys: |
+            go-check-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('go.sum') }}-
+
+      - name: Test helper import boundary
+        run: make check-testutil-imports
 
       - name: gofmt
         run: |

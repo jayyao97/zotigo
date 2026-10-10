@@ -1072,9 +1072,9 @@ Video file previews: `/files/open` accepts optional `includeVideo: true`. After 
 
 ### Translate selected conversation text
 
-`POST /sessions/{id}/translate` accepts `{ "text": "...", "target_language": "zh-CN" | "en" }` and returns `{ "text": "translated text" }` in the normal API envelope. The existing session supplies the working-directory/profile configuration, including when its runtime is offline. This makes an isolated, tool-free provider request; it does not start an agent, create a session, or append display/history items. Codex sessions use their configured Zotigo profile, as title suggestions do.
+`POST /sessions/{id}/translate` accepts `{ "text": "...", "target_language": "zh-CN" | "en", "profile": "optional-host-global-profile" }` and returns `{ "text": "translated text", "profile": "resolved-profile", "model": "configured-model" }` in the normal API envelope. Without an explicit profile, the existing session supplies its working-directory/profile configuration, including when its runtime is offline. An explicit profile resolves against host-global configuration, matching `/config/profiles?scope=global`; project overrides do not change that selection. The configured thinking setting is preserved. This makes an isolated, tool-free provider request; it does not start an agent, create a session, or append display/history items. Codex sessions use their configured Zotigo profile by default, as title suggestions do.
 
-Input is limited to 8,000 Unicode characters and a 64 KiB request body. Translation has a 30-second deadline and a 128 KiB output bound. Invalid input returns 400, unknown session 404, provider failure 502, and deadline expiry 504. Source text is treated as untrusted translation material. The endpoint uses the daemon's existing authentication.
+Input is limited to 8,000 Unicode characters and a 64 KiB request body. Translation has a 30-second deadline and a 128 KiB output bound. Invalid input or missing profile returns 400, unknown session 404, provider failure 502, and deadline expiry 504. Provider failures include a safe error category and the resolved profile/model, without forwarding upstream response bodies. Source text is treated as untrusted translation material. The endpoint uses the daemon's existing authentication.
 
 ### Search a session without loading its history
 

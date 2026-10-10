@@ -3,13 +3,13 @@ module github.com/jayyao97/zotigo
 go 1.25.3
 
 require (
-	github.com/fsnotify/fsnotify v1.7.0
 	charm.land/bubbles/v2 v2.0.0-rc.1
 	charm.land/bubbletea/v2 v2.0.0-rc.2
 	charm.land/lipgloss/v2 v2.0.0-beta.3.0.20251106192539-4b304240aab7
 	github.com/anthropics/anthropic-sdk-go v1.38.0
 	github.com/bytedance/sonic v1.15.2
 	github.com/charmbracelet/x/ansi v0.11.3
+	github.com/fsnotify/fsnotify v1.7.0
 	github.com/gofrs/flock v0.13.0
 	github.com/golang-migrate/migrate/v4 v4.18.3
 	github.com/google/uuid v1.6.0
@@ -21,6 +21,7 @@ require (
 	go.lsp.dev/jsonrpc2 v0.10.0
 	go.lsp.dev/protocol v0.12.0
 	go.uber.org/zap v1.21.0
+	golang.org/x/image v0.29.0
 	golang.org/x/net v0.41.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/sys v0.44.0

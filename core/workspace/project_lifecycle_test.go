@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestProjectArchiveHidesProjectAndLeavesWorkspacesArchivedOnRestore(t *testing.T) {
@@ -182,7 +184,7 @@ func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 }
 
 func TestProjectDeleteRejectsSymlinkedProjectsDirectory(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
@@ -213,7 +215,7 @@ func TestProjectDeleteRejectsSymlinkedProjectsDirectory(t *testing.T) {
 }
 
 func TestProjectDeleteRejectsSymlinkedProjectDirectoryBeforeTouchingDescendants(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
@@ -246,7 +248,7 @@ func TestProjectDeleteRejectsSymlinkedProjectDirectoryBeforeTouchingDescendants(
 
 func createFolderProjectFixture(t *testing.T) (*Store, Project, Workspace, Source) {
 	t.Helper()
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -160,7 +160,7 @@ func TestNavigationImportFirstClientWinsAndDropsStaleIDs(t *testing.T) {
 }
 
 func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
-	store, workspace, _ := createGitWorkspaceFixture(t)
+	store, workspace, _ := createGitWorkspaceFixtureInRoot(t, t.TempDir())
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "old-session", workspace.ID); err != nil {
 		t.Fatal(err)

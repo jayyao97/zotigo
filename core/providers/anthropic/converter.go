@@ -203,6 +203,27 @@ func markLastMessageBlockCacheable(msgs []anthropic.MessageParam) {
 
 // convertToolResult converts a protocol ToolResult to an Anthropic ContentBlockParamUnion
 func convertToolResult(tr *protocol.ToolResult) anthropic.ContentBlockParamUnion {
+	if tr.Type == protocol.ToolResultTypeContent {
+		var content []anthropic.ToolResultBlockParamContentUnion
+		for _, part := range tr.Content {
+			switch part.Type {
+			case protocol.ContentTypeText:
+				content = append(content, anthropic.ToolResultBlockParamContentUnion{OfText: &anthropic.TextBlockParam{Text: part.Text}})
+			case protocol.ContentTypeImage:
+				if part.Image != nil && len(part.Image.Data) > 0 {
+					mime := part.Image.MediaType
+					if mime == "" {
+						mime = "image/png"
+					}
+					block := anthropic.NewImageBlockBase64(mime, base64.StdEncoding.EncodeToString(part.Image.Data))
+					content = append(content, anthropic.ToolResultBlockParamContentUnion{OfImage: block.OfImage})
+				}
+			}
+		}
+		return anthropic.ContentBlockParamUnion{OfToolResult: &anthropic.ToolResultBlockParam{
+			ToolUseID: tr.ToolCallID, Content: content, IsError: anthropic.Bool(tr.IsError),
+		}}
+	}
 	contentStr := tr.Text
 	if tr.JSON != nil {
 		b, _ := json.Marshal(tr.JSON)

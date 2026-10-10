@@ -18,6 +18,9 @@ func TestTranslateTextIsolatedRequest(t *testing.T) {
 	if len(p.messages) != 2 || len(p.tools) != 0 || messageText(p.messages[1]) != "Hello\nworld" || !strings.Contains(messageText(p.messages[0]), "untrusted") {
 		t.Fatalf("unexpected request: %#v", p.messages)
 	}
+	if p.options.ReasoningEffort != "" {
+		t.Fatal("translation must preserve the configured profile's reasoning setting")
+	}
 }
 
 func TestTranslateTextRejectsInvalidAndFailedResponses(t *testing.T) {

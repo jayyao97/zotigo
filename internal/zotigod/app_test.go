@@ -663,7 +663,7 @@ func TestProfilesRejectsUnsupportedMethod(t *testing.T) {
 
 func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -723,7 +723,7 @@ func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
 
 func TestSessionProfileChangeRejectsOfflineSessionLockedByWorker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -759,7 +759,7 @@ func TestSessionProfileChangeRejectsOfflineSessionLockedByWorker(t *testing.T) {
 
 func TestSessionProfileChangeReportsRollbackFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -823,7 +823,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	const providerName = "offline-profile-repair-provider"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -917,7 +917,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 
 func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -984,7 +984,7 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 
 func TestSessionProfileChangeReportsUnlockFailure(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1063,7 +1063,7 @@ func TestSessionProfileChangeQueuesCommandForRunningWorker(t *testing.T) {
 
 func TestSessionProfileChangeDoesNotRaceSessionStart(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1115,7 +1115,7 @@ func TestSessionProfileChangeDoesNotRaceSessionStart(t *testing.T) {
 }
 
 func TestSessionsCreateAndList(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1251,7 +1251,7 @@ func TestAPIErrorEnvelopeContract(t *testing.T) {
 }
 
 func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1284,7 +1284,7 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 
 func TestSessionsCreatePersistsSelectedProfile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1350,7 +1350,7 @@ profiles:
 
 func TestSessionsCreatePersistsProjectDefaultProfile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1379,7 +1379,7 @@ func TestSessionsCreatePersistsProjectDefaultProfile(t *testing.T) {
 
 func TestSessionsCreateRejectsUnknownProfile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1508,7 +1508,7 @@ func TestSessionsGetLiveFallsBackToRegistryWhenStoreFails(t *testing.T) {
 }
 
 func TestSessionsGetReturnsStoredSessionOffline(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1534,7 +1534,7 @@ func TestSessionsGetReturnsStoredSessionOffline(t *testing.T) {
 }
 
 func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1568,7 +1568,7 @@ func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
 }
 
 func TestSessionsListDoesNotLoadSessionHistories(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1671,7 +1671,7 @@ func TestStaleWorkerDisconnectDoesNotResetRestartedSession(t *testing.T) {
 }
 
 func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -1987,7 +1987,7 @@ func TestSessionItemsReadsStoredSessionWithoutRegistryEntry(t *testing.T) {
 }
 
 func TestStoredDisplayItemSourceReadsDisplayLog(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2128,7 +2128,7 @@ func TestSessionStartPassesWorkingDirectoryToWorkerLauncher(t *testing.T) {
 }
 
 func TestSessionStartResumesStoredSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2175,7 +2175,7 @@ func TestSessionStartResumesStoredSession(t *testing.T) {
 
 func TestDisconnectedRunningSessionRejectsRemovedProfile(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2238,7 +2238,7 @@ func TestDisconnectedRunningSessionRejectsRemovedProfile(t *testing.T) {
 }
 
 func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2304,7 +2304,7 @@ func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
 }
 
 func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2369,7 +2369,7 @@ func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
 }
 
 func TestSessionStartOwnerCancellationDoesNotFailSharedLaunch(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2436,7 +2436,7 @@ func TestSessionStartOwnerCancellationDoesNotFailSharedLaunch(t *testing.T) {
 }
 
 func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -2488,7 +2488,7 @@ func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
 }
 
 func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -3219,7 +3219,7 @@ func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
 
 func TestLoadWorkerCommandCursorDoesNotSkipPendingMessage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3264,7 +3264,7 @@ func TestLoadWorkerCommandCursorDoesNotSkipPendingMessage(t *testing.T) {
 
 func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3314,7 +3314,7 @@ func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 
 func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3387,7 +3387,7 @@ func TestRecoverWorkerCommandCursorTracksDurableSteeringApplication(t *testing.T
 
 func TestLoadWorkerCommandCursorDoesNotTreatAppliedImageSteeringAsCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3460,7 +3460,7 @@ func TestLoadWorkerCommandCursorDoesNotTreatAppliedImageSteeringAsCommand(t *tes
 
 func TestLoadWorkerCommandCursorDowngradesUnsafeSequence(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3503,7 +3503,7 @@ func TestLoadWorkerCommandCursorDowngradesUnsafeSequence(t *testing.T) {
 
 func TestLoadWorkerCommandCursorDowngradesInvalidOffset(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3553,7 +3553,7 @@ func TestLoadWorkerCommandCursorDowngradesInvalidOffset(t *testing.T) {
 
 func TestLoadWorkerCommandCursorDowngradesOffsetBeforePendingCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -3762,7 +3762,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -3974,7 +3974,7 @@ func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4116,7 +4116,7 @@ func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) 
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4221,7 +4221,7 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4315,7 +4315,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	baseStore, err := zotigosession.NewFileStore(t.TempDir())
+	baseStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4465,7 +4465,7 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4619,7 +4619,7 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 }
 
 func TestWorkerSessionLockRejectsReuse(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create file store: %v", err)
 	}
@@ -4689,7 +4689,7 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 }
 
 func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4825,7 +4825,7 @@ func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
 }
 
 func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -4902,7 +4902,7 @@ func TestOccupiedRuntimeFailureIsConflictAndRetryable(t *testing.T) {
 }
 
 func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -5064,7 +5064,7 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 }
 
 func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -5222,7 +5222,7 @@ func TestSessionImageReadBackfillsLegacyDisplayLogReference(t *testing.T) {
 }
 
 func TestSessionMessageRejectsEmptyTextWithoutImages(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -5746,7 +5746,7 @@ func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) 
 
 func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6178,7 +6178,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 	const providerName = "worker-close-delayed-stream"
 	provider := &blockingFinishProvider{started: make(chan struct{}), release: make(chan struct{})}
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return provider, nil })
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
@@ -6395,7 +6395,7 @@ func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T) {
 	const providerName = "zotigod-completion-input-test"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -6673,7 +6673,7 @@ func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
 func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T) {
 	const providerName = "zotigod-stopping-turn-test"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7077,7 +7077,7 @@ func TestWorkerCommandsDoNotReplayAppliedSteeringItems(t *testing.T) {
 }
 
 func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -7205,7 +7205,7 @@ func TestSessionControlsRejectInvalidRequests(t *testing.T) {
 }
 
 func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -7223,7 +7223,7 @@ func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
 }
 
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -7305,7 +7305,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 }
 
 func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -7836,7 +7836,7 @@ func TestPersistedApprovalRemainsReadableWhenSessionEnds(t *testing.T) {
 }
 
 func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -7868,7 +7868,7 @@ func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T
 }
 
 func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
@@ -8144,7 +8144,7 @@ func TestSessionsGetByIDNotFound(t *testing.T) {
 }
 
 func TestSessionsListUsesCreationOrder(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -8188,7 +8188,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 }
 
 func TestSessionsListSerializesEmptyArray(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
@@ -8887,7 +8887,7 @@ func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
 }
 
 func TestLiveSessionGetUsesStoredChannelToolCapability(t *testing.T) {
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

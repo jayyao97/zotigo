@@ -141,8 +141,9 @@ func (s *serverState) onSessionNew(ctx context.Context, params acp.SessionNewPar
 	// ACP does not own an LSP manager or subagent scope here, so LSP and
 	// spawn tools stay disabled by leaving those host options unset.
 	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:  s.cfg,
-		Profile: s.profile,
+		Config:           s.cfg,
+		Profile:          s.profile,
+		DisableViewImage: true,
 	}); err != nil {
 		return "", fmt.Errorf("failed to register tools: %w", err)
 	}

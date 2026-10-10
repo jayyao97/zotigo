@@ -8,6 +8,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestSnapshotDigestSurvivesJSONRoundTrip(t *testing.T) {
@@ -42,7 +43,7 @@ func TestRuntimeWALChecksumSurvivesJSONRoundTrip(t *testing.T) {
 	message.Metadata = &protocol.MessageMetadata{Raw: map[string]any{
 		"provider": providerMetadata{Second: "two", First: "one"},
 	}}
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +77,7 @@ func TestLoadLegacyRuntimeWALPreservesNestedJSONFieldOrder(t *testing.T) {
 	message.Metadata = &protocol.MessageMetadata{Raw: map[string]any{
 		"provider": providerMetadata{Second: "two", First: "one"},
 	}}
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +116,7 @@ func TestLoadLegacyRuntimeWALPreservesNestedJSONFieldOrder(t *testing.T) {
 }
 
 func TestRuntimeWALRoundTripAndTornTail(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +156,7 @@ func TestRuntimeWALRoundTripAndTornTail(t *testing.T) {
 }
 
 func TestRuntimeWALRejectsCorruptCompleteRecord(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +183,7 @@ func TestRuntimeWALRejectsCorruptCompleteRecord(t *testing.T) {
 }
 
 func TestRuntimeWALKeepsValidFinalRecordWithoutNewline(t *testing.T) {
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -8,11 +8,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestDisplayIndexWindowAndPagination(t *testing.T) {
 	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +140,7 @@ func BenchmarkDisplayIndexRecentPage(b *testing.B) {
 
 func TestDisplayIndexReplacementInvalidation(t *testing.T) {
 	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,7 +184,7 @@ func TestDisplayIndexReplacementInvalidation(t *testing.T) {
 
 func TestDisplayIndexIgnoresIncompleteCrashTail(t *testing.T) {
 	ctx := context.Background()
-	store, err := NewFileStore(t.TempDir())
+	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}

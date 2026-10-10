@@ -18,6 +18,8 @@ type ToolSetConfig struct {
 	LSPManager             *lsp.Manager
 	Spawn                  bool
 	SpawnApprovalRequester builtin.SpawnApprovalRequester
+	// ACP fs/read_text_file cannot preserve binary image bytes.
+	DisableViewImage bool
 }
 
 func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
@@ -25,6 +27,9 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 		&builtin.ReadFileTool{},
 		&builtin.WriteFileTool{},
 		&builtin.EditTool{},
+	}
+	if !cfg.DisableViewImage {
+		childTools = append(childTools, &builtin.ViewImageTool{})
 	}
 	for _, tool := range childTools {
 		ag.RegisterTool(tool)

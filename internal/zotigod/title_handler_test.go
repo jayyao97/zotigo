@@ -149,7 +149,7 @@ func TestStoredSessionTitleSuggestionDoesNotStartWorker(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()
 	writeTitleTestConfig(t, workDir)
-	store, err := zotigosession.NewFileStore(t.TempDir())
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}

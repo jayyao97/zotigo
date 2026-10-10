@@ -6,6 +6,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestSourceDeregistrationPreservesExistingWorkspace(t *testing.T) {
@@ -135,7 +137,7 @@ func TestDeregisteredFolderPreservesBindingsAndRejectsNewBindings(t *testing.T) 
 	for _, mode := range []FolderMode{FolderModeDirect, FolderModeReference, FolderModeCopy} {
 		t.Run(string(mode), func(t *testing.T) {
 			ctx := context.Background()
-			store, err := Open(t.TempDir())
+			store, err := Open(catalogtest.NewRoot(t))
 			if err != nil {
 				t.Fatal(err)
 			}

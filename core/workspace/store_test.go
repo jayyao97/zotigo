@@ -13,6 +13,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 func TestCatalogMutationsDuringSessionWrites(t *testing.T) {
@@ -118,7 +119,7 @@ func TestStorePersistsCatalogWhenDerivedSessionIndexIsCleared(t *testing.T) {
 }
 
 func TestRenameProject(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,7 +161,7 @@ func TestRenameProject(t *testing.T) {
 }
 
 func TestRenameWorkspaceChangesDisplayTitleOnly(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,7 +192,7 @@ func TestRenameWorkspaceChangesDisplayTitleOnly(t *testing.T) {
 }
 
 func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +230,7 @@ func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
 }
 
 func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +304,7 @@ func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
 }
 
 func TestSourceConstraintsAndReferences(t *testing.T) {
-	store, err := Open(t.TempDir())
+	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -563,7 +564,7 @@ func TestMigratesV2CheckoutOwnershipSchema(t *testing.T) {
 }
 
 func TestOpenReadOnlyDoesNotPermitCatalogWrites(t *testing.T) {
-	root := t.TempDir()
+	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
 		t.Fatal(err)
