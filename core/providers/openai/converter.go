@@ -86,6 +86,7 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reason
 			oaMsgs = append(oaMsgs, paramUnion)
 
 		case protocol.RoleTool:
+			var images []openai.ChatCompletionContentPartUnionParam
 			for _, p := range msg.Content {
 				if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
 					tr := p.ToolResult
@@ -97,14 +98,29 @@ func convertToChatParams(msgs []protocol.Message, toolsList []tools.Tool, reason
 						contentStr = fmt.Sprintf("User denied execution: %s", tr.Reason)
 					} else if tr.Type == protocol.ToolResultTypeContent {
 						for _, c := range tr.Content {
-							if c.Type == protocol.ContentTypeText {
+							switch c.Type {
+							case protocol.ContentTypeText:
 								contentStr += c.Text
+							case protocol.ContentTypeImage:
+								img, err := newInputImageParam(c.Image)
+								if err != nil {
+									return openai.ChatCompletionNewParams{}, err
+								}
+								if !img.ImageURL.Valid() {
+									return openai.ChatCompletionNewParams{}, fmt.Errorf("chat completions tool images require image bytes or a URL")
+								}
+								images = append(images, openai.TextContentPart("Image returned by tool call "+tr.ToolCallID+":"), openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: img.ImageURL.Value}))
 							}
 						}
 					}
 
 					oaMsgs = append(oaMsgs, openai.ToolMessage(contentStr, tr.ToolCallID))
 				}
+			}
+			// Chat Completions only permits text in tool messages. Attach images
+			// after all call results on the wire; persisted history stays RoleTool.
+			if len(images) > 0 {
+				oaMsgs = append(oaMsgs, openai.UserMessage(images))
 			}
 		}
 	}

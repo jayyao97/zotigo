@@ -443,12 +443,32 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 				if part.ToolResult == nil {
 					continue
 				}
+				output := responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
+					OfString: param.NewOpt(responseToolOutputString(part.ToolResult)),
+				}
+				if part.ToolResult.Type == protocol.ToolResultTypeContent && len(part.ToolResult.Content) > 0 {
+					output = responses.ResponseInputItemFunctionCallOutputOutputUnionParam{}
+					for _, content := range part.ToolResult.Content {
+						switch content.Type {
+						case protocol.ContentTypeText:
+							output.OfResponseFunctionCallOutputItemArray = append(output.OfResponseFunctionCallOutputItemArray, responses.ResponseFunctionCallOutputItemUnionParam{
+								OfInputText: &responses.ResponseInputTextContentParam{Text: content.Text},
+							})
+						case protocol.ContentTypeImage:
+							img, err := newInputImageParam(content.Image)
+							if err != nil {
+								return responses.ResponseNewParams{}, err
+							}
+							output.OfResponseFunctionCallOutputItemArray = append(output.OfResponseFunctionCallOutputItemArray, responses.ResponseFunctionCallOutputItemUnionParam{
+								OfInputImage: &responses.ResponseInputImageContentParam{ImageURL: img.ImageURL, FileID: img.FileID, Detail: "auto"},
+							})
+						}
+					}
+				}
 				items = append(items, responses.ResponseInputItemUnionParam{
 					OfFunctionCallOutput: &responses.ResponseInputItemFunctionCallOutputParam{
 						CallID: part.ToolResult.ToolCallID,
-						Output: responses.ResponseInputItemFunctionCallOutputOutputUnionParam{
-							OfString: param.NewOpt(responseToolOutputString(part.ToolResult)),
-						},
+						Output: output,
 					},
 				})
 			}

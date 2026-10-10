@@ -1758,6 +1758,19 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 		tr.ToolName = action.Name
 		return tr
 	}
+	if tr, ok := res.(protocol.ToolResult); ok {
+		// The dispatcher owns call identity, even when a tool returns rich content.
+		tr.ToolCallID = action.ToolCallID
+		tr.ToolName = action.Name
+		if loopWarning != "" {
+			if tr.Type == protocol.ToolResultTypeContent {
+				tr.Content = append([]protocol.ToolResultContentPart{{Type: protocol.ContentTypeText, Text: loopWarning}}, tr.Content...)
+			} else {
+				tr.Text = prefixed(tr.Text)
+			}
+		}
+		return tr
+	}
 	tr := protocol.NewTextToolResult(action.ToolCallID, prefixed(formatToolOutput(res)), false)
 	tr.ToolName = action.Name
 	tr.Metadata = toolResultMetadata(res)
