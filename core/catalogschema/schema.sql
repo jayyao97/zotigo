@@ -196,3 +196,15 @@ CREATE TABLE display_index_files (
   mtime INTEGER NOT NULL,
   observed_size INTEGER NOT NULL DEFAULT -1
 );
+
+CREATE TABLE session_input_queue (
+  sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+  session_id TEXT NOT NULL,
+  id TEXT NOT NULL,
+  payload TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('queued', 'paused', 'sending', 'sent', 'cancelled')),
+  batch_id TEXT NOT NULL DEFAULT '',
+  revision INTEGER NOT NULL DEFAULT 1,
+  UNIQUE(session_id, id)
+);
+CREATE INDEX idx_session_input_queue ON session_input_queue(session_id, state, sequence);

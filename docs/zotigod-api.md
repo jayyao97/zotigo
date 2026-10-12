@@ -1108,3 +1108,35 @@ SQLite selects offsets, then only those JSONL records are read. This independent
 window must not be merged into a contiguous history cache while ignoring its
 gaps. Clients restore their regular timeline when leaving search. Message-ID
 lookup uses `(session_id, item_id)`.
+## Queued session input
+
+`POST /sessions/{id}/queue` accepts the same `text`, `images`, `skills`, and
+`client_message_id` fields as `/messages`. It returns a public command with
+`type: "queued"`. Unlike `/messages`, it never steers an active turn. When idle,
+the daemon claims all currently queued messages in order and submits one merged
+message with `StartOnly` admission. Text sections are separated by blank lines;
+image references retain order and skill names are deduplicated.
+
+`GET /sessions/{id}/queue` returns `{ "items": [...] }` inside the usual API
+envelope. Each item includes public command metadata and `state` (`queued`,
+`sending`, or `paused`), `revision`, and `editable`. This reads only the indexed
+queue, not conversation snapshots. An empty or unknown session queue returns an
+empty array.
+
+`PATCH /sessions/{id}/queue/{item}` takes `{ "text": "...", "revision": 1 }`.
+It preserves images and skills. `DELETE` on the same path takes `{ "revision": 1 }`.
+Stale revisions and claimed batches return HTTP 409. Cancelled/sent IDs remain
+as idempotency receipts until session deletion. Reusing an ID for different
+input returns HTTP 409; clients should use a new ID for a new submission.
+
+`POST /sessions/{id}/queue/resume` explicitly resumes a paused queue while idle.
+Normal turn completion dispatches the next batch; failure or interruption pauses
+it. Daemon restart also pauses pending batches. Uncertain admissions retain the
+batch ID and frozen contents until reconciliation; definite rejections unlock
+editing. New messages arriving after a claim belong to a later batch.
+
+Queue storage lives in `catalog.sqlite`, managed by migration 13. Images remain
+in session image storage, not base64 in the queue. At most 100 pending messages
+may be queued; their combined text/images must fit the normal message limits.
+Drain or cancel pending queues before downgrading the schema: migration 13 down
+drops the queue table. Deploy this daemon before clients using queue endpoints.
