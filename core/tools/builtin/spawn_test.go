@@ -2,17 +2,21 @@ package builtin
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/transport"
 )
@@ -181,6 +185,115 @@ func TestSpawnToolRunsChildAgent(t *testing.T) {
 	}
 	if len(messages) == 0 || !strings.Contains(messageText(messages[len(messages)-1]), "Inspect foo.go") {
 		t.Fatalf("child prompt was not passed through, messages=%v", messages)
+	}
+}
+
+func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
+	for _, lines := range []int{250, 2000, 0} {
+		t.Run(fmt.Sprint(lines), func(t *testing.T) {
+			report := strings.Repeat("中文审查报告：这一行包含已验证的结论和证据。\n", lines) + "测试结果：全部通过。\n"
+			if lines == 0 {
+				report = strings.Repeat("中文长行🧪", 10000) + "最终测试结果"
+			}
+			recorder := registerSpawnTestProvider(t, report)
+			exec := newSpawnTestExecutor(t)
+			spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&ReadFileTool{}})
+			result, err := spawn.Execute(context.Background(), exec, `{"name":"../../untrusted","description":"review","prompt":"Review"}`)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output := spawnTestOutputText(t, result)
+			path := strings.TrimPrefix(strings.SplitN(output, "\n", 2)[0], "Full report: ")
+			if !strings.HasPrefix(path, filepath.Join(exec.WorkDir(), ".zotigo", "subagent-reports")+string(filepath.Separator)) {
+				t.Fatalf("invalid report path %q", path)
+			}
+			data, err := exec.ReadFile(context.Background(), path)
+			if err != nil || string(data) != report {
+				t.Fatalf("report not preserved: %v", err)
+			}
+			compressor := services.NewCompressor(services.DefaultCompressorConfig())
+			history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: "spawn", Type: protocol.ToolResultTypeText, Text: output}}}}}
+			projected := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
+			if !strings.Contains(projected, path) {
+				t.Fatal("recovery path lost")
+			}
+			switch lines {
+			case 250:
+				if !strings.Contains(projected, "测试结果：全部通过。") || strings.Contains(projected, "[... truncated ...]") {
+					t.Fatal("normal report truncated")
+				}
+			case 0:
+				var recovered strings.Builder
+				for offset := 0; offset < len(report); {
+					args, _ := json.Marshal(map[string]any{"path": path, "byte_offset": offset})
+					part, err := (&ReadFileTool{}).Execute(context.Background(), exec, string(args))
+					if err != nil {
+						t.Fatal(err)
+					}
+					history[0].Content[0].ToolResult = &protocol.ToolResult{ToolName: "read_file", Type: protocol.ToolResultTypeText, Text: part.(string)}
+					read := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
+					header, body, ok := strings.Cut(read, "\n")
+					if !ok || !utf8.ValidString(body) || len(body) == 0 || len(body) > 4096 || strings.Contains(read, "[... truncated ...]") {
+						t.Fatal("invalid byte page")
+					}
+					recovered.WriteString(body)
+					offset += len(body)
+					if offset < len(report) && !strings.Contains(header, fmt.Sprintf("next_byte_offset=%d", offset)) {
+						t.Fatal("missing next cursor")
+					}
+				}
+				if recovered.String() != report {
+					t.Fatal("single-line report not fully recovered")
+				}
+			default:
+				if !strings.Contains(projected, "[... truncated ...]") {
+					t.Fatal("oversized report not bounded")
+				}
+				var recovered strings.Builder
+				for offset := 1; offset <= lines+1; offset += 20 {
+					args, _ := json.Marshal(map[string]any{"path": path, "offset": offset, "limit": 20})
+					part, err := (&ReadFileTool{}).Execute(context.Background(), exec, string(args))
+					if err != nil {
+						t.Fatal(err)
+					}
+					history[0].Content[0].ToolResult = &protocol.ToolResult{ToolName: "read_file", Type: protocol.ToolResultTypeText, Text: part.(string)}
+					read := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
+					if strings.Contains(read, "[... truncated ...]") {
+						t.Fatal("paged read truncated")
+					}
+					recovered.WriteString(strings.SplitN(read, "\n\n<system-reminder>", 2)[0] + "\n")
+				}
+				if recovered.String() != report {
+					t.Fatal("paged report differs")
+				}
+			}
+		})
+	}
+}
+
+func TestSpawnReportPrecedesTrace(t *testing.T) {
+	output := formatSpawnResult("test", "explore", "/tmp", "review", "FINAL FINDINGS", []string{"read_file"}, 1, protocol.Usage{})
+	if strings.Index(output, "FINAL FINDINGS") > strings.Index(output, "Trace:") {
+		t.Fatal("trace crowds out report")
+	}
+}
+
+type reportWriteFailureExecutor struct{ executor.Executor }
+
+func (e reportWriteFailureExecutor) WriteFile(context.Context, string, []byte, os.FileMode) error {
+	return os.ErrPermission
+}
+
+func TestSpawnReportSurvivesSaveFailure(t *testing.T) {
+	recorder := registerSpawnTestProvider(t, "completed findings")
+	spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&ReadFileTool{}})
+	result, err := spawn.Execute(context.Background(), reportWriteFailureExecutor{newSpawnTestExecutor(t)}, `{"description":"review","prompt":"Review"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := spawnTestOutputText(t, result)
+	if !strings.Contains(output, "Full report file could not be saved:") || !strings.Contains(output, "completed findings") || strings.Contains(output, "Full report:") {
+		t.Fatal("save failure lost report or advertised a nonexistent file")
 	}
 }
 

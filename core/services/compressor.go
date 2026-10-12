@@ -10,6 +10,7 @@ import (
 	"sync"
 	"text/template"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -420,6 +421,13 @@ func (c *Compressor) summarizeToolOutputs(ctx context.Context, messages []protoc
 			newContent := make([]protocol.ContentPart, 0, len(msg.Content))
 			for _, part := range msg.Content {
 				if part.Type == protocol.ContentTypeToolResult && part.ToolResult != nil {
+					// These recent reports already went through the independent
+					// report budget in truncateToolResults. Summarizing them again
+					// would discard findings and the full-report recovery path.
+					if part.ToolResult.ToolName == "spawn" {
+						newContent = append(newContent, part)
+						continue
+					}
 					text := part.ToolResult.Text
 					tokens := c.counter(text)
 
@@ -505,10 +513,16 @@ func (c *Compressor) truncateToolResults(messages []protocol.Message, maxResultT
 			case protocol.ContentTypeToolResult:
 				if part.ToolResult != nil {
 					toolResult := *part.ToolResult
+					// Delegated findings are the answer to a task, not disposable
+					// command logs. Keep a larger bounded report in the prompt.
+					resultTokens := maxResultTokens
+					if toolResult.ToolName == "spawn" {
+						resultTokens = max(resultTokens, 16000)
+					}
 					changed := false
 					if toolResult.JSON != nil {
 						if encoded, err := json.Marshal(toolResult.JSON); err == nil {
-							text, bounded := c.boundToolText(string(encoded), maxResultTokens)
+							text, bounded := c.boundToolText(string(encoded), resultTokens)
 							if bounded {
 								toolResult.JSON = nil
 								toolResult.Text = text
@@ -520,7 +534,7 @@ func (c *Compressor) truncateToolResults(messages []protocol.Message, maxResultT
 								changed = true
 							}
 						}
-					} else if text, bounded := c.boundToolText(toolResult.Text, maxResultTokens); bounded {
+					} else if text, bounded := c.boundToolText(toolResult.Text, resultTokens); bounded {
 						toolResult.Text = text
 						changed = true
 					}
@@ -529,7 +543,7 @@ func (c *Compressor) truncateToolResults(messages []protocol.Message, maxResultT
 						copy(trContent, toolResult.Content)
 						for cpIdx, cp := range trContent {
 							if cp.Type == protocol.ContentTypeText {
-								if text, bounded := c.boundToolText(cp.Text, maxResultTokens); bounded {
+								if text, bounded := c.boundToolText(cp.Text, resultTokens); bounded {
 									cp.Text = text
 									trContent[cpIdx] = cp
 									changed = true
@@ -805,6 +819,9 @@ func (c *Compressor) truncateText(text string, maxTokens int) string {
 		return truncated[:idx]
 	}
 
+	for len(truncated) > 0 && !utf8.RuneStart(text[len(truncated)]) {
+		truncated = truncated[:len(truncated)-1]
+	}
 	return truncated
 }
 

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -21,13 +22,18 @@ const defaultReadLimit = 2000
 
 func (t *ReadFileTool) Name() string { return "read_file" }
 func (t *ReadFileTool) Description() string {
-	return fmt.Sprintf("Read content of a file from the filesystem. Defaults to the first %d lines; pass offset/limit to page through larger files (1-indexed line numbers).", defaultReadLimit)
+	return fmt.Sprintf("Read content of a file from the filesystem. Defaults to the first %d lines; pass offset/limit to page through larger files (1-indexed line numbers). For very long lines, use byte_offset (0-based) instead: returns up to 4096 bytes with a next-byte cursor, without splitting UTF-8 characters.", defaultReadLimit)
 }
 
 func (t *ReadFileTool) Schema() any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
+			"byte_offset": map[string]any{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "0-based byte cursor for bounded reads of long lines. Start with 0, then use the returned next_byte_offset. Cannot be combined with offset/limit.",
+			},
 			"path": map[string]any{
 				"type":        "string",
 				"description": "The absolute or relative path to the file",
@@ -53,17 +59,24 @@ func (t *ReadFileTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 
 func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
 	var args struct {
-		Path   string `json:"path"`
-		Offset int    `json:"offset"`
-		Limit  int    `json:"limit"`
+		Path       string `json:"path"`
+		Offset     int    `json:"offset"`
+		Limit      int    `json:"limit"`
+		ByteOffset *int   `json:"byte_offset"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
+	}
+	if args.ByteOffset != nil && (*args.ByteOffset < 0 || args.Offset != 0 || args.Limit != 0) {
+		return nil, fmt.Errorf("byte_offset must be nonnegative and cannot be combined with offset/limit")
 	}
 
 	content, err := exec.ReadFile(ctx, args.Path)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read file: %w", err)
+	}
+	if args.ByteOffset != nil {
+		return sliceFileBytes(content, *args.ByteOffset), nil
 	}
 
 	limit := args.Limit
@@ -71,6 +84,22 @@ func (t *ReadFileTool) Execute(ctx context.Context, exec executor.Executor, args
 		limit = defaultReadLimit
 	}
 	return sliceLines(string(content), args.Offset, limit), nil
+}
+
+func sliceFileBytes(content []byte, offset int) string {
+	start := min(offset, len(content))
+	for start < len(content) && !utf8.RuneStart(content[start]) {
+		start++
+	}
+	end := start + min(4096, len(content)-start)
+	for end < len(content) && end > start && !utf8.RuneStart(content[end]) {
+		end--
+	}
+	status := "End of file."
+	if end < len(content) {
+		status = fmt.Sprintf("Continue with read_file byte_offset=%d (next_byte_offset=%d).", end, end)
+	}
+	return fmt.Sprintf("<system-reminder>Bytes %d-%d of %d (end exclusive). %s</system-reminder>\n%s", start, end, len(content), status, content[start:end])
 }
 
 // sliceLines returns a 1-indexed [offset, offset+limit) window of lines.

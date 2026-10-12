@@ -199,6 +199,15 @@ If current inputs still cannot fit, the request fails with guidance to reduce
 them; it does not erase history or retry token compaction with the oversized body.
 Remote image URLs/file IDs remain references and are not downloaded for resizing.
 
+Subagent final reports use a separate prompt budget (approximately 16,000 tokens,
+with a 64,000-byte bound) rather than the normal 2,000-token tool-output budget.
+Reports precede execution traces. The full report is saved through the parent
+executor to `.zotigo/subagent-reports/<content-hash>.md` in its working directory;
+the result includes this path so a truncated report can be read in small sections
+with `read_file` byte_offset=0 and the returned next-byte cursor (up to 4 KiB per read, including for single-line reports). These files persist for later reads and can be
+removed when no longer needed. If saving fails, the result reports that failure
+and still returns the completed report. Persisted conversation history is unchanged.
+
 Run:
 ```bash
 go run ./cmd/zotigo

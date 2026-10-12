@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -106,6 +107,8 @@ func (t *SpawnTool) Description() string {
 Use this for complex searches, multi-file analysis, independent review, or scoped implementation work whose intermediate tool output does not need to stay in your main context.
 
 Subagents start fresh: include the goal, relevant context, file paths, constraints, what you have already learned, and the output format you want. Do not delegate vague synthesis like "based on your findings, fix it"; give a concrete task.
+
+Completed reports are saved under .zotigo/subagent-reports in the parent working directory. If a returned report is truncated, read the provided full-report path with read_file byte_offset=0 and the returned next-byte cursor instead of running the task again.
 
 Set workdir when the subagent should operate in a specific directory. If workdir is outside the parent agent's current safe scope, Zotigo will ask the user to approve that scoped access before launching the subagent.
 
@@ -346,9 +349,19 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		report = "(subagent completed without a text report)"
 	}
 	usage := protocol.SessionUsage(snap.History).Normalized()
+	// Use the parent's executor/scope so the parent can recover the full report
+	// even when the child ran in another directory. Content addressing avoids
+	// collisions between parallel children and does not trust their names as paths.
+	reportPath := filepath.Join(exec.WorkDir(), ".zotigo", "subagent-reports", fmt.Sprintf("%x.md", sha256.Sum256([]byte(report))))
+	reportLocation := fmt.Sprintf("Full report: %s\nIf the report below is truncated, use read_file with path=%q and byte_offset=0, then follow next_byte_offset. Do not rerun the subagent just to recover its report.\n\n", reportPath, reportPath)
+	if err := exec.WriteFile(ctx, reportPath, []byte(report), 0600); err != nil {
+		// The completed report is still valuable when the workspace is read-only.
+		// Surface the failure without discarding it or claiming a file exists.
+		reportLocation = fmt.Sprintf("Full report file could not be saved: %v\n\n", err)
+	}
 
 	return spawnOutput{
-		text:  formatSpawnResult(args.Name, args.AgentType, childWorkDir, args.Description, report, trace, countSubagentToolCalls(snap.History), usage),
+		text:  reportLocation + formatSpawnResult(args.Name, args.AgentType, childWorkDir, args.Description, report, trace, countSubagentToolCalls(snap.History), usage),
 		usage: usage,
 		subagent: spawnResultMetadata{
 			Name: args.Name, AgentType: args.AgentType, WorkDir: childWorkDir,
@@ -540,12 +553,12 @@ func formatSpawnResult(name, agentType, workDir, description, report string, tra
 		description,
 		toolCalls,
 		usage.TotalTokens)
+	sb.WriteString("\n\nReport:\n")
+	sb.WriteString(strings.TrimSpace(report))
 	if len(trace) > 0 {
 		sb.WriteString("\n\nTrace:\n")
 		sb.WriteString(strings.Join(trace, "\n"))
 	}
-	sb.WriteString("\n\nReport:\n")
-	sb.WriteString(strings.TrimSpace(report))
 	return sb.String()
 }
 

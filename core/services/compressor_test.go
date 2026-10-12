@@ -10,9 +10,77 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 )
+
+func TestToolProjectionSeparatesReportsFromLogs(t *testing.T) {
+	compressor := NewCompressor(DefaultCompressorConfig())
+	for _, name := range []string{"spawn", "shell"} {
+		text := strings.Repeat("中文报告说明", 700) + "\nFINAL FINDINGS AND TEST RESULTS"
+		history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: name, Type: protocol.ToolResultTypeText, Text: text}}}}}
+		before, _ := json.Marshal(history)
+		got := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
+		if (name == "spawn") != (got == text) {
+			t.Fatalf("unexpected projection for %s", name)
+		}
+		if !utf8.ValidString(got) {
+			t.Fatal("projection split a UTF-8 rune")
+		}
+		after, _ := json.Marshal(history)
+		if string(before) != string(after) {
+			t.Fatal("projection mutated history")
+		}
+	}
+	text := strings.Repeat("中", 30000)
+	history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: "spawn", Type: protocol.ToolResultTypeText, Text: text}}}}}
+	got := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
+	if !utf8.ValidString(got) || len(got) > 64100 || !strings.Contains(got, "[... truncated ...]") {
+		t.Fatal("long report must be bounded valid UTF-8")
+	}
+}
+
+func TestCompactionPreservesRecentSpawnReport(t *testing.T) {
+	for _, mode := range []string{"none", "success", "failure"} {
+		for _, force := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/force=%v", mode, force), func(t *testing.T) {
+				c := NewCompressor(CompressorConfig{ContextWindowSize: 1000, TriggerRatio: 0.5, TargetRatio: 0.5, PreserveRatio: 0.3})
+				if mode != "none" {
+					c.SetSummarizer(&MockSummarizer{MessagesSummary: "older turns", TextSummary: "should not replace findings", ShouldFail: mode == "failure"})
+				}
+				report := "Full report: /workspace/.zotigo/subagent-reports/report.md\n" + strings.Repeat("报告内容", 1000) + "\nFINAL FINDINGS AND TEST RESULTS"
+				history := []protocol.Message{
+					protocol.NewUserMessage("old task"),
+					protocol.NewAssistantMessage(strings.Repeat("old answer ", 2000)),
+					protocol.NewUserMessage("review"),
+					{Role: protocol.RoleAssistant, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolCall, ToolCall: &protocol.ToolCall{ID: "review-call", Name: "spawn", Arguments: `{}`}}}},
+					protocol.NewToolMessage([]protocol.ToolResult{{ToolCallID: "review-call", ToolName: "spawn", Type: protocol.ToolResultTypeText, Text: report, Metadata: map[string]any{"subagent": "retained"}}}),
+				}
+				before, _ := json.Marshal(history)
+				var got []protocol.Message
+				var result CompressionResult
+				var err error
+				if force {
+					got, result, err = c.ForceCompress(context.Background(), history)
+				} else {
+					got, result, err = c.Compress(context.Background(), history)
+				}
+				if err != nil || !result.Compressed {
+					t.Fatalf("compaction not exercised: %v %+v", err, result)
+				}
+				last := got[len(got)-1].Content[0].ToolResult
+				if last == nil || last.Text != report || last.Metadata["subagent"] != "retained" {
+					t.Fatal("recent report/path/metadata lost during compaction")
+				}
+				after, _ := json.Marshal(history)
+				if string(before) != string(after) {
+					t.Fatal("history mutated")
+				}
+			})
+		}
+	}
+}
 
 func TestCompressor_DefaultTriggerRatio(t *testing.T) {
 	for name, c := range map[string]*Compressor{
