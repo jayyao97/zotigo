@@ -12,7 +12,7 @@ const (
 )
 
 func init() {
-	providers.Register(ProviderName, New)
+	providers.Register(ProviderName, providers.WithImageBudget(New))
 }
 
 // New builds the DeepSeek service wrapper on top of the Anthropic Messages

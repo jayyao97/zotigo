@@ -13,7 +13,7 @@ import (
 const ProviderName = "gemini"
 
 func init() {
-	providers.Register(ProviderName, New)
+	providers.Register(ProviderName, providers.WithImageBudget(New))
 }
 
 func New(cfg config.ProfileConfig) (providers.Provider, error) {
@@ -25,8 +25,9 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 		return nil, fmt.Errorf("max_output_tokens %d exceeds Gemini's maximum representable value %d", maxOutputTokens, int64(math.MaxInt32))
 	}
 	clientCfg := &genai.ClientConfig{
-		APIKey:  cfg.APIKey,
-		Backend: genai.BackendGeminiAPI,
+		APIKey:     cfg.APIKey,
+		Backend:    genai.BackendGeminiAPI,
+		HTTPClient: providers.RequestBudgetHTTPClient(),
 	}
 
 	if cfg.BaseURL != "" {

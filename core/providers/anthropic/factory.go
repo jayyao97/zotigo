@@ -10,7 +10,7 @@ import (
 const ProviderName = "anthropic"
 
 func init() {
-	providers.Register(ProviderName, New)
+	providers.Register(ProviderName, providers.WithImageBudget(New))
 }
 
 func New(cfg config.ProfileConfig) (providers.Provider, error) {
@@ -18,7 +18,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts := []option.RequestOption{}
+	opts := []option.RequestOption{option.WithHTTPClient(providers.RequestBudgetHTTPClient())}
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}
