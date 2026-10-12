@@ -181,6 +181,24 @@ may still read the old `params.max_tokens` value when top-level
 field and it takes precedence. Codex app-server sessions use Codex's own model
 settings and are not given Zotigo's 32K default.
 
+Native provider requests have a separate **24 MiB serialized-body budget**,
+independent of the token context window. Override it for a particular endpoint
+with `params.max_request_bytes` (65536–67108864 bytes). Images from user messages
+and tool results are prepared on a request-only copy: previews are at most 2048
+pixels per side and 1 MiB each. Small PNGs remain lossless; larger previews may
+use JPEG. Prepared images are cached with a 32 MiB bound per provider instance.
+Older images exceeding half of the body budget are replaced with explicit text
+placeholders, retaining message/tool-result structure and any source-path text.
+Images from the current user turn are retained. Persisted history and original
+files are unchanged, so this also applies when resuming older sessions.
+
+The final SDK request body (including tools, system text and base64) is checked
+before transmission. HTTP 413 triggers at most two reduced-image retries, only
+before any response has been delivered, with strictly smaller wire limits.
+If current inputs still cannot fit, the request fails with guidance to reduce
+them; it does not erase history or retry token compaction with the oversized body.
+Remote image URLs/file IDs remain references and are not downloaded for resizing.
+
 Run:
 ```bash
 go run ./cmd/zotigo
