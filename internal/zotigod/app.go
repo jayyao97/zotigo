@@ -480,6 +480,7 @@ type handler struct {
 	sessionOps           *sessionOperationLocks
 	workspaceOps         *sessionOperationLocks
 	approvalOps          *sessionOperationLocks
+	queueOps             *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
 	events               *displayEventBroker
@@ -834,6 +835,9 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 	catalog, catalogErr := zotigoworkspace.Open(store.RootDir())
 	opts.catalog = catalog
 	opts.catalogErr = catalogErr
+	if catalogErr == nil {
+		opts.catalogErr = catalog.RecoverQueuedInputs(context.Background())
+	}
 	items := storedDisplayItemSource{store: store}
 	return newHandler(newSessionRegistry(), items, opts)
 }
@@ -944,6 +948,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		sessionOps:           options.sessionOps,
 		workspaceOps:         options.workspaceOps,
 		approvalOps:          newSessionOperationLocks(),
+		queueOps:             newSessionOperationLocks(),
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 		events:               options.events,
@@ -1024,9 +1029,19 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 			}
 		case workerMessageIdle:
 			if msg.Idle != nil {
-				if handler.closeWorkerWhenIdle(sessionID, generation, *msg.Idle) {
-					handler.registry.MarkIdle(sessionID)
+				idle := *msg.Idle
+				if !handler.workers.IsCurrentIdle(sessionID, generation, idle) {
+					return
 				}
+				// Keep Working state changes in worker event order, even while
+				// queue preparation runs asynchronously.
+				handler.registry.MarkIdle(sessionID)
+				go func() {
+					// Drain before scheduling idle eviction. Admission advances the
+					// command sequence, making this old idle notification harmless.
+					_ = handler.dispatchQueuedInputs(sessionID, false, true)
+					handler.closeWorkerWhenIdle(sessionID, generation, idle)
+				}()
 			}
 		}
 	})
@@ -1090,6 +1105,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/items", withPathValue("id", handler.handleSessionItems))
 	mux.HandleFunc("/sessions/{id}/events", withPathValue("id", handler.handleSessionEvents))
 	mux.HandleFunc("/sessions/{id}/messages", withPathValue("id", handler.handleSessionMessage))
+	mux.HandleFunc("/sessions/{id}/queue", withPathValue("id", handler.handleInputQueue))
+	mux.HandleFunc("/sessions/{id}/queue/resume", withPathValue("id", handler.handleResumeInputQueue))
+	mux.HandleFunc("/sessions/{id}/queue/{item}", handler.handleQueuedInput)
 	mux.HandleFunc("/sessions/{id}/fork", withPathValue("id", handler.handleSessionFork))
 	mux.HandleFunc("/sessions/{id}/pause", withPathValue("id", handler.handleSessionPause))
 	mux.HandleFunc("/sessions/{id}/profile", withPathValue("id", handler.handleSessionProfile))
@@ -2143,6 +2161,11 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 	defer unlock()
 	if !h.registry.WorkerGenerationMatches(id, generation) {
 		return
+	}
+	if h.catalog != nil {
+		if err := h.catalog.PauseQueuedInputs(context.Background(), id); err != nil && h.logger != nil {
+			h.logger.Printf("pause queue after worker disconnect: session=%s error=%v", id, err)
+		}
 	}
 	h.events.WakeBarrier(id)
 	if session, ok := h.registry.Get(id); ok {

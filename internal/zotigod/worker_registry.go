@@ -289,6 +289,15 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 	return worker.send(command)
 }
 
+// IsCurrentIdle validates an idle notification without scheduling eviction,
+// allowing the handler to drain queued inputs before releasing the worker.
+func (r *workerRegistry) IsCurrentIdle(sessionID string, generation string, idle workerIdle) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	worker := r.workers[sessionID]
+	return worker != nil && !worker.closing && worker.generation == generation && worker.lastCommandSequence <= idle.CommandSequence
+}
+
 func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle workerIdle, timeout time.Duration) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]

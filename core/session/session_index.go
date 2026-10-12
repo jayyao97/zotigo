@@ -98,6 +98,9 @@ func (i *sessionIndex) delete(ctx context.Context, id string) error {
 		return fmt.Errorf("delete session index: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if _, err := tx.ExecContext(ctx, `DELETE FROM session_input_queue WHERE session_id = ?`, id); err != nil {
+		return fmt.Errorf("delete session input queue: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM session_images WHERE session_id = ?`, id); err != nil {
 		return fmt.Errorf("delete session image index: %w", err)
 	}

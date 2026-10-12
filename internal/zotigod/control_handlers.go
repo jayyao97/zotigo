@@ -662,6 +662,11 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 		if current.State != SessionStateRunning {
 			return zotigosession.DisplayItem{}, errSessionBusy
 		}
+		if h.catalog != nil {
+			if err := h.catalog.PauseQueuedInputs(ctx, id); err != nil {
+				return zotigosession.DisplayItem{}, fmt.Errorf("pause input queue: %w", err)
+			}
+		}
 		item, appendErr := h.appendPauseCommand(ctx, id, turnID)
 		if appendErr != nil {
 			return zotigosession.DisplayItem{}, appendErr
