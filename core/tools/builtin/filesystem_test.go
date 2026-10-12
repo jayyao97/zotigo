@@ -2,6 +2,7 @@ package builtin
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +11,37 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 )
+
+func TestReadFileByteOffset(t *testing.T) {
+	exec, err := executor.NewLocalExecutor(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	if err := exec.WriteFile(context.Background(), "report.txt", []byte("中a文"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	tool := &ReadFileTool{}
+	for _, tc := range []struct {
+		offset int
+		body   string
+	}{{0, "中a文"}, {1, "a文"}, {3, "a文"}, {4, "文"}, {7, ""}, {999, ""}} {
+		args, _ := json.Marshal(map[string]any{"path": "report.txt", "byte_offset": tc.offset})
+		got, err := tool.Execute(context.Background(), exec, string(args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, body, _ := strings.Cut(got.(string), "\n")
+		if body != tc.body {
+			t.Fatalf("offset %d: %q", tc.offset, body)
+		}
+	}
+	for _, args := range []string{`{"path":"report.txt","byte_offset":-1}`, `{"path":"report.txt","byte_offset":0,"offset":1}`, `{"path":"report.txt","byte_offset":0,"limit":1}`} {
+		if _, err := tool.Execute(context.Background(), exec, args); err == nil {
+			t.Fatalf("accepted invalid args %s", args)
+		}
+	}
+}
 
 func TestReadFileTool_OffsetLimit(t *testing.T) {
 	tmpDir := t.TempDir()
