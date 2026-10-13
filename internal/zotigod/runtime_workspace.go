@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -53,8 +54,14 @@ func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zoti
 		return zotigoruntime.WorkerLaunchSpec{}, fmt.Errorf("codex runtime requires workspace catalog")
 	}
 	organization, err := h.catalog.GetSessionOrganization(ctx, sessionID)
-	if err != nil || organization.WorkspaceID == nil {
-		return zotigoruntime.WorkerLaunchSpec{}, fmt.Errorf("codex runtime requires assigned workspace")
+	if errors.Is(err, zotigoworkspace.ErrNotFound) {
+		return spec, nil
+	}
+	if err != nil {
+		return zotigoruntime.WorkerLaunchSpec{}, fmt.Errorf("load session organization: %w", err)
+	}
+	if organization.WorkspaceID == nil {
+		return spec, nil
 	}
 	spec.WorkingDirectory = h.sessionWorkspaceRoot(ctx, organization)
 	return spec, nil

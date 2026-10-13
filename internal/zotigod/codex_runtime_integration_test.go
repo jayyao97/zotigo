@@ -433,6 +433,67 @@ func TestWorkerRegistryTreatsIdleClosingWorkerAsOffline(t *testing.T) {
 	}
 }
 
+func TestCodexScratchSessionsUseIndependentPersistentCWD(t *testing.T) {
+	root := newTestStoreRoot(t)
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	catalog, err := zotigoworkspace.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	fake := &fakeCodexRuntime{launches: make(chan zotigoruntime.WorkerLaunchSpec, 1), connected: make(chan *websocket.Conn, 1)}
+	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+		store: store, catalog: catalog, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fake), workerConnectTimeout: time.Second,
+	})
+	server := httptest.NewServer(handler)
+	fake.server = server
+	t.Cleanup(server.Close)
+	previous := ""
+	for i := range 2 {
+		response := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"agent":"codex","model":"gpt-5.6-luna","reasoning_effort":"medium"}`)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create scratch: %d %s", response.Code, response.Body)
+		}
+		var created Session
+		if err := decodeAPIData(t, response.Body.Bytes(), &created); err != nil {
+			t.Fatal(err)
+		}
+		if i == 1 {
+			// Desktop/Web set a title before starting, creating an unassigned catalog row.
+			titled := requestCatalog(t, handler, http.MethodPut, "/sessions/"+created.ID+"/title", `{"title":"Scratch"}`)
+			if titled.Code != http.StatusOK {
+				t.Fatalf("set scratch title: %d %s", titled.Code, titled.Body)
+			}
+		}
+		want := filepath.Join(root, "scratch", created.ID)
+		if created.WorkingDirectory != want || want == previous {
+			t.Fatalf("scratch cwd: %q", created.WorkingDirectory)
+		}
+		previous = want
+		if info, err := os.Stat(want); err != nil || !info.IsDir() {
+			t.Fatalf("scratch directory: %v", err)
+		}
+		stored, err := store.Get(context.Background(), created.ID)
+		if err != nil || stored.WorkingDirectory != want {
+			t.Fatalf("persisted cwd: %+v %v", stored, err)
+		}
+		started := requestCatalog(t, handler, http.MethodPost, "/sessions/"+created.ID+"/start", "")
+		if started.Code != http.StatusOK {
+			t.Fatalf("start scratch: %d %s", started.Code, started.Body)
+		}
+		conn := <-fake.connected
+		t.Cleanup(func() { _ = conn.Close() })
+		launch := <-fake.launches
+		if launch.WorkingDirectory != want || launch.SessionStoreRoot != root {
+			t.Fatalf("worker launch: %+v", launch)
+		}
+	}
+}
+
 func TestCodexSessionUsesWorkspaceCWDWithoutRuntimeProjectBinding(t *testing.T) {
 	root := t.TempDir()
 	store, err := zotigosession.NewFileStore(root)
