@@ -1277,10 +1277,6 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		case zotigoruntime.AgentCodex:
-			if assignedWorkspaceID == "" {
-				writeAPIError(w, http.StatusBadRequest, "codex sessions require workspace_id")
-				return
-			}
 			if strings.TrimSpace(req.Profile) != "" {
 				writeAPIError(w, http.StatusBadRequest, "profile is only valid for agent zotigo")
 				return

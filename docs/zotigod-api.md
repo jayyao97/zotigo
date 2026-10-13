@@ -269,7 +269,7 @@ GET /skills?session_id=sess_8f0e12ab34cd56ef&force_reload=true
 }
 ```
 
-Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned to a ready Workspace and selects a concrete model and reasoning effort:
+Sessions default to `agent: "zotigo"`. A Codex-backed Session selects a concrete model and reasoning effort. Workspace assignment is optional; when supplied, the Workspace must be ready. For example, to create a Workspace-bound Codex Session:
 
 ```json
 {
@@ -280,7 +280,7 @@ Sessions default to `agent: "zotigo"`. A Codex-backed Session must be assigned t
 }
 ```
 
-`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are valid only for Codex Sessions and are checked against the paginated `model/list` catalog using the runtime model slug. Creating a Codex Session does not create, reuse, or modify a Codex local Project. The worker uses the complete Workspace root as `cwd`, so `code/`, `notes/`, `artifacts/`, and root-level instructions share one context boundary. The first message creates a thread without `projectId`, and zotigod persists the returned thread ID as the Session backend binding. Resume uses the same `cwd` and does not change any existing Codex Project assignment.
+`profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are valid only for Codex Sessions and are checked against the paginated `model/list` catalog using the runtime model slug. Creating a Codex Session does not create, reuse, or modify a Codex local Project. The worker uses the Session working directory as `cwd`. For a Workspace session this is the complete Workspace root, so `code/`, `notes/`, `artifacts/`, and root-level instructions share one context boundary; a Scratch session uses its own persistent directory. The first message creates a thread without `projectId`, and zotigod persists the returned thread ID as the Session backend binding. Resume uses the same `cwd` and does not change any existing Codex Project assignment.
 
 This bridge version does not expose Codex approval callbacks. Codex Sessions therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted or set to `bypass_permissions`, and later approval-policy changes return `409`. The ordinary Zotigo runtime retains the approval behavior described below.
 
@@ -288,7 +288,7 @@ This bridge version does not expose Codex approval callbacks. Codex Sessions the
 
 `PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a Codex Session. The values apply to the next turn; the Codex thread and Project binding do not change. The endpoint returns `409` while the Session is bound to a Channel conversation because that binding owns an immutable runtime snapshot.
 
-An explicit `working_directory` must be an absolute path that resolves to an existing directory. A workspace session uses the workspace root. A new session without either `workspace_id` or `working_directory` receives its own `<session-store-root>/scratch/<session-id>` directory (normally `~/.zotigo/scratch/<session-id>`); persistent session storage is required. Its profile is resolved against that directory and global configuration, not the daemon's launch directory. Existing sessions and explicitly supplied directories are unchanged. The directory is persisted and returned as `working_directory`. Codex sessions still require `workspace_id`.
+An explicit `working_directory` must be an absolute path that resolves to an existing directory. A workspace session uses the workspace root. A new session without either `workspace_id` or `working_directory` receives its own `<session-store-root>/scratch/<session-id>` directory (normally `~/.zotigo/scratch/<session-id>`); persistent session storage is required. Its profile is resolved against that directory and global configuration, not the daemon's launch directory. Existing sessions and explicitly supplied directories are unchanged. The directory is persisted and returned as `working_directory`. This directory selection applies to both Zotigo and Codex sessions; Codex does not require `workspace_id`. An explicitly selected Workspace must still be ready.
 
 `profile` is an optional profile name returned by `GET /config/profiles`. When it is omitted, zotigod resolves the project's current `default_profile` during session creation. The resolved profile is persisted and returned as `profile`, so worker restarts and offline session recovery keep using the profile selected for that session. An unknown explicit profile returns `400`. Legacy sessions without a stored profile continue to resolve the current project default when a worker starts.
 
