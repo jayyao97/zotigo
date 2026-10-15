@@ -56,6 +56,7 @@ const (
 )
 
 type Session struct {
+	ReadState            *zotigosession.ReadState  `json:"read_state,omitempty"`
 	ForkedFrom           *zotigosession.ForkOrigin `json:"forked_from,omitempty"`
 	ID                   string                    `json:"id"`
 	State                SessionState              `json:"state"`
@@ -1118,6 +1119,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/title-suggestion", withPathValue("id", handler.handleSessionTitleSuggestion))
 	mux.HandleFunc("/sessions/{id}/translate", withPathValue("id", handler.handleTranslation))
 	mux.HandleFunc("/sessions/{id}/title", withPathValue("id", handler.handleSessionOrganizationTitle))
+	mux.HandleFunc("/sessions/{id}/read-state", withPathValue("id", handler.handleSessionReadState))
 	mux.HandleFunc("/sessions/{id}/pinned", withPathValue("id", handler.handleSessionOrganizationPinned))
 	mux.HandleFunc("/sessions/{id}/position", withPathValue("id", handler.handleSessionOrganizationPosition))
 	mux.HandleFunc("/sessions/{id}/archive", withPathValue("id", func(w http.ResponseWriter, r *http.Request, id string) {
@@ -1428,6 +1430,16 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
 	}
+	if store, ok := h.store.(sessionReadStore); ok {
+		states, err := store.ListSessionReadStates(ctx)
+		if err != nil {
+			return nil, err
+		}
+		for i := range sessions {
+			state := states[sessions[i].ID]
+			sessions[i].ReadState = &state
+		}
+	}
 	return sessions, nil
 }
 
@@ -1523,7 +1535,7 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
 			return
 		}
-		writeAPIJSON(w, http.StatusOK, h.decorateSession(r.Context(), stored, full))
+		h.writeSessionWithReadState(w, r, h.decorateSession(r.Context(), stored, full))
 		return
 	}
 	session.Live = true
@@ -1531,7 +1543,7 @@ func (h *handler) handleSessionGet(w http.ResponseWriter, r *http.Request, id st
 	if h.store != nil {
 		full, _ = h.store.Get(r.Context(), id)
 	}
-	writeAPIJSON(w, http.StatusOK, h.decorateSession(r.Context(), session, full))
+	h.writeSessionWithReadState(w, r, h.decorateSession(r.Context(), session, full))
 }
 
 func (h *handler) handleSessionStart(w http.ResponseWriter, r *http.Request, id string) {

@@ -631,7 +631,7 @@ func (s *FileStore) Delete(ctx context.Context, id string) error {
 	if err := s.index.delete(ctx, id); err != nil {
 		return err
 	}
-	if _, err := s.index.db.ExecContext(ctx, `DELETE FROM display_items WHERE session_id=?; DELETE FROM display_index_files WHERE session_id=?`, id, id); err != nil {
+	if _, err := s.index.db.ExecContext(ctx, `DELETE FROM display_items WHERE session_id=?; DELETE FROM display_index_files WHERE session_id=?; DELETE FROM session_read_state WHERE session_id=?`, id, id, id); err != nil {
 		return err
 	}
 
