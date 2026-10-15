@@ -952,7 +952,8 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 	service.SetDispatcher(dispatcher)
 	secret := "secret"
 	owners := []string{"owner-1"}
-	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "alias", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners}); err != nil {
+	fullAccess := "bypass_permissions"
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{ApprovalPolicy: &fullAccess, Provider: ProviderFeishu, Name: "alias", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners}); err != nil {
 		t.Fatal(err)
 	}
 	group := bindTestGroup(t, store, "group-1", "owner-1")
@@ -987,7 +988,20 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 		{MessageID: "message-0", ChatID: "group-1", ChatType: "group", ChatName: "Actual group", RootID: "old-topic", ThreadID: "thread-1", Sender: Sender{ID: "owner-1", DisplayName: "Owner"}, Text: "first", MentionedBot: true, CreatedAt: time.Now()},
 		{MessageID: "message-1", ChatID: "group-1", ChatType: "group", ChatName: "Actual group", RootID: "old-topic", ThreadID: "thread-1", Sender: Sender{ID: "owner-1", DisplayName: "Owner"}, Text: "second", MentionedBot: true, CreatedAt: time.Now()},
 	}
-	for _, input := range inputs {
+	for index, input := range inputs {
+		wantPolicy := fullAccess
+		if index == 1 {
+			// Change the connection default after automatic shared provisioning.
+			connection, loadErr := store.GetConnection(ctx, "connection-1")
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			connection.ApprovalPolicy = "auto"
+			if _, err := store.PutConnection(ctx, connection); err != nil {
+				t.Fatal(err)
+			}
+			wantPolicy = "auto"
+		}
 		if err = adapter.callbacks.Inbound(ctx, input); err != nil {
 			t.Fatal(err)
 		}
@@ -999,6 +1013,9 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 			currentGroup, groupErr := store.GetConversationByScope(ctx, "connection-1", "group-1", "")
 			t.Fatalf("message was not dispatched: %+v group=%+v err=%v", message, currentGroup, groupErr)
 		}
+		if task.ApprovalPolicy != wantPolicy {
+			t.Fatalf("task policy=%q want=%q", task.ApprovalPolicy, wantPolicy)
+		}
 		if task.SessionID != "session-shared" || task.Origin.ChannelID != "bot-1" || task.Origin.ChannelName != "Test Bot" || task.Origin.ExternalConversationName != "Actual group" {
 			t.Fatalf("task=%+v", task)
 		}
@@ -1009,7 +1026,7 @@ func TestServiceSharedGroupUsesOneSessionAndRepliesInMainGroup(t *testing.T) {
 		t.Fatal("shared session was not provisioned")
 	}
 	shared, err := store.GetConversationByScope(ctx, "connection-1", "group-1", "")
-	if err != nil || shared.SessionID != "session-shared" {
+	if err != nil || shared.SessionID != "session-shared" || shared.ApprovalPolicy != "" {
 		t.Fatalf("shared=%+v err=%v", shared, err)
 	}
 	preservedTopic, err := store.GetConversationByScope(ctx, "connection-1", "group-1", "old-topic")

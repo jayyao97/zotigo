@@ -98,12 +98,35 @@ func (noopProgress) Receipt() channels.DeliveryReceipt {
 
 func TestProvisionChannelSessionCommitsBindingBeforePublishingSession(t *testing.T) {
 	handler, store, catalog, workspace := newChannelProvisionFixture(t)
+	ctx := context.Background()
+	// A workspace can already contain more sessions than the sidebar displays.
+	var existingPositions []int64
+	for index := range 6 {
+		id := fmt.Sprintf("existing-%d", index)
+		if _, err := catalog.AssignSession(ctx, id, workspace.ID); err != nil {
+			t.Fatal(err)
+		}
+		position := -time.Now().Add(-time.Hour).UnixMilli() + int64(index)
+		if _, err := catalog.SetSessionPosition(ctx, id, position); err != nil {
+			t.Fatal(err)
+		}
+		existingPositions = append(existingPositions, position)
+	}
 	var sessionID string
 	prompt := channels.SessionPromptConfig{AgentInstructions: "channel agent", ApprovalInstructions: "channel approval", ReviewAllTools: true}
 	err := handler.ProvisionChannelSession(context.Background(), workspace.ID, "Review README", prompt, channels.SessionRuntimeConfig{Agent: channels.SessionAgentZotigo}, func(id string, _ channels.SessionRuntimeConfig) error {
 		sessionID = id
 		if _, visible := handler.registry.Get(id); visible {
 			t.Fatal("session was published before its channel binding committed")
+		}
+		organization, err := catalog.GetSessionOrganization(ctx, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, position := range existingPositions {
+			if organization.WorkspacePosition == nil || *organization.WorkspacePosition >= position {
+				t.Fatalf("new channel session is not ahead of existing sessions: %+v", organization)
+			}
 		}
 		return nil
 	})
@@ -604,7 +627,7 @@ func TestChannelGroupBindingValidatesWorkspaceAndClearsSession(t *testing.T) {
 	}
 }
 
-func TestChannelBindingRejectsBypassSession(t *testing.T) {
+func TestChannelBindingPreservesBypassSessionSnapshot(t *testing.T) {
 	ctx := context.Background()
 	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
@@ -629,8 +652,12 @@ func TestChannelBindingRejectsBypassSession(t *testing.T) {
 	body := `{"display_name":"Shadow Test","session_id":"session-bypass","workspace_id":"","enabled":true,"allowed_sender_ids":["user-1"],"agent_instructions_mode":"inherit","agent_instructions":"","approval_instructions_mode":"inherit","approval_instructions":""}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
-	if recorder.Code != http.StatusBadRequest {
+	if recorder.Code != http.StatusOK {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	bound, err := channelStore.GetConversation(ctx, conversation.ID)
+	if err != nil || bound.ApprovalPolicy != string(agent.ApprovalPolicyBypass) {
+		t.Fatalf("bound=%+v err=%v", bound, err)
 	}
 }
 

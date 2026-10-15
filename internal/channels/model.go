@@ -55,6 +55,7 @@ const (
 )
 
 type Connection struct {
+	ApprovalPolicy       string    `json:"approval_policy,omitempty"`
 	ID                   string    `json:"id"`
 	Provider             string    `json:"provider"`
 	Name                 string    `json:"name"`
@@ -77,6 +78,7 @@ type Connection struct {
 }
 
 type ConnectionInput struct {
+	ApprovalPolicy       *string   `json:"approval_policy,omitempty"`
 	Provider             string    `json:"provider"`
 	Name                 string    `json:"name"`
 	AppID                string    `json:"app_id"`
@@ -97,6 +99,7 @@ type Sender struct {
 }
 
 type Conversation struct {
+	ApprovalPolicy           string       `json:"approval_policy,omitempty"`
 	ID                       string       `json:"id"`
 	ConnectionID             string       `json:"connection_id"`
 	ChatID                   string       `json:"chat_id"`
@@ -128,6 +131,7 @@ type Conversation struct {
 }
 
 type ConversationInput struct {
+	ApprovalPolicy           *string      `json:"approval_policy,omitempty"`
 	DisplayName              string       `json:"display_name"`
 	SessionStrategy          string       `json:"session_strategy"`
 	SessionID                string       `json:"session_id"`
@@ -235,6 +239,7 @@ type ReferencedMessage struct {
 // SessionPromptConfig is the fully resolved prompt policy applied to a
 // Channel Session. The daemon versions it again when admitting a turn.
 type SessionPromptConfig struct {
+	ApprovalPolicy       string
 	AgentInstructions    string
 	ApprovalInstructions string
 	ReviewAllTools       bool
@@ -251,6 +256,7 @@ type SessionRuntimeConfig struct {
 }
 
 type Task struct {
+	ApprovalPolicy       string
 	ConnectionID         string
 	ConversationID       string
 	SessionID            string
@@ -366,4 +372,16 @@ type SessionProvisioner interface {
 // instead of starting a new agent turn.
 type TaskController interface {
 	StopChannelTask(ctx context.Context, task Task, progress func(Progress), admissionComplete func()) (TaskResult, error)
+}
+
+// NormalizeApprovalPolicy preserves Auto for configurations written by older clients.
+func NormalizeApprovalPolicy(policy string) (string, error) {
+	switch policy {
+	case "", "auto":
+		return "auto", nil
+	case "bypass_permissions":
+		return policy, nil
+	default:
+		return "", errors.New("approval_policy must be auto or bypass_permissions")
+	}
 }

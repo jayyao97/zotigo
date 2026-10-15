@@ -18,7 +18,7 @@ import (
 var ErrNotFound = errors.New("channel resource not found")
 var ErrConnectionBound = errors.New("connection has bound sessions; unbind or archive them before deleting")
 
-const channelSchemaVersion = 1
+const channelSchemaVersion = 2
 
 type Store struct {
 	db        *sql.DB
@@ -68,6 +68,19 @@ func (s *Store) initializeSchema() error {
 	if version == channelSchemaVersion {
 		return nil
 	}
+	if version == 1 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err = tx.Exec(`ALTER TABLE channel_connections ADD COLUMN approval_policy TEXT NOT NULL DEFAULT 'auto';
+ ALTER TABLE channel_conversations ADD COLUMN approval_policy TEXT NOT NULL DEFAULT '';
+ PRAGMA user_version = 2;`); err != nil {
+			return fmt.Errorf("migrate channel approval policy: %w", err)
+		}
+		return tx.Commit()
+	}
 	if version != 0 {
 		return fmt.Errorf("unsupported channels schema version %d", version)
 	}
@@ -89,7 +102,7 @@ CREATE TABLE IF NOT EXISTS channel_connections (
  enabled INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'stopped', last_error TEXT NOT NULL DEFAULT '',
  bot_open_id TEXT NOT NULL DEFAULT '', bot_name TEXT NOT NULL DEFAULT '', allow_chat_ids TEXT NOT NULL DEFAULT '[]', owner_sender_ids TEXT NOT NULL DEFAULT '[]',
  agent_instructions TEXT NOT NULL DEFAULT '', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER NOT NULL DEFAULT 0,
- progress_mode TEXT NOT NULL DEFAULT 'interactive_card',
+ progress_mode TEXT NOT NULL DEFAULT 'interactive_card', approval_policy TEXT NOT NULL DEFAULT 'auto',
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS channel_conversations (
@@ -100,7 +113,7 @@ CREATE TABLE IF NOT EXISTS channel_conversations (
  enabled INTEGER NOT NULL DEFAULT 0,
  sender_policy TEXT NOT NULL DEFAULT 'selected', allowed_sender_ids TEXT NOT NULL DEFAULT '[]', observed_senders TEXT NOT NULL DEFAULT '[]',
  agent_mode TEXT NOT NULL DEFAULT 'inherit', agent_instructions TEXT NOT NULL DEFAULT '',
- approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
+ approval_policy TEXT NOT NULL DEFAULT '', approval_mode TEXT NOT NULL DEFAULT 'inherit', approval_instructions TEXT NOT NULL DEFAULT '', review_all_tools INTEGER,
  last_activity_at TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
  UNIQUE(connection_id, chat_id, root_id)
 );
@@ -119,7 +132,7 @@ CREATE INDEX IF NOT EXISTS channel_messages_by_conversation ON channel_messages(
 `); err != nil {
 		return fmt.Errorf("initialize channels schema: %w", err)
 	}
-	if _, err = tx.Exec(`PRAGMA user_version = 1`); err != nil {
+	if _, err = tx.Exec(`PRAGMA user_version = 2`); err != nil {
 		return fmt.Errorf("set channels schema version: %w", err)
 	}
 	if err = tx.Commit(); err != nil {
@@ -170,11 +183,11 @@ func (s *Store) PutConnection(ctx context.Context, value Connection) (Connection
 	value.AllowChatIDs = normalizeIDs(value.AllowChatIDs)
 	value.OwnerSenderIDs = normalizeIDs(value.OwnerSenderIDs)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_connections
-(id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,name=excluded.name,app_id=excluded.app_id,
+(id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,name=excluded.name,app_id=excluded.app_id,
 enabled=excluded.enabled,allow_chat_ids=excluded.allow_chat_ids,owner_sender_ids=excluded.owner_sender_ids,agent_instructions=excluded.agent_instructions,
-approval_instructions=excluded.approval_instructions,review_all_tools=excluded.review_all_tools,progress_mode=excluded.progress_mode,updated_at=excluded.updated_at`,
-		value.ID, value.Provider, value.Name, value.AppID, value.Enabled, value.Status, value.LastError, value.BotOpenID, value.BotName, jsonText(value.AllowChatIDs), jsonText(value.OwnerSenderIDs), value.AgentInstructions, value.ApprovalInstructions, value.ReviewAllTools, value.ProgressMode, value.CreatedAt.Format(time.RFC3339Nano), value.UpdatedAt.Format(time.RFC3339Nano))
+approval_instructions=excluded.approval_instructions,review_all_tools=excluded.review_all_tools,progress_mode=excluded.progress_mode,approval_policy=excluded.approval_policy,updated_at=excluded.updated_at`,
+		value.ID, value.Provider, value.Name, value.AppID, value.Enabled, value.Status, value.LastError, value.BotOpenID, value.BotName, jsonText(value.AllowChatIDs), jsonText(value.OwnerSenderIDs), value.AgentInstructions, value.ApprovalInstructions, value.ReviewAllTools, value.ProgressMode, value.ApprovalPolicy, value.CreatedAt.Format(time.RFC3339Nano), value.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return Connection{}, fmt.Errorf("save channel connection: %w", err)
 	}
@@ -185,7 +198,7 @@ func scanConnection(row interface{ Scan(...any) error }) (Connection, error) {
 	var c Connection
 	var enabled, review int
 	var allow, owners, created, updated string
-	err := row.Scan(&c.ID, &c.Provider, &c.Name, &c.AppID, &enabled, &c.Status, &c.LastError, &c.BotOpenID, &c.BotName, &allow, &owners, &c.AgentInstructions, &c.ApprovalInstructions, &review, &c.ProgressMode, &created, &updated)
+	err := row.Scan(&c.ID, &c.Provider, &c.Name, &c.AppID, &enabled, &c.Status, &c.LastError, &c.BotOpenID, &c.BotName, &allow, &owners, &c.AgentInstructions, &c.ApprovalInstructions, &review, &c.ProgressMode, &c.ApprovalPolicy, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -204,7 +217,7 @@ func scanConnection(row interface{ Scan(...any) error }) (Connection, error) {
 	return c, nil
 }
 
-const connectionColumns = `id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,created_at,updated_at`
+const connectionColumns = `id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,created_at,updated_at`
 
 func (s *Store) GetConnection(ctx context.Context, id string) (Connection, error) {
 	return scanConnection(s.db.QueryRowContext(ctx, `SELECT `+connectionColumns+` FROM channel_connections WHERE id=?`, id))
@@ -326,7 +339,7 @@ func scanConversation(row interface{ Scan(...any) error }) (Conversation, error)
 	var enabled int
 	var allowed, observed, last, created, updated string
 	var review sql.NullBool
-	err := row.Scan(&c.ID, &c.ConnectionID, &c.ChatID, &c.RootID, &c.ThreadID, &c.ChatType, &c.ChatMode, &c.ChatName, &c.DisplayName, &c.SessionStrategy, &c.SessionID, &c.WorkspaceID, &c.Agent, &c.ProfileName, &c.Model, &c.ReasoningEffort, &enabled, &c.SenderPolicy, &allowed, &observed, &c.AgentInstructionsMode, &c.AgentInstructions, &c.ApprovalInstructionsMode, &c.ApprovalInstructions, &review, &last, &created, &updated)
+	err := row.Scan(&c.ID, &c.ConnectionID, &c.ChatID, &c.RootID, &c.ThreadID, &c.ChatType, &c.ChatMode, &c.ChatName, &c.DisplayName, &c.SessionStrategy, &c.SessionID, &c.WorkspaceID, &c.Agent, &c.ProfileName, &c.Model, &c.ReasoningEffort, &enabled, &c.SenderPolicy, &allowed, &observed, &c.AgentInstructionsMode, &c.AgentInstructions, &c.ApprovalInstructionsMode, &c.ApprovalInstructions, &review, &c.ApprovalPolicy, &last, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -355,7 +368,7 @@ func scanConversation(row interface{ Scan(...any) error }) (Conversation, error)
 	return c, nil
 }
 
-const conversationColumns = `id,connection_id,chat_id,root_id,thread_id,chat_type,chat_mode,chat_name,display_name,session_strategy,session_id,workspace_id,session_agent,profile_name,model,reasoning_effort,enabled,sender_policy,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,last_activity_at,created_at,updated_at`
+const conversationColumns = `id,connection_id,chat_id,root_id,thread_id,chat_type,chat_mode,chat_name,display_name,session_strategy,session_id,workspace_id,session_agent,profile_name,model,reasoning_effort,enabled,sender_policy,allowed_sender_ids,observed_senders,agent_mode,agent_instructions,approval_mode,approval_instructions,review_all_tools,approval_policy,last_activity_at,created_at,updated_at`
 
 func (s *Store) GetConversation(ctx context.Context, id string) (Conversation, error) {
 	return scanConversation(s.db.QueryRowContext(ctx, `SELECT `+conversationColumns+` FROM channel_conversations WHERE id=?`, id))
@@ -413,7 +426,7 @@ func (s *Store) PutConversation(ctx context.Context, c Conversation) (Conversati
 		return Conversation{}, err
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE channel_conversations SET chat_mode=?,chat_name=?,display_name=?,session_strategy=?,session_id=?,workspace_id=?,session_agent=?,profile_name=?,model=?,reasoning_effort=?,enabled=?,sender_policy=?,allowed_sender_ids=?,agent_mode=?,agent_instructions=?,approval_mode=?,approval_instructions=?,review_all_tools=?,updated_at=? WHERE id=?`, c.ChatMode, c.ChatName, c.DisplayName, c.SessionStrategy, c.SessionID, c.WorkspaceID, c.Agent, c.ProfileName, c.Model, c.ReasoningEffort, c.Enabled, c.SenderPolicy, jsonText(c.AllowedSenderIDs), c.AgentInstructionsMode, c.AgentInstructions, c.ApprovalInstructionsMode, c.ApprovalInstructions, c.ReviewAllTools, now.Format(time.RFC3339Nano), c.ID)
+	result, err := tx.ExecContext(ctx, `UPDATE channel_conversations SET chat_mode=?,chat_name=?,display_name=?,session_strategy=?,session_id=?,workspace_id=?,session_agent=?,profile_name=?,model=?,reasoning_effort=?,enabled=?,sender_policy=?,allowed_sender_ids=?,agent_mode=?,agent_instructions=?,approval_mode=?,approval_instructions=?,review_all_tools=?,approval_policy=?,updated_at=? WHERE id=?`, c.ChatMode, c.ChatName, c.DisplayName, c.SessionStrategy, c.SessionID, c.WorkspaceID, c.Agent, c.ProfileName, c.Model, c.ReasoningEffort, c.Enabled, c.SenderPolicy, jsonText(c.AllowedSenderIDs), c.AgentInstructionsMode, c.AgentInstructions, c.ApprovalInstructionsMode, c.ApprovalInstructions, c.ReviewAllTools, c.ApprovalPolicy, now.Format(time.RFC3339Nano), c.ID)
 	if err != nil {
 		return Conversation{}, err
 	}

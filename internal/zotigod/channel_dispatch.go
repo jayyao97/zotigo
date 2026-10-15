@@ -34,12 +34,8 @@ func (h *handler) EnsureChannelSessionPrompt(ctx context.Context, sessionID stri
 		unlock()
 		return channels.SessionPromptConfig{}, errSessionNotFound
 	}
-	if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
-		unlock()
-		return channels.SessionPromptConfig{}, errors.New("channel sessions must use auto approval policy")
-	}
 	desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
-	detached, err := h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true)
+	detached, err := h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true, prompt.ApprovalPolicy)
 	unlock()
 	if err != nil {
 		return channels.SessionPromptConfig{}, err
@@ -48,9 +44,17 @@ func (h *handler) EnsureChannelSessionPrompt(ctx context.Context, sessionID stri
 	return prompt, nil
 }
 
-func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, stored *zotigosession.Session, desired *zotigosession.PromptConfig, bound bool) (*workerConnection, error) {
+func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, stored *zotigosession.Session, desired *zotigosession.PromptConfig, bound bool, policy string) (*workerConnection, error) {
+	targetPolicy := stored.ApprovalPolicy
+	if bound {
+		normalized, err := channels.NormalizeApprovalPolicy(policy)
+		if err != nil {
+			return nil, err
+		}
+		targetPolicy = agent.ApprovalPolicy(normalized)
+	}
 	current := stored.PromptConfig
-	if (!bound && current == *desired) || (bound && current.Revision != 0 && current.AgentInstructions == desired.AgentInstructions && current.ApprovalInstructions == desired.ApprovalInstructions && current.ReviewAllTools == desired.ReviewAllTools) {
+	if (!bound && current == *desired) || (bound && stored.ApprovalPolicy == targetPolicy && current.Revision != 0 && current.AgentInstructions == desired.AgentInstructions && current.ApprovalInstructions == desired.ApprovalInstructions && current.ReviewAllTools == desired.ReviewAllTools) {
 		desired.Revision = current.Revision
 		return nil, nil
 	}
@@ -78,6 +82,7 @@ func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, store
 		desired.Revision = 0
 	}
 	stored.PromptConfig = *desired
+	stored.ApprovalPolicy = targetPolicy
 	stored.UpdatedAt = time.Now().UTC()
 	if err := h.store.Put(ctx, stored); err != nil {
 		return nil, fmt.Errorf("persist channel prompt: %w", err)
@@ -114,12 +119,8 @@ func (h *handler) withRefreshedBoundChannelPrompt(ctx context.Context, sessionID
 				unlock()
 				return errSessionNotFound
 			}
-			if bound && stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
-				unlock()
-				return errors.New("channel sessions must use auto approval policy")
-			}
 			desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
-			detached, err = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, bound)
+			detached, err = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, bound, prompt.ApprovalPolicy)
 			unlock()
 			if err == nil {
 				closeDetachedWorker(detached)
@@ -185,7 +186,12 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 	default:
 		return errors.New("unsupported channel session agent")
 	}
+	policy, err := channels.NormalizeApprovalPolicy(prompt.ApprovalPolicy)
+	if err != nil {
+		return err
+	}
 	session := newSession(workspace.RootPath, profileName)
+	session.ApprovalPolicy = agent.ApprovalPolicy(policy)
 	session.Agent = string(agentKind)
 	session.Model = resolved.Model
 	session.ReasoningEffort = resolved.ReasoningEffort
@@ -214,12 +220,17 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 	if storedSession == nil {
 		return cleanup(errors.New("load new channel session: session is unavailable"))
 	}
+	storedSession.ApprovalPolicy = agent.ApprovalPolicy(policy)
 	storedSession.PromptConfig = zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools, Revision: 1}
 	if err := h.store.Put(ctx, storedSession); err != nil {
 		return cleanup(fmt.Errorf("persist channel prompt snapshot: %w", err))
 	}
 	if _, err := h.catalog.AssignSession(ctx, session.ID, workspaceID); err != nil {
 		return cleanup(fmt.Errorf("assign channel session workspace: %w", err))
+	}
+	// Match client-created sessions without waiting for runtime activity sync.
+	if _, err := h.catalog.SetSessionPosition(ctx, session.ID, -time.Now().UnixMilli()); err != nil {
+		return cleanup(fmt.Errorf("set channel session position: %w", err))
 	}
 	if strings.TrimSpace(title) != "" {
 		if _, err := h.catalog.SetSessionTitle(ctx, session.ID, strings.TrimSpace(title)); err != nil {
@@ -292,13 +303,18 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		return channels.TaskResult{}, err
 	}
 
+	policy, err := channels.NormalizeApprovalPolicy(task.ApprovalPolicy)
+	if err != nil {
+		return channels.TaskResult{}, err
+	}
+	channelPolicy := agent.ApprovalPolicy(policy)
 	desired := zotigosession.PromptConfig{AgentInstructions: task.AgentInstructions, ApprovalInstructions: task.ApprovalInstructions, ReviewAllTools: task.ReviewAllTools}
 	if strings.TrimSpace(desired.ApprovalInstructions) != "" && !desired.ReviewAllTools {
 		return channels.TaskResult{}, errors.New("channel approval instructions require review_all_tools")
 	}
 	var stored *zotigosession.Session
 	var detached *workerConnection
-	err := func() error {
+	err = func() error {
 		unlock := h.sessionOps.lock(task.SessionID)
 		defer unlock()
 		var loadErr error
@@ -309,10 +325,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		if stored == nil {
 			return errSessionNotFound
 		}
-		if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
-			return errors.New("channel sessions must use auto approval policy")
-		}
-		detached, loadErr = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true)
+		detached, loadErr = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true, task.ApprovalPolicy)
 		return loadErr
 	}()
 	if err != nil {
@@ -354,7 +367,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		ExternalParentMessageID:  task.Origin.ExternalParentMessageID,
 		Actor:                    protocol.RequestActor{ID: task.Origin.Sender.ID, DisplayName: task.Origin.Sender.DisplayName, Role: task.Origin.ActorRole},
 	}
-	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: agent.ApprovalPolicyAuto, promptRevision: desired.Revision, requestContext: requestContext})
+	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: channelPolicy, promptRevision: desired.Revision, requestContext: requestContext})
 	if err != nil {
 		if errors.Is(err, errActiveTurn) || errors.Is(err, errSessionBusy) {
 			return channels.TaskResult{}, errors.New("the bound session already has an active turn")
