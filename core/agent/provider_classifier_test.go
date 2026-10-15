@@ -164,6 +164,34 @@ func TestForcedToolChoiceUnsupported(t *testing.T) {
 	}
 }
 
+func TestClassifierFallsBackWhenModelRejectsForcedToolChoice(t *testing.T) {
+	compatibilityError := errors.New(`400 Bad Request {"error":{"message":"tool_choice: type \"tool\" and \"any\" are not supported for this model."}}`)
+	for _, streamError := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream_error=%t", streamError), func(t *testing.T) {
+			prov := &scriptedProvider{scripts: [][]protocol.Event{
+				{protocol.NewErrorEvent(compatibilityError)},
+				{newToolCallEvent("allow", "read only", false)},
+				{newToolCallEvent("ask_user", "needs confirmation", false)},
+			}}
+			if !streamError {
+				prov.errs = []error{compatibilityError}
+			}
+			classifier := NewProviderSafetyClassifier(prov, config.SafetyClassifierConfig{TimeoutMs: 1000})
+			got, err := classifier.Classify(context.Background(), SafetyClassifierRequest{ToolName: "read_file"})
+			if err != nil || got.Decision != SafetyClassifierDecisionAllow {
+				t.Fatalf("fallback = %+v, %v", got, err)
+			}
+			got, err = classifier.Classify(context.Background(), SafetyClassifierRequest{ToolName: "shell"})
+			if err != nil || got.Decision != SafetyClassifierDecisionAskUser {
+				t.Fatalf("next decision = %+v, %v", got, err)
+			}
+			if len(prov.choices) != 3 || prov.choices[0].Mode != providers.ToolChoiceSpecific || prov.choices[1].Mode != providers.ToolChoiceAuto || prov.choices[2].Mode != providers.ToolChoiceAuto {
+				t.Fatalf("tool choices = %+v", prov.choices)
+			}
+		})
+	}
+}
+
 func TestClassifierCompatibilityFallbackDoesNotConsumeTransportRetry(t *testing.T) {
 	prov := &scriptedProvider{
 		name: "deepseek-after-transient-error",

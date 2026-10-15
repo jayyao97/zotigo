@@ -356,7 +356,12 @@ func forcedToolChoiceUnsupported(err error) bool {
 		return false
 	}
 	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "thinking mode does not support this tool_choice")
+	if strings.Contains(message, "thinking mode does not support this tool_choice") {
+		return true
+	}
+	// Compatible gateways may quote the rejected modes inside a JSON error.
+	message = strings.ReplaceAll(message, `\`, "")
+	return strings.Contains(message, `tool_choice: type "tool" and "any" are not supported for this model`)
 }
 
 // buildUserPrompt assembles a bounded request body for the classifier.

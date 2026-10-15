@@ -189,6 +189,7 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 				}
 			}
 			canonicalPrompt := channels.SessionPromptConfig{
+				ApprovalPolicy:       string(session.ApprovalPolicy),
 				AgentInstructions:    session.PromptConfig.AgentInstructions,
 				ApprovalInstructions: session.PromptConfig.ApprovalInstructions,
 				ReviewAllTools:       session.PromptConfig.ReviewAllTools,
@@ -286,8 +287,8 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 	if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentCodex && (stored.Model != runtime.Model || stored.ReasoningEffort != runtime.ReasoningEffort) {
 		return runtime, errors.New("bound session Codex settings do not match the channel runtime")
 	}
-	if stored.ApprovalPolicy != agent.ApprovalPolicyAuto {
-		return runtime, errors.New("channel sessions must use auto approval policy")
+	if stored.ApprovalPolicy != agent.ApprovalPolicyAuto && stored.ApprovalPolicy != agent.ApprovalPolicyBypass {
+		return runtime, errors.New("unsupported channel approval policy")
 	}
 	if live, ok := h.registry.Get(stored.ID); ok {
 		if live.Working || (live.State != SessionStateCreated && live.State != SessionStateOffline && live.State != SessionStateRunning) {

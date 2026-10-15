@@ -291,6 +291,14 @@ func (s *Service) PutConnection(ctx context.Context, id string, input Connection
 	if err != nil && !errors.Is(err, ErrNotFound) {
 		return Connection{}, err
 	}
+	policy := old.ApprovalPolicy
+	if input.ApprovalPolicy != nil {
+		policy = *input.ApprovalPolicy
+	}
+	policy, err = NormalizeApprovalPolicy(policy)
+	if err != nil {
+		return Connection{}, err
+	}
 	connections, err := s.store.ListConnections(ctx)
 	if err != nil {
 		return Connection{}, err
@@ -316,7 +324,7 @@ func (s *Service) PutConnection(ctx context.Context, id string, input Connection
 	if input.OwnerSenderIDs != nil {
 		ownerSenderIDs = *input.OwnerSenderIDs
 	}
-	value := Connection{ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, CreatedAt: created}
+	value := Connection{ApprovalPolicy: policy, ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, CreatedAt: created}
 	if input.ClearSecret && input.AppSecret != nil {
 		return Connection{}, errors.New("clear_secret and app_secret cannot be set together")
 	}
@@ -910,6 +918,12 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	c.ApprovalInstructionsMode = input.ApprovalInstructionsMode
 	c.ApprovalInstructions = input.ApprovalInstructions
 	c.ReviewAllTools = input.ReviewAllTools
+	if input.ApprovalPolicy != nil {
+		c.ApprovalPolicy = *input.ApprovalPolicy
+	}
+	if _, err := NormalizeApprovalPolicy(c.ApprovalPolicy); err != nil {
+		return c, err
+	}
 	if c.RootID == "" {
 		if c.SessionStrategy == SessionStrategyTopic {
 			c.SessionID = ""
@@ -947,7 +961,7 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if strings.TrimSpace(effectiveApproval) != "" && !effectiveReview {
 		return c, errors.New("effective approval instructions require review_all_tools")
 	}
-	prompt := SessionPromptConfig{AgentInstructions: connection.AgentInstructions, ApprovalInstructions: effectiveApproval, ReviewAllTools: effectiveReview}
+	prompt := resolvePromptSnapshot(connection, c)
 	if c.AgentInstructionsMode == OverrideReplace {
 		prompt.AgentInstructions = c.AgentInstructions
 	}
@@ -1024,6 +1038,7 @@ func applyPromptSnapshot(conversation *Conversation, prompt SessionPromptConfig)
 	conversation.ApprovalInstructions = prompt.ApprovalInstructions
 	reviewAllTools := prompt.ReviewAllTools
 	conversation.ReviewAllTools = &reviewAllTools
+	conversation.ApprovalPolicy = prompt.ApprovalPolicy
 }
 
 func (s *Service) ListMessages(ctx context.Context, conversationID string, limit int) ([]Message, error) {
@@ -1360,6 +1375,10 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 				conversation.ApprovalInstructionsMode = OverrideReplace
 				conversation.ApprovalInstructions = prompt.ApprovalInstructions
 				conversation.ReviewAllTools = &prompt.ReviewAllTools
+				// Shared sessions use the group record itself; keep its inheritance.
+				if conversation.RootID != "" {
+					conversation.ApprovalPolicy = prompt.ApprovalPolicy
+				}
 				applyRuntimeSnapshot(&conversation, resolved)
 				var bindErr error
 				conversation, bindErr = s.store.PutConversation(ctx, conversation)
@@ -1475,7 +1494,7 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 	}
 	task := Task{
 		ConnectionID: connectionID, ConversationID: conversation.ID, SessionID: conversation.SessionID, MessageID: in.MessageID,
-		Text: in.Text, Images: append([]InboundImage(nil), in.Images...), AgentInstructions: agentText, ApprovalInstructions: approvalText, ReviewAllTools: review,
+		ApprovalPolicy: prompt.ApprovalPolicy, Text: in.Text, Images: append([]InboundImage(nil), in.Images...), AgentInstructions: agentText, ApprovalInstructions: approvalText, ReviewAllTools: review,
 		Origin: TaskOrigin{
 			Provider: connection.Provider, ConnectionName: connection.Name, ChannelID: connection.BotOpenID, ChannelName: connection.BotName, ConversationID: conversation.ID,
 			ConversationName: conversation.DisplayName, ConversationType: conversation.ChatType,
@@ -1629,7 +1648,14 @@ func (s *Service) reconcileRunProcessingMarkers(ctx context.Context, connectionI
 }
 
 func resolvePromptSnapshot(connection Connection, conversation Conversation) SessionPromptConfig {
-	prompt := SessionPromptConfig{AgentInstructions: connection.AgentInstructions, ApprovalInstructions: connection.ApprovalInstructions, ReviewAllTools: connection.ReviewAllTools}
+	policy := connection.ApprovalPolicy
+	if policy == "" {
+		policy = "auto"
+	}
+	if conversation.ApprovalPolicy != "" {
+		policy = conversation.ApprovalPolicy
+	}
+	prompt := SessionPromptConfig{ApprovalPolicy: policy, AgentInstructions: connection.AgentInstructions, ApprovalInstructions: connection.ApprovalInstructions, ReviewAllTools: connection.ReviewAllTools}
 	if conversation.AgentInstructionsMode == OverrideReplace {
 		prompt.AgentInstructions = conversation.AgentInstructions
 	}
