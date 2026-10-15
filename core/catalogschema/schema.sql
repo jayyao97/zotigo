@@ -197,6 +197,14 @@ CREATE TABLE display_index_files (
   observed_size INTEGER NOT NULL DEFAULT -1
 );
 
+CREATE TABLE session_read_state (
+  session_id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 0,
+  read_version INTEGER NOT NULL DEFAULT 0,
+  completed_sequence INTEGER NOT NULL DEFAULT 0,
+  CHECK (read_version >= 0 AND version >= read_version AND completed_sequence >= 0)
+);
+
 CREATE TABLE session_input_queue (
   sequence INTEGER PRIMARY KEY AUTOINCREMENT,
   session_id TEXT NOT NULL,

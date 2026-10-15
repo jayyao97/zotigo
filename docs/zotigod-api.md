@@ -388,6 +388,24 @@ If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}` retur
 
 `GET /sessions` is an index-backed catalog read: it does not load each session snapshot or display log. Live `working` and `active_tool` values come from the in-memory runtime registry. Clients that need history-derived context usage or other detail for the selected session should use `GET /sessions/{id}`.
 
+Session list/detail responses include `read_state`: `{ "version": 2, "read_version": 1, "completed_sequence": 42, "unread": true }`.
+This state is shared across clients and persists in the daemon catalog. A completed,
+failed, or interrupted top-level turn advances the version; streaming chunks and
+metadata changes do not. `completed_sequence` identifies the last terminal display
+record so a client can wait for that content to load before acknowledging it.
+
+`PUT /sessions/{id}/read-state` accepts exactly one of `{ "read_version": 2 }`
+(acknowledge an observed version) or `{ "unread": true }` (manual unread).
+It returns the current read state in the usual envelope. Acknowledgements never
+move backwards or clear a newer version. Manual unread always advances the version,
+including when already unread, to invalidate other clients' pending acknowledgements.
+These operations do not change session activity/order.
+Clients refresh this state through the existing session-list polling; no SSE
+subscription is required. Schema migration 14 initializes existing indexed history
+as read and does not import browser-local unread flags. New completions are tracked
+even with no client connected. Downgrading to schema 13 discards shared read state
+but preserves session history.
+
 Desktop may request an on-demand best-effort refresh of externally changed Codex histories with `GET /sessions?sync_codex=true` or the catalog projection `GET /catalog/sessions?sync_codex=true`. The daemon reads the saved Codex conversation IDs, merges completed turns into each session display log, and returns the normal session list. A refresh failure does not hide the list; the response `data` includes a `diagnostics` array such as:
 
 ```json

@@ -141,6 +141,16 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line), item.ContentKind(), item.ID, displaySearchText(item)); err != nil {
 			return false, err
 		}
+		if item.Subagent == nil && (item.Type == DisplayItemTurnCompleted || item.Type == DisplayItemTurnFailed || item.Type == DisplayItemTurnInterrupted) {
+			// The same transaction as the derived log cursor makes replay and
+			// index repair idempotent, even with no UI connected.
+			if _, err = tx.ExecContext(ctx, `INSERT INTO session_read_state(session_id, version, completed_sequence)
+				VALUES(?, 1, ?) ON CONFLICT(session_id) DO UPDATE SET
+				version=version+1, completed_sequence=excluded.completed_sequence
+				WHERE excluded.completed_sequence > session_read_state.completed_sequence`, id, item.Sequence); err != nil {
+				return false, err
+			}
+		}
 		offset += int64(len(line))
 	}
 	observedSize := int64(-1)
