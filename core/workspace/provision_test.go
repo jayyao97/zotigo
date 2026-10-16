@@ -524,6 +524,7 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGitProvisionCommand(t, repository, "branch", "occupied", "main")
+	runGitProvisionCommand(t, repository, "worktree", "add", filepath.Join(t.TempDir(), "occupied"), "occupied")
 	disposable, err := store.CreateWorkspace(ctx, project.ID, "Disposable")
 	if err != nil {
 		t.Fatal(err)
