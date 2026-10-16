@@ -257,7 +257,7 @@ func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, chec
 			continue
 		}
 		if candidate.Branch == branchRef {
-			return fmt.Errorf("%w: workspace branch is used by another worktree", ErrConflict)
+			return fmt.Errorf("%w: branch %q is used by worktree %s", ErrConflict, checkout.BranchName, candidate.Path)
 		}
 	}
 	if exact != nil {
@@ -292,13 +292,31 @@ func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, chec
 	reason := "zotigo workspace " + workspace.ID
 	if ownershipErr == nil {
 		if branchErr != nil || strings.TrimSpace(ownershipHead) != checkout.BaseCommit ||
-			(checkout.Status != "ready" && strings.TrimSpace(branchHead) != checkout.BaseCommit) {
+			(checkout.Status != "ready" && strings.TrimSpace(branchHead) != checkout.OwnedHead) {
 			return fmt.Errorf("%w: workspace branch ownership does not match", ErrConflict)
 		}
-	} else {
-		if branchErr == nil {
-			return fmt.Errorf("%w: workspace branch already exists without Zotigo ownership", ErrConflict)
+	} else if branchErr == nil {
+		// An archived workspace has no worktree, but still needs its branch to
+		// restore. Only reuse branches no other catalog workspace manages.
+		occupied, err := s.branchManagedByAnotherWorkspace(ctx, workspace.ID, source, checkout.BranchName)
+		if err != nil {
+			return err
 		}
+		if occupied || checkout.Status == "ready" {
+			return fmt.Errorf("%w: branch %q is still managed by a workspace or its ownership marker is missing", ErrConflict, checkout.BranchName)
+		}
+		// Record the adopted head before creating the marker so an interrupted
+		// provision can retry without comparing it to the unrelated base ref.
+		head := strings.TrimSpace(branchHead)
+		if err := s.setCheckoutBranchAndOwnedHead(ctx, workspace.ID, checkout.SourceID, checkout.BranchName, head); err != nil {
+			return err
+		}
+		commands := "verify " + branchRef + " " + head + "\n" +
+			"create " + ownershipRef + " " + checkout.BaseCommit + "\n"
+		if _, err := runGitMutationInput(ctx, source.CanonicalPath, commands, "update-ref", "--stdin"); err != nil {
+			return fmt.Errorf("adopt workspace branch refs: %w", err)
+		}
+	} else {
 		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", checkout.BaseRef+"^{commit}")
 		if err != nil {
 			return fmt.Errorf("%w: base ref is unavailable", ErrConflict)
@@ -322,6 +340,38 @@ func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, chec
 
 func checkoutOwnershipRef(workspaceID string, sourceKey string) string {
 	return "refs/zotigo/workspaces/" + workspaceID + "/" + sourceKey
+}
+
+func (s *Store) branchManagedByAnotherWorkspace(ctx context.Context, workspaceID string, source Source, branch string) (bool, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT c.workspace_id, s.source_key FROM workspace_checkouts c
+		JOIN sources s ON s.id = c.source_id JOIN workspaces w ON w.id = c.workspace_id
+		WHERE s.git_common_dir = ? AND c.branch_name = ?
+		AND c.workspace_id != ? AND w.deleted_at IS NULL
+	`, source.GitCommonDir, branch, workspaceID)
+	if err != nil {
+		return false, fmt.Errorf("check existing branch owner: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var ownerID, sourceKey string
+		if err := rows.Scan(&ownerID, &sourceKey); err != nil {
+			return false, err
+		}
+		// A plan alone does not own a branch. The marker also protects
+		// archived and interrupted provisions that have no worktree yet.
+		ref := checkoutOwnershipRef(ownerID, sourceKey)
+		output, err := runGitMutation(ctx, source.CanonicalPath, "for-each-ref", "--format=%(refname)", ref)
+		if err != nil {
+			return false, fmt.Errorf("check workspace ownership ref: %w", err)
+		}
+		for _, found := range strings.Fields(output) {
+			if found == ref {
+				return true, nil
+			}
+		}
+	}
+	return false, rows.Err()
 }
 
 func verifyCheckoutOwnership(ctx context.Context, source Source, checkout Checkout, ownershipRef string) error {
