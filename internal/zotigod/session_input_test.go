@@ -38,3 +38,20 @@ func TestInputMessageAndDisplayItemKeepRequestContext(t *testing.T) {
 		t.Fatal("request context was retained by reference")
 	}
 }
+
+func TestSteeringPreservesTrustedOriginThroughReplay(t *testing.T) {
+	origin := &protocol.RequestContext{Source: "feishu", ConnectionID: "bot", Actor: protocol.RequestActor{ID: "owner"}}
+	command := commandResponse{ID: "channel:bot:steer", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "continue", RequestContext: origin}}
+	steering := steeringCommandForRequest(workerInputRequest{Command: command}, "turn")
+	item := displayItemForAcceptedInput(steering)
+	restored, err := steeringCommandFromItem(item, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := messageCommandForRequest(workerInputRequest{Command: restored})
+	for _, got := range []*protocol.RequestContext{commandRequestContext(steering), item.Command.RequestContext, commandRequestContext(restored), commandRequestContext(message)} {
+		if !sameRequestContext(origin, got) || got == origin {
+			t.Fatalf("origin lost or aliased: %+v", got)
+		}
+	}
+}

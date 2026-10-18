@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/brand/zotigo-app.png" alt="Zotigo" width="112" height="112" />
+</p>
+
 # Zotigo
 
 Zotigo is a next-generation, protocol-centric CLI Agent written in Golang. It is designed to be a universal interface for AI interaction, capable of switching seamlessly between multiple LLM providers while maintaining a unified conversation context.

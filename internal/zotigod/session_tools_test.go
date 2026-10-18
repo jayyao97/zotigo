@@ -70,8 +70,13 @@ func TestSessionToolsResolveTrustedInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	req.Arguments = json.RawMessage(`{}`)
-	if _, err = h.executeRuntimeTool(ctx, caller.SessionID, "generation", req); err == nil {
-		t.Fatal("mixed-principal turn authorized")
+	if _, err = h.executeRuntimeTool(ctx, caller.SessionID, "generation", req); err != nil {
+		t.Fatalf("local steering disabled session tools: %v", err)
+	}
+	req.Name = "read_session"
+	req.Arguments, _ = json.Marshal(map[string]string{"session_id": caller.SessionID})
+	if _, err = h.executeRuntimeTool(ctx, caller.SessionID, "generation", req); err != nil {
+		t.Fatalf("read after local steering: %v", err)
 	}
 }
 
@@ -628,6 +633,7 @@ func TestChannelOwnerReadsAndForksWorkspaceSessions(t *testing.T) {
 		{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "turn"}},
 		{ID: "channel:bot:message", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: sessionCommandMessage, Text: "read history", RequestContext: caller.Origin}},
 		{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "owner-turn"}},
+		{ID: "channel:bot:steering", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: "owner-turn", RequestContext: caller.Origin.Clone()}},
 	} {
 		if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
 			t.Fatal(err)

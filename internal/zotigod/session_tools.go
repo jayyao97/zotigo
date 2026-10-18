@@ -66,10 +66,15 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 			input = pending
 			started = true
 		}
-		// Mixed-principal steering is not an authorization context. Fail closed until
-		// per-input principal intersection is supported, even for local steering.
+		// Steering from the same principal preserves the turn's authority. Do
+		// not let a different sender borrow the initiating input's grants.
 		if sessionScope && started && item.Command != nil && item.Command.Type == sessionCommandSteering {
-			return caller, errors.New("session tools are disabled in turns with steering input")
+			if input == nil || input.Command == nil ||
+				strings.HasPrefix(item.ID, "session_tool:") ||
+				(strings.HasPrefix(item.ID, "channel:") && item.Command.RequestContext == nil) ||
+				!sameSessionToolPrincipal(input.Command.RequestContext, item.Command.RequestContext) {
+				return caller, errors.New("session tools require steering input from the same trusted principal")
+			}
 		}
 	}
 	if input == nil || input.Command == nil {
@@ -95,6 +100,15 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	caller.WorkspaceID = *organization.WorkspaceID
 	caller.Stored = stored
 	return caller, nil
+}
+
+func sameSessionToolPrincipal(left, right *protocol.RequestContext) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return left.Source == right.Source && left.ConnectionID == right.ConnectionID &&
+		left.ConversationID == right.ConversationID && left.ExternalConversation == right.ExternalConversation &&
+		left.Actor.ID != "" && left.Actor.ID == right.Actor.ID
 }
 
 func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string, request workerRuntimeToolRequest) (string, error) {
