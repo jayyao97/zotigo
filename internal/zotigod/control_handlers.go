@@ -97,10 +97,11 @@ type messageCommandPayload struct {
 }
 
 type steeringCommandPayload struct {
-	Text   string             `json:"text"`
-	Images []commandImageData `json:"images,omitempty"`
-	Skills []string           `json:"skills,omitempty"`
-	TurnID string             `json:"turn_id,omitempty"`
+	Text           string                   `json:"text"`
+	Images         []commandImageData       `json:"images,omitempty"`
+	Skills         []string                 `json:"skills,omitempty"`
+	TurnID         string                   `json:"turn_id,omitempty"`
+	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
 }
 
 type pauseCommandPayload struct {
@@ -1180,6 +1181,7 @@ func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (co
 	}
 	if item.Command != nil {
 		command.Steering.Text = item.Command.Text
+		command.Steering.RequestContext = item.Command.RequestContext.Clone()
 		command.Steering.TurnID = item.Command.TurnID
 		command.Steering.Skills = append([]string(nil), item.Command.Skills...)
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)

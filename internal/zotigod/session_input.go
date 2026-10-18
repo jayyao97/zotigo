@@ -69,6 +69,9 @@ func sameCommandInput(existing commandResponse, request commandResponse) bool {
 }
 
 func commandRequestContext(command commandResponse) *protocol.RequestContext {
+	if command.Steering != nil {
+		return command.Steering.RequestContext
+	}
 	if command.Message == nil {
 		return nil
 	}
@@ -120,7 +123,7 @@ func messageCommandForRequest(request workerInputRequest) commandResponse {
 	command := request.Command
 	command.Type = sessionCommandMessage
 	if command.Message == nil && command.Steering != nil {
-		command.Message = &messageCommandPayload{Text: command.Steering.Text, Images: command.Steering.Images, Skills: command.Steering.Skills}
+		command.Message = &messageCommandPayload{Text: command.Steering.Text, Images: command.Steering.Images, Skills: command.Steering.Skills, RequestContext: command.Steering.RequestContext.Clone()}
 	}
 	command.Steering = nil
 	return command
@@ -129,9 +132,10 @@ func messageCommandForRequest(request workerInputRequest) commandResponse {
 func steeringCommandForRequest(request workerInputRequest, turnID string) commandResponse {
 	command := request.Command
 	text, images, skills := commandInput(command)
+	origin := commandRequestContext(command).Clone()
 	command.Type = sessionCommandSteering
 	command.Message = nil
-	command.Steering = &steeringCommandPayload{Text: text, Images: images, Skills: skills, TurnID: turnID}
+	command.Steering = &steeringCommandPayload{Text: text, Images: images, Skills: skills, TurnID: turnID, RequestContext: origin}
 	return command
 }
 
