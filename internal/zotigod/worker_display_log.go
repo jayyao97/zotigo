@@ -19,18 +19,19 @@ type workerDisplayLog struct {
 	barrier   func(context.Context) error
 	delta     func(displayDeltaEvent)
 
-	mu          sync.Mutex
-	turnID      string
-	turnStarted time.Time
-	turnUsage   protocol.Usage
-	terminalID  string
-	terminal    string
-	block       *workerDisplayBlock
-	subagents   map[string]*workerSubagentBlock
-	toolCalls   map[string]chan struct{}
-	toolCallErr map[string]error
-	steering    map[string]commandResponse
-	deltaMuted  bool
+	mu            sync.Mutex
+	turnID        string
+	turnStarted   time.Time
+	turnUsage     protocol.Usage
+	terminalID    string
+	terminal      string
+	block         *workerDisplayBlock
+	subagents     map[string]*workerSubagentBlock
+	toolCalls     map[string]chan struct{}
+	toolCallErr   map[string]error
+	steering      map[string]commandResponse
+	steeringOrder []string
+	deltaMuted    bool
 }
 
 type workerDisplayBlock struct {
@@ -70,6 +71,7 @@ func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
 	l.steering = make(map[string]commandResponse)
+	l.steeringOrder = nil
 	l.deltaMuted = false
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
@@ -96,7 +98,28 @@ func (l *workerDisplayLog) QueueSteering(command commandResponse) {
 	if l.steering == nil {
 		l.steering = make(map[string]commandResponse)
 	}
+	if _, exists := l.steering[command.ID]; !exists {
+		l.steeringOrder = append(l.steeringOrder, command.ID)
+	}
 	l.steering[command.ID] = command
+	// The current block may not emit another delta before it finishes.
+	if l.block != nil && l.delta != nil && !l.deltaMuted {
+		l.delta(displayDeltaEvent{
+			ItemID: l.block.id, Role: string(protocol.RoleAssistant),
+			PartType: l.block.partType, BeforeInputID: l.beforeInputIDLocked(),
+		})
+	}
+}
+
+func (l *workerDisplayLog) beforeInputIDLocked() string {
+	for len(l.steeringOrder) > 0 {
+		id := l.steeringOrder[0]
+		if _, exists := l.steering[id]; exists {
+			return id
+		}
+		l.steeringOrder = l.steeringOrder[1:]
+	}
+	return ""
 }
 
 func (l *workerDisplayLog) DiscardSteering(commandID string) {
@@ -342,10 +365,11 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		l.block.text += event.ContentPartDelta.Text
 		if l.delta != nil && !l.deltaMuted {
 			l.delta(displayDeltaEvent{
-				ItemID:   l.block.id,
-				Role:     string(protocol.RoleAssistant),
-				PartType: partType,
-				Delta:    event.ContentPartDelta.Text,
+				BeforeInputID: l.beforeInputIDLocked(),
+				ItemID:        l.block.id,
+				Role:          string(protocol.RoleAssistant),
+				PartType:      partType,
+				Delta:         event.ContentPartDelta.Text,
 			})
 		}
 	case protocol.EventTypeContentEnd:
@@ -402,12 +426,13 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 	case protocol.EventTypeToolProgress:
 		if event.ToolResult != nil && event.ToolResult.ToolCallID != "" && event.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
 			l.delta(displayDeltaEvent{
-				ItemID:     "tool-progress:" + event.ToolResult.ToolCallID,
-				Role:       string(protocol.RoleAssistant),
-				PartType:   "tool_progress",
-				Delta:      event.ToolResult.Text,
-				ToolCallID: event.ToolResult.ToolCallID,
-				ToolName:   event.ToolResult.ToolName,
+				BeforeInputID: l.beforeInputIDLocked(),
+				ItemID:        "tool-progress:" + event.ToolResult.ToolCallID,
+				Role:          string(protocol.RoleAssistant),
+				PartType:      "tool_progress",
+				Delta:         event.ToolResult.Text,
+				ToolCallID:    event.ToolResult.ToolCallID,
+				ToolName:      event.ToolResult.ToolName,
 			})
 		}
 	case protocol.EventTypeSubagent:
@@ -763,6 +788,9 @@ func (l *workerDisplayLog) completeToolCallLocked(toolCallID string, err error) 
 }
 
 func (l *workerDisplayLog) appendItem(ctx context.Context, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+	if item.Type == zotigosession.DisplayItemAssistantMessage {
+		item.BeforeInputID = l.beforeInputIDLocked()
+	}
 	stored, err := l.items.AppendItem(ctx, l.sessionID, item)
 	if err == nil && l.wake != nil {
 		l.wake(ctx)

@@ -453,6 +453,82 @@ func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
 	}
 }
 
+func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
+	ctx := t.Context()
+	root := newTestStoreRoot(t)
+	store, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const id = "steering-boundary"
+	putStoredSession(t, store, id, t.TempDir())
+	source := storedDisplayItemSource{store: store}
+	display := newWorkerDisplayLog(id, source)
+	turn, err := display.StartTurn(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var deltas []displayDeltaEvent
+	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	if err := display.HandleEvent(ctx, protocol.NewTextDeltaEvent("old thinking")); err != nil {
+		t.Fatal(err)
+	}
+	for _, inputID := range []string{"steer-1", "steer-2"} {
+		command := commandResponse{ID: inputID, Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: inputID, TurnID: turn}}
+		display.QueueSteering(command)
+		if _, err := appendAcceptedSessionInput(ctx, source, id, command); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(deltas) != 3 || deltas[1].BeforeInputID != "steer-1" || deltas[2].BeforeInputID != "steer-1" {
+		t.Fatalf("current preview lost first steering boundary: %+v", deltas)
+	}
+	for _, event := range []protocol.Event{
+		{Type: protocol.EventTypeContentEnd},
+		{Type: protocol.EventTypeToolCallEnd, ToolCall: &protocol.ToolCall{ID: "shell", Name: "shell", Arguments: "{}"}},
+		{Type: protocol.EventTypeToolResultDone, ToolResult: &protocol.ToolResult{ToolCallID: "shell", ToolName: "shell", Text: "interrupted"}},
+		{Type: protocol.EventTypeSteeringApplied, SteeringIDs: []string{"steer-1", "steer-2"}},
+		protocol.NewTextDeltaEvent("new output"),
+		{Type: protocol.EventTypeContentEnd},
+	} {
+		if err := display.HandleEvent(ctx, event); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := zotigosession.NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	items, _, err := reopened.ListDisplayItems(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldOutputs := 0
+	for _, item := range items {
+		if item.Type != zotigosession.DisplayItemAssistantMessage {
+			continue
+		}
+		if len(item.Content) > 0 && item.Content[0].Text == "new output" {
+			if item.BeforeInputID != "" {
+				t.Fatal("new generation retained old steering boundary")
+			}
+			continue
+		}
+		oldOutputs++
+		if publicDisplayItem(item).BeforeInputID != "steer-1" {
+			t.Fatalf("persisted/API boundary missing: %+v", item)
+		}
+	}
+	if oldOutputs != 3 {
+		t.Fatalf("expected thinking, tool call and result, got %d", oldOutputs)
+	}
+}
+
 func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 	ctx := context.Background()
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}

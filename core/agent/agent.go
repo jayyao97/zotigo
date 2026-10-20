@@ -377,7 +377,7 @@ func (a *Agent) GetContextStats() map[string]int {
 	history := a.conversation.history
 	stats["message_count"] = len(history)
 	if a.compressor != nil {
-		stats["estimated_tokens"] = a.compressor.CountTokens(history)
+		stats["estimated_tokens"] = a.contextTokensLocked()
 	}
 	if a.loopDetector != nil {
 		for k, v := range a.loopDetector.Stats() {
@@ -397,7 +397,10 @@ func (a *Agent) ForceCompress(ctx context.Context) (*services.CompressionResult,
 		return nil, fmt.Errorf("compressor not initialized")
 	}
 
-	result, err := a.compressHistoryLocked(ctx, false)
+	if a.runActive || a.state == StatePaused {
+		return nil, fmt.Errorf("cannot compact while the agent is working or awaiting approval")
+	}
+	result, err := a.compressHistoryLocked(ctx, true)
 	if err != nil {
 		return nil, err
 	}
@@ -718,7 +721,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 			a.mu.Lock()
-			msgs, compaction, err := a.buildContext()
+			msgs, contextInput, compaction, err := a.buildContext()
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
@@ -903,6 +906,9 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					asstMsg.Metadata = &protocol.MessageMetadata{}
 				}
 				asstMsg.Metadata.Usage = &normalized
+				asstMsg.Metadata.ContextInput = &contextInput
+				asstMsg.Metadata.Provider = provider.Name()
+				asstMsg.Metadata.Model = model
 			}
 			if !isZeroUsage(toolUsage) {
 				normalized := toolUsage.Normalized()
@@ -2369,19 +2375,19 @@ func isZeroUsage(usage protocol.Usage) bool {
 		usage.CacheReadInputTokens == 0
 }
 
-func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction, error) {
+func (a *Agent) buildContext() ([]protocol.Message, protocol.ContextInput, *protocol.ContextCompaction, error) {
 	msgs := a.systemPromptMessages()
+	contextInput := a.contextPromptFor(msgs)
 	var compaction *protocol.ContextCompaction
 	history := a.projectPromptHistory(a.conversation.history)
 
-	// Compression and dispatch use the same bounded prompt projection, including
-	// system messages. This keeps the trigger and before/after numbers tied to
-	// what the provider is actually about to receive.
-	if a.compressor != nil && a.compressor.NeedsCompression(appendPrompt(msgs, history)) {
-		result, err := a.compressHistoryLocked(context.Background(), false)
+	// The compression path owns the single calibrated threshold check; an outer
+	// local-only gate would suppress valid API-driven compaction.
+	if a.compressor != nil {
+		result, err := a.compressHistoryWithPromptLocked(context.Background(), false, contextInput)
 		if err != nil {
 			if errors.Is(err, ErrHistoryRecord) {
-				return nil, nil, err
+				return nil, contextInput, nil, err
 			}
 			debug.Logf("agent proactive compression failed, continuing uncompressed: %v", err)
 		}
@@ -2397,7 +2403,8 @@ func (a *Agent) buildContext() ([]protocol.Message, *protocol.ContextCompaction,
 	}
 
 	msgs = append(msgs, history...)
-	return msgs, compaction, nil
+	contextInput.HistoryDigest = services.ContextDigest(history)
+	return msgs, contextInput, compaction, nil
 }
 
 func (a *Agent) systemPromptMessages() []protocol.Message {
@@ -2416,13 +2423,6 @@ func (a *Agent) projectPromptHistory(history []protocol.Message) []protocol.Mess
 		return history
 	}
 	return a.compressor.ProjectPrompt(history, 2000)
-}
-
-func appendPrompt(prefix, history []protocol.Message) []protocol.Message {
-	promptMessages := make([]protocol.Message, 0, len(prefix)+len(history))
-	promptMessages = append(promptMessages, prefix...)
-	promptMessages = append(promptMessages, history...)
-	return promptMessages
 }
 
 func (a *Agent) applyPendingTurnUserInput(ctx context.Context, outCh chan<- protocol.Event) (bool, error) {
@@ -2549,11 +2549,17 @@ func (a *Agent) compressHistoryLocked(
 	ctx context.Context,
 	force bool,
 ) (services.CompressionResult, error) {
+	return a.compressHistoryWithPromptLocked(ctx, force, a.contextPromptLocked())
+}
+
+func (a *Agent) compressHistoryWithPromptLocked(
+	ctx context.Context,
+	force bool,
+	prompt protocol.ContextInput,
+) (services.CompressionResult, error) {
 	history := a.projectPromptHistory(a.conversation.history)
-	prefix := a.systemPromptMessages()
-	promptBefore := appendPrompt(prefix, history)
-	if !force && !a.compressor.NeedsCompression(promptBefore) {
-		tokens := a.compressor.EstimatePromptTokens(promptBefore)
+	tokens, _ := a.compressor.ContextTokens(history, prompt)
+	if !force && !a.compressor.NeedsCompressionTokens(tokens) {
 		return services.CompressionResult{
 			OriginalTokens: tokens, CompressedTokens: tokens,
 			MessagesBefore: len(history), MessagesAfter: len(history),
@@ -2569,15 +2575,17 @@ func (a *Agent) compressHistoryLocked(
 	if err != nil || !result.Compressed {
 		return result, err
 	}
-	result.OriginalTokens = a.compressor.CountTokens(promptBefore)
+	result.OriginalTokens = tokens
 
 	rebased, state, err := a.rebaseUserContext(compressed)
 	if err != nil {
 		return services.CompressionResult{}, err
 	}
 	result.MessagesAfter = len(rebased)
-	result.CompressedTokens = a.compressor.CountTokens(appendPrompt(prefix, a.projectPromptHistory(rebased)))
-	if result.CompressedTokens >= result.OriginalTokens || result.MessagesAfter >= result.MessagesBefore {
+	result.CompressedTokens, _ = a.compressor.ContextTokens(rebased, prompt)
+	// Compare local-to-local to verify that rewriting actually reduced input;
+	// a provider-calibrated "before" and local "after" are not comparable.
+	if a.compressor.CountTokens(a.projectPromptHistory(rebased)) >= a.compressor.CountTokens(history) || result.MessagesAfter >= result.MessagesBefore {
 		result.Compressed = false
 		result.CompressedTokens = result.OriginalTokens
 		result.MessagesAfter = result.MessagesBefore

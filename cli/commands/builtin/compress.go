@@ -40,7 +40,7 @@ func (c *CompressCommand) Execute(ctx context.Context, env *commands.Environment
 	}
 
 	if !result.Compressed {
-		env.Output("No compression needed.\n")
+		env.Output("History cannot be reduced further.\n")
 		env.Output("Current context: %d messages, ~%d tokens", messagesBefore, tokensBefore)
 		return nil
 	}

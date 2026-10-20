@@ -8957,7 +8957,8 @@ func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 	assertUsage := func(handler *handler, saved *zotigosession.Session) {
 		t.Helper()
 		got := handler.decorateSession(context.Background(), sessionFromMetadata(saved.Metadata, SessionStateOffline, false), saved).ContextUsage
-		if got == nil || got.Status != "available" || got.Source != "provider" || got.Tokens != 80_000 {
+		want := services.NewCompressor(services.CompressorConfig{}).CountTokens(compressed)
+		if got == nil || got.Status != "available" || got.Source != "estimate" || got.Tokens != want || got.Tokens >= 80_000 {
 			t.Fatalf("context usage after compaction = %#v", got)
 		}
 	}

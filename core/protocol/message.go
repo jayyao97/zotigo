@@ -21,10 +21,21 @@ type MessageMetadata struct {
 	Provider       string          `json:"provider,omitempty"`
 	Model          string          `json:"model,omitempty"`
 	Usage          *Usage          `json:"usage,omitempty"`
+	ContextInput   *ContextInput   `json:"context_input,omitempty"`
 	ToolUsage      *Usage          `json:"tool_usage,omitempty"`
 	OriginalText   string          `json:"original_text,omitempty"`
 	RequestContext *RequestContext `json:"request_context,omitempty"`
 	Raw            map[string]any  `json:"raw,omitempty"`
+}
+
+// ContextInput identifies the request measured by this message's Usage.
+// It contains no prompt text. PrefixTokens accounts for system/tool definitions
+// when a dormant session is displayed without constructing a live agent.
+type ContextInput struct {
+	HistoryDigest string `json:"history_digest"`
+	PromptKey     string `json:"prompt_key"`
+	ProfileKey    string `json:"profile_key"`
+	PrefixTokens  int    `json:"prefix_tokens"`
 }
 
 // RequestContext is host-attributed provenance for one user input. Roles in

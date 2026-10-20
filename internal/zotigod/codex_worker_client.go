@@ -92,6 +92,14 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 			returnErr = errors.Join(returnErr, runtime.Close())
 			returnErr = errors.Join(returnErr, runtime.cleanupSkillFiles())
 		}
+		if appClient != nil {
+			_ = appClient.Close()
+		}
+		// Finish reporting takes the daemon's session operation lock. Release
+		// storage first so workspace archival can wait for shutdown under that lock.
+		if unlockErr := unlock(); unlockErr != nil {
+			returnErr = errors.Join(returnErr, unlockErr)
+		}
 		if runErr == nil {
 			runErr = returnErr
 		}
@@ -106,14 +114,8 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		if writer != nil {
 			writer.Close()
 		}
-		if appClient != nil {
-			_ = appClient.Close()
-		}
 		if workerConn != nil {
 			_ = workerConn.Close()
-		}
-		if unlockErr := unlock(); unlockErr != nil {
-			returnErr = errors.Join(returnErr, unlockErr)
 		}
 		_ = store.Close()
 	}()
@@ -347,6 +349,7 @@ type codexWorkerRuntime struct {
 	hasTotalUsage        bool
 	messages             map[string]string
 	messageOrder         []string
+	displayItems         map[string]codexActiveDisplayItem
 	toolNames            map[string]string
 	toolArguments        map[string]string
 	toolNativeNames      map[string]string
@@ -359,6 +362,20 @@ type codexWorkerRuntime struct {
 	approvals            map[string]codexPendingApproval
 	runtimeToolResults   <-chan workerRuntimeToolResult
 	activeRequestContext *protocol.RequestContext
+}
+
+type codexActiveDisplayItem struct {
+	partType      string
+	beforeInputID string
+}
+
+func (r *codexWorkerRuntime) trackDisplayItem(id, partType string) {
+	if r.displayItems == nil {
+		r.displayItems = make(map[string]codexActiveDisplayItem)
+	}
+	if _, exists := r.displayItems[id]; !exists {
+		r.displayItems[id] = codexActiveDisplayItem{partType: partType}
+	}
 }
 
 type codexPendingInteraction struct {
@@ -693,6 +710,21 @@ func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command comm
 }
 
 func (r *codexWorkerRuntime) persistSteering(command commandResponse, turnID string) error {
+	// turn/steer acknowledges admission, not an item/generation boundary.
+	// Anchor only items already in flight; later item/started notifications
+	// belong after this input. Keep the first boundary for repeated steering.
+	for id, active := range r.displayItems {
+		if active.beforeInputID != "" {
+			continue
+		}
+		active.beforeInputID = command.ID
+		r.displayItems[id] = active
+		if r.writer != nil && (active.partType == "text" || active.partType == "reasoning") {
+			r.writer.SendDelta(displayDeltaEvent{
+				ItemID: id, Role: "assistant", PartType: active.partType, BeforeInputID: command.ID,
+			})
+		}
+	}
 	images := displayImagesFromCommand(command.Steering.Images)
 	item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
 	item.ID = command.ID
@@ -1525,8 +1557,9 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if _, exists := r.messages[delta.ItemID]; !exists {
 			r.messageOrder = append(r.messageOrder, delta.ItemID)
 		}
+		r.trackDisplayItem(delta.ItemID, "text")
 		r.messages[delta.ItemID] += delta.Delta
-		r.writer.SendDelta(displayDeltaEvent{ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: string(protocol.ContentTypeText), Delta: delta.Delta})
+		r.writer.SendDelta(displayDeltaEvent{ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: string(protocol.ContentTypeText), Delta: delta.Delta, BeforeInputID: r.displayItems[delta.ItemID].beforeInputID})
 	case "item/started":
 		var started codexItemNotification
 		if err := sonic.Unmarshal(message.Params, &started); err != nil {
@@ -1535,10 +1568,17 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if !r.matchesActiveItem(started.ThreadID, started.TurnID, started.Item.ID) {
 			return nil
 		}
+		switch started.Item.Type {
+		case "agentMessage":
+			r.trackDisplayItem(started.Item.ID, "text")
+		case "reasoning":
+			r.trackDisplayItem(started.Item.ID, "reasoning")
+		}
 		name, arguments, ok, err := codexToolCall(started.Item)
 		if err != nil || !ok {
 			return err
 		}
+		r.trackDisplayItem(started.Item.ID, "tool_progress")
 		if r.toolNames == nil {
 			r.toolNames = make(map[string]string)
 		}
@@ -1581,7 +1621,8 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 		r.writer.SendDelta(displayDeltaEvent{
 			ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: "tool_progress", Delta: delta.Delta,
-			ToolCallID: delta.ItemID, ToolName: r.toolNames[delta.ItemID],
+			BeforeInputID: r.displayItems[delta.ItemID].beforeInputID,
+			ToolCallID:    delta.ItemID, ToolName: r.toolNames[delta.ItemID],
 		})
 	case "item/completed":
 		var completed codexItemNotification
@@ -1591,6 +1632,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if !r.matchesActiveItem(completed.ThreadID, completed.TurnID, completed.Item.ID) {
 			return nil
 		}
+		defer delete(r.displayItems, completed.Item.ID)
 		switch completed.Item.Type {
 		case "agentMessage":
 			text := completed.Item.Text
@@ -1715,6 +1757,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.turnUsage = protocol.Usage{}
 		r.messages = make(map[string]string)
 		r.messageOrder = nil
+		r.displayItems = nil
 		r.toolNames = make(map[string]string)
 		r.toolArguments = make(map[string]string)
 		r.toolNativeNames = make(map[string]string)
@@ -1976,6 +2019,15 @@ func codexFailedStatus(status string) bool {
 }
 
 func (r *codexWorkerRuntime) append(item zotigosession.DisplayItem) error {
+	if item.Type == zotigosession.DisplayItemAssistantMessage {
+		item.BeforeInputID = r.displayItems[item.ID].beforeInputID
+		for _, part := range item.Content {
+			if part.ToolResult != nil {
+				item.BeforeInputID = r.displayItems[part.ToolResult.ToolCallID].beforeInputID
+				break
+			}
+		}
+	}
 	if _, err := r.store.AppendDisplayItem(context.Background(), r.cfg.SessionID, item); err != nil {
 		return err
 	}

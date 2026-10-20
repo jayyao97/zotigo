@@ -386,7 +386,9 @@ If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}` retur
 }
 ```
 
-`context_usage.tokens` is the latest provider-reported prompt/input occupancy, not cumulative session usage or the size of unprocessed history. The last valid snapshot survives later notifications that omit usage fields and daemon restart. When no reliable snapshot exists, `context_usage` is still present as `{"status":"unavailable"}`; clients must not infer zero usage. `source` and `updated_at` identify the measurement origin and age. Existing clients may ignore these additive fields.
+`context_usage.tokens` is context occupancy, never cumulative session usage. Codex reports its provider snapshot (`source: "provider"`). Native sessions use the last valid API input plus a local estimate of retained assistant output and subsequent user/tool messages (`source: "provider_estimate"`); a request fingerprint validates the history prefix and model configuration. After history replacement/compaction, a model change, or when legacy usage has no fingerprint, native sessions fall back to a local estimate (`source: "estimate"`). Dormant sessions reuse the last worker's static prompt estimate; the worker revalidates system/tool definitions before its next request. `updated_at` identifies the last measurement's time. A session with no context has `{"status":"unavailable"}`; clients must not infer zero usage. Clients may ignore the additive source field, but should distinguish estimates and show over-limit token counts honestly.
+
+For an idle native session, sending the bare text `/compact` (or `/compress`) through the normal message endpoint performs manual compaction without forwarding the command to the model. It bypasses the automatic token threshold, persists the rewritten history, and reports either a `context_compacted` event or a message explaining that the history cannot be reduced further. Commands with attachments/skills or channel provenance remain ordinary prompts. During an active turn manual compaction is rejected; wait for the turn to finish or stop it first. The normal client message ID deduplication applies.
 
 `GET /sessions` is an index-backed catalog read: it does not load each session snapshot or display log. Live `working` and `active_tool` values come from the in-memory runtime registry. Clients that need history-derived context usage or other detail for the selected session should use `GET /sessions/{id}`.
 
@@ -452,6 +454,13 @@ Query parameters:
 - `limit`: number of items to return. Defaults to the most recent `50`, maximum `200`.
 - `after`: return items with `sequence` greater than this cursor.
 - `before`: return items with `sequence` lower than this cursor.
+
+Assistant items and streaming deltas may carry `before_input_id`. Render that
+output before the input identified by this field, preserving output order. This boundary
+is persisted on completed items, so reconnects and other clients use the same
+ordering. `sequence` remains the storage/pagination cursor. If the referenced
+input is outside the loaded page (or absent), preserve sequence order; older
+items without this field also retain sequence order.
 
 `after` and `before` are mutually exclusive. Responses are always ordered by `sequence` ascending, including the default recent page.
 
@@ -1150,6 +1159,13 @@ as idempotency receipts until session deletion. Reusing an ID for different
 input returns HTTP 409; clients should use a new ID for a new submission.
 
 `POST /sessions/{id}/queue/resume` explicitly resumes a paused queue while idle.
+`POST /sessions/{id}/queue/{item}/send` takes `{ "revision": 1 }` and sends
+only that editable item immediately using normal start-or-steer admission.
+Images and skills are preserved; remaining queue order is unchanged. Stale or
+already claimed items return 409. A repeated request for a sent item returns
+200 without resending. Uncertain admissions remain frozen for reconciliation;
+definite rejections leave the item available to retry with its new revision.
+
 Normal turn completion dispatches the next batch; failure or interruption pauses
 it. Daemon restart also pauses pending batches. Uncertain admissions retain the
 batch ID and frozen contents until reconciliation; definite rejections unlock

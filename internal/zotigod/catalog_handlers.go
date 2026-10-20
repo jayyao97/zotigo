@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
@@ -644,9 +645,37 @@ func (h *handler) lockWorkspaceSessions(ctx context.Context, workspaceID string)
 			unlocks[index]()
 		}
 	}
+	// Check every session before releasing any idle workers. Session operation
+	// locks keep message admission and queue draining out until removal finishes.
+	idleSessions := make([]string, 0)
 	for _, sessionID := range sessionIDs {
-		if session, ok := h.registry.Get(sessionID); ok && sessionIsActive(session) {
+		session, exists := h.registry.Get(sessionID)
+		active := exists && sessionIsActive(session)
+		if active && h.items != nil {
+			items, _, err := h.items.LoadItems(ctx, sessionID)
+			if err != nil {
+				release()
+				return func() {}, false, err
+			}
+			if requireIdleSession(items) != nil || hasPendingHumanRequest(items) {
+				return release, true, nil
+			}
+		}
+		queued, err := h.catalog.QueuedInputs(ctx, sessionID)
+		if err != nil {
+			release()
+			return func() {}, false, err
+		}
+		if len(queued) > 0 {
 			return release, true, nil
+		}
+		ownsIdleWorker := false
+		if active {
+			if session.State != SessionStateRunning || session.Working || h.items == nil {
+				return release, true, nil
+			}
+			ownsIdleWorker = h.workers.Has(sessionID)
+			idleSessions = append(idleSessions, sessionID)
 		}
 		if h.store != nil {
 			locked, err := h.store.IsLocked(ctx, sessionID)
@@ -654,8 +683,41 @@ func (h *handler) lockWorkspaceSessions(ctx context.Context, workspaceID string)
 				release()
 				return func() {}, false, err
 			}
-			if locked {
+			if locked && !ownsIdleWorker {
 				return release, true, nil
+			}
+		}
+	}
+	for _, sessionID := range idleSessions {
+		if _, err := h.registry.ReleaseIdleWorker(sessionID); err != nil {
+			release()
+			return func() {}, false, err
+		}
+		// Detach suppresses the disconnect callback, which also needs sessionOps.
+		closeDetachedWorker(h.workers.Detach(sessionID))
+	}
+	// Closing the connection is asynchronous from the worker process's point
+	// of view. Never remove its worktree until the worker releases its lock.
+	waitCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	for _, sessionID := range idleSessions {
+		if h.store == nil {
+			continue
+		}
+		for {
+			locked, err := h.store.IsLocked(waitCtx, sessionID)
+			if err != nil {
+				release()
+				return func() {}, false, fmt.Errorf("%w: idle workers were released, but their session locks could not be checked; workspace was not removed, retry shortly: %w", zotigoworkspace.ErrConflict, err)
+			}
+			if !locked {
+				break
+			}
+			select {
+			case <-waitCtx.Done():
+				release()
+				return func() {}, false, fmt.Errorf("%w: idle workers were released, but their session locks are still closing; workspace was not removed, retry shortly: %w", zotigoworkspace.ErrConflict, waitCtx.Err())
+			case <-time.After(20 * time.Millisecond):
 			}
 		}
 	}

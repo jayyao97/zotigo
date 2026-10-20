@@ -140,6 +140,19 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 	return result, nil
 }
 
+// ClaimQueuedInput reserves one editable item without changing the other rows.
+func (s *Store) ClaimQueuedInput(ctx context.Context, sessionID, id string, revision int64, batchID string) error {
+	result, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='sending',batch_id=?,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused')`, batchID, sessionID, id, revision)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count != 1 {
+		return ErrQueueConflict
+	}
+	return err
+}
+
 func (s *Store) FinishQueuedBatch(ctx context.Context, sessionID, batchID string, success bool) error {
 	state := "paused"
 	if success {

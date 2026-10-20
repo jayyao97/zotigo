@@ -394,6 +394,7 @@ type workerRuntime struct {
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
 	turnActive          bool
+	turnCompacting      bool
 	turnStopping        bool
 	turnReady           chan struct{}
 	turnDone            chan struct{}
@@ -739,17 +740,6 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequ
 }
 
 func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
-	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
-		r.mu.Lock()
-		promptRevision := r.promptConfig.Revision
-		r.mu.Unlock()
-		if request.RequiredApprovalPolicy != "" && r.agent.RequestedApprovalPolicy() != request.RequiredApprovalPolicy {
-			return commandResponse{}, errInputPolicyMismatch
-		}
-		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
-			return commandResponse{}, errInputPolicyMismatch
-		}
-	}
 	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
 		return commandResponse{}, err
 	} else if found {
@@ -764,7 +754,24 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		}
 		return existing, nil
 	}
-
+	// Do not wait for Agent.mu while manual compaction is summarizing.
+	r.mu.Lock()
+	compacting := r.turnCompacting
+	r.mu.Unlock()
+	if compacting {
+		return commandResponse{}, fmt.Errorf("%w: context compaction is in progress", errActiveTurn)
+	}
+	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
+		r.mu.Lock()
+		promptRevision := r.promptConfig.Revision
+		r.mu.Unlock()
+		if request.RequiredApprovalPolicy != "" && r.agent.RequestedApprovalPolicy() != request.RequiredApprovalPolicy {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+	}
 	turnID := r.display.CurrentTurnID()
 	if request.StartOnly {
 		r.mu.Lock()
@@ -779,6 +786,9 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 	}
 	if request.SteeringOnly && turnID == "" {
 		return commandResponse{}, errNoActiveTurn
+	}
+	if isCompactCommand(messageCommandForRequest(request).Message) && turnID != "" {
+		return commandResponse{}, fmt.Errorf("%w: wait for the current turn to finish before /compact", errActiveTurn)
 	}
 
 	message, err := inputMessageFromRequest(request)
@@ -1338,6 +1348,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	turnCtx, cancel := context.WithCancel(context.Background())
 	r.turnCancel = cancel
 	r.turnActive = true
+	r.turnCompacting = isCompactCommand(command)
 	r.turnStopping = false
 	r.turnReady = make(chan struct{})
 	r.turnDone = make(chan struct{})
@@ -1366,7 +1377,13 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	dispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
 	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
 	go func() {
-		runErr := r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
+		var runErr error
+		if isCompactCommand(command) {
+			r.markTurnReady()
+			runErr = r.compactTurn(turnCtx)
+		} else {
+			runErr = r.runner.RunFullTurnStarted(turnCtx, msg, r.markTurnReady)
+		}
 		if runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, zotigotransport.ErrTransportClosed) {
 			_ = r.display.Fail(context.Background(), runErr)
 		}
@@ -1394,6 +1411,43 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		}
 	}()
 	return nil
+}
+
+// Only bare, local commands are interpreted; text with attachments, skills or
+// channel provenance remains normal model input.
+func isCompactCommand(command *messageCommandPayload) bool {
+	if command == nil || len(command.Images) != 0 || len(command.Skills) != 0 || command.RequestContext != nil {
+		return false
+	}
+	switch strings.TrimSpace(command.Text) {
+	case "/compact", "/compress":
+		return true
+	}
+	return false
+}
+
+func (r *workerRuntime) compactTurn(ctx context.Context) error {
+	result, err := r.agent.ForceCompress(ctx)
+	if err != nil {
+		return err
+	}
+	text := "Nothing to compact: the retained history cannot be reduced further."
+	if result.Compressed {
+		if err := r.display.HandleEvent(ctx, protocol.Event{
+			Type: protocol.EventTypeContextCompacted,
+			ContextCompaction: &protocol.ContextCompaction{
+				OriginalTokens: result.OriginalTokens, CompressedTokens: result.CompressedTokens,
+				MessagesBefore: result.MessagesBefore, MessagesAfter: result.MessagesAfter,
+			},
+		}); err != nil {
+			return err
+		}
+		text = fmt.Sprintf("Context compacted: %d → %d messages. Estimated next input: %d tokens.", result.MessagesBefore, result.MessagesAfter, result.CompressedTokens)
+	}
+	if err := r.display.HandleEvent(ctx, protocol.NewTextDeltaEvent(text)); err != nil {
+		return err
+	}
+	return r.display.HandleEvent(ctx, protocol.NewFinishEvent(protocol.FinishReasonStop))
 }
 
 func messageFromCommandWithSkills(commandID string, command *messageCommandPayload, manager *skills.SkillManager) (protocol.Message, error) {
@@ -1524,6 +1578,7 @@ func (r *workerRuntime) finishTurn() {
 	r.closeTurnDoneLocked()
 	r.turnCancel = nil
 	r.turnActive = false
+	r.turnCompacting = false
 	r.turnStopping = false
 	if r.channelTools != nil {
 		r.channelTools.setRequestContext(nil)

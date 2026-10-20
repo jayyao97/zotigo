@@ -22,6 +22,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
@@ -493,6 +494,8 @@ type handler struct {
 	channels             *channels.Service
 	skillsMu             sync.Mutex
 	skillManagers        map[string]*skills.SkillManager
+	contextUsageMu       sync.Mutex
+	contextUsageCache    map[string]contextUsageCacheEntry
 }
 
 type createSessionRequest struct {
@@ -969,7 +972,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	handler.workers.SetMessageHandler(func(sessionID string, generation string, msg workerMessage) {
 		switch msg.Type {
 		case workerMessageDelta:
-			if msg.Delta == nil || msg.Delta.ItemID == "" || msg.Delta.Delta == "" {
+			if msg.Delta == nil || msg.Delta.ItemID == "" || (msg.Delta.Delta == "" && msg.Delta.BeforeInputID == "") {
 				return
 			}
 			switch msg.Delta.PartType {
@@ -1109,6 +1112,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/queue", withPathValue("id", handler.handleInputQueue))
 	mux.HandleFunc("/sessions/{id}/queue/resume", withPathValue("id", handler.handleResumeInputQueue))
 	mux.HandleFunc("/sessions/{id}/queue/{item}", handler.handleQueuedInput)
+	mux.HandleFunc("/sessions/{id}/queue/{item}/send", handler.handleSendQueuedInput)
 	mux.HandleFunc("/sessions/{id}/fork", withPathValue("id", handler.handleSessionFork))
 	mux.HandleFunc("/sessions/{id}/pause", withPathValue("id", handler.handleSessionPause))
 	mux.HandleFunc("/sessions/{id}/profile", withPathValue("id", handler.handleSessionProfile))
@@ -1872,30 +1876,31 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 			session.Working = false
 			session.ActiveTool = ""
 		}
-		for idx := len(items) - 1; idx >= 0; idx-- {
-			if usage := items[idx].ContextUsage; usage != nil && usage.Tokens > 0 && usage.Window > 0 {
-				status := usage.Status
-				if status == "" {
-					status = "available"
+		if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
+			for idx := len(items) - 1; idx >= 0; idx-- {
+				if usage := items[idx].ContextUsage; usage != nil && usage.Tokens > 0 && usage.Window > 0 {
+					status := usage.Status
+					if status == "" {
+						status = "available"
+					}
+					source := usage.Source
+					if source == "" {
+						source = "provider"
+					}
+					updatedAt := usage.UpdatedAt
+					if updatedAt.IsZero() {
+						updatedAt = items[idx].CreatedAt
+					}
+					session.ContextUsage = &SessionContextUsage{Tokens: usage.Tokens, Window: usage.Window, Status: status, Source: source, UpdatedAt: updatedAt}
+					break
 				}
-				source := usage.Source
-				if source == "" {
-					source = "provider"
-				}
-				updatedAt := usage.UpdatedAt
-				if updatedAt.IsZero() {
-					updatedAt = items[idx].CreatedAt
-				}
-				session.ContextUsage = &SessionContextUsage{Tokens: usage.Tokens, Window: usage.Window, Status: status, Source: source, UpdatedAt: updatedAt}
-				break
 			}
 		}
 	}
 	if stored == nil || zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex || session.ContextUsage.Status == "available" {
 		return session
 	}
-	usage, ok := protocol.LastTurnUsage(stored.AgentSnapshot.History)
-	if !ok {
+	if len(stored.AgentSnapshot.History) == 0 {
 		return session
 	}
 	appConfig, err := config.NewManager().LoadForDir(session.WorkingDirectory)
@@ -1911,9 +1916,18 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 		contextWindow = config.DefaultContextWindow
 	}
 	updatedAt := session.UpdatedAt
+	prompt := protocol.ContextInput{ProfileKey: services.ContextProfileKey(profile)}
 	for idx := len(stored.AgentSnapshot.History) - 1; idx >= 0; idx-- {
 		message := stored.AgentSnapshot.History[idx]
 		if message.Role == protocol.RoleAssistant && message.Metadata != nil && message.Metadata.Usage != nil {
+			if anchor := message.Metadata.ContextInput; anchor != nil {
+				// Dormant sessions use the last worker's static prompt estimate.
+				// The worker revalidates system/tool definitions before dispatch.
+				prompt.PrefixTokens = anchor.PrefixTokens
+				if anchor.ProfileKey == prompt.ProfileKey {
+					prompt.PromptKey = anchor.PromptKey
+				}
+			}
 			updatedAt = message.CreatedAt
 			if message.FinishedAt != nil {
 				updatedAt = *message.FinishedAt
@@ -1921,17 +1935,24 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 			break
 		}
 	}
-	inputTokens := usage.TotalInput()
-	if inputTokens <= 0 {
-		return session
+	inputTokens, calibrated := h.nativeContextTokens(session.ID, stored.AgentSnapshot.History, prompt)
+	source := "estimate"
+	if calibrated {
+		source = "provider_estimate"
 	}
-	session.ContextUsage = &SessionContextUsage{Tokens: inputTokens, Window: contextWindow, Status: "available", Source: "provider", UpdatedAt: updatedAt}
+	session.ContextUsage = &SessionContextUsage{Tokens: inputTokens, Window: contextWindow, Status: "available", Source: source, UpdatedAt: updatedAt}
 	return session
 }
 
 func unavailableSessionContextUsage() *SessionContextUsage {
 	return &SessionContextUsage{Status: "unavailable"}
 }
+
+// Read-only counting is shared across sessions; constructing a tokenizer for
+// every session on every sidebar refresh rebuilds the BPE tables.
+var nativeContextEstimator = sync.OnceValue(func() *services.Compressor {
+	return services.NewCompressor(services.CompressorConfig{})
+})
 
 func activeToolName(items []zotigosession.DisplayItem) string {
 	active := make(map[string]string)

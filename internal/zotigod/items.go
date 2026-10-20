@@ -241,6 +241,7 @@ func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigose
 }
 
 type itemResponse struct {
+	BeforeInputID     string                            `json:"before_input_id,omitempty"`
 	ID                string                            `json:"id"`
 	Sequence          uint64                            `json:"sequence"`
 	Type              string                            `json:"type"`
@@ -471,6 +472,7 @@ func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.D
 
 func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 	return itemResponse{
+		BeforeInputID:     item.BeforeInputID,
 		ID:                item.ID,
 		Sequence:          item.Sequence,
 		Type:              string(item.Type),

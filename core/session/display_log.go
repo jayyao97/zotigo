@@ -214,6 +214,9 @@ type DisplayContextCompaction struct {
 }
 
 type DisplayItem struct {
+	// BeforeInputID keeps output from the interrupted generation before the
+	// steering input even when that output becomes durable after admission.
+	BeforeInputID     string                       `json:"before_input_id,omitempty"`
 	ID                string                       `json:"id"`
 	Sequence          uint64                       `json:"sequence"`
 	Type              DisplayItemType              `json:"type"`
