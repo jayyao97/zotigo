@@ -241,6 +241,11 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 	if event.eventType != "delta" || event.id != "" || event.delta.ItemID != "item-from-worker" || event.delta.Delta != "thinking" {
 		t.Fatalf("worker delta event = %#v", event)
 	}
+	writer.SendDelta(displayDeltaEvent{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", BeforeInputID: "steering-input"})
+	boundary := readDisplayEvent(t, reader)
+	if boundary.eventType != "delta" || boundary.delta.BeforeInputID != "steering-input" || boundary.delta.Delta != "" {
+		t.Fatalf("metadata-only ordering delta lost: %#v", boundary)
+	}
 }
 
 func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {

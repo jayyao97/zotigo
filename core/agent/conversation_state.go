@@ -139,6 +139,10 @@ func cloneMessage(message protocol.Message) protocol.Message {
 			usage := *metadata.Usage
 			metadata.Usage = &usage
 		}
+		if metadata.ContextInput != nil {
+			contextInput := *metadata.ContextInput
+			metadata.ContextInput = &contextInput
+		}
 		if metadata.ToolUsage != nil {
 			usage := *metadata.ToolUsage
 			metadata.ToolUsage = &usage

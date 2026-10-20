@@ -3,6 +3,7 @@ package zotigod
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -41,11 +42,13 @@ func (s *slowQueueHistory) LoadItems(ctx context.Context, id string) ([]zotigose
 
 func TestQueuedInputsWaitForTurnAndMerge(t *testing.T) {
 	for _, agent := range []string{"zotigo", "codex"} {
-		t.Run(agent, func(t *testing.T) { testQueuedInputsWaitForTurnAndMerge(t, agent) })
+		t.Run(agent, func(t *testing.T) { testQueuedInputsWaitForTurnAndMerge(t, agent, false, false) })
+		t.Run(agent+" send now", func(t *testing.T) { testQueuedInputsWaitForTurnAndMerge(t, agent, true, false) })
+		t.Run(agent+" error after admission", func(t *testing.T) { testQueuedInputsWaitForTurnAndMerge(t, agent, true, true) })
 	}
 }
 
-func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string) {
+func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, failAfterAdmission bool) {
 	ctx := context.Background()
 	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
@@ -110,12 +113,98 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string) {
 	if len(listed.Items) != 2 || listed.Items[0].Text != "edited" || listed.Items[0].State != "queued" {
 		t.Fatalf("queue=%+v response=%d %s", listed, rec.Code, rec.Body.String())
 	}
+	var idleSequence uint64
+	if sendNow {
+		if rec := request("POST", "/b/send", `{"revision":99}`); rec.Code != 409 {
+			t.Fatalf("stale send = %d", rec.Code)
+		}
+		done := make(chan *httptest.ResponseRecorder, 1)
+		go func() { done <- request("POST", "/b/send", `{"revision":1}`) }()
+		if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		var input workerMessage
+		if err := worker.ReadJSON(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.InputRequest == nil || input.InputRequest.StartOnly || input.InputRequest.Command.Message.Text != "b" {
+			t.Fatalf("immediate input = %+v", input)
+		}
+		// A definite rejection must preserve the item and permit a fresh retry.
+		if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{RequestID: input.InputRequest.RequestID, ErrorCode: "input_failed", Error: "image decoding failed before admission"}}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case rec := <-done:
+			if rec.Code != 409 {
+				t.Fatalf("rejection = %d", rec.Code)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("rejection timed out")
+		}
+		row, err := catalog.QueuedInputByID(ctx, sessionID, "b")
+		if err != nil || row == nil || row.BatchID != "" || row.State != "queued" {
+			t.Fatalf("rejected item lost: %+v %v", row, err)
+		}
+		go func() { done <- request("POST", "/b/send", fmt.Sprintf(`{"revision":%d}`, row.Revision)) }()
+		if err := worker.ReadJSON(&input); err != nil {
+			t.Fatal(err)
+		}
+		if input.InputRequest == nil {
+			t.Fatal("retry input missing")
+		}
+		command := steeringCommandForRequest(*input.InputRequest, "old")
+		accepted, err := appendAcceptedSessionInput(ctx, source, sessionID, command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		idleSequence = accepted.Sequence
+		result := &workerInputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}
+		wantStatus := 200
+		if failAfterAdmission {
+			result.Command = nil
+			result.ErrorCode, result.Error = "input_failed", "approval interruption failed after admission"
+		}
+		if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: result}); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case rec := <-done:
+			if rec.Code != wantStatus {
+				t.Fatalf("send now: %d %s", rec.Code, rec.Body.String())
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("send now timed out")
+		}
+		if failAfterAdmission {
+			row, err := catalog.QueuedInputByID(ctx, sessionID, "b")
+			if err != nil || row == nil || row.BatchID != accepted.ID || row.State != "sent" {
+				t.Fatalf("durable admission must reconcile immediately: %+v %v", row, err)
+			}
+			body := fmt.Sprintf(`{"revision":%d}`, row.Revision)
+			if rec := request("POST", "/b/send", body); rec.Code != 200 {
+				t.Fatalf("reconciled retry = %d", rec.Code)
+			}
+			rows, err := catalog.QueuedInputs(ctx, sessionID)
+			if err != nil || len(rows) != 1 || rows[0].ID != "a" {
+				t.Fatalf("reconciliation lost remaining queue: %+v %v", rows, err)
+			}
+			return
+		}
+		if rec := request("POST", "/b/send", `{"revision":1}`); rec.Code != 200 {
+			t.Fatalf("repeat send = %d", rec.Code)
+		}
+		rows, err := catalog.QueuedInputs(ctx, sessionID)
+		if err != nil || len(rows) != 1 || rows[0].ID != "a" || rows[0].State != "queued" {
+			t.Fatalf("remaining queue: %+v %v", rows, err)
+		}
+	}
 	if _, err := source.AppendItem(ctx, sessionID, zotigosession.DisplayItem{ID: "turn-end", Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "old", Status: "completed"}, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	// Preparation deliberately exceeds Codex's 250ms idle eviction timeout.
 	source.delay.Store(true)
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: 0}}); err != nil {
+	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: idleSequence}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
@@ -127,7 +216,11 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string) {
 		current, _ := registry.Get(sessionID)
 		t.Fatalf("read input: %v queue=%+v session=%+v", err, rows, current)
 	}
-	if input.InputRequest == nil || !input.InputRequest.StartOnly || input.InputRequest.Command.Message.Text != "edited\n\nb" {
+	wantText := "edited\n\nb"
+	if sendNow {
+		wantText = "edited"
+	}
+	if input.InputRequest == nil || !input.InputRequest.StartOnly || input.InputRequest.Command.Message.Text != wantText {
 		t.Fatalf("input=%+v", input)
 	}
 	command := input.InputRequest.Command
@@ -158,6 +251,11 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string) {
 }
 
 func TestQueuedInputImagesAndLostAcknowledgement(t *testing.T) {
+	t.Run("message", func(t *testing.T) { testQueuedInputImagesAndLostAcknowledgement(t, false) })
+	t.Run("steering", func(t *testing.T) { testQueuedInputImagesAndLostAcknowledgement(t, true) })
+}
+
+func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 	ctx := context.Background()
 	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
@@ -207,6 +305,9 @@ func TestQueuedInputImagesAndLostAcknowledgement(t *testing.T) {
 	}
 	if len(merged.Message.Images) != 1 || merged.Message.Images[0].DataBase64 != tinyPNGBase64() {
 		t.Fatal("image was not rehydrated")
+	}
+	if steering {
+		merged = steeringCommandForRequest(workerInputRequest{Command: merged}, "active")
 	}
 	if _, err := appendAcceptedSessionInput(ctx, source, "s", merged); err != nil {
 		t.Fatal(err)

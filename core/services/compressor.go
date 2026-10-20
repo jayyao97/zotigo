@@ -172,9 +172,8 @@ func (c *Compressor) CountTokens(messages []protocol.Message) int {
 	return c.countTokens(messages)
 }
 
-// EstimatePromptTokens returns the local estimate for the exact bounded prompt
-// projection. Provider usage is a historical snapshot and is intentionally not
-// used as an anchor for a rewritten next request.
+// EstimatePromptTokens returns the local estimate for the bounded prompt
+// projection. ContextTokens adds provider calibration when a valid anchor exists.
 func (c *Compressor) EstimatePromptTokens(messages []protocol.Message) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()

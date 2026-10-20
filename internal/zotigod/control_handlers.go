@@ -226,6 +226,10 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
+		case errors.Is(err, errActiveTurn):
+			writeAPIErrorCode(w, http.StatusConflict, "active_turn", err.Error())
+		case errors.Is(err, errInputPolicyMismatch):
+			writeAPIErrorCode(w, http.StatusConflict, "input_policy_mismatch", err.Error())
 		case errors.Is(err, errSessionBusy):
 			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
 		case errors.Is(err, errCommandIDConflict):
@@ -755,6 +759,10 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
 		case errors.Is(err, errNoActiveTurn):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
+		case errors.Is(err, errActiveTurn):
+			writeAPIErrorCode(w, http.StatusConflict, "active_turn", err.Error())
+		case errors.Is(err, errInputPolicyMismatch):
+			writeAPIErrorCode(w, http.StatusConflict, "input_policy_mismatch", err.Error())
 		case errors.Is(err, errWorkerOffline):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
 		case errors.Is(err, errTurnMismatch):

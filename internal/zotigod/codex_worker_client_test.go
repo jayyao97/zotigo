@@ -718,6 +718,87 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 	}
 }
 
+func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
+	t.Parallel()
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	const sessionID = "codex-steering-order"
+	putStoredSession(t, store, sessionID, t.TempDir())
+	writer := &workerClientWriter{sendCh: make(chan workerMessage, 32), done: make(chan struct{})}
+	runtime := &codexWorkerRuntime{
+		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}},
+		store: store, threadID: "thread-1", activeTurnID: "turn-1", writer: writer, messages: make(map[string]string),
+	}
+	notify := func(method, item string) {
+		t.Helper()
+		if err := runtime.handleNotification(t.Context(), codexapp.Message{
+			Method: method, Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","item":` + item + `}`),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	notify("item/started", `{"id":"thinking","type":"reasoning"}`)
+	notify("item/started", `{"id":"answer","type":"agentMessage"}`)
+	notify("item/started", `{"id":"shell","type":"commandExecution","command":"echo hello","cwd":"/tmp"}`)
+	for _, id := range []string{"steer-1", "steer-2"} {
+		if err := runtime.persistSteering(commandResponse{
+			ID: id, Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: id},
+		}, "turn-1"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := runtime.handleNotification(t.Context(), codexapp.Message{
+		Method: "item/agentMessage/delta", Params: []byte(`{"turnId":"turn-1","itemId":"answer","delta":"tail"}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	boundaryUpdates, textUpdates := 0, 0
+	for len(writer.sendCh) > 0 {
+		message := <-writer.sendCh
+		if message.Delta == nil {
+			continue
+		}
+		if message.Delta.BeforeInputID != "steer-1" {
+			t.Fatalf("streaming boundary missing: %+v", message.Delta)
+		}
+		if message.Delta.Delta == "" {
+			boundaryUpdates++
+		} else {
+			textUpdates++
+		}
+	}
+	if boundaryUpdates != 2 || textUpdates != 1 {
+		t.Fatalf("position updates=%d text updates=%d", boundaryUpdates, textUpdates)
+	}
+	notify("item/completed", `{"id":"thinking","type":"reasoning","summary":["old thinking"]}`)
+	notify("item/completed", `{"id":"answer","type":"agentMessage","text":"old answer"}`)
+	notify("item/completed", `{"id":"shell","type":"commandExecution","command":"echo hello","status":"completed","aggregatedOutput":"hello","exitCode":0}`)
+	notify("item/started", `{"id":"new-answer","type":"agentMessage"}`)
+	notify("item/completed", `{"id":"new-answer","type":"agentMessage","text":"new answer"}`)
+	items, _, err := store.ListDisplayItems(t.Context(), sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marked := 0
+	for _, item := range items {
+		if item.ID == "thinking" || item.ID == "answer" || (len(item.Content) > 0 && item.Content[0].ToolResult != nil) {
+			marked++
+			if publicDisplayItem(item).BeforeInputID != "steer-1" {
+				t.Fatalf("old output lost first steering boundary: %+v", item)
+			}
+		}
+		if item.ID == "new-answer" && item.BeforeInputID != "" {
+			t.Fatal("new output incorrectly moved before steering")
+		}
+	}
+	if marked != 3 || len(runtime.displayItems) != 0 {
+		t.Fatalf("marked=%d active items=%+v", marked, runtime.displayItems)
+	}
+}
+
 func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	t.Parallel()
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))

@@ -16,6 +16,9 @@ func workerInputErrorDetails(err error) (string, string) {
 	case errors.Is(err, errNoActiveTurn):
 		return "no_active_turn", "steering requires an active turn"
 	case errors.Is(err, errActiveTurn):
+		if err != errActiveTurn {
+			return "active_turn", err.Error()
+		}
 		return "active_turn", "a turn is already active"
 	case errors.Is(err, errTurnMismatch):
 		return "turn_mismatch", "expected_turn_id does not match active turn"

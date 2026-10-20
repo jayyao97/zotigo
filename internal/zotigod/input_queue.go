@@ -235,6 +235,64 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 	writeAPIError(w, 404, "queued input not found")
 }
 
+func (h *handler) handleSendQueuedInput(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", "POST")
+		writeAPIError(w, 405, "method not allowed")
+		return
+	}
+	if h.catalog == nil {
+		writeAPIError(w, 503, "queue storage unavailable")
+		return
+	}
+	var req struct {
+		Revision int64 `json:"revision"`
+	}
+	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
+		writeAPIError(w, 400, err.Error())
+		return
+	}
+	id, itemID := r.PathValue("id"), r.PathValue("item")
+	unlock := h.queueOps.lock(id)
+	defer unlock()
+	// Keep admission alive if the caller disconnects; a lost HTTP response must
+	// not turn an already accepted input into an editable queue entry.
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	row, err := h.catalog.QueuedInputByID(ctx, id, itemID)
+	if err != nil {
+		writeAPIError(w, 500, err.Error())
+		return
+	}
+	if row == nil {
+		writeAPIError(w, 404, "queued input not found")
+		return
+	}
+	if row.State == "sent" {
+		writeAPIJSON(w, 200, map[string]bool{"ok": true})
+		return
+	}
+	if row.Revision != req.Revision || row.BatchID != "" || (row.State != "queued" && row.State != "paused") {
+		writeAPIError(w, 409, workspace.ErrQueueConflict.Error())
+		return
+	}
+	if _, err = h.ensureSessionRunning(ctx, id); err == nil && !h.ensureWorkerOnline(ctx, id) {
+		err = errWorkerOffline
+	}
+	if err == nil {
+		row.BatchID = "queue_" + uuid.NewString()
+		err = h.catalog.ClaimQueuedInput(ctx, id, itemID, req.Revision, row.BatchID)
+		if err == nil {
+			err = h.submitQueuedInputs(ctx, id, []workspace.QueuedInput{*row}, false)
+		}
+	}
+	if err != nil {
+		writeAPIError(w, 409, err.Error())
+		return
+	}
+	writeAPIJSON(w, 200, map[string]bool{"ok": true})
+}
+
 func (h *handler) handleResumeInputQueue(w http.ResponseWriter, r *http.Request, id string) {
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", "POST")
@@ -281,7 +339,7 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			continue
 		}
 		for _, item := range items {
-			if item.ID == row.BatchID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+			if item.ID == row.BatchID && item.Command != nil && (item.Command.Type == sessionCommandMessage || item.Command.Type == sessionCommandSteering) {
 				if err := h.catalog.FinishQueuedBatch(ctx, id, row.BatchID, true); err != nil {
 					return err
 				}
@@ -332,6 +390,10 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 	if err != nil || len(rows) == 0 {
 		return err
 	}
+	return h.submitQueuedInputs(ctx, id, rows, true)
+}
+
+func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []workspace.QueuedInput, startOnly bool) error {
 	command, err := mergeQueuedInputs(rows)
 	possiblyAdmitted := false
 	if err == nil {
@@ -345,7 +407,7 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 		} else if unavailable != "" {
 			err = errSessionUnavailable
 		} else {
-			submission, err = h.workers.BeginInput(id, workerInputRequest{Command: command, StartOnly: true})
+			submission, err = h.workers.BeginInput(id, workerInputRequest{Command: command, StartOnly: startOnly})
 			if err == nil {
 				submission.OnFinish(h.sessionOps.reserveInput(id))
 			}
@@ -356,7 +418,28 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			_, err = submission.Await(ctx)
 			var rejected *workerInputError
 			if errors.As(err, &rejected) {
-				possiblyAdmitted = false
+				// A worker reply ends this admission attempt. Reconcile generic
+				// failures against its synchronous durable admission record.
+				// Transport timeouts have no such boundary and remain uncertain.
+				switch rejected.Code {
+				case "no_active_turn", "active_turn", "turn_mismatch", "input_policy_mismatch":
+					possiblyAdmitted = false
+				case "input_failed", "command_id_conflict":
+					items, _, loadErr := h.items.LoadItems(context.Background(), id)
+					if loadErr != nil {
+						err = errors.Join(err, loadErr)
+						break
+					}
+					possiblyAdmitted = false
+					for _, item := range items {
+						if item.ID == rows[0].BatchID && item.Command != nil &&
+							(item.Command.Type == sessionCommandMessage || item.Command.Type == sessionCommandSteering) {
+							possiblyAdmitted = true
+							err = nil
+							break
+						}
+					}
+				}
 			}
 		}
 	}
@@ -364,7 +447,7 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 		releaseErr := h.catalog.ReleaseQueuedBatch(context.Background(), id, rows[0].BatchID)
 		// A concurrent ordinary send may win the idle boundary. Leave the queue
 		// eligible for that turn's completion instead of treating it as failure.
-		if errors.Is(err, errActiveTurn) && releaseErr == nil {
+		if startOnly && errors.Is(err, errActiveTurn) && releaseErr == nil {
 			return nil
 		}
 		return errors.Join(err, releaseErr)
