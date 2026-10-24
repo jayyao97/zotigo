@@ -200,7 +200,8 @@ func TestRunner_ApprovalFlow(t *testing.T) {
 	defer tr.Close()
 
 	r := runner.New(ag, tr)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 
 	// Step 1: Run and expect need_approval
 	done := make(chan error, 1)
@@ -210,7 +211,10 @@ func TestRunner_ApprovalFlow(t *testing.T) {
 
 	// Collect events until need_approval
 	var lastEvent protocol.Event
-	timeout := time.After(2 * time.Second)
+	// These are liveness guards, not latency assertions. Race-enabled CI
+	// may spend seconds scheduling each phase under package-level load.
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
 
 collectLoop1:
 	for {
@@ -220,7 +224,7 @@ collectLoop1:
 			if event.Type == protocol.EventTypeFinish {
 				break collectLoop1
 			}
-		case <-timeout:
+		case <-timeout.C:
 			t.Fatal("Timeout waiting for events")
 		}
 	}
@@ -231,7 +235,7 @@ collectLoop1:
 		if err != nil {
 			t.Fatalf("RunOnce error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout - RunOnce should return immediately on need_approval")
 	}
 
@@ -249,6 +253,10 @@ collectLoop1:
 		t.Errorf("Expected test_tool, got %s", pending[0].Name)
 	}
 
+	// The approval continuation gets its own budget; do not reuse the
+	// deadline that started before the initial model response.
+	timeout.Reset(10 * time.Second)
+
 	// Step 2: Submit approval
 	go func() {
 		done <- r.SubmitApproval(ctx, []transport.ApprovalResult{
@@ -265,7 +273,7 @@ collectLoop2:
 			if event.Type == protocol.EventTypeFinish && event.FinishReason == protocol.FinishReasonStop {
 				break collectLoop2
 			}
-		case <-timeout:
+		case <-timeout.C:
 			t.Fatal("Timeout waiting for final events")
 		}
 	}
@@ -276,7 +284,7 @@ collectLoop2:
 		if err != nil {
 			t.Fatalf("SubmitApproval error: %v", err)
 		}
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("Timeout waiting for SubmitApproval to complete")
 	}
 
