@@ -73,6 +73,7 @@ Default prefix: `~/.local/share/zotigo`; override with `--prefix /absolute/path`
 - Each component's `current` symlink selects its installation; `previous` retains the prior build.
 - `current/INSTALLATION`: code-owned release version, source commit, and `dirty=true|false`.
 - `config/daemon.env`: user-owned shell assignments, preserved on upgrade.
+- On first configuration (no `daemon.env` and no `daemon/current/INSTALLATION`), the installer creates `config/daemon.token` with 32 random bytes encoded as hex and mode `0600`, and sets `ZOTIGOD_AUTH_TOKEN_FILE` in `daemon.env`. OpenSSL is required for this generation. Authentication is enabled even on loopback. An existing token is reused after an interrupted install; upgrades never rotate it or enable authentication on an existing configuration. If an installed daemon has lost `daemon.env`, restore it before reinstalling.
 - Diagnostic logs live outside the prefix, in `~/.zotigo/logs/cli/` and `~/.zotigo/logs/daemon/`.
 
 Run `zotigo --version` or `zotigod --version`. `GET /health` also reports the running daemon's `version` and `commit`, in addition to the existing status/protocol fields. The commit comes from optional Go VCS metadata and is `unknown` when unavailable; it is not injected or used as the release version. Installed and running versions can differ until a service is restarted.

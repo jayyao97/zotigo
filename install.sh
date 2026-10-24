@@ -89,7 +89,23 @@ if [ "$component" = daemon ]; then
     detected_codex=
   fi
   config="$prefix/config/daemon.env"
-  [ -e "$config" ] || printf '%s\n' '# Shell assignments; preserved on upgrade.' 'ZOTIGOD_ADDR=127.0.0.1:8766' '# ZOTIGOD_AUTH_TOKEN_FILE=/absolute/path/to/token' > "$config"
+  if [ ! -e "$config" ]; then
+    [ ! -L "$config" ] && [ ! -e "$root/current/INSTALLATION" ] || fail "Existing daemon configuration is missing; restore $config before reinstalling."
+    token_file="$prefix/config/daemon.token"
+    if [ ! -e "$token_file" ]; then
+      [ ! -L "$token_file" ] || fail "Daemon token file is a broken symlink: $token_file"
+      need openssl
+      openssl rand -hex 32 > "$stage/daemon.token"
+      chmod 600 "$stage/daemon.token"
+      mv "$stage/daemon.token" "$token_file"
+    fi
+    [ -f "$token_file" ] && [ -s "$token_file" ] || fail "Daemon token file is empty or invalid: $token_file"
+    {
+      printf '%s\n' '# Shell assignments; preserved on upgrade.' 'ZOTIGOD_ADDR=127.0.0.1:8766'
+      printf 'ZOTIGOD_AUTH_TOKEN_FILE=%s\n' "$(quote "$token_file")"
+    } > "$stage/daemon.env"
+    mv "$stage/daemon.env" "$config"
+  fi
   {
     echo '#!/bin/sh'
     printf 'PATH=%s; export PATH\n' "$(quote "$PATH")"

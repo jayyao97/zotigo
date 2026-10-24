@@ -201,7 +201,14 @@ service_verify() {
         ''|0|*[!0-9]*) ;;
         *)
           if grep -F "\"version\":\"$version\"" "$stage/health" >/dev/null &&
-             grep -F "\"process_id\":\"$expected_pid\"" "$stage/health" >/dev/null; then return 0; fi ;;
+             grep -F "\"process_id\":\"$expected_pid\"" "$stage/health" >/dev/null; then
+            if [ -n "${ZOTIGOD_AUTH_TOKEN_FILE:-}" ]; then
+              # Keep the credential out of process arguments and diagnostics.
+              (umask 077; printf 'Authorization: Bearer %s\n' "$(cat "$ZOTIGOD_AUTH_TOKEN_FILE")" > "$stage/daemon-auth-header")
+              curl "$@" -H "@$stage/daemon-auth-header" "${check_url%/health}/projects" >/dev/null 2>&1 || fail 'Daemon started but authenticated API verification failed; check its token configuration.'
+            fi
+            return 0
+          fi ;;
       esac
     fi
     attempts=$((attempts + 1))
