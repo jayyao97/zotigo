@@ -60,6 +60,16 @@ func TestNativeForkExactPrefixAndIsolation(t *testing.T) {
 	if err != nil || org.WorkspaceID == nil || *org.WorkspaceID != caller.WorkspaceID {
 		t.Fatalf("workspace: %#v %v", org, err)
 	}
+	sourceOrg, err := h.catalog.GetSessionOrganization(ctx, source.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if org.WorkspacePosition == nil || sourceOrg.WorkspacePosition == nil || *org.WorkspacePosition >= *sourceOrg.WorkspacePosition {
+		t.Fatalf("fork must precede source: child=%v source=%v", org.WorkspacePosition, sourceOrg.WorkspacePosition)
+	}
+	if _, err := h.catalog.SetSessionPosition(ctx, child.ID, 1234); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := h.catalog.SetSessionTitle(ctx, child.ID, "Renamed"); err != nil {
 		t.Fatal(err)
 	}
@@ -70,6 +80,9 @@ func TestNativeForkExactPrefixAndIsolation(t *testing.T) {
 	org, _ = h.catalog.GetSessionOrganization(ctx, child.ID)
 	if org.Title == nil || *org.Title != "Renamed" {
 		t.Fatal("retry overwrote title")
+	}
+	if org.WorkspacePosition == nil || *org.WorkspacePosition != 1234 {
+		t.Fatal("retry overwrote manually chosen position")
 	}
 	if _, err := h.forkSession(ctx, "branch", source.ID, "other", "Branch"); !errors.Is(err, errCommandIDConflict) {
 		t.Fatalf("conflict: %v", err)

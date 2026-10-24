@@ -358,3 +358,66 @@ func TestQueuePausedAfterFailure(t *testing.T) {
 		}
 	}
 }
+
+func TestEditQueuedImages(t *testing.T) {
+	for _, tc := range []struct {
+		name, body    string
+		status, count int
+	}{
+		{"preserve", `{"revision":1,"text":"edited"}`, 200, 2},
+		{"remove one", `{"revision":1,"text":"edited","image_indices":[1]}`, 200, 1},
+		{"remove all", `{"revision":1,"text":"edited","image_indices":[]}`, 200, 0},
+		{"image only", `{"revision":1,"text":"","image_indices":[1]}`, 200, 1},
+		{"empty", `{"revision":1,"text":"","image_indices":[]}`, 400, 2},
+		{"duplicate", `{"revision":1,"text":"edited","image_indices":[1,1]}`, 400, 2},
+		{"invalid", `{"revision":1,"text":"edited","image_indices":[2]}`, 400, 2},
+		{"stale", `{"revision":2,"text":"edited","image_indices":[]}`, 409, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			catalog, err := workspace.Open(newTestStoreRoot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer catalog.Close()
+			command := commandResponse{ID: "q", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "original", Images: []commandImageData{{BlobPath: "first"}, {BlobPath: "second"}}}}
+			data, _ := json.Marshal(command)
+			if err := catalog.QueueInput(ctx, "s", "q", data); err != nil {
+				t.Fatal(err)
+			}
+			h := &handler{catalog: catalog, queueOps: newSessionOperationLocks()}
+			listed := httptest.NewRecorder()
+			h.handleInputQueue(listed, httptest.NewRequest(http.MethodGet, "/", nil), "s")
+			var response struct {
+				Data struct {
+					Items []queuedInputResponse `json:"items"`
+				} `json:"data"`
+			}
+			if err := json.Unmarshal(listed.Body.Bytes(), &response); err != nil || listed.Code != 200 || len(response.Data.Items) != 1 || !response.Data.Items[0].ImageEditingSupported {
+				t.Fatalf("missing image editing capability: %s (%v)", listed.Body.String(), err)
+			}
+			req := httptest.NewRequest(http.MethodPatch, "/", strings.NewReader(tc.body))
+			req.SetPathValue("id", "s")
+			req.SetPathValue("item", "q")
+			rec := httptest.NewRecorder()
+			h.handleQueuedInput(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			rows, err := catalog.QueuedInputs(ctx, "s")
+			if err != nil || len(rows) != 1 {
+				t.Fatalf("rows: %v %v", rows, err)
+			}
+			command = commandResponse{}
+			if err := json.Unmarshal(rows[0].Payload, &command); err != nil {
+				t.Fatal(err)
+			}
+			if len(command.Message.Images) != tc.count {
+				t.Fatalf("images: %+v", command.Message.Images)
+			}
+			if tc.status == 200 && tc.count == 1 && command.Message.Images[0].BlobPath != "second" {
+				t.Fatal("wrong image retained")
+			}
+		})
+	}
+}
