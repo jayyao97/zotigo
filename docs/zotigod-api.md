@@ -1153,7 +1153,13 @@ queue, not conversation snapshots. An empty or unknown session queue returns an
 empty array.
 
 `PATCH /sessions/{id}/queue/{item}` takes `{ "text": "...", "revision": 1 }`.
-It preserves images and skills. `DELETE` on the same path takes `{ "revision": 1 }`.
+Optional `image_indices` selects which existing attachments to retain by zero-based
+index, guarded by the same revision. Omit it to preserve all images; pass `[]` to
+remove all images. Invalid or duplicate indices are rejected. Text and retained
+images cannot both be empty.
+Skills are preserved; images are preserved only when `image_indices` is omitted.
+Queue items advertise `image_editing_supported: true` when image selection is supported.
+Clients must treat a missing or false flag as unsupported and omit `image_indices`. `DELETE` on the same path takes `{ "revision": 1 }`.
 Stale revisions and claimed batches return HTTP 409. Cancelled/sent IDs remain
 as idempotency receipts until session deletion. Reusing an ID for different
 input returns HTTP 409; clients should use a new ID for a new submission.

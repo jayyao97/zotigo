@@ -17,9 +17,10 @@ import (
 
 type queuedInputResponse struct {
 	publicCommandResponse
-	State    string `json:"state"`
-	Revision int64  `json:"revision"`
-	Editable bool   `json:"editable"`
+	State                 string `json:"state"`
+	Revision              int64  `json:"revision"`
+	Editable              bool   `json:"editable"`
+	ImageEditingSupported bool   `json:"image_editing_supported"`
 }
 
 func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id string) {
@@ -156,7 +157,7 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 			writeAPIError(w, 500, "invalid queued input")
 			return
 		}
-		result = append(result, queuedInputResponse{publicCommandFromCommand(command), row.State, row.Revision, row.BatchID == "" && row.State != "sending"})
+		result = append(result, queuedInputResponse{publicCommandFromCommand(command), row.State, row.Revision, row.BatchID == "" && row.State != "sending", true})
 	}
 	writeAPIJSON(w, 200, map[string]any{"items": result})
 }
@@ -173,8 +174,9 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Text     string `json:"text"`
-		Revision int64  `json:"revision"`
+		Text         string `json:"text"`
+		Revision     int64  `json:"revision"`
+		ImageIndices *[]int `json:"image_indices"`
 	}
 	if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 		writeAPIError(w, 400, err.Error())
@@ -197,6 +199,19 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		command.Message.Text = strings.TrimSpace(req.Text)
+		if r.Method == http.MethodPatch && req.ImageIndices != nil {
+			images := make([]commandImageData, 0, len(*req.ImageIndices))
+			seen := make(map[int]bool)
+			for _, index := range *req.ImageIndices {
+				if index < 0 || index >= len(command.Message.Images) || seen[index] {
+					writeAPIError(w, 400, "invalid image_indices")
+					return
+				}
+				seen[index] = true
+				images = append(images, command.Message.Images[index])
+			}
+			command.Message.Images = images
+		}
 		if r.Method == http.MethodPatch && command.Message.Text == "" && len(command.Message.Images) == 0 {
 			writeAPIError(w, 400, "message requires text or images")
 			return

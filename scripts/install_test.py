@@ -4,7 +4,6 @@ import json
 from pathlib import Path
 import shutil
 import signal
-import sys
 import time
 import plistlib
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -187,12 +186,13 @@ chmod +x "$2"
         self.assertEqual(self.install().returncode, 0)
         current = self.prefix / "cli/current"
         original = current.resolve()
-        shutil.copy("/bin/sleep", current / "zotigo")
-        if sys.platform == "darwin":
-            # Copied Apple system binaries need a fresh signature to run as a fixture.
-            subprocess.run(["codesign", "--force", "--sign", "-", str(current / "zotigo")],
-                           check=True, capture_output=True)
-        process = subprocess.Popen(["zotigo", "30"], env={**self.env, "PATH": f"{self.prefix}/bin:{self.env['PATH']}"})
+        # A real executable exercises PATH/symlink process detection. Renaming
+        # system sleep is unsafe: multicall coreutils dispatches by argv[0],
+        # and copied Apple system binaries may need to be signed again.
+        subprocess.run(["cc", "-x", "c", "-", "-o", str(current / "zotigo")],
+                       input="#include <unistd.h>\nint main(void) { sleep(30); return 0; }\n",
+                       text=True, check=True, capture_output=True)
+        process = subprocess.Popen(["zotigo"], env={**self.env, "PATH": f"{self.prefix}/bin:{self.env['PATH']}"})
         try:
             time.sleep(0.2)
             self.assertIsNone(process.poll())
