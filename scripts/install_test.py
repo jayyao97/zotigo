@@ -91,6 +91,55 @@ chmod +x "$2"
         self.assertEqual(config.read_text(), content)
         self.assertEqual(subprocess.check_output([str(launcher)], env=clean_env, text=True).strip(), "/configured/codex")
 
+    def test_daemon_first_install_generates_and_reuses_private_token(self):
+        self.prepare_daemon()
+        result = self.install(component="daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        token = self.prefix / "config/daemon.token"
+        original = token.read_text()
+        self.assertRegex(original, r"^[0-9a-f]{64}\n$")
+        self.assertEqual(token.stat().st_mode & 0o777, 0o600)
+        config = self.prefix / "config/daemon.env"
+        content = config.read_text()
+        self.assertIn(str(token), content)
+        self.assertNotIn(original.strip(), result.stdout + result.stderr)
+        # Exercise the generated launcher, including its quoted token path.
+        binary = self.prefix / "daemon/current/zotigod"
+        binary.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        args = subprocess.check_output([str(self.prefix / "daemon/current/run")], env=self.env, text=True).splitlines()
+        self.assertEqual(args, ["--addr", "127.0.0.1:8766", "--auth-token-file", str(token)])
+        result = self.install(component="daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text(), content)
+        self.assertEqual(token.read_text(), original)
+
+    def test_daemon_existing_config_does_not_enable_auth(self):
+        self.prepare_daemon()
+        config = self.prefix / "config/daemon.env"
+        config.parent.mkdir(parents=True)
+        original = "ZOTIGOD_ADDR=127.0.0.1:9876\n# no authentication\n"
+        config.write_text(original)
+        result = self.install(component="daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(config.read_text(), original)
+        self.assertFalse((config.parent / "daemon.token").exists())
+
+    def test_daemon_retry_reuses_token_but_missing_upgrade_config_fails(self):
+        self.prepare_daemon()
+        token = self.prefix / "config/daemon.token"
+        token.parent.mkdir(parents=True)
+        token.write_text("interrupted-install-token\n")
+        result = self.install(component="daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(token.read_text(), "interrupted-install-token\n")
+        config = token.parent / "daemon.env"
+        config.unlink()
+        result = self.install(component="daemon")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Existing daemon configuration is missing", result.stderr)
+        self.assertFalse(config.exists())
+        self.assertEqual(token.read_text(), "interrupted-install-token\n")
+
     def test_daemon_without_usable_codex_still_installs(self):
         self.prepare_daemon()
         clean_path = f"{self.tools}:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -314,6 +363,44 @@ chmod +x "$2"
                                          "check_url": f"http://127.0.0.1:{server.server_port}/",
                                          "check_host": "web.example.internal"}, capture_output=True, timeout=5)
             self.assertEqual(result.returncode, 0, result.stderr)
+        finally:
+            server.shutdown()
+            thread.join()
+            server.server_close()
+
+    def test_daemon_probe_checks_authenticated_api(self):
+        headers = []
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/health":
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(b'{"data":{"version":"1.0.0","process_id":"77"}}')
+                else:
+                    headers.append(self.headers.get("Authorization"))
+                    self.send_response(200 if headers[-1] == "Bearer expected-token" else 401)
+                    self.end_headers()
+
+            def log_message(self, *_args):
+                pass
+
+        token = self.base / "probe.token"
+        server = HTTPServer(("127.0.0.1", 0), Handler)
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            for value, code in [("expected-token", 0), ("wrong-token", 1)]:
+                token.write_text(value + "\n")
+                result = subprocess.run(["sh", "-c", '. "$1"; service_running() { return 0; }; service_pid() { echo 77; }; service_verify',
+                                         "test", str(self.source / "scripts/install-common.sh")],
+                                        env={**self.env, "service": "yes", "component": "daemon", "version": "1.0.0",
+                                             "stage": str(self.base), "ZOTIGOD_AUTH_TOKEN_FILE": str(token),
+                                             "check_url": f"http://127.0.0.1:{server.server_port}/health"},
+                                        capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, code, result.stderr)
+                self.assertNotIn(value.encode(), result.stdout + result.stderr)
+            self.assertEqual(headers, ["Bearer expected-token", "Bearer wrong-token"])
         finally:
             server.shutdown()
             thread.join()
