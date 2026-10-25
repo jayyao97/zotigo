@@ -30,6 +30,8 @@ const (
 	DisplayItemApprovalPolicyChanged DisplayItemType = "approval_policy_changed"
 	DisplayItemToolExecutionStarted  DisplayItemType = "tool_execution_started"
 	DisplayItemContextUsageUpdated   DisplayItemType = "context_usage_updated"
+	DisplayItemRequestRetry          DisplayItemType = "request_retry"
+	DisplayItemModelUsageUpdated     DisplayItemType = "model_usage_updated"
 )
 
 type DisplayContentPart struct {
@@ -74,11 +76,12 @@ type DisplayToolExecution struct {
 }
 
 type DisplayContextUsage struct {
-	Tokens    int       `json:"tokens"`
-	Window    int       `json:"window"`
-	Status    string    `json:"status,omitempty"`
-	Source    string    `json:"source,omitempty"`
-	UpdatedAt time.Time `json:"updated_at,omitempty"`
+	ProfileKey string    `json:"profile_key,omitempty"`
+	Tokens     int       `json:"tokens"`
+	Window     int       `json:"window"`
+	Status     string    `json:"status,omitempty"`
+	Source     string    `json:"source,omitempty"`
+	UpdatedAt  time.Time `json:"updated_at,omitempty"`
 }
 
 type DisplayToolResultContentPart struct {
@@ -231,6 +234,7 @@ type DisplayItem struct {
 	ApprovalPolicy    *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
 	ToolExecution     *DisplayToolExecution        `json:"tool_execution,omitempty"`
 	ContextUsage      *DisplayContextUsage         `json:"context_usage,omitempty"`
+	Retry             *protocol.RequestRetry       `json:"retry,omitempty"`
 	ContextCompaction *DisplayContextCompaction    `json:"context_compaction,omitempty"`
 	Error             string                       `json:"error,omitempty"`
 	CreatedAt         time.Time                    `json:"created_at"`

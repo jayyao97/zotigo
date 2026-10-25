@@ -102,3 +102,50 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 		t.Fatalf("model switch: %+v", got)
 	}
 }
+
+func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
+	workDir := t.TempDir()
+	writeTestProfileConfig(t, workDir)
+	cfg, err := config.NewManager().LoadForDir(workDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, profile, err := cfg.ResolveProfile("test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	window := profile.ContextWindow
+	if window <= 0 {
+		window = config.DefaultContextWindow
+	}
+	ctx := context.Background()
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("live", source)
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	progress := &protocol.ContextUsage{Tokens: 527163, Window: window, Source: "provider_estimate", ProfileKey: services.ContextProfileKey(profile)}
+	if err := display.HandleEvent(ctx, protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: progress}); err != nil {
+		t.Fatal(err)
+	}
+	h := &handler{items: source}
+	stored := &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "live", Agent: "zotigo", ProfileName: "test", WorkingDirectory: workDir}}
+	get := func() *SessionContextUsage {
+		return h.decorateSession(ctx, sessionFromMetadata(stored.Metadata, SessionStateRunning, true), stored).ContextUsage
+	}
+	if got := get(); got.Tokens != 527163 || got.Source != "provider_estimate" {
+		t.Fatalf("live usage = %+v", got)
+	}
+	// A new model/profile must never reuse an old model's progress.
+	source.items["live"][1].ContextUsage.ProfileKey = "other"
+	if got := get(); got.Status != "unavailable" {
+		t.Fatalf("stale usage = %+v", got)
+	}
+	source.items["live"][1].ContextUsage.ProfileKey = progress.ProfileKey
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if got := get(); got.Status != "unavailable" {
+		t.Fatalf("previous turn usage = %+v", got)
+	}
+}

@@ -143,7 +143,7 @@ func (h *handler) handleSessionEvents(w http.ResponseWriter, r *http.Request, id
 
 	cursor := displayEventCursor{sequence: after}
 	catchUp := func() bool {
-		exists, err := catchUpDisplayEvents(r.Context(), w, flusher, h.items, id, &cursor)
+		exists, err := catchUpDisplayEvents(r.Context(), w, flusher, h.items, id, &cursor, r.Header.Get("X-Zotigo-Runtime-Updates") == "true")
 		return err == nil && exists
 	}
 	if !catchUp() {
@@ -187,7 +187,7 @@ func displayEventSessionExists(ctx context.Context, source displayItemSource, se
 	return exists, err
 }
 
-func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, source displayItemSource, sessionID string, cursor *displayEventCursor) (bool, error) {
+func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher http.Flusher, source displayItemSource, sessionID string, cursor *displayEventCursor, runtimeUpdates ...bool) (bool, error) {
 	if source, ok := source.(offsetDisplayItemSource); ok {
 		for {
 			items, exists, nextOffset, err := source.LoadItemsFromOffset(ctx, sessionID, cursor.offset, displayEventBatchSize)
@@ -198,7 +198,7 @@ func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher ht
 				if item.Sequence <= cursor.sequence {
 					continue
 				}
-				if !isPublicDisplayItem(item) {
+				if !isPublicDisplayItem(item, runtimeUpdates...) {
 					cursor.sequence = item.Sequence
 					continue
 				}
@@ -223,7 +223,7 @@ func catchUpDisplayEvents(ctx context.Context, w http.ResponseWriter, flusher ht
 		if item.Sequence <= cursor.sequence {
 			continue
 		}
-		if !isPublicDisplayItem(item) {
+		if !isPublicDisplayItem(item, runtimeUpdates...) {
 			cursor.sequence = item.Sequence
 			continue
 		}

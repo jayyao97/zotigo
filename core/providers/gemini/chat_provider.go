@@ -73,13 +73,16 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 				return
 			}
 
-			if resp == nil || len(resp.Candidates) == 0 {
+			if resp == nil {
 				continue
 			}
 
 			// Track usage metadata from each chunk (last one has final counts)
 			if resp.UsageMetadata != nil {
 				lastUsageMetadata = resp.UsageMetadata
+			}
+			if len(resp.Candidates) == 0 {
+				continue
 			}
 
 			candidate := resp.Candidates[0]
@@ -198,8 +201,9 @@ func geminiUsage(m *genai.GenerateContentResponseUsageMetadata) *protocol.Usage 
 	cached := int(m.CachedContentTokenCount)
 	input := max(int(m.PromptTokenCount)-cached, 0)
 	return &protocol.Usage{
-		InputTokens:          input,
-		OutputTokens:         int(m.CandidatesTokenCount),
+		InputTokens: input,
+		// Thinking tokens are generated output even when not surfaced as text.
+		OutputTokens:         int(m.CandidatesTokenCount + m.ThoughtsTokenCount),
 		TotalTokens:          int(m.TotalTokenCount),
 		CacheReadInputTokens: cached,
 	}

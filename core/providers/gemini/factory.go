@@ -13,7 +13,7 @@ import (
 const ProviderName = "gemini"
 
 func init() {
-	providers.Register(ProviderName, providers.WithImageBudget(New))
+	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(New)))
 }
 
 func New(cfg config.ProfileConfig) (providers.Provider, error) {

@@ -48,7 +48,13 @@ func RequestBudgetHTTPClient() *http.Client {
 	return &http.Client{Transport: &requestBudgetTransport{next: http.DefaultTransport}}
 }
 
-func (t *requestBudgetTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+func (t *requestBudgetTransport) RoundTrip(req *http.Request) (response *http.Response, err error) {
+	defer func() {
+		if attempt, ok := req.Context().Value(retryAttemptKey{}).(*retryAttempt); ok && response != nil {
+			attempt.status = response.StatusCode
+			attempt.header = response.Header.Clone()
+		}
+	}()
 	budget, ok := req.Context().Value(requestBudgetKey{}).(*requestBudget)
 	if !ok || req.Body == nil || req.Method != http.MethodPost {
 		return t.next.RoundTrip(req)
@@ -72,7 +78,7 @@ func (t *requestBudgetTransport) RoundTrip(req *http.Request) (*http.Response, e
 	}
 	request := req.Clone(req.Context())
 	request.Body = io.NopCloser(bytes.NewReader(data))
-	response, err := t.next.RoundTrip(request)
+	response, err = t.next.RoundTrip(request)
 	if response != nil && response.StatusCode == http.StatusRequestEntityTooLarge {
 		budget.tooLarge.Store(true)
 	}

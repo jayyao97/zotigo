@@ -23,6 +23,7 @@ type workerDisplayLog struct {
 	turnID        string
 	turnStarted   time.Time
 	turnUsage     protocol.Usage
+	runUsage      protocol.Usage
 	terminalID    string
 	terminal      string
 	block         *workerDisplayBlock
@@ -63,6 +64,7 @@ func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession
 	defer l.mu.Unlock()
 	l.turnStarted = time.Now()
 	l.turnUsage = protocol.Usage{}
+	l.runUsage = protocol.Usage{}
 	l.turnID = fmt.Sprintf("turn_%d", l.turnStarted.UnixNano())
 	l.terminalID = ""
 	l.terminal = ""
@@ -315,6 +317,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 		reason = userPauseReason
 	}
 	turnID := l.turnID
+	usage := l.turnUsage.Add(l.runUsage).Normalized()
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
@@ -322,6 +325,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 			Status:     "interrupted",
 			Reason:     reason,
 			DurationMS: time.Since(l.turnStarted).Milliseconds(),
+			Usage:      &usage,
 		},
 	})
 	if err == nil {
@@ -507,10 +511,28 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			}
 		}
 		return nil
+	case protocol.EventTypeRequestRetry:
+		_, err := l.appendItem(ctx, zotigosession.DisplayItem{Type: zotigosession.DisplayItemRequestRetry, Retry: event.Retry})
+		return err
+	case protocol.EventTypeUsageUpdated:
+		if event.Usage != nil {
+			l.runUsage = event.Usage.Normalized()
+		}
+		item := zotigosession.DisplayItem{Type: zotigosession.DisplayItemModelUsageUpdated}
+		if usage := event.ContextUsage; usage != nil {
+			item.ContextUsage = &zotigosession.DisplayContextUsage{Tokens: usage.Tokens, Window: usage.Window, Source: usage.Source, Status: "available", ProfileKey: usage.ProfileKey, UpdatedAt: time.Now().UTC()}
+		}
+		if event.Usage != nil {
+			usage := l.turnUsage.Add(l.runUsage).Normalized()
+			item.Turn = &zotigosession.DisplayTurn{ID: l.turnID, Usage: &usage}
+		}
+		_, err := l.appendItem(ctx, item)
+		return err
 	case protocol.EventTypeFinish:
 		if event.Usage != nil {
 			l.turnUsage = l.turnUsage.Add(event.Usage.Normalized()).Normalized()
 		}
+		l.runUsage = protocol.Usage{}
 		if event.FinishReason == "need_approval" {
 			return l.flushBlockLocked(ctx)
 		}
@@ -541,6 +563,10 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		return err
 	case protocol.EventTypeError:
 		if event.Error != nil {
+			if event.Usage != nil {
+				l.turnUsage = l.turnUsage.Add(event.Usage.Normalized()).Normalized()
+				l.runUsage = protocol.Usage{}
+			}
 			return l.failLocked(ctx, event.Error)
 		}
 	}
@@ -701,6 +727,11 @@ func (l *workerDisplayLog) appendSubagentItemLocked(ctx context.Context, itemID 
 
 func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 	l.block = nil
+	usage := l.turnUsage.Add(l.runUsage).Normalized()
+	var usagePointer *protocol.Usage
+	if usage != (protocol.Usage{}) {
+		usagePointer = &usage
+	}
 	errText := fmt.Sprintf("%v", err)
 	if _, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemError,
@@ -716,6 +747,7 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 			ID:         l.turnID,
 			Status:     "failed",
 			DurationMS: time.Since(l.turnStarted).Milliseconds(),
+			Usage:      usagePointer,
 		},
 	})
 	if appendErr == nil {

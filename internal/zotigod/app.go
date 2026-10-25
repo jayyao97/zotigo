@@ -1900,9 +1900,6 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	if stored == nil || zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex || session.ContextUsage.Status == "available" {
 		return session
 	}
-	if len(stored.AgentSnapshot.History) == 0 {
-		return session
-	}
 	appConfig, err := config.NewManager().LoadForDir(session.WorkingDirectory)
 	if err != nil {
 		return session
@@ -1917,6 +1914,22 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	}
 	updatedAt := session.UpdatedAt
 	prompt := protocol.ContextInput{ProfileKey: services.ContextProfileKey(profile)}
+	// A running worker persists small progress records after each model call.
+	// The full snapshot is only checkpointed at turn/pause boundaries.
+	if session.Working {
+		for idx := len(items) - 1; idx >= 0; idx-- {
+			if usage := items[idx].ContextUsage; usage != nil && usage.ProfileKey == prompt.ProfileKey && usage.Window == contextWindow {
+				session.ContextUsage = &SessionContextUsage{Tokens: usage.Tokens, Window: usage.Window, Status: "available", Source: usage.Source, UpdatedAt: usage.UpdatedAt}
+				return session
+			}
+			if items[idx].Type == zotigosession.DisplayItemTurnStarted || items[idx].Type == zotigosession.DisplayItemProfileChanged || items[idx].Type == zotigosession.DisplayItemContextCompacted {
+				break
+			}
+		}
+	}
+	if len(stored.AgentSnapshot.History) == 0 {
+		return session
+	}
 	for idx := len(stored.AgentSnapshot.History) - 1; idx >= 0; idx-- {
 		message := stored.AgentSnapshot.History[idx]
 		if message.Role == protocol.RoleAssistant && message.Metadata != nil && message.Metadata.Usage != nil {
@@ -2075,7 +2088,7 @@ func (h *handler) handleSessionItems(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	writeAPIJSON(w, http.StatusOK, buildItemsResponse(items, query))
+	writeAPIJSON(w, http.StatusOK, buildItemsResponse(items, query, r.Header.Get("X-Zotigo-Runtime-Updates") == "true"))
 }
 
 func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id string) {

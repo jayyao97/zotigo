@@ -20,6 +20,8 @@ const (
 	EventTypeSteeringApplied  EventType = "steering_applied"
 	EventTypeFinish           EventType = "finish"
 	EventTypeError            EventType = "error"
+	EventTypeRequestRetry     EventType = "request_retry"
+	EventTypeUsageUpdated     EventType = "usage_updated"
 )
 
 type Event struct {
@@ -39,9 +41,25 @@ type Event struct {
 	// durably established its display boundary.
 	SteeringAck chan error `json:"-"`
 
-	FinishReason FinishReason `json:"finish_reason,omitempty"`
-	Error        error        `json:"error,omitempty"`
-	Usage        *Usage       `json:"usage,omitempty"`
+	FinishReason FinishReason  `json:"finish_reason,omitempty"`
+	Error        error         `json:"error,omitempty"`
+	Usage        *Usage        `json:"usage,omitempty"`
+	Retry        *RequestRetry `json:"retry,omitempty"`
+	ContextUsage *ContextUsage `json:"context_usage,omitempty"`
+}
+
+type ContextUsage struct {
+	Tokens     int    `json:"tokens"`
+	Window     int    `json:"window"`
+	Source     string `json:"source"`
+	ProfileKey string `json:"profile_key"`
+}
+
+type RequestRetry struct {
+	RequestID string `json:"request_id,omitempty"`
+	Status    string `json:"status,omitempty"`
+	Attempt   int    `json:"attempt"`
+	DelayMS   int64  `json:"delay_ms"`
 }
 
 // SubagentEvent associates one child-agent event with its parent spawn call.

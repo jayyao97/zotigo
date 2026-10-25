@@ -49,3 +49,11 @@ func TestMapFinishReason(t *testing.T) {
 		})
 	}
 }
+
+func TestGeminiUsageIncludesThinkingAndSeparatesCache(t *testing.T) {
+	got := geminiUsage(&genai.GenerateContentResponseUsageMetadata{PromptTokenCount: 100, CachedContentTokenCount: 40, CandidatesTokenCount: 10, ThoughtsTokenCount: 80, TotalTokenCount: 190})
+	want := protocol.Usage{InputTokens: 60, CacheReadInputTokens: 40, OutputTokens: 90, TotalTokens: 190}
+	if *got != want {
+		t.Fatalf("usage=%+v want=%+v", *got, want)
+	}
+}

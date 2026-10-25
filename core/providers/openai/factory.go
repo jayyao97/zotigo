@@ -12,7 +12,7 @@ import (
 const ProviderName = "openai"
 
 func init() {
-	providers.Register(ProviderName, providers.WithImageBudget(New))
+	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(New)))
 }
 
 // New chooses between the Chat Completions API (/v1/chat/completions)
@@ -31,7 +31,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	opts := []option.RequestOption{option.WithHTTPClient(providers.RequestBudgetHTTPClient())}
+	opts := []option.RequestOption{option.WithHTTPClient(providers.RequestBudgetHTTPClient()), option.WithMaxRetries(0)}
 	if cfg.APIKey != "" {
 		opts = append(opts, option.WithAPIKey(cfg.APIKey))
 	}

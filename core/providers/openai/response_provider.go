@@ -270,6 +270,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 
 			case "response.failed", "error":
 				msg := evt.Message
+				code := evt.Code
+				if evt.Type == "response.failed" {
+					msg = evt.Response.Error.Message
+					code = string(evt.Response.Error.Code)
+				}
 				if msg == "" {
 					msg = "response API failed"
 				}
@@ -279,7 +284,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 				// failures: for gpt-5/o-series the Responses API surfaces
 				// these via response.failed events, not via stream.Err()
 				// at the bottom of the loop.
-				ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(&responseStreamError{Msg: msg, Code: evt.Code}))
+				ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(&responseStreamError{Msg: msg, Code: code}))
 				return
 			}
 		}
@@ -566,6 +571,8 @@ type responseStreamError struct {
 	Msg  string
 	Code string
 }
+
+func (e *responseStreamError) RetryCode() string { return e.Code }
 
 func (e *responseStreamError) Error() string {
 	if e.Code != "" {

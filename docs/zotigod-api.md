@@ -445,6 +445,52 @@ Pause, steering, and approval decisions do not auto-resume offline sessions beca
 
 `GET /sessions/{id}/items` returns a paginated, read-only display log for a session. This log is a persistent read model for CLI and desktop replay; it is not `AgentSnapshot.History`, and desktop clients must not read `.zotigo/sessions` directly.
 
+Clients may send `X-Zotigo-Runtime-Updates: true` on `/items` and `/events` to
+receive two additional durable native-agent item types. Without this header,
+these items are omitted, preserving compatibility with older clients:
+
+- `model_usage_updated`: `context_usage` uses the same calibrated occupancy
+  estimate as native compression. It is updated before a request (including
+  newly added tool/user content) and after a completed model call. Optional
+  `turn.usage` is a **cumulative snapshot for that turn**, including completed
+  calls before a later failure, cancellation or timeout. Do not add snapshots
+  together or add them to terminal `turn.usage`; use the latest snapshot for
+  each turn. The history WAL remains the recovery source for agent state.
+- `request_retry`: `retry.attempt` is the upcoming retry number (1 or 2) and
+  `retry.delay_ms` is the planned backoff. This records a transient failure,
+  not a failed turn. It does not guarantee the retry executed: cancellation
+  or the original deadline can end the wait.
+
+  Each retry lifecycle now also carries a stable `retry.request_id` for one
+  model invocation and `retry.status`: `waiting` (backoff), `retrying` (request
+  dispatched), `recovered` (output resumed), `failed` (retry policy ended),
+  `canceled` (caller canceled/deadline), or `context_recovery` (request retry
+  ended and the agent handed the failure to context compaction recovery).
+  `context_recovery` ends that request's retry indicator; it does not promise
+  that compaction or the subsequent model request succeeds.
+  Clients should fold records with the
+  same request ID into one row, preserving its first position and replacing
+  its status with the newest record. Different model invocations must not be
+  merged. Final errors still use the existing error/turn-failed events; these
+  retain the diagnostic details. Older records without ID/status retain their
+  original meaning. If a worker exits before a retry terminal update, the
+  enclosing turn terminal event ends any outstanding retry indicator.
+
+Native adapters share a maximum of two retries for transient HTTP/network or
+structured SSE errors **before any model output is published**. Backoff uses
+exponential delay with jitter and honors `Retry-After`; a server-requested wait
+over one minute ends the request rather than retrying early. SDK retries are
+disabled to prevent nested retry budgets. Once text, reasoning, a tool call or
+finish has been published, the request is not replayed automatically. Permanent
+errors and caller cancellation/deadlines are not retried. Calls that fail without
+returning usage remain unknown; recorded usage is not a billing guarantee.
+
+During an active native turn, session detail reads use the newest compatible
+progress record rather than the previous turn's full snapshot. Clients can also
+apply live `context_usage` updates directly. Model/profile changes and a new
+turn invalidate older progress; idle sessions continue to use their saved
+history. Codex's external runtime keeps its existing retry and usage behavior.
+
 Codex `fileChange` records use `apply_patch` as a backwards-compatible display tool name, not as an executable Zotigo core method. The durable tool result keeps `json.changes` entries with `path`, `kind`, and `diff`. The public tool-call arguments expose only scalar `files` and `change_count` summary fields, avoiding JavaScript object coercion such as `[object Object]`; richer clients should build file-level diff views from the structured tool result.
 
 The current file-store implementation reads the per-session append log before applying pagination, so `limit` bounds the HTTP response size but is not yet a tail-read optimization for very long sessions. A future store-level query can optimize this without changing the public API.
