@@ -640,6 +640,16 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 		// EndTurn is deferred but skipped while we're paused — the
 		// turn resumes when the user approves.
 		var turnErr error
+		// A run can contain many model calls. Progress and terminal events
+		// carry cumulative run snapshots, including calls before a failure.
+		var runUsage protocol.Usage
+		withUsage := func(event protocol.Event) protocol.Event {
+			if !isZeroUsage(runUsage) {
+				usage := runUsage.Normalized()
+				event.Usage = &usage
+			}
+			return event
+		}
 		isFreshTurn := msg.Role == protocol.RoleUser
 		if isFreshTurn {
 			turnMeta := map[string]any{
@@ -710,7 +720,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			a.mu.RUnlock()
 
 			if state == StatePaused {
-				outCh <- protocol.Event{Type: protocol.EventTypeFinish, FinishReason: "need_approval"}
+				outCh <- withUsage(protocol.Event{Type: protocol.EventTypeFinish, FinishReason: "need_approval"})
 				return
 			}
 
@@ -725,15 +735,17 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
+			contextUsage := a.contextUsageLocked(contextInput)
 			a.mu.Unlock()
 			if err != nil {
 				turnErr = fmt.Errorf("build context: %w", err)
-				outCh <- protocol.NewErrorEvent(turnErr)
+				outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 				return
 			}
 			if compaction != nil {
 				outCh <- protocol.Event{Type: protocol.EventTypeContextCompacted, ContextCompaction: compaction}
 			}
+			outCh <- protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: contextUsage}
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
 			var toolList []tools.Tool
@@ -782,7 +794,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					continue
 				}
 				turnErr = err
-				outCh <- protocol.NewErrorEvent(err)
+				outCh <- withUsage(protocol.NewErrorEvent(err))
 				return
 			}
 
@@ -795,8 +807,15 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			var providerFinishReason protocol.FinishReason
 			var providerUsage *protocol.Usage
 			var reactiveErr error
+			var failedRetry *protocol.RequestRetry
 
 			for evt := range stream {
+				// Resolve a failed retry together with its following error: the
+				// agent may hand a context-length failure to compaction instead.
+				if evt.Type == protocol.EventTypeRequestRetry && evt.Retry != nil && evt.Retry.Status == "failed" {
+					failedRetry = evt.Retry
+					continue
+				}
 				if evt.Type == protocol.EventTypeFinish {
 					providerFinishReason = evt.FinishReason
 					providerUsage = evt.Usage
@@ -809,12 +828,29 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				// without this exit, an empty currentContent would trip
 				// the empty-response recovery path and re-call the model.
 				if evt.Type == protocol.EventTypeError && evt.Error != nil {
+					if evt.Usage != nil {
+						// Failed requests have no assistant history entry, but their
+						// reported usage still belongs in turn events and hook snapshots.
+						runUsage = runUsage.Add(*evt.Usage).Normalized()
+						a.mu.Lock()
+						a.cumulativeUsage = a.cumulativeUsage.Add(*evt.Usage).Normalized()
+						a.mu.Unlock()
+					}
 					if errors.Is(evt.Error, providers.ErrContextLengthExceeded) &&
 						reactiveRetries < maxReactiveRetries {
 						reactiveErr = evt.Error
 					} else {
 						turnErr = evt.Error
-						outCh <- evt
+					}
+					if failedRetry != nil {
+						retry := *failedRetry
+						if reactiveErr != nil {
+							retry.Status = "context_recovery"
+						}
+						outCh <- protocol.Event{Type: protocol.EventTypeRequestRetry, Retry: &retry}
+					}
+					if reactiveErr == nil {
+						outCh <- withUsage(evt)
 					}
 					for range stream {
 					}
@@ -870,7 +906,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					continue
 				}
 				turnErr = reactiveErr
-				outCh <- protocol.NewErrorEvent(reactiveErr)
+				outCh <- withUsage(protocol.NewErrorEvent(reactiveErr))
 				return
 			}
 
@@ -974,15 +1010,20 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			a.mu.Lock()
 			err = a.conversation.appendMessages(asstMsg)
 			if err == nil {
-				a.cumulativeUsage = a.cumulativeUsage.Add(protocol.SessionUsage([]protocol.Message{asstMsg})).Normalized()
+				usage := protocol.SessionUsage([]protocol.Message{asstMsg})
+				a.cumulativeUsage = a.cumulativeUsage.Add(usage).Normalized()
+				runUsage = runUsage.Add(usage).Normalized()
 			}
 			steeringPending := len(a.pendingTurnUser) > 0
+			contextUsage = a.contextUsageLocked(contextInput)
 			a.mu.Unlock()
 			if err != nil {
 				turnErr = fmt.Errorf("record assistant history: %w", err)
-				outCh <- protocol.NewErrorEvent(turnErr)
+				outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 				return
 			}
+
+			outCh <- withUsage(protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: contextUsage})
 
 			// Reset the empty-recovery budget on any legitimate output.
 			// The cap is meant to stop consecutive empty responses, not to
@@ -995,7 +1036,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				if len(currentToolCalls) > 0 {
 					if err := recordInterruptedToolCalls(currentToolCalls); err != nil {
 						turnErr = fmt.Errorf("record interrupted tool results: %w", err)
-						outCh <- protocol.NewErrorEvent(turnErr)
+						outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 						return
 					}
 				}
@@ -1052,7 +1093,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 						a.mu.Unlock()
 						if err := recordInterruptedToolCalls(currentToolCalls); err != nil {
 							turnErr = fmt.Errorf("record interrupted tool results: %w", err)
-							outCh <- protocol.NewErrorEvent(turnErr)
+							outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 							return
 						}
 						continue
@@ -1084,7 +1125,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 					a.mu.Unlock()
 					if err != nil {
 						turnErr = fmt.Errorf("record tool results: %w", err)
-						outCh <- protocol.NewErrorEvent(turnErr)
+						outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 						return
 					}
 					for i := range results {
@@ -1132,7 +1173,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				a.mu.Unlock()
 				if err != nil {
 					turnErr = fmt.Errorf("record recovery nudge: %w", err)
-					outCh <- protocol.NewErrorEvent(turnErr)
+					outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 					return
 				}
 				continue
@@ -1152,7 +1193,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			a.state = StateIdle
 			a.mu.Unlock()
 
-			outCh <- protocol.NewFinishEvent(providerFinishReason)
+			outCh <- withUsage(protocol.NewFinishEvent(providerFinishReason))
 			return
 		}
 	}()

@@ -1695,7 +1695,10 @@ func TestAgentAddsToolResultUsageToSessionUsage(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	for range events {
+	for event := range events {
+		if event.Type == protocol.EventTypeFinish && (event.Usage == nil || *event.Usage != childUsage) {
+			t.Fatalf("finish lost tool usage: %+v", event.Usage)
+		}
 	}
 
 	snapshot := ag.Snapshot()
@@ -1727,7 +1730,20 @@ func TestAgentClearHistoryPreservesCumulativeUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for range events {
+	progressSeen := false
+	for event := range events {
+		if event.Type == protocol.EventTypeUsageUpdated && event.Usage != nil {
+			progressSeen = true
+			if *event.Usage != turnUsage || event.ContextUsage == nil || event.ContextUsage.Tokens < turnUsage.TotalInput() {
+				t.Fatalf("invalid progress: %+v", event)
+			}
+		}
+		if event.Type == protocol.EventTypeFinish && (event.Usage == nil || *event.Usage != turnUsage) {
+			t.Fatalf("finish lost turn usage: %+v", event.Usage)
+		}
+	}
+	if !progressSeen {
+		t.Fatal("usage not emitted before turn completion")
 	}
 	ag.ClearHistory()
 	cleared := ag.Snapshot()
@@ -5003,6 +5019,7 @@ func TestAgent_Describe_ClassifierDisabled(t *testing.T) {
 // agent's force-compact-and-retry path.
 type reactiveMockProvider struct {
 	calls          int
+	retryFailure   bool
 	failTimes      int // how many of the first calls return ErrContextLengthExceeded
 	contextErrText string
 }
@@ -5015,6 +5032,9 @@ func (p *reactiveMockProvider) StreamChat(_ context.Context, _ []protocol.Messag
 	go func() {
 		defer close(ch)
 		if p.calls <= p.failTimes {
+			if p.retryFailure {
+				ch <- protocol.Event{Type: protocol.EventTypeRequestRetry, Retry: &protocol.RequestRetry{RequestID: "context-request", Status: "failed", Attempt: 1}}
+			}
 			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(fmt.Errorf("HTTP 400: %s", p.contextErrText)))
 			return
 		}
@@ -5030,6 +5050,7 @@ func (p *reactiveMockProvider) StreamChat(_ context.Context, _ []protocol.Messag
 
 func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 	mock := &reactiveMockProvider{
+		retryFailure:   true,
 		failTimes:      1,
 		contextErrText: "prompt is too long: 250000 tokens",
 	}
@@ -5065,9 +5086,16 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 	}
 
 	var sawText bool
+	var retryStatus string
 	var compaction *protocol.ContextCompaction
 	var lastFinish protocol.FinishReason
 	for e := range events {
+		if e.Type == protocol.EventTypeRequestRetry && e.Retry != nil {
+			retryStatus = e.Retry.Status
+			if retryStatus != "context_recovery" {
+				t.Fatalf("misleading retry state: %s", retryStatus)
+			}
+		}
 		if e.Type == protocol.EventTypeContentDelta && e.ContentPartDelta != nil &&
 			e.ContentPartDelta.Type != protocol.ContentTypeReasoning &&
 			strings.Contains(e.ContentPartDelta.Text, "recovered") {
@@ -5086,6 +5114,9 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 
 	if mock.calls != 2 {
 		t.Errorf("expected 2 StreamChat calls (initial + retry), got %d", mock.calls)
+	}
+	if retryStatus != "context_recovery" {
+		t.Fatal("missing context recovery handoff")
 	}
 	if !sawText {
 		t.Error("did not see recovered content delta")

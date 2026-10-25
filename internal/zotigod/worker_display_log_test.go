@@ -47,6 +47,73 @@ func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
 	}
 }
 
+func TestWorkerUsageProgressSurvivesTerminalAndApproval(t *testing.T) {
+	for _, terminal := range []string{"completed", "failed", "interrupted"} {
+		t.Run(terminal, func(t *testing.T) {
+			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			display := newWorkerDisplayLog("progress", source)
+			ctx := context.Background()
+			if _, err := display.StartTurn(ctx); err != nil {
+				t.Fatal(err)
+			}
+			send := func(event protocol.Event) {
+				t.Helper()
+				if err := display.HandleEvent(ctx, event); err != nil {
+					t.Fatal(err)
+				}
+			}
+			usage := &protocol.Usage{InputTokens: 10, OutputTokens: 2}
+			progress := protocol.Event{Type: protocol.EventTypeUsageUpdated, Usage: usage, ContextUsage: &protocol.ContextUsage{Tokens: 15, Window: 100, Source: "provider_estimate", ProfileKey: "profile"}}
+			send(progress)
+			send(progress) // cumulative run snapshots must not be summed
+			items, _, _ := source.LoadItems(ctx, "progress")
+			if got := items[len(items)-1]; got.ContextUsage.Tokens != 15 || got.Turn.Usage.TotalTokens != 12 {
+				t.Fatalf("progress = %+v", got)
+			}
+			send(protocol.Event{Type: protocol.EventTypeFinish, FinishReason: "need_approval", Usage: usage})
+			progress.Usage = &protocol.Usage{InputTokens: 20, OutputTokens: 3}
+			send(progress)
+			switch terminal {
+			case "completed":
+				send(protocol.Event{Type: protocol.EventTypeFinish, FinishReason: protocol.FinishReasonStop, Usage: progress.Usage})
+			case "failed":
+				send(protocol.Event{Type: protocol.EventTypeError, Error: errors.New("unavailable"), Usage: progress.Usage})
+			case "interrupted":
+				if err := display.Interrupt(ctx, "deadline"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			items, _, _ = source.LoadItems(ctx, "progress")
+			if got := items[len(items)-1].Turn.Usage; got == nil || got.TotalTokens != 35 {
+				t.Fatalf("terminal usage = %+v", got)
+			}
+		})
+	}
+}
+
+func TestWorkerDisplayLogPersistsFailedTurnUsage(t *testing.T) {
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	display := newWorkerDisplayLog("sess-failed-usage", source)
+	ctx := context.Background()
+	if _, err := display.StartTurn(ctx); err != nil {
+		t.Fatal(err)
+	}
+	want := protocol.Usage{InputTokens: 30, OutputTokens: 5, TotalTokens: 35}
+	event := protocol.NewErrorEvent(errors.New("upstream failed"))
+	event.Usage = &want
+	if err := display.HandleEvent(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := source.LoadItems(ctx, "sess-failed-usage")
+	if err != nil {
+		t.Fatal(err)
+	}
+	last := items[len(items)-1]
+	if last.Turn == nil || last.Turn.Usage == nil || *last.Turn.Usage != want {
+		t.Fatalf("failed turn lost usage: %+v", last)
+	}
+}
+
 func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)

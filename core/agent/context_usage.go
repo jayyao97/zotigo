@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"sort"
 
+	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/services"
 )
@@ -43,4 +44,22 @@ func (a *Agent) contextPromptFor(system []protocol.Message) protocol.ContextInpu
 func (a *Agent) contextTokensLocked() int {
 	tokens, _ := a.compressor.ContextTokens(a.conversation.history, a.contextPromptLocked())
 	return tokens
+}
+
+// Uses the same calibrated estimate as compression, including assistant output
+// and tool results since the last request. Caller holds a.mu.
+func (a *Agent) contextUsageLocked(input protocol.ContextInput) *protocol.ContextUsage {
+	if a.compressor == nil {
+		return nil
+	}
+	tokens, calibrated := a.compressor.ContextTokens(a.conversation.history, input)
+	window := a.cfg.ContextWindow
+	if window <= 0 {
+		window = config.DefaultContextWindow
+	}
+	source := "estimate"
+	if calibrated {
+		source = "provider_estimate"
+	}
+	return &protocol.ContextUsage{Tokens: tokens, Window: window, Source: source, ProfileKey: input.ProfileKey}
 }

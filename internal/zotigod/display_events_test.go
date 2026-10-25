@@ -204,6 +204,20 @@ func TestInternalToolExecutionMarkerIsHiddenFromPublicItemsAndEvents(t *testing.
 	}
 }
 
+func TestRuntimeUpdatesRequireOptIn(t *testing.T) {
+	items := []zotigosession.DisplayItem{
+		{ID: "text", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage},
+		{ID: "usage", Sequence: 2, Type: zotigosession.DisplayItemModelUsageUpdated, ContextUsage: &zotigosession.DisplayContextUsage{Tokens: 42, Window: 100}},
+		{ID: "retry", Sequence: 3, Type: zotigosession.DisplayItemRequestRetry},
+	}
+	if page := buildItemsResponse(items, zotigosession.DisplayPageQuery{Limit: 10}); len(page.Items) != 1 {
+		t.Fatalf("legacy page: %+v", page)
+	}
+	if page := buildItemsResponse(items, zotigosession.DisplayPageQuery{Limit: 10}, true); len(page.Items) != 3 || page.Items[1].ContextUsage.Tokens != 42 {
+		t.Fatalf("runtime page: %+v", page)
+	}
+}
+
 func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {

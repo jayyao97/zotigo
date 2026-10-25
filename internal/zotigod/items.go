@@ -241,22 +241,24 @@ func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigose
 }
 
 type itemResponse struct {
-	BeforeInputID     string                            `json:"before_input_id,omitempty"`
-	ID                string                            `json:"id"`
-	Sequence          uint64                            `json:"sequence"`
-	Type              string                            `json:"type"`
-	Role              string                            `json:"role,omitempty"`
-	Content           []itemContentResponse             `json:"content,omitempty"`
-	Subagent          *itemSubagentEventResponse        `json:"subagent,omitempty"`
-	Turn              *itemTurnResponse                 `json:"turn,omitempty"`
-	Approval          *itemApprovalResponse             `json:"approval,omitempty"`
-	Interaction       *zotigosession.DisplayInteraction `json:"interaction,omitempty"`
-	Command           *itemCommandResponse              `json:"command,omitempty"`
-	Profile           *itemProfileResponse              `json:"profile,omitempty"`
-	ApprovalPolicy    *itemApprovalPolicyResponse       `json:"approval_policy,omitempty"`
-	ContextCompaction *itemContextCompactionResponse    `json:"context_compaction,omitempty"`
-	Error             string                            `json:"error,omitempty"`
-	CreatedAt         time.Time                         `json:"created_at"`
+	ContextUsage      *zotigosession.DisplayContextUsage `json:"context_usage,omitempty"`
+	Retry             *protocol.RequestRetry             `json:"retry,omitempty"`
+	BeforeInputID     string                             `json:"before_input_id,omitempty"`
+	ID                string                             `json:"id"`
+	Sequence          uint64                             `json:"sequence"`
+	Type              string                             `json:"type"`
+	Role              string                             `json:"role,omitempty"`
+	Content           []itemContentResponse              `json:"content,omitempty"`
+	Subagent          *itemSubagentEventResponse         `json:"subagent,omitempty"`
+	Turn              *itemTurnResponse                  `json:"turn,omitempty"`
+	Approval          *itemApprovalResponse              `json:"approval,omitempty"`
+	Interaction       *zotigosession.DisplayInteraction  `json:"interaction,omitempty"`
+	Command           *itemCommandResponse               `json:"command,omitempty"`
+	Profile           *itemProfileResponse               `json:"profile,omitempty"`
+	ApprovalPolicy    *itemApprovalPolicyResponse        `json:"approval_policy,omitempty"`
+	ContextCompaction *itemContextCompactionResponse     `json:"context_compaction,omitempty"`
+	Error             string                             `json:"error,omitempty"`
+	CreatedAt         time.Time                          `json:"created_at"`
 }
 
 type itemContentResponse struct {
@@ -450,10 +452,10 @@ func parseDisplayCursor(raw string) (uint64, error) {
 	return cursor, nil
 }
 
-func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.DisplayPageQuery) itemsResponse {
+func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.DisplayPageQuery, runtimeUpdates ...bool) itemsResponse {
 	publicItems := make([]zotigosession.DisplayItem, 0, len(items))
 	for _, item := range items {
-		if isPublicDisplayItem(item) {
+		if isPublicDisplayItem(item, runtimeUpdates...) {
 			publicItems = append(publicItems, item)
 		}
 	}
@@ -472,6 +474,8 @@ func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.D
 
 func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 	return itemResponse{
+		ContextUsage:      item.ContextUsage,
+		Retry:             item.Retry,
 		BeforeInputID:     item.BeforeInputID,
 		ID:                item.ID,
 		Sequence:          item.Sequence,
@@ -520,7 +524,10 @@ func publicDisplayProfile(profile *zotigosession.DisplayProfileChange) *itemProf
 	return &itemProfileResponse{CommandID: profile.CommandID, From: profile.From, To: profile.To}
 }
 
-func isPublicDisplayItem(item zotigosession.DisplayItem) bool {
+func isPublicDisplayItem(item zotigosession.DisplayItem, runtimeUpdates ...bool) bool {
+	if item.Type == zotigosession.DisplayItemModelUsageUpdated || item.Type == zotigosession.DisplayItemRequestRetry {
+		return len(runtimeUpdates) > 0 && runtimeUpdates[0]
+	}
 	return item.Type != zotigosession.DisplayItemToolExecutionStarted && item.Type != zotigosession.DisplayItemContextUsageUpdated
 }
 
