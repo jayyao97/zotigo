@@ -16,9 +16,20 @@ install_init() {
   root="$prefix/$component"
   mkdir "$root/install.lock" 2>/dev/null || fail "Another $component installation holds $root/install.lock; remove it only if that installer is no longer running."
   stage=$(mktemp -d "$root/releases/build.XXXXXX")
-  trap 'rm -rf "$stage"; rmdir "$root/install.lock"' EXIT
+  trap 'install_cleanup' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
+}
+
+install_cleanup() {
+  # Restore the active directory if publication was interrupted between renames.
+  if [ -e "$stage/old-current" ] || [ -L "$stage/old-current" ]; then
+    if [ ! -e "$root/current" ] && [ ! -L "$root/current" ]; then
+      mv "$stage/old-current" "$root/current" || return 1
+    fi
+  fi
+  rm -rf "$stage"
+  rmdir "$root/install.lock"
 }
 
 source_identity() {
@@ -33,6 +44,11 @@ installed_daemon_matches() (
   [ -x "$1" ] || return 1
   record="$(dirname "$1")/INSTALLATION"
   [ -f "$record" ] || return 1
+  if [ "$(uname -s)" = Darwin ]; then
+    # Older symlink-based installs need migrating even at the same source commit.
+    [ ! -L "$(dirname "$1")" ] && [ -f "$(dirname "$1")/RELEASE" ] || return 1
+    sh "$2/scripts/sign-macos-daemon.sh" --verify "$1" >/dev/null 2>&1 || return 1
+  fi
   source_dir=$2
   source_identity
   [ "$dirty" = false ] || return 1
@@ -84,12 +100,40 @@ assert_stopped() {
 
 publish_install() {
   assert_stopped
+  if [ "$platform" = Darwin ] && [ "$component" = daemon ]; then
+    publish_macos_daemon
+    return
+  fi
   if [ -e "$root/current" ] && [ ! -L "$root/current" ]; then fail "$root/current is not an installer-owned symlink."; fi
   release="$root/releases/$version-$(date +%s)-$$"
   printf 'version=%s\ncommit=%s\ndirty=%s\n' "$version" "$commit" "$dirty" > "$stage/output/INSTALLATION"
   mv "$stage/output" "$release"
   if [ -L "$root/current" ]; then atomic_link "$(readlink "$root/current")" "$root/previous"; fi
   atomic_link "$release" "$root/current"
+}
+
+publish_macos_daemon() {
+  previous_release=
+  if [ -L "$root/current" ]; then
+    previous_release=$(readlink "$root/current")
+  elif [ -e "$root/current" ]; then
+    [ -d "$root/current" ] && [ -f "$root/current/RELEASE" ] || fail 'Refusing to replace an unrecognized daemon/current directory.'
+    previous_release=$(cat "$root/current/RELEASE")
+  fi
+  if [ -n "$previous_release" ]; then
+    case "$previous_release" in "$root/releases/"*) ;; *) fail 'Unrecognized previous daemon release.' ;; esac
+    [ -f "$previous_release/INSTALLATION" ] || fail 'Previous daemon release metadata is missing.'
+  fi
+  release="$root/releases/$version-$(date +%s)-$$"
+  printf 'version=%s\ncommit=%s\ndirty=%s\n' "$version" "$commit" "$dirty" > "$stage/output/INSTALLATION"
+  mv "$stage/output" "$release"
+  # The archive remains immutable; current is a real, fixed-path directory.
+  cp -R "$release" "$stage/active"
+  printf '%s\n' "$release" > "$stage/active/RELEASE"
+  if [ -n "$previous_release" ]; then atomic_link "$previous_release" "$root/previous"; fi
+  # Services and processes were checked above. Never overwrite a live Mach-O.
+  if [ -e "$root/current" ] || [ -L "$root/current" ]; then mv "$root/current" "$stage/old-current"; fi
+  mv "$stage/active" "$root/current"
 }
 
 service_check() {

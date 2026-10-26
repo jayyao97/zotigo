@@ -77,6 +77,9 @@ binary=zotigo
 [ "$component" = cli ] || binary=zotigod
 mkdir "$stage/output"
 (cd "$source_dir" && go build -trimpath -o "$stage/output/$binary" "./cmd/$binary")
+if [ "$platform" = Darwin ] && [ "$component" = daemon ]; then
+  sh "$source_dir/scripts/sign-macos-daemon.sh" "$stage/output/$binary"
+fi
 version=$("$stage/output/$binary" --version | sed -n "s/^$binary //p")
 validate_version
 "$stage/output/$binary" --version

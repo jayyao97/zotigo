@@ -41,7 +41,96 @@ printf '#!/bin/sh\\necho "zotigo 1.0.0"\\n' > "$2"
 chmod +x "$2"
 ''')
         compiler.chmod(0o755)
-        self.env = {**os.environ, "PATH": f"{self.tools}:{os.environ['PATH']}"}
+        self.env = {**os.environ, "PATH": f"{self.tools}:{os.environ['PATH']}",
+                    "ZOTIGO_MACOS_SIGNING_IDENTITY": "1" * 40,
+                    "ZOTIGO_MACOS_SIGNING_IDENTITY_FILE": str(self.base / "signing-identity")}
+        # Compiler output is a shell fixture, never sign with the host's keychain.
+        codesign = self.tools / "codesign"
+        codesign.write_text('''#!/bin/sh
+[ "${FAIL_SIGN:-0}" = 0 ] || exit 1
+if [ "$1" = --display ]; then
+  echo 'Identifier=com.zotigo.daemon'
+  echo 'Authority=Zotigo Test Signing'
+fi
+''')
+        codesign.chmod(0o755)
+
+    def publish_fixed_daemon(self, **env):
+        script = '''set -eu
+. "$1"
+install_init
+mkdir "$stage/output"
+printf 'new binary' > "$stage/output/zotigod"
+version=2.0.0 commit=test dirty=false
+publish_macos_daemon
+'''
+        return subprocess.run(["sh", "-c", script, "test", str(self.source / "scripts/install-common.sh")],
+                              env={**self.env, "prefix": str(self.prefix), "component": "daemon", **env},
+                              text=True, capture_output=True)
+
+    def test_macos_publication_keeps_fixed_real_path_and_archives(self):
+        current = self.prefix / "daemon/current"
+        for _ in range(2):
+            result = self.publish_fixed_daemon()
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertTrue(current.is_dir())
+            self.assertFalse(current.is_symlink())
+            self.assertEqual((current / "zotigod").resolve(), current / "zotigod")
+            release = Path((current / "RELEASE").read_text().strip())
+            self.assertEqual((release / "zotigod").read_text(), "new binary")
+        self.assertTrue((current.parent / "previous").is_symlink())
+
+    def test_macos_publication_migrates_symlink_and_restores_on_failure(self):
+        root = self.prefix / "daemon"
+        release = root / "releases/old"
+        release.mkdir(parents=True)
+        (release / "INSTALLATION").write_text("version=1.0.0\n")
+        (release / "zotigod").write_text("old binary")
+        (root / "current").symlink_to(release)
+        real_mv = shutil.which("mv")
+        stub = self.tools / "mv"
+        stub.write_text(f'''#!/bin/sh
+case "$1" in */active) exit 1 ;; esac
+exec '{real_mv}' "$@"
+''')
+        stub.chmod(0o755)
+        result = self.publish_fixed_daemon()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((root / "current").resolve(), release)
+        self.assertEqual((root / "current/zotigod").read_text(), "old binary")
+        stub.unlink()
+        result = self.publish_fixed_daemon()
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((root / "current").is_symlink())
+        self.assertEqual((root / "previous").resolve(), release)
+
+    def test_macos_publication_refuses_unmanaged_directory(self):
+        current = self.prefix / "daemon/current"
+        current.mkdir(parents=True)
+        (current / "user-file").write_text("keep")
+        result = self.publish_fixed_daemon()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unrecognized", result.stderr)
+        self.assertEqual((current / "user-file").read_text(), "keep")
+
+    def test_macos_signing_requires_and_reuses_persistent_identity(self):
+        uname = self.tools / "uname"
+        uname.write_text("#!/bin/sh\necho Darwin\n")
+        uname.chmod(0o755)
+        script = self.source / "scripts/sign-macos-daemon.sh"
+        binary = self.base / "zotigod"
+        binary.write_text("fixture")
+        def sign(**env):
+            return subprocess.run(["sh", str(script), str(binary)], env={**self.env, **env},
+                                  text=True, capture_output=True)
+        self.assertNotEqual(sign(ZOTIGO_MACOS_SIGNING_IDENTITY="").returncode, 0)
+        self.assertNotEqual(sign(ZOTIGO_MACOS_SIGNING_IDENTITY="-").returncode, 0)
+        self.assertEqual(sign().returncode, 0)
+        self.assertEqual(sign(ZOTIGO_MACOS_SIGNING_IDENTITY="").returncode, 0)
+        saved = Path(self.env["ZOTIGO_MACOS_SIGNING_IDENTITY_FILE"])
+        self.assertEqual(saved.read_text().strip(), "1" * 40)
+        self.assertNotEqual(sign(FAIL_SIGN="1", ZOTIGO_MACOS_SIGNING_IDENTITY="2" * 40).returncode, 0)
+        self.assertEqual(saved.read_text().strip(), "1" * 40)
 
     def install(self, component="cli", **env):
         return subprocess.run(["sh", str(self.source / "install.sh"), "--source", str(self.source),
@@ -259,6 +348,7 @@ chmod +x "$2"
         binary.write_text('#!/bin/sh\necho "zotigod 1.0.0"\n')
         binary.chmod(0o755)
         record = self.tools / "INSTALLATION"
+        (self.tools / "RELEASE").write_text("fixture archive\n")
         cases = [
             ("", 1),  # Unmanaged/old installations have no clean-source provenance.
             (f"version=1.0.0\ncommit={commit}\ndirty=true\n", 1),
@@ -269,12 +359,32 @@ chmod +x "$2"
         for metadata, expected in cases:
             record.write_text(metadata)
             result = subprocess.run(["sh", "-c", '. "$1"; installed_daemon_matches "$2" "$3"',
-                                     "test", str(self.source / "scripts/install-common.sh"), str(binary), str(self.source)])
+                                     "test", str(self.source / "scripts/install-common.sh"), str(binary), str(self.source)], env=self.env)
             self.assertEqual(result.returncode, expected, metadata)
         (self.source / "local-change").write_text("modified source")
         result = subprocess.run(["sh", "-c", '. "$1"; installed_daemon_matches "$2" "$3"',
-                                 "test", str(self.source / "scripts/install-common.sh"), str(binary), str(self.source)])
+                                 "test", str(self.source / "scripts/install-common.sh"), str(binary), str(self.source)], env=self.env)
         self.assertEqual(result.returncode, 1)
+
+    def test_macos_pairing_rejects_old_layout_or_invalid_signature(self):
+        uname = self.tools / "uname"
+        uname.write_text("#!/bin/sh\necho Darwin\n")
+        uname.chmod(0o755)
+        commit = subprocess.check_output(["git", "-C", str(self.source), "rev-parse", "HEAD"], text=True).strip()
+        binary = self.tools / "zotigod"
+        binary.write_text('#!/bin/sh\necho "zotigod 1.0.0"\n')
+        binary.chmod(0o755)
+        (self.tools / "INSTALLATION").write_text(f"version=1.0.0\ncommit={commit}\ndirty=false\n")
+        def matches(**env):
+            return subprocess.run(["sh", "-c", '. "$1"; installed_daemon_matches "$2" "$3"',
+                                   "test", str(self.source / "scripts/install-common.sh"), str(binary), str(self.source)],
+                                  env={**self.env, **env}).returncode
+        self.assertNotEqual(matches(), 0)
+        (self.tools / "RELEASE").write_text("fixture\n")
+        self.assertEqual(matches(), 0)
+        self.assertNotEqual(matches(FAIL_SIGN="1"), 0)
+        self.assertFalse(Path(self.env["ZOTIGO_MACOS_SIGNING_IDENTITY_FILE"]).exists(),
+                         "read-only signature verification must not save configuration")
 
     def test_source_changes_do_not_redefine_release_version(self):
         subprocess.run(["git", "-C", str(self.source), "tag", "v9.0.0"], check=True)
