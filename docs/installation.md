@@ -34,7 +34,7 @@ its interpreter, such as Node, available in the daemon's environment.
 
 ## Installation
 
-No Homebrew tap, separate manager, GitHub Release, or Apple Developer account is required for this source-install path. Run as your normal user. Git, curl, tar, and a SHA-256 utility (`sha256sum` or `shasum`) are prerequisites. On macOS, install Command Line Tools if Git is unavailable. Daemon services require a systemd user manager on Linux or a logged-in macOS GUI session.
+No Homebrew tap, separate manager, GitHub Release, or Apple Developer account is required for this source-install path. Run as your normal user. Git, curl, tar, and a SHA-256 utility (`sha256sum` or `shasum`) are prerequisites. On macOS, install Command Line Tools if Git is unavailable; daemon builds also require a persistent code-signing identity as described below. Daemon services require a systemd user manager on Linux or a logged-in macOS GUI session.
 
 After the installer is merged and an initial stable tag is published:
 
@@ -70,7 +70,7 @@ No `sudo`, global package-manager installation, shell profile edits, or persiste
 Default prefix: `~/.local/share/zotigo`; override with `--prefix /absolute/path` or `ZOTIGO_INSTALL_PREFIX`. Paths may contain spaces but not shell/service metacharacters. Add `PREFIX/bin` to your shell's PATH.
 
 - `cli/releases/`, `daemon/releases/`: separate builds, never overwritten in place.
-- Each component's `current` symlink selects its installation; `previous` retains the prior build.
+- Each component's `current` symlink selects its installation, except the macOS daemon: its `current` is a real directory so the executable's resolved path stays fixed. `previous` retains the prior release archive.
 - `current/INSTALLATION`: code-owned release version, source commit, and `dirty=true|false`.
 - `config/daemon.env`: user-owned shell assignments, preserved on upgrade.
 - On first configuration (no `daemon.env` and no `daemon/current/INSTALLATION`), the installer creates `config/daemon.token` with 32 random bytes encoded as hex and mode `0600`, and sets `ZOTIGOD_AUTH_TOKEN_FILE` in `daemon.env`. OpenSSL is required for this generation. Authentication is enabled even on loopback. An existing token is reused after an interrupted install; upgrades never rotate it or enable authentication on an existing configuration. If an installed daemon has lost `daemon.env`, restore it before reinstalling.
@@ -115,6 +115,62 @@ These are operational diagnostics, not a full terminal recording. Session/projec
 
 Run the same installer for the desired immutable tag. It builds the new version first, but refuses activation while a process from the existing installation is running. Finish tasks and stop/unload the service before retrying. Do not independently restart it while an installer is running. The installer never silently interrupts active tasks or takes over a Homebrew/manual installation.
 
-A failed build leaves `current` unchanged. Previous build directories remain available. If startup fails after activation, inspect logs and the `previous` link; there is no automatic data rollback. Downgrade only when the old program can read the current data format. Configuration and `~/.zotigo` project/session data are never deleted by installation. Old release directories can be removed manually once no process or `current`/`previous` link uses them.
+A failed build or signing step leaves `current` unchanged. Previous build directories remain available. If startup fails after activation, inspect logs and the `previous` link; there is no automatic data rollback. Downgrade only when the old program can read the current data format. Configuration and `~/.zotigo` project/session data are never deleted by installation. Old release directories can be removed manually once no process or `current`/`previous` link uses them. For the macOS daemon, `current/RELEASE` identifies the active archive; keep that archive too.
+
+## macOS daemon identity and privacy permissions
+
+The daemon uses signing identifier `com.zotigo.daemon`. Unlike Go's ad-hoc
+signature, a persistent certificate lets successive builds satisfy the same
+code identity requirement. The installer and Desktop development builder both
+use `scripts/sign-macos-daemon.sh`. They fail if the identity is missing,
+unavailable, or cannot sign; they never fall back to ad-hoc signing.
+
+For personal source builds, create a persistent **Code Signing** certificate in
+your login keychain using Keychain Access's Certificate Assistant. A local
+self-signed identity is sufficient to test code identity continuity; it is not
+Developer ID distribution signing or notarization. Keep its private key across
+upgrades. Do not generate a new certificate for each build. If it is not listed
+as a valid identity, inspect its code-signing trust settings in Keychain Access.
+For distribution, select your existing Developer ID Application identity instead.
+
+List available identities, then select the certificate's 40-character SHA-1
+fingerprint (not its display name):
+
+```sh
+security find-identity -v -p codesigning
+ZOTIGO_MACOS_SIGNING_IDENTITY=YOUR_40_CHARACTER_CERTIFICATE_FINGERPRINT \
+  sh install.sh --source "$PWD" --component daemon
+```
+
+After successful signing the fingerprint is saved to
+`~/.config/zotigo/macos-signing-identity` with owner-only permissions. Subsequent
+installs and Desktop development builds reuse it without an environment override.
+`ZOTIGO_MACOS_SIGNING_IDENTITY_FILE` selects an alternate file. The file contains
+only the public certificate fingerprint; private keys stay in the keychain.
+The keychain may require unlocking or interactive authorization. Headless builds
+must arrange keychain access explicitly. Changing identities can require renewed
+privacy authorization. Certificate creation/trust setup is not automated.
+
+The macOS daemon runs at `PREFIX/daemon/current/zotigod`, with no version symlink
+in that path. Stop the service before upgrading as usual. The installer archives
+the build in `releases/`, stages a complete active directory, then renames it into
+place. It restores the old directory if the activation rename fails. This is a
+stopped-service replacement with a brief missing-directory window, not a live
+atomic directory exchange. After a forced kill/power loss, inspect any retained
+`releases/build.*/old-current` and the install lock before recovery; do not delete
+that staging directory while `current` is absent. Normal signals run cleanup.
+Existing symlink-based installations migrate on the next successful install.
+For rollback, reinstall a compatible source revision that includes this fixed-path
+installer layout. Older installers cannot publish into the new real `current`
+directory. Do not replace `current` with a release symlink or launch the archived binary.
+
+Migration from ad-hoc signing may require one new macOS permission grant. Old
+permission entries are not removed automatically. Validate on a real Mac: grant
+the needed permission to build A, upgrade to a different build B with the same
+identity, confirm file access and no additional entry/prompt, then validate a
+rollback. Compare `codesign -d -r- PATH` between builds as supporting evidence.
+Different prefixes and Desktop's separate development daemon path are distinct
+installations and may still need separate authorization. No TCC database or
+system-wide privacy setting is modified by the installer.
 
 To uninstall, stop and disable/unload the service, remove its service file and installer-created binary link, then remove the component's installation directory. Keep `~/.zotigo` and `config/` unless you explicitly want to delete user data.
