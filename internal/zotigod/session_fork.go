@@ -236,11 +236,6 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	if _, err = h.catalog.AssignSession(ctx, targetID, *org.WorkspaceID); err != nil {
 		return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 	}
-	// Fork creation is new activity even though its inherited turns are old.
-	// Match channel creation ordering without rewriting historical timestamps.
-	if _, err = h.catalog.SetSessionPosition(ctx, targetID, -time.Now().UnixMilli()); err != nil {
-		return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
-	}
 	branchTitle := strings.TrimSpace(title)
 	if branchTitle == "" {
 		branchTitle = "Fork"

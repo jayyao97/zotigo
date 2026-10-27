@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"math"
 	"path/filepath"
 	"testing"
 	"time"
@@ -119,7 +120,7 @@ func TestRecordSessionActivityMovesWorkspaceSessionToFront(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if first.WorkspacePosition == nil || second.WorkspacePosition == nil || *first.WorkspacePosition >= *second.WorkspacePosition {
+	if first.WorkspacePosition == nil || second.WorkspacePosition == nil || *second.WorkspacePosition >= *first.WorkspacePosition {
 		t.Fatalf("initial positions = first:%v second:%v", first.WorkspacePosition, second.WorkspacePosition)
 	}
 
@@ -260,5 +261,22 @@ func TestDeleteWorkspaceArchivesOrganizationAndKeepsPathTombstone(t *testing.T) 
 	}
 	if !owned {
 		t.Fatal("deleted workspace path tombstone is missing")
+	}
+}
+
+func TestAssignSessionRejectsPositionOverflow(t *testing.T) {
+	store, workspace, _ := createGitWorkspaceFixture(t)
+	ctx := t.Context()
+	if _, err := store.AssignSession(ctx, "first", workspace.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.SetSessionPosition(ctx, "first", math.MinInt64); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AssignSession(ctx, "next", workspace.ID); !errors.Is(err, ErrConflict) {
+		t.Fatalf("assign = %v, want conflict", err)
+	}
+	if _, err := store.GetSessionOrganization(ctx, "next"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unexpected partial assignment: %v", err)
 	}
 }

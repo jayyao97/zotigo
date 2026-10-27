@@ -383,3 +383,43 @@ func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOper
 	handler := newHandler(registry, items, handlerOptions{store: store, catalog: catalog, workspaceOps: workspaceOps, workers: workers})
 	return handler, registry, catalog, workspace
 }
+
+func TestCreateSessionStartsAtFrontWithoutClientReorder(t *testing.T) {
+	handler, _, catalog, workspace := newCatalogSessionFixture(t)
+	writeTestProfileConfig(t, workspace.RootPath)
+	var previousID string
+	var previousPosition int64
+	for i := 0; i < 3; i++ {
+		response := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
+		if response.Code != http.StatusCreated {
+			t.Fatalf("create = %d: %s", response.Code, response.Body.String())
+		}
+		var session Session
+		decodeCatalogData(t, response, &session)
+		org, err := catalog.GetSessionOrganization(t.Context(), session.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if org.WorkspacePosition == nil {
+			t.Fatal("missing position")
+		}
+		if i > 0 {
+			if *org.WorkspacePosition >= previousPosition {
+				t.Fatalf("new position %d is not before %d", *org.WorkspacePosition, previousPosition)
+			}
+			previous, err := catalog.GetSessionOrganization(t.Context(), previousID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if *previous.WorkspacePosition != previousPosition {
+				t.Fatal("creation changed existing position")
+			}
+		}
+		// Include manually positioned sessions ahead of the clock-derived position.
+		previousPosition = *org.WorkspacePosition - 1000000
+		if _, err := catalog.SetSessionPosition(t.Context(), session.ID, previousPosition); err != nil {
+			t.Fatal(err)
+		}
+		previousID = session.ID
+	}
+}
