@@ -271,6 +271,8 @@ GET /skills?session_id=sess_8f0e12ab34cd56ef&force_reload=true
 }
 ```
 
+For workspace-bound creation, the response includes `workspace_position`, the position assigned at the front by the daemon. Clients should preserve it and skip their legacy post-creation position update. Older daemons omit this field; clients may retain that update only when it is absent.
+
 Sessions default to `agent: "zotigo"`. A Codex-backed Session selects a concrete model and reasoning effort. Workspace assignment is optional; when supplied, the Workspace must be ready. For example, to create a Workspace-bound Codex Session:
 
 ```json

@@ -394,14 +394,17 @@ func TestCreateSessionStartsAtFrontWithoutClientReorder(t *testing.T) {
 		if response.Code != http.StatusCreated {
 			t.Fatalf("create = %d: %s", response.Code, response.Body.String())
 		}
-		var session Session
+		var session struct {
+			Session
+			WorkspacePosition *int64 `json:"workspace_position"`
+		}
 		decodeCatalogData(t, response, &session)
 		org, err := catalog.GetSessionOrganization(t.Context(), session.ID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if org.WorkspacePosition == nil {
-			t.Fatal("missing position")
+		if org.WorkspacePosition == nil || session.WorkspacePosition == nil || *org.WorkspacePosition != *session.WorkspacePosition {
+			t.Fatal("missing or inconsistent creation position")
 		}
 		if i > 0 {
 			if *org.WorkspacePosition >= previousPosition {
