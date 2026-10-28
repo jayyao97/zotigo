@@ -14,6 +14,8 @@ func TestDisplayContentKind(t *testing.T) {
 		{"assistant image", DisplayItem{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "image"}}}, DisplayContentConversation},
 		{"mixed", DisplayItem{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "tool_call"}, {Type: "text", Text: "answer"}, {Type: "tool_result"}}}, DisplayContentConversation},
 		{"tools only", DisplayItem{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "tool_call"}, {Type: "tool_result"}}}, DisplayContentTool},
+		{"reasoning only", DisplayItem{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "reasoning", Text: "private"}}}, DisplayContentEvent},
+		{"thinking and tool", DisplayItem{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "thinking", Text: "private"}, {Type: "tool_call"}}}, DisplayContentTool},
 		{"empty assistant", DisplayItem{Type: DisplayItemAssistantMessage}, DisplayContentEvent},
 		{"tool start", DisplayItem{Type: DisplayItemToolExecutionStarted}, DisplayContentTool},
 		{"turn end", DisplayItem{Type: DisplayItemTurnCompleted}, DisplayContentEvent},

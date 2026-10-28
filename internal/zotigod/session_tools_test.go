@@ -214,9 +214,30 @@ func TestSessionToolsReadAcrossProjects(t *testing.T) {
 	if err != nil || strings.Contains(listed, target.ID) {
 		t.Fatalf("archived target listed: %s %v", listed, err)
 	}
-	if _, err := invoke("read_session", args); err == nil {
-		t.Fatal("archived target readable")
+	if _, err := invoke("read_session", args); err != nil {
+		t.Fatalf("archived history not readable: %v", err)
 	}
+	listed, err = invoke("list_sessions", json.RawMessage(`{"include_archived":true}`))
+	if err != nil || !strings.Contains(listed, target.ID) || !strings.Contains(listed, `"archived":true`) {
+		t.Fatalf("archived target missing: %s %v", listed, err)
+	}
+	if err := h.authorizeToolTarget(ctx, caller, target.ID, false); err == nil {
+		t.Fatal("archived target writable")
+	}
+	for _, owner := range []bool{false, true} {
+		channelCaller := caller
+		channelCaller.Origin = &protocol.RequestContext{Source: "feishu"}
+		channelCaller.CanReadWorkspaceSessions = owner
+		result, err := h.listToolSessions(ctx, channelCaller, json.RawMessage(`{"include_archived":true}`))
+		encoded, _ := json.Marshal(result)
+		if err != nil || strings.Contains(string(encoded), target.ID) {
+			t.Fatalf("archive option widened channel scope: %s %v", encoded, err)
+		}
+		if _, err := h.readToolSession(ctx, channelCaller, args); err == nil {
+			t.Fatal("archived cross-workspace read allowed")
+		}
+	}
+
 }
 
 func TestSessionToolsRejectDelegatedAndMissingOrigin(t *testing.T) {
@@ -697,5 +718,47 @@ func TestChannelOwnerReadsAndForksWorkspaceSessions(t *testing.T) {
 	caller.WorkspaceID = "different-workspace"
 	if err := h.authorizeToolTarget(ctx, caller, target.ID, true); err == nil {
 		t.Fatal("owner escaped workspace")
+	}
+}
+
+func TestSessionToolsSelfArchivedHistoryScope(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	target := newSession(t.TempDir(), "channel-default")
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.AssignSession(ctx, target.ID, caller.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.store.AppendDisplayItem(ctx, target.ID, session.DisplayItem{Type: session.DisplayItemUserMessage, Content: []session.DisplayContentPart{{Type: "text", Text: "archived work"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.SetSessionArchived(ctx, target.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(map[string]any{"session_id": target.ID})
+	for _, include := range []bool{false, true} {
+		query, _ := json.Marshal(map[string]any{"include_archived": include})
+		result, err := h.listToolSessions(ctx, caller, query)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(result)
+		if strings.Contains(string(encoded), target.ID) != include {
+			t.Fatalf("archive filter=%v: %s", include, encoded)
+		}
+	}
+	caller.Origin = &protocol.RequestContext{Source: "feishu"}
+	caller.CanReadWorkspaceSessions = true
+	if _, err := h.readToolSession(ctx, caller, raw); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.authorizeToolTarget(ctx, caller, target.ID, false); err == nil {
+		t.Fatal("archived session writable")
+	}
+	caller.CanReadWorkspaceSessions = false
+	if _, err := h.readToolSession(ctx, caller, raw); err == nil {
+		t.Fatal("non-owner escaped bound session")
 	}
 }

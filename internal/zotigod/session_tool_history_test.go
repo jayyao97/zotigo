@@ -101,7 +101,7 @@ func TestHistoryBudgetPreservesBothPaginationDirections(t *testing.T) {
 		var seen []uint64
 		for round := 0; round < 10; round++ {
 			page := session.PageDisplayItems(items, query)
-			rows, err := projectToolHistory(&page, forward, 0)
+			rows, err := projectToolHistory(&page, forward, 0, false)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -138,6 +138,91 @@ func TestHistoryBudgetPreservesBothPaginationDirections(t *testing.T) {
 		}
 		if !reflect.DeepEqual(seen, []uint64{1, 2, 3, 4, 5, 6, 7, 8, 9}) {
 			t.Fatalf("forward=%v skipped/repeated messages: %v", forward, seen)
+		}
+	}
+}
+
+func TestSessionToolsOptionalToolDetailsAndReasoningFilter(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	text := strings.Repeat("工具结果🙂\n", 20000)
+	items := []session.DisplayItem{
+		{Type: session.DisplayItemUserMessage, Content: []session.DisplayContentPart{{Type: "text", Text: "question"}}},
+		{Type: session.DisplayItemAssistantMessage, Content: []session.DisplayContentPart{{Type: "reasoning", Text: "PRIVATE_REASONING"}}},
+		{Type: session.DisplayItemAssistantMessage, Content: []session.DisplayContentPart{
+			{Type: "tool_call", ToolCall: &session.DisplayToolCall{ID: "call", Name: "shell", Arguments: `{"command":"go test ./..."}`}},
+			{Type: "tool_result", ToolResult: &session.DisplayToolResult{ToolCallID: "call", ToolName: "shell", IsError: true, Text: text, Content: []session.DisplayToolResultContentPart{{Type: "image", Image: &session.DisplayMediaPart{FileID: "img", Data: []byte("PRIVATE_IMAGE"), URL: "PRIVATE_URL"}}}}},
+			{Type: "thinking", Text: "PRIVATE_THINKING"},
+			{Type: "text", Text: "done"},
+		}},
+		{Type: session.DisplayItemAssistantMessage, Content: []session.DisplayContentPart{{Type: "tool_result", ToolResult: &session.DisplayToolResult{Text: "standalone result"}}}},
+	}
+	for i := range items {
+		item, err := h.store.AppendDisplayItem(ctx, caller.SessionID, items[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		items[i] = item
+	}
+	read := func(args map[string]any) map[string]any {
+		t.Helper()
+		args["session_id"] = caller.SessionID
+		raw, _ := json.Marshal(args)
+		result, err := h.readToolSession(ctx, caller, raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, _ := json.Marshal(result)
+		if strings.Contains(string(encoded), "PRIVATE_") {
+			t.Fatal("private reasoning/media leaked")
+		}
+		rows := result.(map[string]any)["items"].([]toolHistoryItem)
+		encodedRows, _ := json.Marshal(rows)
+		if len(encodedRows) > toolHistoryPageBytes+2 {
+			t.Fatalf("budget exceeded: %d", len(encodedRows))
+		}
+		return result.(map[string]any)
+	}
+	plain := read(map[string]any{"after": items[0].Sequence - 1, "limit": 2})["items"].([]toolHistoryItem)
+	if len(plain) != 2 || plain[1].Sequence != items[2].Sequence || plain[1].Text != "done" {
+		t.Fatalf("default projection = %+v", plain)
+	}
+	if result := read(map[string]any{"after": items[2].Sequence, "include_tools": true}); len(result["items"].([]toolHistoryItem)) != 1 {
+		t.Fatal("tool-only result omitted")
+	}
+	row := read(map[string]any{"message_sequence": items[2].Sequence, "include_tools": true})["items"].([]toolHistoryItem)[0]
+	if !row.Truncated || row.NextTextOffset == nil {
+		t.Fatal("long tool result not resumable")
+	}
+	full := row.Text
+	for row.NextTextOffset != nil {
+		row = read(map[string]any{"message_sequence": items[2].Sequence, "include_tools": true, "text_offset": *row.NextTextOffset})["items"].([]toolHistoryItem)[0]
+		if row.Text == "" {
+			t.Fatal("no continuation progress")
+		}
+		full += row.Text
+	}
+	// Decode the result from the reconstructed labeled stream, ensuring chunks
+	// preserved the exact output rather than only its length or prefix.
+	start := strings.Index(full, "[tool_result]\n") + len("[tool_result]\n")
+	end := strings.Index(full[start:], "\ndone")
+	var part session.DisplayContentPart
+	if start < len("[tool_result]\n") || end < 0 {
+		t.Fatal("tool result labels missing")
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(full[start:start+end])), &part); err != nil {
+		t.Fatal(err)
+	}
+	if part.ToolResult.Text != text || !part.ToolResult.IsError || part.ToolResult.ToolCallID != "call" {
+		t.Fatal("tool result changed")
+	}
+	if !strings.Contains(full, "go test ./...") {
+		t.Fatal("call arguments missing")
+	}
+	for _, limit := range []int{-1, 101} {
+		raw, _ := json.Marshal(map[string]any{"session_id": caller.SessionID, "limit": limit, "include_tools": true})
+		if _, err := h.readToolSession(ctx, caller, raw); err == nil {
+			t.Fatalf("invalid limit %d accepted", limit)
 		}
 	}
 }

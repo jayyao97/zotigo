@@ -19,13 +19,43 @@ type toolHistoryAttachment struct {
 	MediaType string `json:"media_type,omitempty"`
 }
 
-func projectHistoryItem(item session.DisplayItem) toolHistoryItem {
+func projectHistoryItem(item session.DisplayItem, includeTools bool) toolHistoryItem {
 	row := toolHistoryItem{Sequence: item.Sequence, Type: item.Type, Timestamp: item.CreatedAt}
 	if item.Turn != nil {
 		row.TurnID = item.Turn.ID
 	}
+	if includeTools && item.ToolExecution != nil {
+		data, _ := json.Marshal(item.ToolExecution)
+		row.Text += "[tool_execution_started]\n" + string(data) + "\n"
+	}
 	for _, part := range item.Content {
+		if part.Type == "reasoning" || part.Type == "thinking" {
+			continue
+		}
 		if part.IsTool() {
+			if includeTools {
+				// Render the selected tool payload into the existing resumable text stream.
+				// Media stays metadata-only, even when the tool result is requested.
+				selected := part
+				selected.Text = ""
+				if part.ToolResult != nil {
+					result := *part.ToolResult
+					result.Metadata = nil
+					result.Content = nil
+					for _, content := range part.ToolResult.Content {
+						if content.Type == "text" {
+							result.Content = append(result.Content, content)
+						}
+						if content.Image != nil {
+							row.Attachments = append(row.Attachments, toolHistoryAttachment{Type: "image", FileID: content.Image.FileID, MediaType: content.Image.MediaType})
+						}
+					}
+					selected.ToolResult = &result
+				}
+				selected.Image = nil
+				data, _ := json.Marshal(selected)
+				row.Text += "\n[" + part.Type + "]\n" + string(data) + "\n"
+			}
 			continue
 		}
 		row.Text += part.Text
@@ -72,7 +102,7 @@ func historyTextChunk(row toolHistoryItem, budget int) (toolHistoryItem, error) 
 	return row, nil
 }
 
-func projectToolHistory(page *session.DisplayPage, forward bool, textOffset int) ([]toolHistoryItem, error) {
+func projectToolHistory(page *session.DisplayPage, forward bool, textOffset int, includeTools bool) ([]toolHistoryItem, error) {
 	result := make([]toolHistoryItem, 0, len(page.Items))
 	budget := toolHistoryPageBytes
 	for step := range page.Items {
@@ -80,7 +110,7 @@ func projectToolHistory(page *session.DisplayPage, forward bool, textOffset int)
 		if !forward {
 			index = len(page.Items) - 1 - step
 		}
-		row := projectHistoryItem(page.Items[index])
+		row := projectHistoryItem(page.Items[index], includeTools)
 		if textOffset > len(row.Text) || textOffset < len(row.Text) && !utf8.RuneStart(row.Text[textOffset]) {
 			return nil, errors.New("text_offset must be a UTF-8 byte boundary within the message")
 		}
