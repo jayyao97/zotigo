@@ -228,10 +228,6 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 	if _, err := h.catalog.AssignSession(ctx, session.ID, workspaceID); err != nil {
 		return cleanup(fmt.Errorf("assign channel session workspace: %w", err))
 	}
-	// Match client-created sessions without waiting for runtime activity sync.
-	if _, err := h.catalog.SetSessionPosition(ctx, session.ID, -time.Now().UnixMilli()); err != nil {
-		return cleanup(fmt.Errorf("set channel session position: %w", err))
-	}
 	if strings.TrimSpace(title) != "" {
 		if _, err := h.catalog.SetSessionTitle(ctx, session.ID, strings.TrimSpace(title)); err != nil {
 			return cleanup(fmt.Errorf("set channel session title: %w", err))

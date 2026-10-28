@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 )
@@ -28,14 +29,23 @@ func (s *Store) AssignSession(ctx context.Context, sessionID string, workspaceID
 	if status != WorkspaceStatusReady {
 		return SessionOrganization{}, fmt.Errorf("%w: workspace is not ready", ErrConflict)
 	}
-	var position int64
+	var firstPosition sql.NullInt64
 	if err := tx.QueryRowContext(ctx, `
-		SELECT COALESCE(MAX(workspace_position), 0) + 1000
+		SELECT MIN(workspace_position)
 		FROM session_organization WHERE workspace_id = ?
-	`, workspaceID).Scan(&position); err != nil {
+	`, workspaceID).Scan(&firstPosition); err != nil {
 		return SessionOrganization{}, err
 	}
 	now := time.Now().UTC()
+	// Allocate at the front in the assignment transaction, including when existing
+	// positions were manually reordered or another session was created this millisecond.
+	position := -unixMillis(now)
+	if firstPosition.Valid && firstPosition.Int64 <= position {
+		if firstPosition.Int64 == math.MinInt64 {
+			return SessionOrganization{}, fmt.Errorf("%w: session position space exhausted", ErrConflict)
+		}
+		position = firstPosition.Int64 - 1
+	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO session_organization(
 			session_id, project_id, workspace_id, workspace_position,

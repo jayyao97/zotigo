@@ -25,7 +25,7 @@ func (item DisplayItem) ContentKind() DisplayContentKind {
 		for _, part := range item.Content {
 			if part.IsTool() {
 				hasTool = true
-			} else {
+			} else if part.Type != "reasoning" && part.Type != "thinking" {
 				return DisplayContentConversation
 			}
 		}

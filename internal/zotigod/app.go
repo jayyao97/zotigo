@@ -1327,17 +1327,23 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("persist session: %v", err))
 			return
 		}
+		var workspacePosition *int64
 		if assignedWorkspaceID != "" {
-			if _, err := h.catalog.AssignSession(r.Context(), session.ID, assignedWorkspaceID); err != nil {
+			organization, err := h.catalog.AssignSession(r.Context(), session.ID, assignedWorkspaceID)
+			if err != nil {
 				if h.store != nil {
 					_ = h.store.Delete(r.Context(), session.ID)
 				}
 				h.writeCatalogError(w, err)
 				return
 			}
+			workspacePosition = organization.WorkspacePosition
 		}
 		session = h.registry.Add(session)
-		writeAPIJSON(w, http.StatusCreated, session)
+		writeAPIJSON(w, http.StatusCreated, struct {
+			Session
+			WorkspacePosition *int64 `json:"workspace_position,omitempty"`
+		}{session, workspacePosition})
 	default:
 		w.Header().Set("Allow", "GET, POST")
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")

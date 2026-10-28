@@ -28,7 +28,7 @@ func TestConversationIndexFiltersBeforePagination(t *testing.T) {
 	for range 120 {
 		items = append(items, DisplayItem{Type: DisplayItemAssistantMessage, CreatedAt: stamp, Content: []DisplayContentPart{{Type: "tool_result", ToolResult: &DisplayToolResult{Text: "tool body"}}}})
 	}
-	items = append(items, DisplayItem{Type: DisplayItemAssistantMessage, CreatedAt: stamp, Content: []DisplayContentPart{{Type: "tool_call"}, {Type: "text", Text: "answer"}}}, DisplayItem{Type: DisplayItemTurnCompleted, CreatedAt: stamp})
+	items = append(items, DisplayItem{Type: DisplayItemAssistantMessage, CreatedAt: stamp, Content: []DisplayContentPart{{Type: "tool_call"}, {Type: "text", Text: "answer"}}}, DisplayItem{Type: DisplayItemTurnCompleted, CreatedAt: stamp}, DisplayItem{Type: DisplayItemAssistantMessage, CreatedAt: stamp, Content: []DisplayContentPart{{Type: "reasoning", Text: "private"}}})
 	items, err = store.AppendDisplayItems(ctx, sess.ID, items)
 	if err != nil {
 		t.Fatal(err)
@@ -37,6 +37,8 @@ func TestConversationIndexFiltersBeforePagination(t *testing.T) {
 	window := DisplayTimeWindow{Since: &stamp, Until: &end}
 	for _, query := range []DisplayPageQuery{
 		{Limit: 2, ContentKind: DisplayContentConversation},
+		{Limit: 3, ContentKind: DisplayContentConversation, IncludeTools: true},
+		{Limit: 3, ContentKind: DisplayContentConversation, IncludeTools: true, HasAfter: true, After: 1},
 		{Limit: 1, ContentKind: DisplayContentConversation},
 		{Limit: 1, ContentKind: DisplayContentConversation, HasBefore: true, Before: 122},
 		{Limit: 1, ContentKind: DisplayContentConversation, HasAfter: true, After: 1},
@@ -154,5 +156,80 @@ func TestConversationIndexMigrationBackfillResumes(t *testing.T) {
 	}
 	if err := store.index.db.QueryRow(`SELECT COUNT(*) FROM display_items`).Scan(&count); err != nil || count != 600 {
 		t.Fatalf("rebuild not idempotent: %d, %v", count, err)
+	}
+}
+
+func TestReasoningIndexMigrationPreservesHistoryAndReadState(t *testing.T) {
+	ctx, root := t.Context(), t.TempDir()
+	store, err := NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := store.AppendDisplayItems(ctx, sess.ID, []DisplayItem{
+		{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "text", Text: "answer"}}},
+		{Type: DisplayItemAssistantMessage, Content: []DisplayContentPart{{Type: "reasoning", Text: "private"}}},
+		{Type: DisplayItemTurnCompleted},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var size, mtime, observed int64
+	if err := store.index.db.QueryRow("SELECT size,mtime,observed_size FROM display_index_files WHERE session_id=?", sess.ID).Scan(&size, &mtime, &observed); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := catalogschema.OpenDatabase(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := catalogschema.Migrate(ctx, db, 14); err != nil {
+		t.Fatal(err)
+	}
+	// Restore a valid old index marker and the old reasoning classification.
+	if _, err := db.Exec("UPDATE display_items SET content_kind='conversation' WHERE session_id=? AND sequence=?", sess.ID, items[1].Sequence); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("INSERT INTO display_index_files(session_id,size,mtime,observed_size) VALUES(?,?,?,?)", sess.ID, size, mtime, observed); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("UPDATE session_read_state SET read_version=version WHERE session_id=?", sess.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := catalogschema.Migrate(ctx, db, uint(catalogschema.Version)); err != nil {
+		t.Fatal(err)
+	}
+	store, err = NewFileStore(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	query := DisplayPageQuery{Limit: 1, ContentKind: DisplayContentConversation}
+	if _, _, err := store.ReadDisplayPage(ctx, sess.ID, query, DisplayTimeWindow{}); !errors.Is(err, ErrDisplayIndexPending) {
+		t.Fatalf("stale index exposed: %v", err)
+	}
+	if err := store.RebuildDisplayIndex(ctx); err != nil {
+		t.Fatal(err)
+	}
+	page, _, err := store.ReadDisplayPage(ctx, sess.ID, query, DisplayTimeWindow{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Sequence != items[0].Sequence || page.HasMore {
+		t.Fatalf("wrong rebuilt page: %+v %v", page, err)
+	}
+	var version, readVersion, completed uint64
+	if err := db.QueryRow("SELECT version,read_version,completed_sequence FROM session_read_state WHERE session_id=?", sess.ID).Scan(&version, &readVersion, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if version != 1 || readVersion != 1 || completed != items[2].Sequence {
+		t.Fatalf("read state changed: %d %d %d", version, readVersion, completed)
+	}
+	raw, exists, err := store.ListDisplayItems(ctx, sess.ID)
+	if err != nil || !exists || len(raw) != len(items) || raw[1].Content[0].Text != "private" {
+		t.Fatalf("durable history changed: %v", err)
 	}
 }

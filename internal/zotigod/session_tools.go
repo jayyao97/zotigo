@@ -251,13 +251,14 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 	// Local UI input may read across the daemon's catalog. Channel authority and
 	// all mutations remain tied to the source workspace.
 	workspaceScoped := !read || caller.Origin != nil
-	if organization.WorkspaceID == nil || organization.EffectiveArchived() || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
+	if organization.WorkspaceID == nil || (!read && organization.EffectiveArchived()) || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
 		return errors.New("target session is outside the authorized workspace")
 	}
 	return nil
 }
 
 type toolSessionSummary struct {
+	Archived             bool         `json:"archived"`
 	ID                   string       `json:"session_id"`
 	Title                string       `json:"title,omitempty"`
 	WorkspaceID          string       `json:"workspace_id"`
@@ -343,6 +344,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 		Before          *uint64 `json:"before"`
 		Since           string  `json:"since"`
 		Until           string  `json:"until"`
+		IncludeTools    bool    `json:"include_tools"`
 		MessageSequence *uint64 `json:"message_sequence"`
 		TextOffset      int     `json:"text_offset"`
 	}
@@ -369,7 +371,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 	if err != nil {
 		return nil, err
 	}
-	query := session.DisplayPageQuery{Limit: limit, ContentKind: session.DisplayContentConversation}
+	query := session.DisplayPageQuery{Limit: limit, ContentKind: session.DisplayContentConversation, IncludeTools: req.IncludeTools}
 	if req.After != nil {
 		query.After = *req.After
 		query.HasAfter = true
@@ -414,7 +416,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 		}
 		page.NextCursor, page.PrevCursor, page.HasMore = "", "", false
 	}
-	result, err := projectToolHistory(&page, query.HasAfter, req.TextOffset)
+	result, err := projectToolHistory(&page, query.HasAfter, req.TextOffset, req.IncludeTools)
 	if err != nil {
 		return nil, err
 	}

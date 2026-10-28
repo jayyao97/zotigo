@@ -222,8 +222,13 @@ func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query Displa
 	base := "session_id=?" + where
 	args = append([]any{id}, args...)
 	if query.ContentKind != "" {
-		base += " AND content_kind=?"
-		args = append(args, query.ContentKind)
+		if query.IncludeTools {
+			base += " AND content_kind IN (?,?)"
+			args = append(args, query.ContentKind, DisplayContentTool)
+		} else {
+			base += " AND content_kind=?"
+			args = append(args, query.ContentKind)
+		}
 	}
 	var first, last int64
 	for _, bound := range []struct {
