@@ -207,6 +207,7 @@ func (a *Agent) applyRuntimeProfileLocked(profile RuntimeProfile) {
 	a.profileName = profile.Name
 	a.cfg = profile.Config
 	a.provider = profile.Provider
+	a.configureCompressorSummarizer()
 	a.classifier = profile.Classifier
 	a.classifierProfileName = profile.ClassifierProfileName
 	a.classifierProfile = profile.ClassifierProfile

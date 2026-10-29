@@ -60,12 +60,18 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 
 	if cfg.Config != nil {
 		webClient := builtin.NewWebClient(builtin.WebConfig{
-			TavilyAPIKey: cfg.Config.Tools.Web.TavilyAPIKey,
-			UserAgent:    cfg.Config.Tools.Web.UserAgent,
-			Timeout:      time.Duration(cfg.Config.Tools.Web.TimeoutSec) * time.Second,
-			MaxPageSize:  cfg.Config.Tools.Web.MaxPageSize,
+			SearchProvider: cfg.Config.Tools.Web.SearchProvider,
+			DeepSeekAPIKey: cfg.Config.Tools.Web.DeepSeekAPIKey,
+			TavilyAPIKey:   cfg.Config.Tools.Web.TavilyAPIKey,
+			UserAgent:      cfg.Config.Tools.Web.UserAgent,
+			Timeout:        time.Duration(cfg.Config.Tools.Web.TimeoutSec) * time.Second,
+			MaxPageSize:    cfg.Config.Tools.Web.MaxPageSize,
 		})
-		if sp := builtin.NewSearchProvider(webClient); sp != nil {
+		sp, err := builtin.NewSearchProvider(webClient)
+		if err != nil {
+			return err
+		}
+		if sp != nil {
 			webSearchTool := builtin.NewWebSearchTool(sp)
 			childTools = append(childTools, webSearchTool)
 			ag.RegisterTool(webSearchTool)

@@ -2028,11 +2028,12 @@ func (r *codexWorkerRuntime) append(item zotigosession.DisplayItem) error {
 			}
 		}
 	}
-	if _, err := r.store.AppendDisplayItem(context.Background(), r.cfg.SessionID, item); err != nil {
+	stored, err := r.store.AppendDisplayItem(context.Background(), r.cfg.SessionID, item)
+	if err != nil {
 		return err
 	}
 	if r.writer != nil {
-		r.writer.SendDisplayWake()
+		r.writer.SendDisplayItem(stored)
 	}
 	return nil
 }

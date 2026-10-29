@@ -5112,8 +5112,8 @@ func TestAgent_ReactiveCompact_RetriesOnContextLengthError(t *testing.T) {
 		}
 	}
 
-	if mock.calls != 2 {
-		t.Errorf("expected 2 StreamChat calls (initial + retry), got %d", mock.calls)
+	if mock.calls != 3 {
+		t.Errorf("expected 3 StreamChat calls (initial + LLM summary + retry), got %d", mock.calls)
 	}
 	if retryStatus != "context_recovery" {
 		t.Fatal("missing context recovery handoff")

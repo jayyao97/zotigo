@@ -16,7 +16,7 @@ func TestNewResolvesMaxOutputTokens(t *testing.T) {
 		{
 			name: "native default",
 			cfg:  config.ProfileConfig{Provider: "gemini", Model: "gemini-test", APIKey: "test"},
-			want: 32768,
+			want: 120000,
 		},
 		{
 			name: "legacy params max tokens",

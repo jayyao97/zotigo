@@ -281,8 +281,10 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	if c.summarizer != nil {
 		summary, err = c.summarizer.SummarizeMessages(ctx, summaryInput)
 		if err != nil {
-			// Fallback to simple summary
-			summary = c.simpleSummary(summaryInput)
+			return messages, result, fmt.Errorf("summarize conversation: %w", err)
+		}
+		if strings.TrimSpace(summary) == "" {
+			return messages, result, fmt.Errorf("summarize conversation: empty summary")
 		}
 	} else {
 		summary = c.simpleSummary(summaryInput)
@@ -316,7 +318,7 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	result.Summary = summary
 	result.CompressedTokens = c.countTokens(compressed)
 	result.MessagesAfter = len(compressed)
-	result.Compressed = result.CompressedTokens < result.OriginalTokens && result.MessagesAfter < result.MessagesBefore
+	result.Compressed = result.CompressedTokens < result.OriginalTokens
 	if !result.Compressed {
 		result.Compressed = false
 		result.CompressedTokens = result.OriginalTokens
@@ -385,7 +387,9 @@ func (c *Compressor) findSafePartitionPoint(messages []protocol.Message, preserv
 
 	// Adjust to safe boundary: find the nearest user message boundary
 	// A safe boundary is just before a user message (after the previous tool/assistant)
-	for idx := roughIdx; idx < len(messages); idx++ {
+	// Index zero cannot remove any history. A large first message can put
+	// the rough boundary there even when later user turns can be preserved.
+	for idx := max(1, roughIdx); idx < len(messages); idx++ {
 		if messages[idx].Role == protocol.RoleUser && !messages[idx].IsContextualUser() {
 			// Check if previous message exists and isn't a tool message
 			// (which would mean we're in the middle of a chain)
@@ -568,12 +572,42 @@ func (c *Compressor) truncateToolResults(messages []protocol.Message, maxResultT
 func (c *Compressor) boundToolText(text string, maxTokens int) (string, bool) {
 	projected := omitInlineMediaPayloads(text)
 	if len(projected) > maxTokens*4 || c.counter(projected) > maxTokens {
-		return c.truncateText(projected, maxTokens) + "\n\n[... truncated ...]", true
+		// Include the marker in both budgets so projecting an already projected
+		// result is a no-op. Byte-only truncation underestimates non-ASCII text.
+		marker := "\n\n[... truncated ...]"
+		if maxTokens <= 0 {
+			return "", true
+		}
+		if len(marker) > maxTokens*4 || c.counter(marker) > maxTokens {
+			marker = ""
+		}
+		low, high := 0, min(len(projected), maxTokens*4-len(marker))
+		best := marker
+		for low <= high {
+			mid := low + (high-low)/2
+			end := mid
+			for end > 0 && end < len(projected) && !utf8.RuneStart(projected[end]) {
+				end--
+			}
+			candidate := projected[:end] + marker
+			if c.counter(candidate) <= maxTokens {
+				best = candidate
+				low = mid + 1
+			} else {
+				high = mid - 1
+			}
+		}
+		return best, true
 	}
 	return projected, projected != text
 }
 
 func omitInlineMediaPayloads(text string) string {
+	// Match JSON persistence's replacement of each invalid UTF-8 byte before
+	// budgeting or slicing, keeping live and restored projections identical.
+	if !utf8.ValidString(text) {
+		text = strings.Map(func(r rune) rune { return r }, text)
+	}
 	const marker = "[inline media payload omitted]"
 	for searchFrom := 0; searchFrom < len(text); {
 		dataIndex := strings.Index(text[searchFrom:], "data:")

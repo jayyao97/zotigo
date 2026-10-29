@@ -96,7 +96,10 @@ func TestTavilySearchProvider_APIError(t *testing.T) {
 func TestNewSearchProvider(t *testing.T) {
 	t.Run("tavily provider", func(t *testing.T) {
 		wc := NewWebClient(WebConfig{TavilyAPIKey: "tavily-key"})
-		sp := NewSearchProvider(wc)
+		sp, err := NewSearchProvider(wc)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if sp == nil {
 			t.Fatal("expected non-nil provider")
 		}
@@ -109,7 +112,10 @@ func TestNewSearchProvider(t *testing.T) {
 		wc := NewWebClient(WebConfig{})
 		// Clear env fallback
 		wc.config.TavilyAPIKey = ""
-		sp := NewSearchProvider(wc)
+		sp, err := NewSearchProvider(wc)
+		if err != nil {
+			t.Fatal(err)
+		}
 		if sp != nil {
 			t.Errorf("expected nil provider, got %T", sp)
 		}

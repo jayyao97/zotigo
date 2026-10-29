@@ -29,18 +29,36 @@ type searchResult struct {
 	Content string
 }
 
-// NewSearchProvider creates a SearchProvider based on available API keys.
-// Returns nil if no key is configured.
-func NewSearchProvider(wc *WebClient) SearchProvider {
+// NewSearchProvider preserves Tavily as the default. Explicit selections require a key.
+func NewSearchProvider(wc *WebClient) (SearchProvider, error) {
+	switch wc.config.SearchProvider {
+	case "deepseek":
+		if wc.config.DeepSeekAPIKey == "" {
+			return nil, fmt.Errorf("deepseek search requires tools.web.deepseek_api_key or DEEPSEEK_API_KEY")
+		}
+		return &DeepSeekSearchProvider{apiKey: wc.config.DeepSeekAPIKey, baseURL: wc.config.DeepSeekBaseURL, client: wc.client, ua: wc.config.UserAgent}, nil
+	case "", "tavily":
+	default:
+		return nil, fmt.Errorf("unknown web search provider %q (expected tavily or deepseek)", wc.config.SearchProvider)
+	}
 	if wc.config.TavilyAPIKey != "" {
 		return &TavilySearchProvider{
 			apiKey:  wc.config.TavilyAPIKey,
 			baseURL: wc.config.TavilyBaseURL,
 			client:  wc.client,
 			ua:      wc.config.UserAgent,
-		}
+		}, nil
 	}
-	return nil
+	if wc.config.SearchProvider == "tavily" {
+		return nil, fmt.Errorf("tavily search requires tools.web.tavily_api_key or TAVILY_API_KEY")
+	}
+	return nil, nil
+}
+
+// Backends with different query syntax advertise only the parameters they accept.
+type searchToolDefinition interface {
+	Description() string
+	Schema() any
 }
 
 // WebSearchTool searches the web via a pluggable SearchProvider.
@@ -56,10 +74,16 @@ func NewWebSearchTool(provider SearchProvider) *WebSearchTool {
 func (t *WebSearchTool) Name() string { return "web_search" }
 
 func (t *WebSearchTool) Description() string {
+	if definition, ok := t.provider.(searchToolDefinition); ok {
+		return definition.Description()
+	}
 	return "Search the web for up-to-date information. Returns relevant search results with titles, URLs, and content. Use topic='news' for recent events."
 }
 
 func (t *WebSearchTool) Schema() any {
+	if definition, ok := t.provider.(searchToolDefinition); ok {
+		return definition.Schema()
+	}
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{

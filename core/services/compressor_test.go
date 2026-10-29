@@ -66,6 +66,12 @@ func TestCompactionPreservesRecentSpawnReport(t *testing.T) {
 				} else {
 					got, result, err = c.Compress(context.Background(), history)
 				}
+				if mode == "failure" {
+					if err == nil || result.Compressed {
+						t.Fatal("failed summary must not commit")
+					}
+					return
+				}
 				if err != nil || !result.Compressed {
 					t.Fatalf("compaction not exercised: %v %+v", err, result)
 				}
@@ -803,7 +809,7 @@ func TestCompressorExcludesContextualMessagesFromSummaryInput(t *testing.T) {
 	}
 }
 
-func TestCompressor_SummarizerFallback(t *testing.T) {
+func TestCompressor_SummarizerFailurePreservesHistory(t *testing.T) {
 	c := NewCompressor(CompressorConfig{
 		ContextWindowSize: 50,
 		TriggerRatio:      0.5,
@@ -843,20 +849,16 @@ func TestCompressor_SummarizerFallback(t *testing.T) {
 	}
 
 	ctx := context.Background()
-	_, result, err := c.Compress(ctx, msgs)
-	if err != nil {
-		t.Fatalf("Compress failed: %v", err)
+	before, _ := json.Marshal(msgs)
+	got, result, err := c.Compress(ctx, msgs)
+	if err == nil || result.Compressed {
+		t.Fatalf("failed summary accepted: %+v %v", result, err)
+	}
+	after, _ := json.Marshal(got)
+	if string(before) != string(after) {
+		t.Fatal("failed summary changed history")
 	}
 
-	// Should fallback to simple summary
-	if !result.Compressed {
-		t.Error("Should have compressed with fallback")
-	}
-
-	// Simple summary should have XML structure
-	if !strings.Contains(result.Summary, "<context_summary>") {
-		t.Error("Fallback should produce XML summary")
-	}
 }
 
 // ============ Boundary Condition Tests ============

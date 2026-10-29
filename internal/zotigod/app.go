@@ -981,6 +981,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 				handler.events.PublishDelta(sessionID, *msg.Delta)
 			}
 		case workerMessageDisplayWake:
+			if msg.PreviewRetirement != nil {
+				handler.events.Retire(sessionID, *msg.PreviewRetirement)
+			}
 			handler.events.Wake(sessionID)
 		case workerMessageWorking:
 			if session, ok := handler.registry.Get(sessionID); ok && session.State == SessionStatePausing {
@@ -1039,6 +1042,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 				}
 				// Keep Working state changes in worker event order, even while
 				// queue preparation runs asynchronously.
+				handler.events.Retire(sessionID, displayPreviewRetirement{Terminal: true})
 				handler.registry.MarkIdle(sessionID)
 				go func() {
 					// Drain before scheduling idle eviction. Admission advances the
@@ -1055,6 +1059,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/agents", handler.handleAgents)
 	mux.HandleFunc("/agents/codex/prepare", handler.handleCodexPrepare)
 	mux.HandleFunc("/config/profiles", handler.handleProfiles)
+	mux.HandleFunc("/config/models", handler.handleModelSettings)
+	mux.HandleFunc("/config/models/test", handler.handleModelTest)
 	mux.HandleFunc("/sources/inspect", handler.handleSourceInspection)
 	mux.HandleFunc("/files/events", handler.handleFileEvents)
 	mux.HandleFunc("/files/capabilities", handler.handleWorkspaceFile)
@@ -2215,6 +2221,7 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 			h.logger.Printf("pause queue after worker disconnect: session=%s error=%v", id, err)
 		}
 	}
+	h.events.Retire(id, displayPreviewRetirement{Terminal: true})
 	h.events.WakeBarrier(id)
 	if session, ok := h.registry.Get(id); ok {
 		if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {

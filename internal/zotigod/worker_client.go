@@ -146,12 +146,13 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
-		SessionID:      cfg.SessionID,
-		Store:          store,
-		SendDelta:      clientWriter.SendDelta,
-		NotifyDisplay:  clientWriter.SendDisplayWake,
-		SyncDisplay:    clientWriter.SendDisplayWakeReliable,
-		DisplayBarrier: displayBarrier.Wait,
+		SessionID:         cfg.SessionID,
+		Store:             store,
+		SendDelta:         clientWriter.SendDelta,
+		NotifyDisplay:     clientWriter.SendDisplayWake,
+		NotifyDisplayItem: clientWriter.SendDisplayItem,
+		SyncDisplay:       clientWriter.SendDisplayWakeReliable,
+		DisplayBarrier:    displayBarrier.Wait,
 		NotifyApproval: func(ctx context.Context, approval approvalRequestResponse) {
 			_ = clientWriter.SendApprovalRequest(ctx, approval)
 		},
@@ -279,6 +280,7 @@ type workerRuntimeConfig struct {
 	SessionID              string
 	Store                  zotigosession.Store
 	SendDelta              func(displayDeltaEvent)
+	NotifyDisplayItem      func(zotigosession.DisplayItem)
 	NotifyDisplay          func()
 	SyncDisplay            func(context.Context) error
 	DisplayBarrier         func(context.Context) error
@@ -457,6 +459,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	})
 	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
 	display.delta = cfg.SendDelta
+	display.persisted = cfg.NotifyDisplayItem
 	display.wake = func(context.Context) {
 		if cfg.NotifyDisplay != nil {
 			cfg.NotifyDisplay()
@@ -765,8 +768,17 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		r.mu.Lock()
 		promptRevision := r.promptConfig.Revision
 		r.mu.Unlock()
-		if request.RequiredApprovalPolicy != "" && r.agent.RequestedApprovalPolicy() != request.RequiredApprovalPolicy {
-			return commandResponse{}, errInputPolicyMismatch
+		if request.RequiredApprovalPolicy != "" {
+			policy, err := r.agent.RequestedApprovalPolicyForInput()
+			if errors.Is(err, agent.ErrCompacting) {
+				return commandResponse{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+			}
+			if err != nil {
+				return commandResponse{}, err
+			}
+			if policy != request.RequiredApprovalPolicy {
+				return commandResponse{}, errInputPolicyMismatch
+			}
 		}
 		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
 			return commandResponse{}, errInputPolicyMismatch
@@ -825,6 +837,9 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 			return steering, nil
 		}
 		r.display.DiscardSteering(steering.ID)
+		if errors.Is(err, agent.ErrCompacting) {
+			return commandResponse{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+		}
 		if request.SteeringOnly || !isStaleTurnUserInputError(err) {
 			if isStaleTurnUserInputError(err) {
 				return commandResponse{}, errNoActiveTurn
@@ -2191,8 +2206,24 @@ func (w *workerClientWriter) SendDelta(delta displayDeltaEvent) {
 	}
 }
 
+func (w *workerClientWriter) SendDisplayItem(item zotigosession.DisplayItem) {
+	retirement := previewRetirement(item)
+	// Unlike an ordinary wake, this retires daemon-owned preview memory even
+	// when nobody is reading history. Keep it ordered after earlier deltas and
+	// apply backpressure instead of dropping it or adding an unbounded queue.
+	// Writer shutdown (including a WebSocket write failure) releases this wait;
+	// the daemon then clears that worker's remaining previews on disconnect.
+	select {
+	case w.sendCh <- workerMessage{Type: workerMessageDisplayWake, PreviewRetirement: &retirement}:
+	case <-w.done:
+	}
+}
+
 func (w *workerClientWriter) SendDisplayWake() {
-	msg := workerMessage{Type: workerMessageDisplayWake}
+	w.sendDisplayWake(workerMessage{Type: workerMessageDisplayWake})
+}
+
+func (w *workerClientWriter) sendDisplayWake(msg workerMessage) {
 	select {
 	case <-w.done:
 		return

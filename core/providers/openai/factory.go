@@ -55,6 +55,7 @@ func New(cfg config.ProfileConfig) (providers.Provider, error) {
 			client:          &client,
 			model:           cfg.Model,
 			reasoningEffort: cfg.ThinkingLevel,
+			maxOutputTokens: maxOutputTokens,
 		}, nil
 	}
 }

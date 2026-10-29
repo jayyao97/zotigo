@@ -42,6 +42,7 @@ zotigod \
 - `GET /skills`
 - `POST /agents/codex/prepare`
 - `GET /config/profiles`
+- `GET /config/models`, `PUT /config/models`, `POST /config/models/test`
 - `POST /sources/inspect`
 - `POST /projects`
 - `GET /projects?status=active|archived|all` (`active` is the default)
@@ -227,13 +228,76 @@ The response is safe for desktop clients and does not expose API keys, base URLs
       "provider": "openai",
       "model": "gpt-5.6-sol",
       "thinking_level": "high",
-      "max_output_tokens": 32768
+      "max_output_tokens": 120000
     }
   ]
 }
 ```
 
-Profiles are ordered by `name`, and `max_output_tokens` is the effective native Zotigo value after applying the 32768 default. This endpoint only reads configuration and does not start a worker or create a session. Codex app-server model settings are separate and do not inherit this value.
+Profiles are ordered by `name`, and `max_output_tokens` is the effective native Zotigo value after applying the 120000 default. This endpoint only reads configuration and does not start a worker or create a session. Codex app-server model settings are separate and do not inherit this value.
+
+## Manage global model profiles
+
+These endpoints configure the connected daemon's `~/.zotigo/config.yaml`, not
+the client's machine or a project override. They use the same public API
+authentication as other daemon operations. Responses use the normal API envelope
+and `Cache-Control: no-store`. Older daemons return 404; clients must show an
+upgrade/unavailable message rather than treating that response as an empty list.
+
+`GET /config/models` returns `revision`, `default_profile`, `profiles`, and
+`defaults` (`context_window`, `max_output_tokens`) from the runtime constants.
+Each profile exposes `name`, `provider`, `model`, `base_url`, `thinking_level`,
+`context_window`, nullable `max_output_tokens`, `mode` (OpenAI `params.mode`),
+and `has_api_key`. The optional `default_max_output_tokens` is the value used
+when that profile’s explicit output limit is cleared, including Gemini’s legacy
+`params.max_tokens`. Clients must not treat these defaults as detected model limits;
+OpenAI Chat Completions sends this limit as `max_completion_tokens` (including reasoning tokens); Responses sends `max_output_tokens`. The key itself and unrelated provider/safety fields are not
+returned. This management projection is distinct from `/config/profiles`, which
+continues to return the effective model selector catalog.
+
+`PUT /config/models` accepts:
+
+```json
+{
+  "revision": "revision returned by GET",
+  "action": "create",
+  "profile": {
+    "name": "my-model", "provider": "openai", "model": "model-id",
+    "base_url": "", "thinking_level": "", "context_window": 0,
+    "max_output_tokens": null, "mode": "", "has_api_key": false
+  },
+  "api_key": "new-key"
+}
+```
+
+Actions are `create`, `save`, `delete`, and `default`. Create rejects an existing
+name; save requires an existing profile. Names cannot be renamed through this
+API. Delete/default identify the profile by `profile.name`. Omit `api_key` to
+retain the stored value; send an empty string to clear it. Environment-based
+provider credentials can still apply after clearing the file's key.
+
+The first profile becomes the default. Deleting the current default requires
+choosing another first, except when deleting the last profile. References from
+other profiles' safety classifiers prevent deletion. Sessions, channel bindings,
+and project overrides are not rewritten; clients should warn that existing
+references may require another profile after deletion.
+
+Writes patch YAML nodes, retain unrelated fields/comments, and atomically replace
+the file with mode 0600. An advisory lock serializes management writers. A stale
+revision or detected external file edit returns 409 without saving. Arbitrary
+external editors do not share that lock: a simultaneous external replacement
+after the final check cannot be excluded. YAML anchors/merge keys and symlinked
+configuration files require manual editing. Existing workers retain their loaded
+configuration; new workers load the saved values. Model lists can be refreshed
+immediately. Codex login and model settings are independent.
+
+`POST /config/models/test` accepts the same draft/revision shape, resolves an
+omitted key server-side, and makes a short model request without tools or saving.
+The request has a 20-second deadline and can incur provider charges. It returns
+`{ "ok": true }`, or `{ "ok": false, "reason": "authentication" }` with reasons
+`authentication`, `quota`, `model`, `timeout`, or `connection`. Raw provider errors
+and generated text are not returned. It verifies a basic model response, not all
+model capabilities. Configuration conflicts still return 409.
 
 ## Discover Agent Skills
 
@@ -391,6 +455,8 @@ If a session exists only on disk, `GET /sessions` and `GET /sessions/{id}` retur
 `context_usage.tokens` is context occupancy, never cumulative session usage. Codex reports its provider snapshot (`source: "provider"`). Native sessions use the last valid API input plus a local estimate of retained assistant output and subsequent user/tool messages (`source: "provider_estimate"`); a request fingerprint validates the history prefix and model configuration. After history replacement/compaction, a model change, or when legacy usage has no fingerprint, native sessions fall back to a local estimate (`source: "estimate"`). Dormant sessions reuse the last worker's static prompt estimate; the worker revalidates system/tool definitions before its next request. `updated_at` identifies the last measurement's time. A session with no context has `{"status":"unavailable"}`; clients must not infer zero usage. Clients may ignore the additive source field, but should distinguish estimates and show over-limit token counts honestly.
 
 For an idle native session, sending the bare text `/compact` (or `/compress`) through the normal message endpoint performs manual compaction without forwarding the command to the model. It bypasses the automatic token threshold, persists the rewritten history, and reports either a `context_compacted` event or a message explaining that the history cannot be reduced further. Commands with attachments/skills or channel provenance remain ordinary prompts. During an active turn manual compaction is rejected; wait for the turn to finish or stop it first. The normal client message ID deduplication applies.
+
+Native automatic and manual compaction summarize the older history with the active profile's LLM, without tools. Switching profiles also switches the summarizer. Summary requests honor cancellation and have a five-minute upper bound. While any native compaction is running, immediate steering is rejected with `active_turn` before admission; it is not persisted as accepted input. Stop remains available to cancel the summary. A provider error, interrupted stream, truncated output, or empty summary fails compaction without replacing the original model history; it does not silently substitute a local template. Automatic compaction errors fail the current turn instead of continuing with an over-budget request. A successful `context_compacted` marker is emitted only after the smaller history has been persisted. Summary generations are recorded as `compactor` in configured observability traces.
 
 `GET /sessions` is an index-backed catalog read: it does not load each session snapshot or display log. Live `working` and `active_tool` values come from the in-memory runtime registry. Clients that need history-derived context usage or other detail for the selected session should use `GET /sessions/{id}`.
 
@@ -703,7 +769,7 @@ Subagent deltas additionally carry a `subagent` object whose `tool_call_id` matc
 
 All deltas for one block use the same worker-generated UUID. When the block finishes, its complete durable `assistant_message` uses that UUID as its item ID and receives the next durable sequence. Desktop should append deltas to a temporary block keyed by `item_id`, then replace that block with the durable `item` event carrying the same ID.
 
-Delta events intentionally have no SSE `id` and never advance `Last-Event-ID`: they are not persisted, replayed, or included in `/items`. They may be dropped if a worker, daemon, connection, or slow client fails. On reconnect, Desktop should discard unresolved temporary blocks and rebuild from durable items. It should also ignore a late delta whose `item_id` is already durable.
+Delta events intentionally have no SSE `id` and never advance `Last-Event-ID`: they are not persisted or included in `/items`. The daemon retains unfinished text/reasoning prefixes in memory (including subagent blocks) and replays them on each new subscription before sending later deltas. Snapshot capture and subscription registration are atomic. Completed blocks are removed from this cache; idle/disconnected workers release their remaining previews. Tool-progress previews remain live-only. They may be dropped if a worker, daemon, connection, or slow client fails. On reconnect, Desktop should discard unresolved temporary blocks and rebuild from durable items and the replayed unfinished prefixes. It should also ignore a late delta whose `item_id` is already durable.
 
 Reconnect semantics:
 

@@ -38,6 +38,8 @@ func wideImage(t *testing.T) []byte {
 func finishSSE(w http.ResponseWriter, provider string) {
 	w.Header().Set("Content-Type", "text/event-stream")
 	switch provider {
+	case "openai-response", "openai-response-failed":
+		_, _ = io.WriteString(w, "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n")
 	case "anthropic":
 		_, _ = io.WriteString(w, "event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n")
 	case "gemini":

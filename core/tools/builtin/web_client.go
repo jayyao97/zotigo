@@ -8,11 +8,14 @@ import (
 
 // WebConfig holds configuration for web-related tools.
 type WebConfig struct {
-	TavilyAPIKey  string
-	TavilyBaseURL string // default "https://api.tavily.com", overridable for tests
-	UserAgent     string
-	Timeout       time.Duration
-	MaxPageSize   int
+	SearchProvider  string // empty preserves Tavily as the default
+	DeepSeekAPIKey  string
+	DeepSeekBaseURL string // default https://api.deepseek.com; overridable for tests
+	TavilyAPIKey    string
+	TavilyBaseURL   string // default "https://api.tavily.com", overridable for tests
+	UserAgent       string
+	Timeout         time.Duration
+	MaxPageSize     int
 }
 
 // WebClient is a shared HTTP client and config bundle for web tools.
@@ -24,6 +27,12 @@ type WebClient struct {
 // NewWebClient creates a new WebClient with the given configuration.
 // Use NewSearchProvider(wc) to obtain the search backend (nil if no key is set).
 func NewWebClient(cfg WebConfig) *WebClient {
+	if cfg.DeepSeekAPIKey == "" {
+		cfg.DeepSeekAPIKey = os.Getenv("DEEPSEEK_API_KEY")
+	}
+	if cfg.DeepSeekBaseURL == "" {
+		cfg.DeepSeekBaseURL = "https://api.deepseek.com"
+	}
 	if cfg.TavilyAPIKey == "" {
 		cfg.TavilyAPIKey = os.Getenv("TAVILY_API_KEY")
 	}
