@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/viper"
 )
@@ -20,7 +21,11 @@ type Manager struct {
 }
 
 func NewManager() *Manager {
-	v := viper.New()
+	// Dots are literal in profile names and provider parameter keys. Use a
+	// separate path delimiter so loading, merging and writing preserve them.
+	v := viper.NewWithOptions(viper.KeyDelimiter("::"))
+	// Preserve the existing ZOTIGO_PROFILES.NAME.MODEL environment convention.
+	v.SetEnvKeyReplacer(strings.NewReplacer("::", "."))
 	v.SetConfigType("yaml")
 	return &Manager{v: v}
 }
@@ -178,7 +183,7 @@ func (m *Manager) EnsureGlobalConfig() (path string, created bool, err error) {
 }
 
 func configWriter(cfg *Config) *viper.Viper {
-	writer := viper.New()
+	writer := viper.NewWithOptions(viper.KeyDelimiter("::"))
 	writer.SetConfigType("yaml")
 	writer.Set("default_profile", cfg.DefaultProfile)
 	writer.Set("profiles", cfg.Profiles)

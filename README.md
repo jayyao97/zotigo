@@ -108,6 +108,8 @@ go install github.com/jayyao97/zotigo/cmd/zotigo@latest
 
 ## Configuration
 
+For Tavily or DeepSeek web search configuration, see [Web search backends](docs/web-tools.md).
+
 On first run (`go run ./cmd/zotigo`), Zotigo creates a config template at `~/.zotigo/config.yaml` if it does not exist.
 
 Zotigo does not inject model profiles into the effective configuration. The
@@ -175,7 +177,7 @@ The example uses the current API IDs from the
 and [Claude model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
 Zotigo still has no built-in model Profile; copy only the profiles you need.
 
-Native Zotigo profiles default `max_output_tokens` to `32768`; configured
+Native Zotigo profiles default `max_output_tokens` to `120000`; configured
 values must be positive. The setting maps to Anthropic Messages `max_tokens`,
 OpenAI Responses `max_output_tokens`, and Gemini `MaxOutputTokens`.
 `thinking_level` never changes an explicit output limit; unsupported provider

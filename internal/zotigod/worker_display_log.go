@@ -14,6 +14,7 @@ import (
 type workerDisplayLog struct {
 	sessionID string
 	items     displayItemSource
+	persisted func(zotigosession.DisplayItem)
 	wake      func(context.Context)
 	wakeSync  func(context.Context) error
 	barrier   func(context.Context) error
@@ -824,8 +825,12 @@ func (l *workerDisplayLog) appendItem(ctx context.Context, item zotigosession.Di
 		item.BeforeInputID = l.beforeInputIDLocked()
 	}
 	stored, err := l.items.AppendItem(ctx, l.sessionID, item)
-	if err == nil && l.wake != nil {
-		l.wake(ctx)
+	if err == nil {
+		if l.persisted != nil {
+			l.persisted(stored)
+		} else if l.wake != nil {
+			l.wake(ctx)
+		}
 	}
 	return stored, err
 }

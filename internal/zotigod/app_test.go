@@ -576,8 +576,8 @@ profiles:
 	if globalProfile == nil || globalProfile.Provider != "anthropic" || globalProfile.Model != "claude-fast" {
 		t.Fatalf("expected merged global profile, got %#v", globalProfile)
 	}
-	if globalProfile.MaxOutputTokens != 32768 {
-		t.Fatalf("global max_output_tokens = %d, want effective default 32768", globalProfile.MaxOutputTokens)
+	if globalProfile.MaxOutputTokens != 120000 {
+		t.Fatalf("global max_output_tokens = %d, want effective default 120000", globalProfile.MaxOutputTokens)
 	}
 	for _, forbidden := range []string{"should-not-leak", "global-secret", "private.example.com", "private_option", "api_key", "base_url"} {
 		if strings.Contains(rec.Body.String(), forbidden) {

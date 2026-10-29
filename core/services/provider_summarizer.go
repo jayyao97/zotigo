@@ -2,8 +2,10 @@ package services
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -73,10 +75,7 @@ func NewProviderSummarizer(provider providers.Provider, opts ...SummarizerOption
 }
 
 // SummarizeMessages generates a structured summary of messages using the LLM.
-//
-// Named returns (result, err) let the deferred EndGeneration capture
-// final state regardless of which return path the function takes.
-func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (result string, err error) {
+func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(conversationSummaryInstruction)
 
@@ -89,16 +88,22 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 				sb.WriteString(part.Text)
 			case protocol.ContentTypeToolCall:
 				if part.ToolCall != nil {
-					fmt.Fprintf(&sb, "[Called tool: %s]", part.ToolCall.Name)
+					fmt.Fprintf(&sb, "[Called tool: %s %s]", part.ToolCall.Name, part.ToolCall.Arguments)
 				}
 			case protocol.ContentTypeToolResult:
 				if part.ToolResult != nil {
-					// Truncate long tool results
-					text := part.ToolResult.Text
-					if len(text) > 500 {
-						text = text[:500] + "..."
+					result := part.ToolResult
+					fmt.Fprintf(&sb, "[Tool result: %s] %s", result.ToolName, result.Text)
+					if result.JSON != nil {
+						data, err := json.Marshal(result.JSON)
+						if err != nil {
+							return "", fmt.Errorf("encode summary tool result: %w", err)
+						}
+						sb.Write(data)
 					}
-					fmt.Fprintf(&sb, "[Tool result: %s]", text)
+					for _, content := range result.Content {
+						sb.WriteString(content.Text)
+					}
 				}
 			}
 		}
@@ -115,44 +120,11 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 		},
 	}
 
-	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, reqMessages, nil, nil)
-	var usage *protocol.Usage
-	defer func() {
-		s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err)
-	}()
-
-	// Stream the response
-	events, sErr := s.provider.StreamChat(ctx, reqMessages, nil)
-	if sErr != nil {
-		err = fmt.Errorf("summarize request failed: %w", sErr)
-		return "", err
-	}
-
-	// Collect response + usage. Usage shows up in the finish event;
-	// missing it on a successful summary just leaves cost telemetry
-	// blank for that generation, never errors.
-	var response strings.Builder
-	for event := range events {
-		switch event.Type {
-		case protocol.EventTypeContentDelta:
-			if event.ContentPartDelta != nil {
-				response.WriteString(event.ContentPartDelta.Text)
-			}
-		case protocol.EventTypeFinish:
-			usage = event.Usage
-		}
-	}
-
-	result = response.String()
-	if result == "" {
-		err = fmt.Errorf("empty response from summarizer")
-		return "", err
-	}
-	return result, nil
+	return s.summarize(ctx, reqMessages)
 }
 
 // SummarizeText generates a summary of text with a specific instruction.
-func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, instruction string) (result string, err error) {
+func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, instruction string) (string, error) {
 	prompt := fmt.Sprintf("%s\n\nText to summarize:\n%s", instruction, text)
 
 	reqMessages := []protocol.Message{
@@ -164,34 +136,61 @@ func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, ins
 		},
 	}
 
-	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, reqMessages, nil, nil)
+	return s.summarize(ctx, reqMessages)
+}
+
+// A partial or interrupted stream is not a summary: committing it would
+// permanently remove history that the model never had a chance to preserve.
+func (s *ProviderSummarizer) summarize(ctx context.Context, messages []protocol.Message) (result string, err error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, messages, nil, nil)
 	var usage *protocol.Usage
-	defer func() {
-		s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err)
-	}()
-
-	events, sErr := s.provider.StreamChat(ctx, reqMessages, nil)
-	if sErr != nil {
-		err = fmt.Errorf("summarize text request failed: %w", sErr)
-		return "", err
+	defer func() { s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err) }()
+	events, err := s.provider.StreamChat(ctx, messages, nil)
+	if err != nil {
+		return "", fmt.Errorf("summarize request failed: %w", err)
 	}
-
+	defer func() {
+		// Providers may send a terminal event after cancellation. Consume through
+		// close so their unbuffered sends and stream cleanup can finish.
+		cancel()
+		for range events {
+		}
+	}()
 	var response strings.Builder
-	for event := range events {
-		switch event.Type {
-		case protocol.EventTypeContentDelta:
-			if event.ContentPartDelta != nil {
-				response.WriteString(event.ContentPartDelta.Text)
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case event, ok := <-events:
+			if !ok {
+				return "", fmt.Errorf("summarizer stream ended without completion")
 			}
-		case protocol.EventTypeFinish:
-			usage = event.Usage
+			switch event.Type {
+			case protocol.EventTypeContentDelta:
+				if event.ContentPartDelta != nil && (event.ContentPartDelta.Type == "" || event.ContentPartDelta.Type == protocol.ContentTypeText) {
+					response.WriteString(event.ContentPartDelta.Text)
+				}
+			case protocol.EventTypeError:
+				usage = event.Usage
+				if event.Error != nil {
+					return "", fmt.Errorf("summarizer failed: %w", event.Error)
+				}
+				return "", fmt.Errorf("summarizer failed")
+			case protocol.EventTypeFinish:
+				usage = event.Usage
+				if err := ctx.Err(); err != nil {
+					return "", err
+				}
+				if event.FinishReason != "stop" {
+					return "", fmt.Errorf("summarizer did not complete: %s", event.FinishReason)
+				}
+				if strings.TrimSpace(response.String()) == "" {
+					return "", fmt.Errorf("empty response from summarizer")
+				}
+				return response.String(), nil
+			}
 		}
 	}
-
-	result = response.String()
-	if result == "" {
-		err = fmt.Errorf("empty response from summarizer")
-		return "", err
-	}
-	return result, nil
 }

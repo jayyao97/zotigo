@@ -39,6 +39,72 @@ func TestEnsureGlobalConfigCreatesTemplateAndParentDirectory(t *testing.T) {
 	}
 }
 
+func TestWebSearchConfigRoundTrip(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	cfg := config.DefaultConfig()
+	cfg.Tools.Web.SearchProvider = "deepseek"
+	cfg.Tools.Web.DeepSeekAPIKey = "test-key"
+	if err := config.NewManager().Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := config.NewManager().LoadForDir(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.Tools.Web.SearchProvider != "deepseek" || loaded.Tools.Web.DeepSeekAPIKey != "test-key" {
+		t.Fatal("web search configuration did not survive save/load")
+	}
+}
+
+func TestDottedModelSettingsProfileLoadsAndMerges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	manager := config.NewManager()
+	settings, err := manager.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "test-key"
+	_, err = manager.UpdateModelSettings(config.ModelSettingsChange{
+		Revision: settings.Revision, Action: "create", APIKey: &key,
+		Profile: config.ModelSettingsProfile{Name: "deepseek.v4", Provider: "deepseek", Model: "global-model"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	check := func(dir, wantModel string) *config.Config {
+		t.Helper()
+		cfg, err := config.NewManager().LoadForDir(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, profile, err := cfg.ResolveProfile("")
+		if err != nil || name != "deepseek.v4" || profile.Provider != "deepseek" || profile.Model != wantModel || profile.APIKey != key {
+			t.Fatalf("resolved profile %q: provider=%q model=%q key preserved=%t, err=%v", name, profile.Provider, profile.Model, profile.APIKey == key, err)
+		}
+		return cfg
+	}
+	check("", "global-model")
+	project := t.TempDir()
+	if err := os.WriteFile(filepath.Join(project, config.ProjectConfig), []byte("profiles:\n  deepseek.v4:\n    model: project-model\n  deepseek:\n    provider: openai\n    model: separate-model\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := check(project, "project-model")
+	if len(cfg.Profiles) != 2 || cfg.Profiles["deepseek"].Model != "separate-model" {
+		t.Fatal("dotted and non-dotted profile names collided")
+	}
+	if err := manager.Save(cfg); err != nil {
+		t.Fatal(err)
+	}
+	check("", "project-model")
+	// Existing nested environment overrides use dots, not underscores.
+	t.Setenv("ZOTIGO_PROFILES.DEEPSEEK.V4.MODEL", "env-model")
+	t.Setenv("ZOTIGO_PROFILES.DEEPSEEK.MODEL", "env-separate")
+	cfg = check(project, "env-model")
+	if cfg.Profiles["deepseek"].Model != "env-separate" {
+		t.Fatal("legacy environment override lost")
+	}
+}
+
 func TestEnsureGlobalConfigPreservesExistingFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
@@ -155,7 +221,7 @@ func TestLoadResolvesMaxOutputTokens(t *testing.T) {
 		profile string
 		want    int64
 	}{
-		{name: "default", profile: "provider: openai\n    model: gpt-5", want: 32768},
+		{name: "default", profile: "provider: openai\n    model: gpt-5", want: 120000},
 		{name: "explicit", profile: "provider: openai\n    model: gpt-5\n    max_output_tokens: 65536", want: 65536},
 		{name: "legacy gemini", profile: "provider: gemini\n    model: gemini-test\n    params:\n      max_tokens: 49152", want: 49152},
 		{name: "top-level wins over legacy gemini", profile: "provider: gemini\n    model: gemini-test\n    max_output_tokens: 65536\n    params:\n      max_tokens: 49152", want: 65536},

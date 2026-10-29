@@ -25,6 +25,9 @@ import (
 
 var ErrNotRunning = errors.New("agent is not running")
 
+// ErrCompacting means input was not admitted while a summary was in progress.
+var ErrCompacting = errors.New("context compaction is in progress")
+
 // Agent orchestrates provider, tools, and conversation history.
 type Agent struct {
 	cfg                 config.ProfileConfig
@@ -43,6 +46,7 @@ type Agent struct {
 	// Services
 	loopDetector                *services.LoopDetector
 	compressor                  *services.Compressor
+	compressorSummarizer        services.Summarizer
 	skillManager                *skills.SkillManager
 	classifier                  SafetyClassifier
 	classifierProfileName       string
@@ -79,6 +83,7 @@ type Agent struct {
 	runtimeActivity int
 	profileActivity int
 	runActive       bool
+	compacting      atomic.Bool
 	runtimeIdle     chan struct{}
 	profileApplyMu  sync.Mutex
 }
@@ -127,6 +132,7 @@ func WithApprovalPolicy(p ApprovalPolicy) AgentOption {
 // WithCompressorSummarizer sets the LLM summarizer for high-quality summaries.
 func WithCompressorSummarizer(s services.Summarizer) AgentOption {
 	return func(a *Agent) {
+		a.compressorSummarizer = s
 		if a.compressor != nil {
 			a.compressor.SetSummarizer(s)
 		}
@@ -238,7 +244,20 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 	for _, opt := range opts {
 		opt(a)
 	}
+	a.configureCompressorSummarizer()
 	return a, nil
+}
+
+// Keep compaction on the active model, including after runtime profile changes.
+func (a *Agent) configureCompressorSummarizer() {
+	if a.compressor == nil {
+		return
+	}
+	summarizer := a.compressorSummarizer
+	if summarizer == nil {
+		summarizer = services.NewProviderSummarizer(a.provider, services.WithSummarizerObserver(a.observer, a.cfg.Model))
+	}
+	a.compressor.SetSummarizer(summarizer)
 }
 
 // RegisterTool adds a tool to the agent. Safe to call after construction.
@@ -259,6 +278,30 @@ func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 // RequestedApprovalPolicy returns the policy selected by the host or user.
 // The effective policy may be stricter when the active profile forces manual
 // approval, but it can never be more permissive than this value.
+// RequestedApprovalPolicyForInput checks admission policy without waiting for
+// a remote compaction request. Hosts must not block their stop/control loop.
+func (a *Agent) RequestedApprovalPolicyForInput() (ApprovalPolicy, error) {
+	if err := a.lockForInput(); err != nil {
+		return "", err
+	}
+	defer a.mu.Unlock()
+	return a.requestedPolicy, nil
+}
+
+// TryLock plus the atomic flag closes the check-then-lock race when compaction
+// starts concurrently. Ordinary short critical sections retain waiting semantics.
+func (a *Agent) lockForInput() error {
+	for {
+		if a.compacting.Load() {
+			return ErrCompacting
+		}
+		if a.mu.TryLock() {
+			return nil
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func (a *Agent) RequestedApprovalPolicy() ApprovalPolicy {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -512,7 +555,9 @@ func (a *Agent) QueueTurnUserMessageWithAdmission(msg protocol.Message, admit fu
 	if err != nil {
 		return err
 	}
-	a.mu.Lock()
+	if err := a.lockForInput(); err != nil {
+		return err
+	}
 	if a.state != StateRunning && a.state != StatePaused {
 		a.mu.Unlock()
 		return ErrNotRunning
@@ -731,7 +776,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 			a.mu.Lock()
-			msgs, contextInput, compaction, err := a.buildContext()
+			msgs, contextInput, compaction, err := a.buildContext(ctx)
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
@@ -2416,7 +2461,7 @@ func isZeroUsage(usage protocol.Usage) bool {
 		usage.CacheReadInputTokens == 0
 }
 
-func (a *Agent) buildContext() ([]protocol.Message, protocol.ContextInput, *protocol.ContextCompaction, error) {
+func (a *Agent) buildContext(ctx context.Context) ([]protocol.Message, protocol.ContextInput, *protocol.ContextCompaction, error) {
 	msgs := a.systemPromptMessages()
 	contextInput := a.contextPromptFor(msgs)
 	var compaction *protocol.ContextCompaction
@@ -2425,12 +2470,9 @@ func (a *Agent) buildContext() ([]protocol.Message, protocol.ContextInput, *prot
 	// The compression path owns the single calibrated threshold check; an outer
 	// local-only gate would suppress valid API-driven compaction.
 	if a.compressor != nil {
-		result, err := a.compressHistoryWithPromptLocked(context.Background(), false, contextInput)
+		result, err := a.compressHistoryWithPromptLocked(ctx, false, contextInput)
 		if err != nil {
-			if errors.Is(err, ErrHistoryRecord) {
-				return nil, contextInput, nil, err
-			}
-			debug.Logf("agent proactive compression failed, continuing uncompressed: %v", err)
+			return nil, contextInput, nil, fmt.Errorf("compact context: %w", err)
 		}
 		if err == nil && result.Compressed {
 			history = a.projectPromptHistory(a.conversation.history)
@@ -2598,8 +2640,9 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	force bool,
 	prompt protocol.ContextInput,
 ) (services.CompressionResult, error) {
+	// Match the UI usage path: ContextTokens owns prompt projection.
+	tokens, _ := a.compressor.ContextTokens(a.conversation.history, prompt)
 	history := a.projectPromptHistory(a.conversation.history)
-	tokens, _ := a.compressor.ContextTokens(history, prompt)
 	if !force && !a.compressor.NeedsCompressionTokens(tokens) {
 		return services.CompressionResult{
 			OriginalTokens: tokens, CompressedTokens: tokens,
@@ -2612,6 +2655,8 @@ func (a *Agent) compressHistoryWithPromptLocked(
 		result     services.CompressionResult
 		err        error
 	)
+	a.compacting.Store(true)
+	defer a.compacting.Store(false)
 	compressed, result, err = a.compressor.ForceCompress(ctx, history)
 	if err != nil || !result.Compressed {
 		return result, err
@@ -2626,7 +2671,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	result.CompressedTokens, _ = a.compressor.ContextTokens(rebased, prompt)
 	// Compare local-to-local to verify that rewriting actually reduced input;
 	// a provider-calibrated "before" and local "after" are not comparable.
-	if a.compressor.CountTokens(a.projectPromptHistory(rebased)) >= a.compressor.CountTokens(history) || result.MessagesAfter >= result.MessagesBefore {
+	if a.compressor.CountTokens(a.projectPromptHistory(rebased)) >= a.compressor.CountTokens(history) {
 		result.Compressed = false
 		result.CompressedTokens = result.OriginalTokens
 		result.MessagesAfter = result.MessagesBefore

@@ -17,6 +17,7 @@ type ChatProvider struct {
 	client          *openai.Client
 	model           string
 	reasoningEffort string // "", "low", "medium", "high" — default for calls
+	maxOutputTokens int64
 }
 
 func (p *ChatProvider) Name() string {
@@ -36,6 +37,7 @@ func (p *ChatProvider) StreamChat(ctx context.Context, messages []protocol.Messa
 	}
 
 	params.Model = p.model
+	params.MaxCompletionTokens = openai.Int(p.maxOutputTokens)
 	start := time.Now()
 	debug.Logf("openai stream start model=%s messages=%d tools=%d reasoning=%s", p.model, len(messages), len(toolsList), effort)
 

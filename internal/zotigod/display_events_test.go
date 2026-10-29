@@ -659,3 +659,183 @@ func waitForDisplayEventSubscribers(t *testing.T, broker *displayEventBroker, se
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+func TestSessionEventsRestoresUnfinishedPrefixAfterSwitch(t *testing.T) {
+	store, broker, server, sessionID := newDisplayEventTestServer(t)
+	started := appendDisplayEventTestItem(t, store, sessionID, zotigosession.DisplayItemTurnStarted)
+	path := fmt.Sprintf("/sessions/%s/events?after=%d", sessionID, started.Sequence)
+	first, reader := openDisplayEventStream(t, server, path, "")
+	delta := displayDeltaEvent{ItemID: "streaming-body", Role: "assistant", PartType: "text", Delta: "前半段 **"}
+	broker.PublishDelta(sessionID, delta)
+	if got := readDisplayEvent(t, reader); got.delta.Delta != delta.Delta {
+		t.Fatalf("first delta = %#v", got)
+	}
+	_ = first.Body.Close()
+	waitForDisplayEventSubscribers(t, broker, sessionID, 0)
+	delta.Delta = "重点**，切走时继续输出。"
+	broker.PublishDelta(sessionID, delta)
+	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: delta.ItemID, Role: "assistant", PartType: "text", BeforeInputID: "steering-1"})
+	second, reader := openDisplayEventStream(t, server, path, "")
+	defer second.Body.Close()
+	replay := readDisplayEvent(t, reader)
+	prefix := "前半段 **重点**，切走时继续输出。"
+	if replay.eventType != "delta" || replay.id != "" || replay.delta.Delta != prefix || replay.delta.BeforeInputID != "steering-1" {
+		t.Fatalf("restored prefix = %#v", replay)
+	}
+	delta.Delta = "最后一段。"
+	broker.PublishDelta(sessionID, delta)
+	if got := readDisplayEvent(t, reader); got.delta.Delta != delta.Delta {
+		t.Fatalf("new tail = %#v", got)
+	}
+	stored, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
+		ID: delta.ItemID, Type: zotigosession.DisplayItemAssistantMessage, Role: "assistant",
+		Content: []zotigosession.DisplayContentPart{{Type: "text", Text: prefix + delta.Delta}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	broker.Wake(sessionID)
+	if got := readDisplayEvent(t, reader); got.eventType != "item" || got.item.ID != stored.ID {
+		t.Fatalf("completed block = %#v", got)
+	}
+	if broker.hasPreview(sessionID, delta.ItemID) {
+		t.Fatal("completed prefix retained")
+	}
+}
+
+func TestDisplayPrefixSubscriptionBoundaryAndRetirement(t *testing.T) {
+	broker := newDisplayEventBroker()
+	prefix := strings.Repeat("正文🙂", 5000)
+	broker.PublishDelta("one", displayDeltaEvent{ItemID: "body", Role: "assistant", PartType: "text", Delta: prefix})
+	broker.PublishDelta("one", displayDeltaEvent{ItemID: "child", Role: "assistant", PartType: "reasoning", Delta: "child prefix", Subagent: &zotigosession.DisplaySubagent{ToolCallID: "spawn-1"}})
+	broker.PublishDelta("two", displayDeltaEvent{ItemID: "other", Role: "assistant", PartType: "text", Delta: "private"})
+	events, snapshot, cancel := broker.subscribeWithPreviews("one")
+	defer cancel()
+	broker.PublishDelta("one", displayDeltaEvent{ItemID: "body", Role: "assistant", PartType: "text", Delta: "tail"})
+	if len(snapshot) != 2 || snapshot[0].Delta != prefix || snapshot[1].Delta != "child prefix" {
+		t.Fatal("snapshot is incomplete or contaminated by another session/later delta")
+	}
+	if event := <-events; event.delta == nil || event.delta.Delta != "tail" {
+		t.Fatalf("subscription boundary = %#v", event)
+	}
+	broker.Retire("one", previewRetirement(zotigosession.DisplayItem{ID: "result", Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: &zotigosession.DisplayToolResult{ToolCallID: "spawn-1"}}}}))
+	if broker.hasPreview("one", "child") || !broker.hasPreview("one", "body") {
+		t.Fatal("tool retirement removed wrong blocks")
+	}
+	broker.Retire("one", displayPreviewRetirement{Terminal: true})
+	if broker.hasPreview("one", "body") || !broker.hasPreview("two", "other") {
+		t.Fatal("terminal retirement leaked across sessions")
+	}
+}
+
+func TestSessionEventsDoesNotReplayAlreadyDurablePrefix(t *testing.T) {
+	store, broker, server, sessionID := newDisplayEventTestServer(t)
+	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "completed", Role: "assistant", PartType: "text", Delta: "already saved"})
+	stored, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{ID: "completed", Type: zotigosession.DisplayItemAssistantMessage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Even if a completion notification is dropped, catch-up must discard the
+	// prefix when the durable item is at/before the client's existing cursor.
+	response, reader := openDisplayEventStream(t, server, fmt.Sprintf("/sessions/%s/events?after=%d", sessionID, stored.Sequence), "")
+	defer response.Body.Close()
+	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "next", Role: "assistant", PartType: "text", Delta: "new block"})
+	event := readDisplayEvent(t, reader)
+	if event.delta.ItemID != "next" {
+		t.Fatalf("replayed completed preview: %#v", event)
+	}
+}
+
+func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
+	for _, kind := range []string{"native", "codex"} {
+		t.Run(kind, func(t *testing.T) {
+			store, _, _, sessionID := newDisplayEventTestServer(t)
+			writer := &workerClientWriter{sendCh: make(chan workerMessage, 4), done: make(chan struct{})}
+			item := zotigosession.DisplayItem{ID: "finished-block", Type: zotigosession.DisplayItemAssistantMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "body"}}}
+			if kind == "native" {
+				log := newWorkerDisplayLog(sessionID, storedDisplayItemSource{store: store})
+				log.persisted = writer.SendDisplayItem
+				if _, err := log.appendItem(context.Background(), item); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}}, store: store, writer: writer}
+				if err := runtime.append(item); err != nil {
+					t.Fatal(err)
+				}
+			}
+			select {
+			case message := <-writer.sendCh:
+				if message.Type != workerMessageDisplayWake || message.PreviewRetirement == nil || message.PreviewRetirement.ItemID != item.ID {
+					t.Fatalf("completion notification = %#v", message)
+				}
+				items, _, err := store.ListDisplayItems(context.Background(), sessionID)
+				if err != nil || len(items) != 1 || items[0].ID != item.ID {
+					t.Fatalf("not durable before notification: %#v, %v", items, err)
+				}
+			default:
+				t.Fatal("missing completion notification")
+			}
+		})
+	}
+}
+
+func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
+	const sessionID = "sess-retirement-backpressure"
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
+	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	broker := newDisplayEventBroker()
+	server := httptest.NewServer(newHandler(registry, source, handlerOptions{events: broker}))
+	defer server.Close()
+	conn, _ := connectWorker(t, server, sessionID)
+	defer conn.Close()
+	writer := &workerClientWriter{conn: conn, sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	defer writer.Close()
+	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "finished", Role: "assistant", PartType: "text", Delta: "completed body"})
+	stored, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{ID: "finished", Type: zotigosession.DisplayItemAssistantMessage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer.SendDisplayWake() // Fill the queue before the writer starts draining.
+	sent := make(chan struct{})
+	go func() { writer.SendDisplayItem(stored); close(sent) }()
+	select {
+	case <-sent:
+		t.Fatal("completion was dropped when the queue was full")
+	case <-time.After(20 * time.Millisecond):
+	}
+	go writer.run()
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("completion did not enqueue after queue space became available")
+	}
+	// No SSE subscription or history catch-up is involved in this cleanup.
+	// Allow the first WebSocket JSON decode to initialize under race instrumentation.
+	for deadline := time.Now().Add(5 * time.Second); broker.hasPreview(sessionID, stored.ID) && time.Now().Before(deadline); {
+		time.Sleep(time.Millisecond)
+	}
+	if broker.hasPreview(sessionID, stored.ID) {
+		t.Fatal("completed prefix retained without subscribers")
+	}
+}
+
+func TestDisplayRetirementWaitStopsWhenWriterCloses(t *testing.T) {
+	writer := &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	defer writer.Close()
+	writer.SendDisplayWake()
+	sent := make(chan struct{})
+	go func() { writer.SendDisplayItem(zotigosession.DisplayItem{ID: "finished"}); close(sent) }()
+	select {
+	case <-sent:
+		t.Fatal("completion was dropped when the queue was full")
+	case <-time.After(20 * time.Millisecond):
+	}
+	writer.Close()
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("closed writer left completion sender blocked")
+	}
+}

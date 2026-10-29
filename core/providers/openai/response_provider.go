@@ -88,6 +88,7 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 		var firstChunkAt time.Time
 		var finalUsage *responses.ResponseUsage
 
+	streamEvents:
 		for stream.Next() {
 			if firstChunkAt.IsZero() {
 				firstChunkAt = time.Now()
@@ -264,9 +265,15 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 					u := evt.Response.Usage
 					finalUsage = &u
 				}
+				// The terminal event includes final usage. Do not ask the SDK to
+				// parse proxy trailers after a completed response.
+				break streamEvents
 
 			case "response.incomplete":
 				finishReason = protocol.FinishReasonLength
+				u := evt.Response.Usage
+				finalUsage = &u
+				break streamEvents
 
 			case "response.failed", "error":
 				msg := evt.Message
@@ -293,6 +300,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 			debug.Logf("openai-response stream err model=%s duration=%s err=%v",
 				p.model, time.Since(start).Round(time.Millisecond), err)
 			ch <- protocol.NewErrorEvent(providers.WrapIfContextLength(err))
+			return
+		}
+
+		if finishReason == protocol.FinishReasonUnknown {
+			ch <- protocol.NewErrorEvent(fmt.Errorf("response stream ended before a terminal event"))
 			return
 		}
 

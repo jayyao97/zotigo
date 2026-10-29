@@ -18,7 +18,7 @@ const DefaultContextWindow = 200_000
 // DefaultMaxOutputTokens is the native Zotigo runtime output limit when a
 // profile does not configure max_output_tokens. Codex app-server sessions do
 // not use ProfileConfig and are therefore unaffected by this default.
-const DefaultMaxOutputTokens int64 = 32_768
+const DefaultMaxOutputTokens int64 = 120_000
 
 // Config represents the top-level configuration structure.
 type Config struct {
@@ -197,10 +197,12 @@ type ToolsConfig struct {
 
 // WebToolsConfig holds configuration for web-related tools (web_search, web_fetch).
 type WebToolsConfig struct {
-	TavilyAPIKey string `mapstructure:"tavily_api_key" yaml:"tavily_api_key"`
-	UserAgent    string `mapstructure:"user_agent" yaml:"user_agent"`
-	TimeoutSec   int    `mapstructure:"timeout_sec" yaml:"timeout_sec"`
-	MaxPageSize  int    `mapstructure:"max_page_size" yaml:"max_page_size"`
+	SearchProvider string `mapstructure:"search_provider" yaml:"search_provider"`
+	DeepSeekAPIKey string `mapstructure:"deepseek_api_key" yaml:"deepseek_api_key"`
+	TavilyAPIKey   string `mapstructure:"tavily_api_key" yaml:"tavily_api_key"`
+	UserAgent      string `mapstructure:"user_agent" yaml:"user_agent"`
+	TimeoutSec     int    `mapstructure:"timeout_sec" yaml:"timeout_sec"`
+	MaxPageSize    int    `mapstructure:"max_page_size" yaml:"max_page_size"`
 }
 
 // DefaultConfig returns the default configuration values.

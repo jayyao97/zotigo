@@ -57,6 +57,7 @@ const (
 type workerMessage struct {
 	Type                    workerMessageType              `json:"type"`
 	Command                 *commandResponse               `json:"command,omitempty"`
+	PreviewRetirement       *displayPreviewRetirement      `json:"preview_retirement,omitempty"`
 	Delta                   *displayDeltaEvent             `json:"delta,omitempty"`
 	DisplayBarrier          *workerDisplayBarrier          `json:"display_barrier,omitempty"`
 	ApprovalRequest         *approvalRequestResponse       `json:"approval_request,omitempty"`
