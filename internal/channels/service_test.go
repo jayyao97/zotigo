@@ -2729,6 +2729,9 @@ func TestListGroupsDiscardsOldRunResultAcrossReconfiguration(t *testing.T) {
 	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "old", AppID: "old-app", AppSecret: &oldSecret, Enabled: true, ProgressMode: ProgressModeInteractiveCard}); err != nil {
 		t.Fatal(err)
 	}
+	service.mu.Lock()
+	oldRun := service.runs["connection-1"]
+	service.mu.Unlock()
 	groupsDone := make(chan error, 1)
 	go func() {
 		_, err := service.ListGroups(ctx, "connection-1")
@@ -2741,7 +2744,7 @@ func TestListGroupsDiscardsOldRunResultAcrossReconfiguration(t *testing.T) {
 		_, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "new", AppID: "new-app", AppSecret: &newSecret, Enabled: true, ProgressMode: ProgressModeInteractiveCard})
 		putDone <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	waitForRunRevoked(t, oldRun)
 	stored, err := store.GetConnection(ctx, "connection-1")
 	if err != nil || stored.AppID != "old-app" {
 		t.Fatalf("reconfiguration persisted before old group discovery drained: %+v err=%v", stored, err)
@@ -2809,7 +2812,7 @@ func TestConversationMetadataDiscardsOldRunResultAcrossReconfiguration(t *testin
 		_, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "new", AppID: "new-app", Enabled: true, AllowChatIDs: []string{"allowed"}, ProgressMode: ProgressModeInteractiveCard})
 		putDone <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	waitForRunRevoked(t, run)
 	stored, err := store.GetConnection(ctx, "connection-1")
 	if err != nil || stored.AppID != "old-app" {
 		t.Fatalf("reconfiguration persisted before metadata lookup drained: %+v err=%v", stored, err)
@@ -3198,5 +3201,31 @@ func TestConversationApprovalOverrideCannotDisableEffectiveReview(t *testing.T) 
 	_, err = service.PutConversation(ctx, conversation.ID, ConversationInput{ApprovalInstructionsMode: OverrideReplace, ApprovalInstructions: "", ReviewAllTools: &disabled})
 	if err != nil {
 		t.Fatalf("explicitly empty approval override should allow ordinary safe-tool policy: %v", err)
+	}
+}
+
+// Releasing provider I/O must follow revocation, not a scheduling delay: a slow
+// CI runner may not even enter PutConnection during a fixed sleep.
+func waitForRunRevoked(t *testing.T, run *adapterRun) {
+	t.Helper()
+	if run == nil {
+		t.Fatal("missing adapter run")
+	}
+	deadline := time.NewTimer(5 * time.Second)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		run.sendMu.Lock()
+		revoked := run.revoked
+		run.sendMu.Unlock()
+		if revoked {
+			return
+		}
+		select {
+		case <-deadline.C:
+			t.Fatal("reconfiguration did not revoke the old adapter run")
+		case <-tick.C:
+		}
 	}
 }
