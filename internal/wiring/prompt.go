@@ -12,6 +12,8 @@ import (
 )
 
 type PromptConfig struct {
+	SessionID                  string
+	WorkspaceID                string
 	WorkDir                    string
 	Transport                  string
 	IncludeProjectInstructions bool
@@ -21,6 +23,11 @@ type PromptConfig struct {
 
 func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
 	var opts []prompt.SystemPromptOption
+	if identity := SessionIdentity(cfg.SessionID, cfg.WorkspaceID); identity != "" {
+		opts = append(opts, prompt.WithDynamicSection("zotigo_context", func(_ prompt.PromptContext) string {
+			return identity
+		}))
+	}
 
 	if instructions := strings.TrimSpace(cfg.AgentInstructions); instructions != "" {
 		opts = append(opts, prompt.WithDynamicSection("agent_instructions", func(_ prompt.PromptContext) string {
@@ -36,6 +43,20 @@ func NewSystemPromptBuilder(cfg PromptConfig) *prompt.SystemPromptBuilder {
 	}
 
 	return prompt.NewSystemPromptBuilder(opts...)
+}
+
+// SessionIdentity is supplied by the host, never inferred from workspace files.
+// Keep it outside conversation history so forked and resumed sessions use their
+// own identity even when their history contains an older session's context.
+func SessionIdentity(sessionID, workspaceID string) string {
+	if sessionID == "" {
+		return ""
+	}
+	text := "Current Zotigo session identity (supersedes identity in earlier messages):\nsession_id: " + sessionID
+	if workspaceID != "" {
+		text += "\nworkspace_id: " + workspaceID
+	}
+	return text
 }
 
 func NewUserContextBuilder(cfg PromptConfig) *prompt.UserContextBuilder {

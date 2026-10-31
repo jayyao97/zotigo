@@ -112,7 +112,7 @@ profiles:
 		t.Fatal(err)
 	}
 
-	runtime, err := newWorkerRuntime(context.Background(), workerRuntimeConfig{SessionID: "session-prompt-config", Store: store})
+	runtime, err := newWorkerRuntime(context.Background(), workerRuntimeConfig{SessionID: "session-prompt-config", WorkspaceID: "workspace-current", Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,6 +138,11 @@ profiles:
 	}
 	if !strings.Contains(mainProvider.joinedPrompts(), "Reply using the channel style.") {
 		t.Fatal("native worker did not append session agent instructions")
+	}
+	for _, want := range []string{"session_id: session-prompt-config", "workspace_id: workspace-current"} {
+		if !strings.Contains(mainProvider.joinedPrompts(), want) {
+			t.Fatalf("provider prompt missing %q", want)
+		}
 	}
 	classifierPrompt := classifierProvider.joinedPrompts()
 	if !strings.Contains(classifierPrompt, "You are a strict safety reviewer") ||

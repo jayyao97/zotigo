@@ -147,6 +147,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:         cfg.SessionID,
+		WorkspaceID:       resp.Header.Get(workerWorkspaceHeader),
 		Store:             store,
 		SendDelta:         clientWriter.SendDelta,
 		NotifyDisplay:     clientWriter.SendDisplayWake,
@@ -278,6 +279,7 @@ type workerCommandCursor struct {
 
 type workerRuntimeConfig struct {
 	SessionID              string
+	WorkspaceID            string
 	Store                  zotigosession.Store
 	SendDelta              func(displayDeltaEvent)
 	NotifyDisplayItem      func(zotigosession.DisplayItem)
@@ -522,6 +524,8 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		Profile:     profile,
 		Executor:    localExec,
 		PromptBuilder: wiring.NewSystemPromptBuilder(wiring.PromptConfig{
+			SessionID:         cfg.SessionID,
+			WorkspaceID:       cfg.WorkspaceID,
 			WorkDir:           cwd,
 			SkillManager:      skills,
 			AgentInstructions: sess.PromptConfig.AgentInstructions,
