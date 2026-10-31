@@ -71,7 +71,7 @@ func TestContextTokensCalibration(t *testing.T) {
 	if got, valid := c.ContextTokens(restored, prompt); got != after || !valid {
 		t.Fatalf("restore: %d %v", got, valid)
 	}
-	for _, name := range []string{"no usage", "legacy usage", "model switch", "prompt switch", "rewritten history", "trimmed history"} {
+	for _, name := range []string{"no usage", "legacy usage", "model switch", "rewritten history", "trimmed history"} {
 		t.Run(name, func(t *testing.T) {
 			copyHistory := append([]protocol.Message(nil), history...)
 			copyPrompt := prompt
@@ -82,8 +82,6 @@ func TestContextTokensCalibration(t *testing.T) {
 				copyHistory[1].Metadata = &protocol.MessageMetadata{Usage: answer.Metadata.Usage}
 			case "model switch":
 				copyPrompt.ProfileKey = "model-b"
-			case "prompt switch":
-				copyPrompt.PromptKey = "changed tools"
 			case "rewritten history":
 				copyHistory[0] = protocol.NewUserMessage("[Previous conversation summary]")
 			case "trimmed history":
@@ -94,5 +92,41 @@ func TestContextTokensCalibration(t *testing.T) {
 				t.Fatalf("invalid anchor reused: %d %v", got, valid)
 			}
 		})
+	}
+}
+
+func TestContextTokensRetainsMeasurementAcrossPromptChanges(t *testing.T) {
+	c := NewCompressor(CompressorConfig{ContextWindowSize: 512000})
+	history := []protocol.Message{protocol.NewUserMessage("retained history")}
+	anchor := protocol.ContextInput{PromptKey: "old-tools", ProfileKey: "model", PrefixTokens: 10200, HistoryDigest: ContextDigest(history)}
+	answer := protocol.NewAssistantMessage("previous reply")
+	answer.Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 501539}, ContextInput: &anchor}
+	history = append(history, answer, protocol.NewUserMessage("continue"))
+	// Persisted measurements remain usable after a worker restart or upgrade.
+	data, err := json.Marshal(history)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var restored []protocol.Message
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatal(err)
+	}
+	for _, prefix := range []int{10170, 10200, 10500} {
+		prompt := protocol.ContextInput{PromptKey: "new-tools", ProfileKey: "model", PrefixTokens: prefix}
+		got, calibrated := c.ContextTokens(restored, prompt)
+		want := 501539 + c.CountTokens(restored[1:]) + max(0, prefix-anchor.PrefixTokens)
+		if !calibrated || got != want || !c.NeedsCompressionTokens(got) {
+			t.Fatalf("prefix %d: got %d calibrated=%v, want %d and compression", prefix, got, calibrated, want)
+		}
+	}
+	// The next provider measurement replaces the old baseline, including any
+	// conservative overestimate from a smaller prompt.
+	prompt := protocol.ContextInput{PromptKey: "new-tools", ProfileKey: "model", PrefixTokens: 10170, HistoryDigest: ContextDigest(restored)}
+	answer = protocol.NewAssistantMessage("new reply")
+	answer.Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 490000}, ContextInput: &prompt}
+	restored = append(restored, answer)
+	got, calibrated := c.ContextTokens(restored, prompt)
+	if want := 490000 + c.CountTokens(restored[len(restored)-1:]); !calibrated || got != want {
+		t.Fatalf("new measurement: %d calibrated=%v, want %d", got, calibrated, want)
 	}
 }

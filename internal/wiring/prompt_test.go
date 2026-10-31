@@ -10,6 +10,39 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 )
 
+func TestSessionIdentityPrompt(t *testing.T) {
+	for _, tc := range []struct{ session, workspace string }{
+		{"sess_parent", "workspace_one"},
+		{"sess_fork", "workspace_one"},
+		{"sess_directory", ""},
+		{"", ""},
+	} {
+		t.Run(tc.session, func(t *testing.T) {
+			builder := NewSystemPromptBuilder(PromptConfig{SessionID: tc.session, WorkspaceID: tc.workspace})
+			text := strings.Join(builder.BuildMessages(prompt.PromptContext{}), "\n")
+			if tc.session == "" {
+				if strings.Contains(text, "<zotigo_context>") {
+					t.Fatal("unexpected identity")
+				}
+				return
+			}
+			if !strings.Contains(text, "<zotigo_context>") || !strings.Contains(text, "session_id: "+tc.session) {
+				t.Fatal("missing current identity")
+			}
+			if tc.workspace == "" {
+				if strings.Contains(text, "workspace_id:") {
+					t.Fatal("invented workspace")
+				}
+			} else if !strings.Contains(text, "workspace_id: "+tc.workspace) {
+				t.Fatal("missing workspace")
+			}
+			if tc.session == "sess_fork" && strings.Contains(text, "sess_parent") {
+				t.Fatal("inherited parent identity")
+			}
+		})
+	}
+}
+
 func TestPromptBuildersSplitSkillsAndUserContext(t *testing.T) {
 	workDir := t.TempDir()
 	userSkillsDir := filepath.Join(t.TempDir(), "skills")

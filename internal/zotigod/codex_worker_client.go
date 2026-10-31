@@ -21,12 +21,14 @@ import (
 	channelruntime "github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/wiring"
 )
 
 type codexWorkerConfig struct {
 	workerClientConfig
 	SocketPath            string
 	WorkingDirectory      string
+	WorkspaceID           string
 	Model                 string
 	ReasoningEffort       string
 	ApprovalPolicy        string
@@ -140,6 +142,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	if generation == "" {
 		return fmt.Errorf("connect codex worker websocket: missing worker generation")
 	}
+	cfg.WorkspaceID = response.Header.Get(workerWorkspaceHeader)
 	writer = newWorkerClientWriter(workerConn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	channels := readCodexWorkerMessages(workerConn)
 
@@ -1403,8 +1406,12 @@ func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[stri
 		"cwd": cfg.WorkingDirectory, "model": cfg.Model,
 		"approvalPolicy": codexApprovalPolicy(cfg.ApprovalPolicy),
 	}
-	if cfg.DeveloperInstructions != "" || cfg.ChannelToolsVersion > 0 {
-		params["developerInstructions"] = cfg.DeveloperInstructions
+	instructions := cfg.DeveloperInstructions
+	if identity := wiring.SessionIdentity(cfg.SessionID, cfg.WorkspaceID); identity != "" {
+		instructions += "\n\n<zotigo_context>\n" + identity + "\n</zotigo_context>"
+	}
+	if instructions != "" || cfg.ChannelToolsVersion > 0 {
+		params["developerInstructions"] = instructions
 	}
 	if cfg.ChannelToolsVersion > 0 && !cfg.AutoReview {
 		params["approvalsReviewer"] = "user"

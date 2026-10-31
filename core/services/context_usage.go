@@ -38,7 +38,8 @@ func ContextProfileKey(profile config.ProfileConfig) string {
 }
 
 // ContextTokens returns next-request occupancy, using a measured request only
-// while its entire retained prefix and prompt configuration still match.
+// while the measured history and model still match. Prompt/tool changes are
+// estimated as a delta rather than discarding the provider measurement.
 // The assistant carrying usage was OUTPUT of that request: include it, and all
 // subsequent user/tool messages, in the locally estimated delta.
 func (c *Compressor) ContextTokens(history []protocol.Message, prompt protocol.ContextInput) (tokens int, calibrated bool) {
@@ -52,12 +53,16 @@ func (c *Compressor) ContextTokens(history []protocol.Message, prompt protocol.C
 		anchor := meta.ContextInput
 		// Never fall back to an older measurement across an uncalibrated call.
 		if anchor == nil || anchor.PromptKey == "" || anchor.ProfileKey == "" ||
-			anchor.PromptKey != prompt.PromptKey || anchor.ProfileKey != prompt.ProfileKey ||
+			anchor.ProfileKey != prompt.ProfileKey ||
 			meta.Usage.InputTokens < 0 || meta.Usage.CacheCreationInputTokens < 0 || meta.Usage.CacheReadInputTokens < 0 ||
 			meta.Usage.TotalInput() <= 0 || anchor.HistoryDigest != ContextDigest(history[:index]) {
 			break
 		}
-		return meta.Usage.TotalInput() + c.CountTokens(history[index:]), true
+		// Local tokenization can differ significantly from the provider. Account
+		// for prompt growth, but don't credit estimated savings until the next
+		// API measurement confirms them. This also tolerates estimator changes.
+		prefixGrowth := max(0, prompt.PrefixTokens-anchor.PrefixTokens)
+		return meta.Usage.TotalInput() + prefixGrowth + c.CountTokens(history[index:]), true
 	}
 	return prompt.PrefixTokens + c.CountTokens(history), false
 }
