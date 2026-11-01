@@ -3,194 +3,118 @@ package tui
 import (
 	"fmt"
 	"strings"
-	"time"
 
 	tea "charm.land/bubbletea/v2"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
-func (m *Model) submitApproval() (*Model, tea.Cmd) {
-	m.approving = false
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, "✅ Approved")
-	m.thinking = true
-	m.turnStartTime = time.Now()
+// approvalFailedMsg reports a decision the service did not record, so the
+// prompt becomes answerable again.
+type approvalFailedMsg string
 
-	cmd := func() tea.Msg {
-		ch, err := m.agent.ApproveAndExecutePendingActions(m.ctx)
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-
-	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
-}
-
-func (m *Model) setPendingApprovals(actions []*agent.PendingAction) {
-	m.pendingApprovals = append([]*agent.PendingAction(nil), actions...)
-	m.approvalDecisions = make(map[string]bool, len(actions))
+func (m *Model) showApproval(approval *session.DisplayApproval) tea.Cmd {
+	copied := *approval
+	m.approval = &copied
+	m.approving = true
+	m.approvalSubmitted = false
+	m.approvalChoice = 0
 	m.approvalItemChoice = 0
-	m.approvalContext = ""
-	m.pendingToolName = formatPendingActions(actions)
+	m.approvalDecisions = make(map[string]bool, len(copied.Pending))
+	m.pendingToolName = formatPendingApprovals(copied.Pending)
+	return nil
 }
 
-func (m *Model) acceptCurrentApproval() (*Model, tea.Cmd) {
-	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
+func (m *Model) clearApproval() {
+	m.approving = false
+	m.approval = nil
+	m.approvalDecisions = nil
+	m.approvalSubmitted = false
+	m.pendingToolName = ""
+}
+
+// handleApprovalDecision closes the approval prompt once the service has
+// durably recorded a decision, whichever client made it.
+func (m *Model) handleApprovalDecision(item session.DisplayItem) tea.Cmd {
+	if item.Approval == nil || m.approval == nil || item.Approval.ID != m.approval.ID {
+		return nil
+	}
+	ours := m.approvalSubmitted
+	header := m.pendingToolName
+	m.clearApproval()
+	status := describeDecisions(item.Approval.Decisions)
+	if !ours {
+		status += " (decided by another client)"
+	}
+	return m.commitLine(fmt.Sprintf("\n%s\n%s", header, status))
+}
+
+func (m *Model) currentPending() *session.DisplayPendingApproval {
+	if m.approval == nil || m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.approval.Pending) {
+		return nil
+	}
+	return &m.approval.Pending[m.approvalItemChoice]
+}
+
+func (m *Model) acceptApproval() (*Model, tea.Cmd) {
+	current := m.currentPending()
+	if current == nil || m.approvalSubmitted {
 		return m, nil
 	}
-	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = true
-	if m.approvalItemChoice < len(m.pendingApprovals)-1 {
+	m.approvalDecisions[current.ToolCallID] = true
+	if m.approvalItemChoice < len(m.approval.Pending)-1 {
 		m.approvalItemChoice++
 		m.approvalChoice = 0
 		return m, nil
 	}
-	return m.submitApprovalBatch("")
+	return m, m.submitApprovalDecisions("", false)
 }
 
-func (m *Model) denyCurrentApproval(reason string) (*Model, tea.Cmd) {
-	if m.approvalItemChoice < 0 || m.approvalItemChoice >= len(m.pendingApprovals) {
+// denyApproval denies the current call and every remaining one. Without
+// feedback the service stops the turn together with the denial, matching
+// the previous "deny returns to the prompt" behavior; with feedback the
+// agent continues and sees the reason. A stop is only possible when nothing
+// in the batch was approved.
+func (m *Model) denyApproval(feedback string) (*Model, tea.Cmd) {
+	current := m.currentPending()
+	if current == nil || m.approvalSubmitted {
 		return m, nil
 	}
-	m.approvalDecisions[m.pendingApprovals[m.approvalItemChoice].ToolCallID] = false
-	return m.submitApprovalBatch(reason)
+	for _, pending := range m.approval.Pending[m.approvalItemChoice:] {
+		m.approvalDecisions[pending.ToolCallID] = false
+	}
+	stop := strings.TrimSpace(feedback) == ""
+	for _, approved := range m.approvalDecisions {
+		if approved {
+			stop = false
+		}
+	}
+	return m, m.submitApprovalDecisions(feedback, stop)
 }
 
-func (m *Model) submitApprovalBatch(reason string) (*Model, tea.Cmd) {
-	m.approving = false
-	if strings.TrimSpace(reason) == "" {
+func (m *Model) submitApprovalDecisions(feedback string, stopTurn bool) tea.Cmd {
+	reason := strings.TrimSpace(feedback)
+	if reason == "" {
 		reason = "User denied in TUI"
 	}
-
-	results := make([]transport.ApprovalResult, 0, len(m.pendingApprovals))
-	denied := 0
-	approved := 0
-	for _, action := range m.pendingApprovals {
-		approvedDecision, decided := m.approvalDecisions[action.ToolCallID]
-		if !decided {
-			continue
+	decisions := make([]zotigodclient.ApprovalDecision, 0, len(m.approval.Pending))
+	for _, pending := range m.approval.Pending {
+		approved := m.approvalDecisions[pending.ToolCallID]
+		decision := zotigodclient.ApprovalDecision{ToolCallID: pending.ToolCallID, Approved: approved}
+		if !approved {
+			decision.Reason = reason
 		}
-		result := transport.ApprovalResult{ToolCallID: action.ToolCallID, Approved: approvedDecision}
-		if !approvedDecision {
-			result.Reason = reason
-			denied++
-		} else {
-			approved++
-		}
-		results = append(results, result)
+		decisions = append(decisions, decision)
 	}
-
-	status := fmt.Sprintf("✅ Approved %d", approved)
-	if denied > 0 {
-		status = fmt.Sprintf("🚫 Denied %d/%d · skipped all pending calls", denied, len(m.pendingApprovals))
-	}
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
-	m.thinking = true
-	m.turnStartTime = time.Now()
-	if request := m.spawnRequest; request != nil {
-		m.spawnRequest = nil
-		m.approvalContext = ""
-		cmd := func() tea.Msg {
-			request.resolve(results)
-			return spawnApprovalResolvedMsg{}
-		}
-		return m, tea.Batch(m.commitLine(approvalMsg), cmd)
-	}
-
-	cmd := func() tea.Msg {
-		ch, err := m.agent.ResolvePendingActions(m.ctx, deniedToolResultsFromTUI(results, m.pendingApprovals))
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-
-	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
-}
-
-func deniedToolResultsFromTUI(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
-	byID := make(map[string]*agent.PendingAction, len(pending))
-	for _, action := range pending {
-		byID[action.ToolCallID] = action
-	}
-	denied := make(map[string]protocol.ToolResult)
-	for _, result := range results {
-		if result.Approved {
-			continue
-		}
-		action, ok := byID[result.ToolCallID]
-		if !ok {
-			continue
-		}
-		reason := result.Reason
-		if reason == "" {
-			reason = "User denied in TUI"
-		}
-		denied[result.ToolCallID] = protocol.ToolResult{
-			ToolCallID: result.ToolCallID,
-			ToolName:   action.Name,
-			Type:       protocol.ToolResultTypeExecutionDenied,
-			Reason:     reason,
-			IsError:    true,
-		}
-	}
-	return denied
-}
-
-func (m *Model) denyAndReturn(feedback string) (*Model, tea.Cmd) {
-	m.approving = false
-
-	reason := "User denied"
-	if feedback != "" {
-		reason = feedback
-	}
-
-	status := "🚫 Denied"
-	if feedback != "" {
-		status = fmt.Sprintf("🚫 Denied (feedback: %s)", feedback)
-	}
-	approvalMsg := fmt.Sprintf("\n%s\n%s", m.pendingToolName, status)
-
-	snap := m.agent.Snapshot()
-	var outputs []protocol.ToolResult
-	for _, act := range snap.PendingActions {
-		outputs = append(outputs, protocol.ToolResult{
-			ToolCallID: act.ToolCallID,
-			ToolName:   act.Name,
-			Type:       protocol.ToolResultTypeExecutionDenied,
-			Reason:     reason,
-			IsError:    true,
-		})
-	}
-
-	if feedback == "" {
-		// Simple deny: back to input mode
-		m.thinking = false
-		m.appendDeniedToolResults(outputs)
-		m.appendTurnInterrupted(reason)
-		cmd := func() tea.Msg {
-			ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
-			if err != nil {
-				return errMsg(err)
+	m.approvalSubmitted = true
+	service, sessionID, approvalID, ctx := m.service, m.session.ID, m.approval.ID, m.ctx
+	return func() tea.Msg {
+		if err := service.DecideApproval(ctx, sessionID, approvalID, decisions, stopTurn); err != nil {
+			if zotigodclient.IsStatus(err, 409) {
+				return serviceNoticeMsg(timingStyle.Render("Approval was already resolved by another client."))
 			}
-			// Drain the channel so agent settles, but don't continue the loop
-			for range ch {
-			}
-			return denialSettledMsg{}
+			return approvalFailedMsg(errorStyle.Render("✗ ") + "Approval not recorded: " + err.Error())
 		}
-		return m, tea.Batch(m.commitLine(approvalMsg), cmd)
+		return nil
 	}
-
-	// Deny with feedback: keep thinking, agent continues with user feedback
-	m.thinking = true
-	m.turnStartTime = time.Now()
-	cmd := func() tea.Msg {
-		ch, err := m.agent.SubmitToolOutputs(m.ctx, outputs)
-		if err != nil {
-			return errMsg(err)
-		}
-		return streamReadyMsg(ch)
-	}
-	return m, tea.Batch(m.commitLine(approvalMsg), cmd)
 }

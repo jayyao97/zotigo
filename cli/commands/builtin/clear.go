@@ -6,22 +6,25 @@ import (
 	"github.com/jayyao97/zotigo/cli/commands"
 )
 
-// ClearCommand clears the conversation history.
+// ClearCommand starts a fresh conversation. Sessions are durable in the
+// session service, so the old conversation is kept and can be resumed.
 type ClearCommand struct{}
 
 func NewClearCommand() *ClearCommand {
 	return &ClearCommand{}
 }
 
-func (c *ClearCommand) Name() string        { return "clear" }
-func (c *ClearCommand) Aliases() []string   { return []string{"reset"} }
-func (c *ClearCommand) Description() string { return "Clear the conversation history and start fresh" }
-func (c *ClearCommand) Usage() string       { return "/clear" }
+func (c *ClearCommand) Name() string      { return "clear" }
+func (c *ClearCommand) Aliases() []string { return []string{"reset", "new"} }
+func (c *ClearCommand) Description() string {
+	return "Start a new session in this directory (the current one stays resumable)"
+}
+func (c *ClearCommand) Usage() string { return "/clear" }
 
 func (c *ClearCommand) Execute(ctx context.Context, env *commands.Environment, args []string) error {
-	if env.ClearHistory != nil {
-		env.ClearHistory()
+	if env.NewSession == nil {
+		env.Output("Starting a new session is not supported in this context.")
+		return nil
 	}
-	env.Output("Conversation history cleared.")
-	return nil
+	return env.NewSession()
 }

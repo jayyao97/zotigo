@@ -12,6 +12,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/config"
 	_ "modernc.org/sqlite"
 )
 
@@ -27,11 +28,11 @@ type Store struct {
 
 func Open(root string) (*Store, error) {
 	if root == "" {
-		home, err := os.UserHomeDir()
+		dir, err := config.StateDir()
 		if err != nil {
-			return nil, fmt.Errorf("resolve home: %w", err)
+			return nil, err
 		}
-		root = filepath.Join(home, ".zotigo")
+		root = dir
 	}
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, fmt.Errorf("create zotigo directory: %w", err)

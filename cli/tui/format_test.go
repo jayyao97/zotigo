@@ -5,7 +5,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
 )
@@ -15,6 +14,20 @@ func makeToolResult(text string) *protocol.ToolResult {
 		ToolCallID: "test",
 		Text:       text,
 	}
+}
+
+// formatToolResult renders a protocol result through the display path the
+// TUI uses for durable tool results.
+func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
+	return renderToolResultFromDisplay(&session.DisplayToolResult{
+		ToolCallID: tr.ToolCallID,
+		ToolName:   tr.ToolName,
+		ResultType: string(tr.Type),
+		Text:       tr.Text,
+		JSON:       tr.JSON,
+		Reason:     tr.Reason,
+		IsError:    tr.IsError,
+	}, maxLines)
 }
 
 func TestFormatToolCall_SpawnIncludesWorkDir(t *testing.T) {
@@ -36,8 +49,8 @@ func TestFormatToolCall_SpawnIncludesWorkDir(t *testing.T) {
 }
 
 func TestApprovalHintForAction_GeneralPurposeSpawn(t *testing.T) {
-	action := &agent.PendingAction{
-		Name:      "spawn",
+	action := &session.DisplayPendingApproval{
+		ToolName:  "spawn",
 		Arguments: `{"name":"worker","agent_type":"general-purpose","workdir":"/tmp/project"}`,
 	}
 
@@ -48,8 +61,8 @@ func TestApprovalHintForAction_GeneralPurposeSpawn(t *testing.T) {
 }
 
 func TestApprovalHintForAction_ExploreSpawn(t *testing.T) {
-	action := &agent.PendingAction{
-		Name:      "spawn",
+	action := &session.DisplayPendingApproval{
+		ToolName:  "spawn",
 		Arguments: `{"name":"reader","agent_type":"explore","workdir":"/tmp/project"}`,
 	}
 

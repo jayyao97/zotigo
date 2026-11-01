@@ -5,8 +5,6 @@ import (
 	"fmt"
 
 	"github.com/jayyao97/zotigo/cli/commands"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 // CostCommand shows token usage statistics.
@@ -22,22 +20,14 @@ func (c *CostCommand) Description() string { return "Show token usage statistics
 func (c *CostCommand) Usage() string       { return "/cost" }
 
 func (c *CostCommand) Execute(ctx context.Context, env *commands.Environment, args []string) error {
-	ag, ok := env.Agent.(*agent.Agent)
-	if !ok || ag == nil {
-		env.Output("Cost requires an active agent session.")
+	if env.Usage == nil {
+		env.Output("Cost requires an active session.")
 		return nil
 	}
-
-	snap := ag.Snapshot()
-
-	// Share the same aggregation path as the TUI exit summary so
-	// legacy Anthropic turns (TotalTokens=0 on disk) are normalized
-	// in both places.
-	total := protocol.SessionUsage(snap.History)
-	turns := protocol.CountAssistantTurns(snap.History)
-
-	if turns == 0 {
-		env.Output("No assistant turns recorded yet.")
+	report := env.Usage()
+	total := report.Session
+	if report.Turns == 0 {
+		env.Output("No completed turns recorded yet.")
 		return nil
 	}
 
@@ -53,8 +43,7 @@ func (c *CostCommand) Execute(ctx context.Context, env *commands.Environment, ar
 	if total.TotalTokens > 0 {
 		env.Output("  Total tokens:          %s\n", formatNumber(total.TotalTokens))
 	}
-	env.Output("  Turns:                 %d", turns)
-
+	env.Output("  Turns:                 %d", report.Turns)
 	return nil
 }
 

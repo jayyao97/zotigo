@@ -2,131 +2,106 @@ package cliapp
 
 import (
 	"context"
-	"errors"
-	"fmt"
-	"os"
 	"path/filepath"
 	"sort"
 
 	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
-func loadGlobalResumeSessions(manager *session.Manager) ([]session.Metadata, map[string]string, map[string]string, error) {
-	sessions, err := manager.ListAll()
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	descriptions := make(map[string]string, len(sessions))
-	disabled := make(map[string]string)
-	rootDir := manager.RootDir()
-	if rootDir == "" {
-		for _, metadata := range sessions {
-			descriptions[metadata.ID] = "Legacy / Unassigned"
-		}
-		return sessions, descriptions, disabled, nil
-	}
-	catalog, err := workspace.OpenReadOnly(rootDir)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			for _, metadata := range sessions {
-				descriptions[metadata.ID] = "Legacy / Unassigned"
-			}
-			return sessions, descriptions, disabled, nil
-		}
-		return nil, nil, nil, err
-	}
-	defer func() { _ = catalog.Close() }()
+type resumeEntries struct {
+	sessions     []session.Metadata
+	descriptions map[string]string
+	disabled     map[string]string
+}
 
-	ctx := context.Background()
-	projects, err := catalog.ListProjects(ctx)
+// availabilityReasons maps the service's catalog availability to the
+// picker's disabled reason. "ready" sessions are selectable.
+var availabilityReasons = map[string]string{
+	"archived":            "archived",
+	"runtime_missing":     "runtime missing",
+	"workspace_not_ready": "workspace unavailable",
+	"cwd_mismatch":        "working directory outside its workspace",
+	"cwd_unavailable":     "working directory unavailable",
+}
+
+// loadResumeSessions lists resumable sessions from the session service.
+// Without all, only sessions whose cwd is exactly this directory are shown,
+// matching the previous per-directory resume behavior.
+func loadResumeSessions(ctx context.Context, client *zotigodclient.Client, cwd string, all bool) (resumeEntries, error) {
+	projections, err := client.CatalogSessions(ctx)
 	if err != nil {
-		return nil, nil, nil, err
+		return resumeEntries{}, err
 	}
-	projectNames := make(map[string]string, len(projects))
-	workspaceByID := make(map[string]workspace.Workspace)
-	for _, project := range projects {
-		projectNames[project.ID] = project.Name
-		workspaces, err := catalog.ListWorkspaces(ctx, project.ID, true)
-		if err != nil {
-			return nil, nil, nil, err
-		}
-		for _, item := range workspaces {
-			workspaceByID[item.ID] = item
-		}
-	}
-	organizations, err := catalog.ListSessionOrganizations(ctx)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	organizationByID := make(map[string]workspace.SessionOrganization, len(organizations))
-	for _, organization := range organizations {
-		organizationByID[organization.SessionID] = organization
-	}
-	runtimeIDs := make(map[string]bool, len(sessions))
-	for _, metadata := range sessions {
-		runtimeIDs[metadata.ID] = true
-	}
-	for _, organization := range organizations {
-		if runtimeIDs[organization.SessionID] {
+	entries := resumeEntries{descriptions: map[string]string{}, disabled: map[string]string{}}
+	labels := newWorkspaceLabels(ctx, client)
+	for _, projection := range projections {
+		runtime := projection.Runtime
+		if runtime == nil {
 			continue
 		}
-		sessions = append(sessions, session.Metadata{ID: organization.SessionID, UpdatedAt: organization.UpdatedAt})
-		disabled[organization.SessionID] = "runtime missing"
-	}
-	for _, metadata := range sessions {
-		organization, organized := organizationByID[metadata.ID]
-		if !organized || organization.ProjectID == nil || organization.WorkspaceID == nil {
-			descriptions[metadata.ID] = "Legacy / Unassigned"
-			if metadata.WorkingDirectory != "" {
-				if owned, err := catalog.DeletedWorkspaceOwnsPath(ctx, metadata.WorkingDirectory); err != nil {
-					return nil, nil, nil, err
-				} else if owned {
-					disabled[metadata.ID] = "workspace deleted"
-				}
-			}
-		} else {
-			item, found := workspaceByID[*organization.WorkspaceID]
-			projectName := projectNames[*organization.ProjectID]
-			if projectName == "" {
-				projectName = *organization.ProjectID
-			}
-			workspaceName := *organization.WorkspaceID
-			if found {
-				workspaceName = item.Title
-			}
-			descriptions[metadata.ID] = projectName + " / " + workspaceName
-			if organization.Title != nil {
-				descriptions[metadata.ID] += " / " + *organization.Title
-			}
-			if disabled[metadata.ID] == "runtime missing" {
-				continue
-			}
-			switch {
-			case organization.EffectiveArchived():
-				disabled[metadata.ID] = "archived"
-			case !found || item.Status != workspace.WorkspaceStatusReady:
-				disabled[metadata.ID] = "workspace unavailable"
-			case filepath.Clean(metadata.WorkingDirectory) != filepath.Clean(item.RootPath):
-				disabled[metadata.ID] = "working directory mismatch"
-			}
+		if !all && filepath.Clean(runtime.WorkingDirectory) != filepath.Clean(cwd) {
+			continue
 		}
-		if metadata.WorkingDirectory != "" {
-			if info, err := os.Stat(metadata.WorkingDirectory); err != nil || !info.IsDir() {
-				disabled[metadata.ID] = "working directory unavailable"
-			}
+		entries.sessions = append(entries.sessions, session.Metadata{
+			ID:               runtime.ID,
+			WorkingDirectory: runtime.WorkingDirectory,
+			LastPrompt:       runtime.LastPrompt,
+			UpdatedAt:        runtime.UpdatedAt,
+		})
+		description := labels.describe(projection)
+		if all {
+			description += " · " + runtime.WorkingDirectory
+		}
+		entries.descriptions[runtime.ID] = description
+		if reason, unavailable := availabilityReasons[projection.Availability]; unavailable {
+			entries.disabled[runtime.ID] = reason
+		}
+		if runtime.Agent != "" && runtime.Agent != "zotigo" {
+			entries.disabled[runtime.ID] = runtime.Agent + " session (open it in Desktop)"
 		}
 	}
-	sort.SliceStable(sessions, func(i, j int) bool {
-		left := descriptions[sessions[i].ID]
-		right := descriptions[sessions[j].ID]
-		if left == right {
-			if sessions[i].UpdatedAt.Equal(sessions[j].UpdatedAt) {
-				return sessions[i].ID < sessions[j].ID
-			}
-			return sessions[i].UpdatedAt.After(sessions[j].UpdatedAt)
+	sort.SliceStable(entries.sessions, func(i, j int) bool {
+		if entries.sessions[i].UpdatedAt.Equal(entries.sessions[j].UpdatedAt) {
+			return entries.sessions[i].ID < entries.sessions[j].ID
 		}
-		return fmt.Sprintf("%s\x00%s", left, sessions[i].ID) < fmt.Sprintf("%s\x00%s", right, sessions[j].ID)
+		return entries.sessions[i].UpdatedAt.After(entries.sessions[j].UpdatedAt)
 	})
-	return sessions, descriptions, disabled, nil
+	return entries, nil
+}
+
+type workspaceLabels struct {
+	ctx    context.Context
+	client *zotigodclient.Client
+	cache  map[string]string
+}
+
+func newWorkspaceLabels(ctx context.Context, client *zotigodclient.Client) *workspaceLabels {
+	return &workspaceLabels{ctx: ctx, client: client, cache: map[string]string{}}
+}
+
+func (l *workspaceLabels) describe(projection zotigodclient.SessionProjection) string {
+	label := "Directory"
+	if workspaceID := projection.WorkspaceID(); workspaceID != "" {
+		label = l.workspace(workspaceID)
+	}
+	if projection.Organization != nil && projection.Organization.Title != nil && *projection.Organization.Title != "" {
+		label += " / " + *projection.Organization.Title
+	}
+	return label
+}
+
+func (l *workspaceLabels) workspace(id string) string {
+	if label, ok := l.cache[id]; ok {
+		return label
+	}
+	label := id
+	if workspace, err := l.client.GetWorkspace(l.ctx, id); err == nil {
+		label = workspace.Title
+		if project, err := l.client.GetProject(l.ctx, workspace.ProjectID); err == nil {
+			label = project.Name + " / " + workspace.Title
+		}
+	}
+	l.cache[id] = label
+	return label
 }

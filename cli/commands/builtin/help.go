@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/cli/commands"
-	"github.com/jayyao97/zotigo/core/skills"
 )
 
 // HelpCommand shows available commands.
@@ -32,10 +31,10 @@ func (c *HelpCommand) Execute(ctx context.Context, env *commands.Environment, ar
 	}
 
 	// Show all commands
-	return c.showAllCommands(env)
+	return c.showAllCommands(ctx, env)
 }
 
-func (c *HelpCommand) showAllCommands(env *commands.Environment) error {
+func (c *HelpCommand) showAllCommands(ctx context.Context, env *commands.Environment) error {
 	cmds := c.registry.List()
 
 	// Sort by name
@@ -58,10 +57,10 @@ func (c *HelpCommand) showAllCommands(env *commands.Environment) error {
 
 	sb.WriteString("Type /help <command> for more details.\n")
 
-	// Append available skills if SkillManager is set
-	if sm, ok := env.SkillManager.(*skills.SkillManager); ok && sm != nil {
-		allSkills := sm.List()
-		if len(allSkills) > 0 {
+	// Append available skills when the session can list them.
+	if env.Skills != nil {
+		allSkills, err := env.Skills(ctx, false)
+		if err == nil && len(allSkills) > 0 {
 			sb.WriteString("\nSkills (use /<skill-name> [args]):\n\n")
 			for _, skill := range allSkills {
 				desc := skill.Description

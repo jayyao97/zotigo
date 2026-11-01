@@ -127,7 +127,8 @@ type EnvVariable struct {
 }
 
 type SessionNewResult struct {
-	SessionID string `json:"sessionId"`
+	SessionID string            `json:"sessionId"`
+	Modes     *SessionModeState `json:"modes,omitempty"`
 }
 
 type SessionLoadParams struct {
@@ -136,7 +137,9 @@ type SessionLoadParams struct {
 	MCPServers []MCPServer `json:"mcpServers"`
 }
 
-type SessionLoadResult struct{}
+type SessionLoadResult struct {
+	Modes *SessionModeState `json:"modes,omitempty"`
+}
 
 type SessionListParams struct {
 	Cursor string `json:"cursor,omitempty"`
@@ -220,6 +223,20 @@ type SessionCancelParams struct {
 }
 
 // --- Mode ---
+
+// SessionMode is one operating mode the agent offers for a session.
+type SessionMode struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+}
+
+// SessionModeState is returned by session/new and session/load when the
+// agent supports modes; clients switch with session/set_mode.
+type SessionModeState struct {
+	CurrentModeID  string        `json:"currentModeId"`
+	AvailableModes []SessionMode `json:"availableModes"`
+}
 
 type SessionSetModeParams struct {
 	SessionID string `json:"sessionId"`

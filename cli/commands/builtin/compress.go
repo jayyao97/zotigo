@@ -2,13 +2,12 @@ package builtin
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/jayyao97/zotigo/cli/commands"
-	"github.com/jayyao97/zotigo/core/agent"
 )
 
-// CompressCommand manually triggers context compression.
+// CompressCommand asks the session service to compact the conversation.
+// The result arrives in the session stream as a compaction notice.
 type CompressCommand struct{}
 
 func NewCompressCommand() *CompressCommand {
@@ -21,42 +20,11 @@ func (c *CompressCommand) Description() string { return "Manually compress conve
 func (c *CompressCommand) Usage() string       { return "/compress" }
 
 func (c *CompressCommand) Execute(ctx context.Context, env *commands.Environment, args []string) error {
-	// Try to get agent from environment
-	ag, ok := env.Agent.(*agent.Agent)
-	if !ok || ag == nil {
-		env.Output("Compress requires an active agent session.")
+	if env.Compact == nil {
+		env.Output("Compress requires an active session.")
 		return nil
 	}
-
-	// Get stats before compression
-	statsBefore := ag.GetContextStats()
-	tokensBefore := statsBefore["estimated_tokens"]
-	messagesBefore := statsBefore["message_count"]
-
-	// Force compression
-	result, err := ag.ForceCompress(ctx)
-	if err != nil {
-		return fmt.Errorf("compression failed: %w", err)
-	}
-
-	if !result.Compressed {
-		env.Output("History cannot be reduced further.\n")
-		env.Output("Current context: %d messages, ~%d tokens", messagesBefore, tokensBefore)
-		return nil
-	}
-
-	// Report results
-	env.Output("Context compressed successfully!\n")
-	env.Output("Before: %d messages, ~%d tokens\n", result.MessagesBefore, result.OriginalTokens)
-	env.Output("After:  %d messages, ~%d tokens\n", result.MessagesAfter, result.CompressedTokens)
-	env.Output("Saved:  ~%d tokens (%.1f%% reduction)",
-		result.OriginalTokens-result.CompressedTokens,
-		float64(result.OriginalTokens-result.CompressedTokens)/float64(result.OriginalTokens)*100)
-	if result.TranscriptPath != "" {
-		env.Output("\nTranscript saved to: %s", result.TranscriptPath)
-	}
-
-	return nil
+	return env.Compact()
 }
 
 // StatsCommand shows context statistics.
@@ -72,24 +40,20 @@ func (c *StatsCommand) Description() string { return "Show context statistics" }
 func (c *StatsCommand) Usage() string       { return "/stats" }
 
 func (c *StatsCommand) Execute(ctx context.Context, env *commands.Environment, args []string) error {
-	ag, ok := env.Agent.(*agent.Agent)
-	if !ok || ag == nil {
-		env.Output("Stats requires an active agent session.")
+	if env.Usage == nil {
+		env.Output("Stats requires an active session.")
 		return nil
 	}
-
-	stats := ag.GetContextStats()
-
+	report := env.Usage()
 	env.Output("Context Statistics:\n")
-	env.Output("  Messages:         %d\n", stats["message_count"])
-	env.Output("  Estimated tokens: %d\n", stats["estimated_tokens"])
-
-	if loopCount, ok := stats["loop_total_calls"]; ok {
-		env.Output("  Tool calls:       %d\n", loopCount)
+	if report.ContextTokens == 0 {
+		env.Output("  Context usage:    unavailable until the session reports it\n")
+	} else if report.ContextWindow > 0 {
+		env.Output("  Context tokens:   %s / %s (%.0f%%)\n", formatNumber(report.ContextTokens), formatNumber(report.ContextWindow),
+			float64(report.ContextTokens)/float64(report.ContextWindow)*100)
+	} else {
+		env.Output("  Context tokens:   %s\n", formatNumber(report.ContextTokens))
 	}
-	if uniqueCalls, ok := stats["loop_unique_calls"]; ok {
-		env.Output("  Unique calls:     %d\n", uniqueCalls)
-	}
-
+	env.Output("  Completed turns:  %d\n", report.Turns)
 	return nil
 }

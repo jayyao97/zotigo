@@ -3,6 +3,7 @@ package cliapp
 import (
 	"bytes"
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"log"
@@ -15,20 +16,11 @@ import (
 	"github.com/jayyao97/zotigo/cli/commands"
 	cmdbuiltin "github.com/jayyao97/zotigo/cli/commands/builtin"
 	"github.com/jayyao97/zotigo/cli/tui"
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
-	"github.com/jayyao97/zotigo/core/executor"
-	"github.com/jayyao97/zotigo/core/lsp"
-	"github.com/jayyao97/zotigo/core/middleware"
-	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
-	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
-	_ "github.com/jayyao97/zotigo/core/providers/gemini"
-	_ "github.com/jayyao97/zotigo/core/providers/openai"
-	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"github.com/jayyao97/zotigo/internal/diagnostics"
-	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
 // KittyFilterWriter filters unsupported Kitty keyboard protocol responses.
@@ -48,19 +40,34 @@ func (k *KittyFilterWriter) Write(p []byte) (n int, err error) {
 	return len(p), err
 }
 
+const historyPageSize = 100
+
 // Run starts the interactive CLI and returns a process exit code.
+//
+// The TUI is a client of the zotigod session service. By default it uses
+// the shared local daemon (starting it when needed), so sessions keep
+// running and stay visible to Desktop, ACP and other terminals. With
+// --no-daemon the same service runs inside this process and its sessions
+// stop when the TUI exits.
 func Run(args []string) (exitCode int) {
+	if len(args) > 0 && args[0] == zotigod.WorkerSubcommand {
+		// Session worker launched by an embedded (--no-daemon) service.
+		return zotigod.Run(args[1:])
+	}
 	fs := flag.NewFlagSet("zotigo", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	versionFlag := fs.Bool("version", false, "Print program release version")
 
-	resumeFlag := fs.Bool("resume", false, "Resume a previous session")
+	resumeFlag := fs.Bool("resume", false, "Resume a previous session in this directory")
 	rFlag := fs.Bool("r", false, "Resume a previous session (shorthand)")
-	resumeAllFlag := fs.Bool("resume-all", false, "Resume a session across all projects")
+	resumeAllFlag := fs.Bool("resume-all", false, "Resume a session across all directories and workspaces")
+	noDaemon := fs.Bool("no-daemon", false, "Run the session service inside this process (requires --state-dir); sessions stop when zotigo exits")
+	stateDir := fs.String("state-dir", "", "Isolated state directory for --no-daemon (sessions, catalog, logs); must not be ~/.zotigo")
+	workspaceID := fs.String("workspace", "", "Bind the new session to this Zotigo Workspace (the current directory must be inside it)")
 	bypassPermissions := fs.Bool(
 		"dangerously-skip-permissions",
 		false,
-		"Execute all registered tools without safety checks or approval",
+		"Execute all registered tools without safety checks or approval (Full access)",
 	)
 	if err := fs.Parse(args); err != nil {
 		stopLogging := diagnostics.Start("cli")
@@ -72,9 +79,17 @@ func Run(args []string) (exitCode int) {
 		fmt.Printf("zotigo %s\n", buildinfo.Version)
 		return 0
 	}
+	if *noDaemon {
+		// Export the isolated state root before anything writes state,
+		// including this process's diagnostics log.
+		if _, err := zotigodclient.UseIsolatedStateDir(*stateDir); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			return 2
+		}
+	}
 	stopLogging := diagnostics.Start("cli")
 	defer stopLogging()
-	log.Printf("cli_start version=%s pid=%d", buildinfo.Version, os.Getpid())
+	log.Printf("cli_start version=%s pid=%d no_daemon=%v", buildinfo.Version, os.Getpid(), *noDaemon)
 	defer func() {
 		if value := recover(); value != nil {
 			log.Printf("cli_panic: %v", value)
@@ -82,18 +97,21 @@ func Run(args []string) (exitCode int) {
 		}
 		log.Printf("cli_exit code=%d", exitCode)
 	}()
-	doResume := *resumeFlag || *rFlag || *resumeAllFlag
-	approvalPolicy := agent.ApprovalPolicyAuto
-	if *bypassPermissions {
-		approvalPolicy = agent.ApprovalPolicyBypass
+	fail := func(format string, args ...any) int {
+		message := fmt.Sprintf(format, args...)
+		log.Print(message)
+		fmt.Fprintln(os.Stderr, message)
+		return 1
 	}
 
-	cm := config.NewManager()
-	configPath, created, err := cm.EnsureGlobalConfig()
+	doResume := *resumeFlag || *rFlag || *resumeAllFlag
+	if doResume && *workspaceID != "" {
+		return fail("--workspace applies to new sessions; a resumed session keeps its ownership")
+	}
+
+	configPath, created, err := config.NewManager().EnsureGlobalConfig()
 	if err != nil {
-		log.Printf("Error creating config file: %v\n", err)
-		fmt.Printf("Error creating config file: %v\n", err)
-		return 1
+		return fail("Error creating config file: %v", err)
 	}
 	if created {
 		fmt.Printf("Config file not found. Creating default template at: %s\n", configPath)
@@ -101,196 +119,167 @@ func Run(args []string) (exitCode int) {
 		return 0
 	}
 
-	sessMgr, err := session.NewManager()
+	cwd, err := os.Getwd()
 	if err != nil {
-		log.Printf("Error initializing session manager: %v\n", err)
-		fmt.Printf("Error initializing session manager: %v\n", err)
-		return 1
+		return fail("Error resolving current directory: %v", err)
+	}
+	cwd, err = filepath.Abs(cwd)
+	if err != nil {
+		return fail("Error resolving current directory: %v", err)
 	}
 
-	cwd, _ := os.Getwd()
-	var currentSession *session.Session
+	ctx := context.Background()
+	conn, err := zotigodclient.Connect(ctx, zotigodclient.ConnectOptions{
+		NoDaemon: *noDaemon,
+		StateDir: *stateDir,
+		Logger:   log.New(log.Writer(), "[zotigod-embedded] ", log.LstdFlags),
+	})
+	if err != nil {
+		return fail("Error connecting to the session service: %v", err)
+	}
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := conn.Close(shutdownCtx); err != nil {
+			log.Printf("cli_service_close_error: %v", err)
+		}
+	}()
+	log.Printf("cli_service url=%s embedded=%v", conn.BaseURL(), conn.Embedded)
 
+	policy := ""
+	if *bypassPermissions {
+		policy = "bypass_permissions"
+	}
+
+	var current zotigodclient.Session
 	if doResume {
-		var sessions []session.Metadata
-		var descriptions, disabled map[string]string
-		if *resumeAllFlag {
-			sessions, descriptions, disabled, err = loadGlobalResumeSessions(sessMgr)
-		} else {
-			sessions, err = sessMgr.ListByDir(cwd)
-		}
+		chosen, err := chooseSession(ctx, conn.Client, cwd, *resumeAllFlag)
 		if err != nil {
-			log.Printf("Error listing sessions: %v\n", err)
-			fmt.Printf("Error listing sessions: %v\n", err)
-			return 1
+			return fail("Error listing sessions: %v", err)
 		}
-
-		selModel := tui.NewSessionSelectionModel(sessions, sessMgr)
-		if *resumeAllFlag {
-			selModel = tui.NewGlobalSessionSelectionModel(sessions, sessMgr, descriptions, disabled)
-		}
-		p := tea.NewProgram(selModel)
-		m, err := p.Run()
-		if err != nil {
-			log.Println("Error running selection:", err)
-			fmt.Println("Error running selection:", err)
-			return 1
-		}
-
-		finalModel := m.(tui.SessionSelectionModel)
-		if finalModel.ChosenID == "" {
+		if chosen == "" {
 			fmt.Println("No session selected. Exiting.")
 			return 0
 		}
-
-		currentSession, err = sessMgr.Load(finalModel.ChosenID)
-		if err != nil {
-			log.Printf("Error loading session: %v\n", err)
-			fmt.Printf("Error loading session: %v\n", err)
-			return 1
+		if current, err = conn.GetSession(ctx, chosen); err != nil {
+			return fail("Error loading session: %v", err)
 		}
-		cwd = currentSession.WorkingDirectory
+		if policy != "" && current.ApprovalPolicy != policy {
+			if err := conn.SetApprovalPolicy(ctx, current.ID, policy); err != nil {
+				return fail("Error enabling Full access: %v", err)
+			}
+			if current, err = conn.GetSession(ctx, chosen); err != nil {
+				return fail("Error loading session: %v", err)
+			}
+		}
 	} else {
-		currentSession, err = sessMgr.CreateNew(cwd)
+		current, err = conn.CreateSession(ctx, zotigodclient.CreateSessionRequest{
+			WorkingDirectory: cwd,
+			WorkspaceID:      *workspaceID,
+			ApprovalPolicy:   policy,
+		})
 		if err != nil {
-			log.Printf("Error creating session: %v\n", err)
-			fmt.Printf("Error creating session: %v\n", err)
-			return 1
+			return fail("Error creating session: %v", err)
 		}
 	}
+	log.Printf("cli_session session=%s profile=%s cwd=%s", current.ID, current.Profile, current.WorkingDirectory)
 
-	cfg, err := cm.LoadForDir(cwd)
+	page, err := conn.Items(ctx, current.ID, 0, 0, historyPageSize)
 	if err != nil {
-		log.Println("Error loading config:", err)
-		fmt.Println("Error loading config:", err)
-		return 1
+		return fail("Error loading session history: %v", err)
 	}
-	profileName, profile, err := cfg.ResolveProfile(currentSession.ProfileName)
-	if err != nil {
-		log.Println("Error resolving profile:", err)
-		fmt.Println("Error resolving profile:", err)
-		return 1
-	}
-
-	log.Printf("cli_session session=%s profile=%s", currentSession.ID, profileName)
-	if err := sessMgr.Lock(currentSession.ID); err != nil {
-		log.Printf("Error locking session: %v\n", err)
-		fmt.Printf("Error locking session: %v\n", err)
-		return 1
-	}
-	defer func() { _ = sessMgr.Unlock(currentSession.ID) }()
-
-	localExec, err := executor.NewLocalExecutor(cwd)
-	if err != nil {
-		log.Printf("Error creating executor: %v\n", err)
-		fmt.Printf("Error creating executor: %v\n", err)
-		return 1
-	}
-	defer func() { _ = localExec.Close() }()
-
-	// Executor is used raw now — command-safety is enforced by ShellTool's
-	// ShellPolicy in Classify; file-path safety by tools' in-workdir checks.
-	exec := localExec
-
-	home, _ := os.UserHomeDir()
-	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
-
-	sm, err := wiring.NewSkillManager(cwd)
-	if err != nil {
-		log.Printf("Warning: failed to load skills: %v\n", err)
-		fmt.Printf("Warning: failed to load skills: %v\n", err)
-	}
-
-	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-		WorkDir:      cwd,
-		SkillManager: sm,
-	})
-	ucb := wiring.NewUserContextBuilder(wiring.PromptConfig{
-		WorkDir:                    cwd,
-		IncludeProjectInstructions: true,
-	})
-
-	// Build observability backend before constructing the agent so it
-	// can be wired in as a single option. newObserver returns Noop when
-	// langfuse credentials are absent; the agent never sees nil.
-	//
-	// Each turn gets its own Langfuse session (so cost/usage stay
-	// turn-bounded) but the per-turn sessionIds share the zotigo
-	// session.ID as a prefix — that keeps every turn of one zotigo
-	// invocation grouped in Langfuse's Sessions list under a common
-	// search prefix. Static metadata adds cross-startup grouping for
-	// --resume runs (where the prefix changes).
-	processStart := time.Now()
-	staticMeta := map[string]any{
-		"zotigo_session": currentSession.ID,
-		"process_start":  processStart.Format(time.RFC3339),
-		"resumed":        doResume,
-	}
-	observer := wiring.NewObserver(cfg.Observability, currentSession.ID, staticMeta)
-	defer func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-		_ = observer.Close(ctx)
-	}()
-
-	ag, err := wiring.NewAgent(wiring.AgentConfig{
-		Config:             cfg,
-		ProfileName:        profileName,
-		Profile:            profile,
-		Executor:           exec,
-		PromptBuilder:      pb,
-		UserContextBuilder: ucb,
-		ApprovalPolicy:     approvalPolicy,
-		TranscriptDir:      transcriptDir,
-		Observer:           observer,
-		// ToolSpan goes outermost so it observes every tool call.
-		Middleware: []agent.Middleware{
-			middleware.ToolSpan(observer),
-		},
-		ConfigureClassifier: true,
-	})
-	if err != nil {
-		log.Println("Error creating agent:", err)
-		fmt.Println("Error creating agent:", err)
-		return 1
-	}
-	// Preserve the CLI's construction-time skill semantics: skill files are
-	// listed in prompts, but skill dirs are not added to auto-approved read
-	// scope. ACP intentionally uses SetSkillManager for the broader scope.
-	agent.WithSkillManager(sm)(ag)
-
-	if doResume {
-		ag.Restore(currentSession.AgentSnapshot)
-	}
-
-	lspManager := lsp.NewManager(cwd)
-	defer func() { _ = lspManager.StopAll() }()
-	spawnApprovalBroker := tui.NewSpawnApprovalBroker()
-	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:                 cfg,
-		Profile:                profile,
-		ShellPolicy:            builtin.DefaultShellPolicy(),
-		LSPManager:             lspManager,
-		Spawn:                  true,
-		SpawnApprovalRequester: spawnApprovalBroker,
-	}); err != nil {
-		log.Println("Error registering tools:", err)
-		fmt.Println("Error registering tools:", err)
-		return 1
+	var cursor uint64
+	if len(page.Items) > 0 {
+		cursor = page.Items[len(page.Items)-1].Sequence
 	}
 
 	cmdRegistry := commands.NewRegistry()
 	cmdbuiltin.RegisterAll(cmdRegistry)
+	model := tui.NewModel(tui.ModelOptions{
+		Service:          conn.Client,
+		Session:          current,
+		Registry:         cmdRegistry,
+		History:          page.Items,
+		HistoryTruncated: page.PrevCursor != "",
+		Cursor:           cursor,
+		Location:         describeLocation(ctx, conn.Client, current.ID),
+		Embedded:         conn.Embedded,
+	})
+	defer model.Close()
 
-	p := tea.NewProgram(
-		tui.NewModel(ag, sessMgr, currentSession.ID, cmdRegistry, tui.WithSpawnApprovalBroker(spawnApprovalBroker)),
-		tea.WithOutput(&KittyFilterWriter{File: os.Stdout}),
-	)
+	p := tea.NewProgram(model, tea.WithOutput(&KittyFilterWriter{File: os.Stdout}))
 	if _, err := p.Run(); err != nil {
-		log.Println("Error running program:", err)
-		fmt.Println("Error running program:", err)
-		return 1
+		return fail("Error running program: %v", err)
 	}
-
+	if conn.Embedded {
+		stopEmbeddedTurn(conn.Client, model.SessionID(), model.OpenTurnID())
+	}
 	return 0
+}
+
+// stopEmbeddedTurn interrupts a turn that would otherwise be killed with the
+// embedded service, giving the worker a chance to record the interruption
+// and save its snapshot before shutdown.
+func stopEmbeddedTurn(client *zotigodclient.Client, sessionID string, turnID string) {
+	if turnID == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := client.Pause(ctx, sessionID, turnID); err != nil {
+		log.Printf("cli_embedded_pause_error session=%s err=%v", sessionID, err)
+		return
+	}
+	for ctx.Err() == nil {
+		session, err := client.GetSession(ctx, sessionID)
+		if err != nil || !session.Working {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// describeLocation labels session ownership for the banner. A failure to
+// read the catalog only loses the label, never the session.
+func describeLocation(ctx context.Context, client *zotigodclient.Client, sessionID string) string {
+	projection, err := client.CatalogSession(ctx, sessionID)
+	if err != nil {
+		log.Printf("cli_location_error session=%s err=%v", sessionID, err)
+		return ""
+	}
+	workspaceID := projection.WorkspaceID()
+	if workspaceID == "" {
+		return "Directory session (no Workspace)"
+	}
+	workspace, err := client.GetWorkspace(ctx, workspaceID)
+	if err != nil {
+		return "Workspace " + workspaceID
+	}
+	label := "Workspace " + workspace.Title
+	if project, err := client.GetProject(ctx, workspace.ProjectID); err == nil {
+		label = project.Name + " / " + workspace.Title
+	}
+	return label
+}
+
+func chooseSession(ctx context.Context, client *zotigodclient.Client, cwd string, all bool) (string, error) {
+	entries, err := loadResumeSessions(ctx, client, cwd, all)
+	if err != nil {
+		return "", err
+	}
+	archive := func(id string) error {
+		archiveCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		return client.ArchiveSession(archiveCtx, id)
+	}
+	selection := tui.NewSessionSelectionModel(entries.sessions, archive, entries.descriptions, entries.disabled)
+	finalModel, err := tea.NewProgram(selection).Run()
+	if err != nil {
+		return "", fmt.Errorf("run selection: %w", err)
+	}
+	chosen, ok := finalModel.(tui.SessionSelectionModel)
+	if !ok {
+		return "", errors.New("unexpected selection model")
+	}
+	return chosen.ChosenID, nil
 }

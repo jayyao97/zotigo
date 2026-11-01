@@ -93,7 +93,7 @@ func TestSessionsCreateRejectsUnsupportedApprovalPolicy(t *testing.T) {
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
 	handler := NewHandler()
-	for _, policy := range []string{"manual", "unknown"} {
+	for _, policy := range []string{"never", "unknown"} {
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"working_directory":%q,"approval_policy":%q}`, workDir, policy)
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
@@ -529,5 +529,24 @@ func TestWorkerRuntimeApprovalPolicyPersistenceFailureKeepsSaferPolicy(t *testin
 				t.Fatalf("stored policy = %q, want unchanged %q", stored.ApprovalPolicy, tt.initial)
 			}
 		})
+	}
+}
+
+func TestLowersPermissionsOrdersPolicies(t *testing.T) {
+	cases := []struct {
+		from, to agent.ApprovalPolicy
+		want     bool
+	}{
+		{agent.ApprovalPolicyBypass, agent.ApprovalPolicyAuto, true},
+		{agent.ApprovalPolicyBypass, agent.ApprovalPolicyManual, true},
+		{agent.ApprovalPolicyAuto, agent.ApprovalPolicyManual, true},
+		{agent.ApprovalPolicyManual, agent.ApprovalPolicyAuto, false},
+		{agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass, false},
+		{agent.ApprovalPolicyAuto, agent.ApprovalPolicyAuto, false},
+	}
+	for _, tc := range cases {
+		if got := lowersPermissions(tc.from, tc.to); got != tc.want {
+			t.Errorf("lowersPermissions(%s, %s) = %v", tc.from, tc.to, got)
+		}
 	}
 }

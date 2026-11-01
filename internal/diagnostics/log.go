@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/jayyao97/zotigo/core/config"
 )
 
 const maxBytes = 5 * 1024 * 1024
@@ -21,12 +23,12 @@ const maxTotalBytes = 100 * 1024 * 1024
 // Each process writes its own files; retention is shared by the whole component.
 func Start(component string) func() {
 	previous := log.Writer()
-	home, err := os.UserHomeDir()
+	root, err := config.StateDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Local logging unavailable: %v\n", err)
 		return func() {}
 	}
-	w, err := newWriter(filepath.Join(home, ".zotigo", "logs", component), maxBytes, maxFiles, maxTotalBytes)
+	w, err := newWriter(filepath.Join(root, "logs", component), maxBytes, maxFiles, maxTotalBytes)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Local logging unavailable: %v\n", err)
 		return func() {}

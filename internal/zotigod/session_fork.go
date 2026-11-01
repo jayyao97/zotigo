@@ -148,12 +148,8 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	var snapshot agent.Snapshot
 	switch source.Agent {
 	case "", "zotigo":
-		home, homeErr := os.UserHomeDir()
-		if homeErr != nil {
-			return nil, homeErr
-		}
 		// Match the native worker's TranscriptDir, including custom-store hosts.
-		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, filepath.Join(home, ".zotigo", "sessions", "compacted"))
+		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, compactedTranscriptDir())
 		if err != nil {
 			return nil, err
 		}

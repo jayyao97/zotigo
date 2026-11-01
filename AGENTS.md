@@ -17,8 +17,8 @@ gofmt -w <file>           # pre-commit hook will reject otherwise
 python3 scripts/install_test.py  # source installer transaction tests
 python3 scripts/toolchains_test.py  # isolated download/checksum/cache tests
 make build                # produces ./build/zotigo
-go run ./cmd/zotigo       # run the TUI from source
-go run ./cmd/acp          # run the ACP JSON-RPC server
+go run ./cmd/zotigo --no-daemon --state-dir /tmp/zotigo-dev   # TUI from source, isolated in-process session service
+go run ./cmd/acp --no-daemon --state-dir /tmp/zotigo-dev      # ACP JSON-RPC server the same way
 ZOTIGO_DEBUG=true go run ./cmd/zotigo   # verbose agent + provider event logging
 ```
 
@@ -35,8 +35,10 @@ There is a **pre-commit hook** (`.git/hooks/pre-commit`) that runs `gofmt -l` on
 Top‑level:
 - `cmd/zotigo/` — TUI entrypoint, `cmd/acp/` — ACP server entrypoint
 - `cli/` — TUI (`tui/`) and slash commands (`commands/`)
-- `internal/cliapp/` — CLI/TUI application wiring
-- `internal/acpserver/` — ACP server application wiring
+- `internal/cliapp/` — CLI/TUI application wiring (a client of the zotigod session service)
+- `internal/acpserver/` — ACP adapter onto the zotigod session service
+- `internal/zotigod/` — session service (daemon, embedded `--no-daemon` service, workers)
+- `internal/zotigodclient/` — Go client for the zotigod API, daemon discovery/start (see `docs/terminal-and-acp-clients.md`)
 - `internal/wiring/` — shared agent, tool, and prompt assembly
 - `internal/sessionadapter/` — `agent.Snapshot` to `core/session` persistence mapping
 - `core/` — protocol‑first runtime
@@ -168,7 +170,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 
 ## Quick Troubleshooting
 - Provider not selected: check `~/.zotigo/config.yaml` `default_profile` and the profile's `provider / model / api_key`.
-- Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in `internal/cliapp/app.go` or `internal/acpserver/app.go`; `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
+- Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in the session worker (`internal/zotigod/worker_client.go`); `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
 - Classifier silent‑failing: look for `provider classifier timeout` in debug logs. Default is 20s; lower `safety.classifier.timeout_ms` only after confirming the underlying model is fast enough.
 - Empty output / loop: `ZOTIGO_DEBUG=true`; check for the loop‑guard `<system-reminder>` in the latest tool result. The runner ends a turn on `FinishReason == stop`.
 - gofmt pre‑commit failure: run `gofmt -w` on the listed files, re‑stage, retry the commit.

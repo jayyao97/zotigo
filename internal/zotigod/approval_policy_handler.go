@@ -37,11 +37,29 @@ func normalizeSessionApprovalPolicy(policy agent.ApprovalPolicy, allowEmpty bool
 		return agent.ApprovalPolicyAuto, nil
 	}
 	switch policy {
-	case agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass:
+	case agent.ApprovalPolicyManual, agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass:
 		return policy, nil
 	default:
-		return "", fmt.Errorf("approval_policy must be %q or %q", agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass)
+		return "", fmt.Errorf("approval_policy must be %q, %q or %q", agent.ApprovalPolicyManual, agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass)
 	}
+}
+
+// lowersPermissions reports whether moving from one policy to another
+// grants the agent less autonomy (bypass > auto > manual). Workers apply a
+// lowering change before persisting it so a persistence failure leaves the
+// runtime on the safer policy.
+func lowersPermissions(from, to agent.ApprovalPolicy) bool {
+	rank := func(policy agent.ApprovalPolicy) int {
+		switch policy {
+		case agent.ApprovalPolicyManual:
+			return 0
+		case agent.ApprovalPolicyBypass:
+			return 2
+		default:
+			return 1
+		}
+	}
+	return rank(to) < rank(from)
 }
 
 func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Request, id string) {

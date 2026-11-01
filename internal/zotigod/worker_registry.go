@@ -127,6 +127,7 @@ type workerApprovalDecision struct {
 	RequestID  string                                  `json:"request_id"`
 	ApprovalID string                                  `json:"approval_id"`
 	Decisions  []zotigosession.DisplayApprovalDecision `json:"decisions"`
+	StopTurn   bool                                    `json:"stop_turn,omitempty"`
 }
 
 type workerApprovalResult struct {
@@ -365,7 +366,7 @@ func (r *workerRegistry) acknowledgeDisplayBarrier(sessionID string, barrier wor
 	})
 }
 
-func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision) (approvalRequestResponse, error) {
+func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (approvalRequestResponse, error) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	r.mu.Unlock()
@@ -377,7 +378,7 @@ func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, a
 		ctx, cancel = context.WithTimeout(ctx, r.approvalWait)
 		defer cancel()
 	}
-	return worker.submitApproval(ctx, approvalID, decisions)
+	return worker.submitApproval(ctx, approvalID, decisions, stopTurn)
 }
 
 func (r *workerRegistry) SubmitInteraction(ctx context.Context, sessionID, interactionID string, answers map[string][]string) (interactionRequest, error) {
@@ -742,7 +743,7 @@ func (c *workerConnection) trySendMessage(msg workerMessage) bool {
 	}
 }
 
-func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision) (approvalRequestResponse, error) {
+func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (approvalRequestResponse, error) {
 	requestID := newZotigodID("approval_submit")
 	waiter := make(chan workerApprovalResult, 1)
 	c.waitersMu.Lock()
@@ -760,6 +761,7 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 			RequestID:  requestID,
 			ApprovalID: approvalID,
 			Decisions:  copyApprovalDecisions(decisions),
+			StopTurn:   stopTurn,
 		},
 	}
 	select {

@@ -12,6 +12,7 @@ import (
 
 	"github.com/gofrs/flock"
 	"github.com/jayyao97/zotigo/core/catalogschema"
+	"github.com/jayyao97/zotigo/core/config"
 	_ "modernc.org/sqlite"
 )
 
@@ -29,11 +30,11 @@ type Store struct {
 // pragmas. It is intended for CLI projections; zotigod remains the sole writer.
 func OpenReadOnly(rootDir string) (*Store, error) {
 	if rootDir == "" {
-		home, err := os.UserHomeDir()
+		dir, err := config.StateDir()
 		if err != nil {
 			return nil, fmt.Errorf("workspace catalog home: %w", err)
 		}
-		rootDir = filepath.Join(home, ".zotigo")
+		rootDir = dir
 	}
 	dbPath := filepath.Join(rootDir, "catalog.sqlite")
 	if _, err := os.Stat(dbPath); err != nil {
@@ -74,11 +75,11 @@ func Open(rootDir string) (*Store, error) {
 // Migration commands use the same lock and never open a serving catalog.
 func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 	if rootDir == "" {
-		home, err := os.UserHomeDir()
+		dir, err := config.StateDir()
 		if err != nil {
 			return nil, fmt.Errorf("workspace catalog home: %w", err)
 		}
-		rootDir = filepath.Join(home, ".zotigo")
+		rootDir = dir
 	}
 	if err := os.MkdirAll(rootDir, 0o700); err != nil {
 		return nil, fmt.Errorf("create workspace catalog root: %w", err)

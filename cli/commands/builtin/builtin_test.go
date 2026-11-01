@@ -85,9 +85,10 @@ func TestClearCommand(t *testing.T) {
 
 	t.Run("execute with callback", func(t *testing.T) {
 		env, output := newTestEnv()
-		cleared := false
-		env.ClearHistory = func() {
-			cleared = true
+		started := false
+		env.NewSession = func() error {
+			started = true
+			return nil
 		}
 
 		err := cmd.Execute(ctx, env, nil)
@@ -95,11 +96,11 @@ func TestClearCommand(t *testing.T) {
 			t.Fatalf("Execute failed: %v", err)
 		}
 
-		if !cleared {
-			t.Error("ClearHistory should have been called")
+		if !started {
+			t.Error("NewSession should have been called")
 		}
-		if !strings.Contains(output.String(), "cleared") {
-			t.Error("Should output confirmation message")
+		if output.Len() != 0 {
+			t.Errorf("new session banner comes from the TUI, got %q", output.String())
 		}
 	})
 
@@ -112,9 +113,8 @@ func TestClearCommand(t *testing.T) {
 			t.Fatalf("Execute failed: %v", err)
 		}
 
-		// Should still output message
-		if !strings.Contains(output.String(), "cleared") {
-			t.Error("Should output confirmation message")
+		if !strings.Contains(output.String(), "not supported") {
+			t.Error("Should explain that a new session cannot be started")
 		}
 	})
 }

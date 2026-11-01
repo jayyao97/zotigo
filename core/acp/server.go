@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
@@ -39,7 +40,11 @@ type Server struct {
 	onSessionNew    func(ctx context.Context, params SessionNewParams) (string, error)
 	onSessionPrompt func(ctx context.Context, sessionID string, text string, images []ContentBlock) PromptResult
 	onSessionCancel func(ctx context.Context, sessionID string)
+	onSessionLoad   func(ctx context.Context, params SessionLoadParams) (afterReply func(), err error)
+	onSessionList   func(ctx context.Context, params SessionListParams) (SessionListResult, error)
 	onInitialized   func(caps ClientCapabilities)
+	sessionModes    func(ctx context.Context, sessionID string) *SessionModeState
+	onSetMode       func(ctx context.Context, sessionID string, modeID string) error
 
 	clientCaps ClientCapabilities
 }
@@ -63,6 +68,32 @@ func OnSessionPrompt(fn func(ctx context.Context, sessionID string, text string,
 // OnSessionCancel sets the callback invoked when the client cancels.
 func OnSessionCancel(fn func(ctx context.Context, sessionID string)) ServerOption {
 	return func(s *Server) { s.onSessionCancel = fn }
+}
+
+// OnSessionLoad enables session/load and advertises the loadSession
+// capability. Per the ACP spec the callback replays the conversation with
+// session/update notifications before returning; the reply is sent after it
+// returns, and afterReply (if non-nil) runs once the reply is written, for
+// work that must follow it such as permission requests for the session.
+func OnSessionLoad(fn func(ctx context.Context, params SessionLoadParams) (afterReply func(), err error)) ServerOption {
+	return func(s *Server) { s.onSessionLoad = fn }
+}
+
+// OnSessionList replaces the default session/list answer, which only knows
+// sessions registered in this process.
+func OnSessionList(fn func(ctx context.Context, params SessionListParams) (SessionListResult, error)) ServerOption {
+	return func(s *Server) { s.onSessionList = fn }
+}
+
+// OnSessionModes advertises session modes. state is consulted after
+// session/new and session/load to fill the response's modes; set handles
+// session/set_mode and returns an error for an unknown or rejected mode.
+// Agents report later changes with SendCurrentMode.
+func OnSessionModes(state func(ctx context.Context, sessionID string) *SessionModeState, set func(ctx context.Context, sessionID string, modeID string) error) ServerOption {
+	return func(s *Server) {
+		s.sessionModes = state
+		s.onSetMode = set
+	}
 }
 
 // OnInitialized sets the callback invoked after initialize handshake.
@@ -99,8 +130,15 @@ func (s *Server) ClientCaps() ClientCapabilities {
 // Run starts the JSON-RPC message loop. Blocks until the connection is closed.
 func (s *Server) Run(ctx context.Context) error {
 	s.serverCtx = ctx
-	handler := jsonrpc2.AsyncHandler(jsonrpc2.ReplyHandler(s.handle))
-	s.conn.Go(ctx, handler)
+	// Each incoming message runs in its own goroutine. jsonrpc2.AsyncHandler
+	// is not suitable: it starts a request only after the previous one has
+	// replied, so a long-running session/prompt would block session/cancel
+	// and every other session until its turn ended.
+	handler := jsonrpc2.ReplyHandler(s.handle)
+	s.conn.Go(ctx, func(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc2.Request) error {
+		go func() { _ = handler(ctx, reply, req) }()
+		return nil
+	})
 	select {
 	case <-s.conn.Done():
 		return s.conn.Err()
@@ -108,6 +146,34 @@ func (s *Server) Run(ctx context.Context) error {
 		_ = s.conn.Close()
 		return ctx.Err()
 	}
+}
+
+// ErrConnectionClosed is returned by agent-to-client requests that were
+// still waiting when the client connection closed.
+var ErrConnectionClosed = errors.New("acp: client connection closed")
+
+// call issues a request to the client. jsonrpc2 never completes a pending
+// call when the stream ends, so the wait is also bounded by the connection.
+func (s *Server) call(ctx context.Context, method string, params, result any) (jsonrpc2.ID, error) {
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-s.conn.Done():
+			cancel()
+		case <-callCtx.Done():
+		}
+	}()
+	id, err := s.conn.Call(callCtx, method, params, result)
+	if err != nil && ctx.Err() == nil && callCtx.Err() != nil {
+		return id, ErrConnectionClosed
+	}
+	return id, err
+}
+
+// Done is closed when the client connection is closed.
+func (s *Server) Done() <-chan struct{} {
+	return s.conn.Done()
 }
 
 // --- Outgoing helpers (Agent → Client) ---
@@ -128,6 +194,26 @@ func (s *Server) SendTextChunk(ctx context.Context, sessionID string, text strin
 			Type: "text",
 			Text: text,
 		},
+	})
+}
+
+// SendUserChunk sends a user_message_chunk update, used when replaying a
+// loaded session and for input submitted by other clients.
+func (s *Server) SendUserChunk(ctx context.Context, sessionID string, text string) error {
+	return s.SendUpdate(ctx, sessionID, SessionUpdate{
+		"sessionUpdate": "user_message_chunk",
+		"content": ContentBlock{
+			Type: "text",
+			Text: text,
+		},
+	})
+}
+
+// SendCurrentMode reports a session mode change (current_mode_update).
+func (s *Server) SendCurrentMode(ctx context.Context, sessionID string, modeID string) error {
+	return s.SendUpdate(ctx, sessionID, SessionUpdate{
+		"sessionUpdate": "current_mode_update",
+		"currentModeId": modeID,
 	})
 }
 
@@ -168,7 +254,7 @@ func (s *Server) SendToolCallUpdate(ctx context.Context, sessionID string, toolC
 // RequestPermission asks the client for permission to execute a tool call.
 func (s *Server) RequestPermission(ctx context.Context, sessionID string, toolCall ToolCallData, options []PermissionOption) (PermissionOutcome, error) {
 	var result RequestPermissionResult
-	_, err := s.conn.Call(ctx, MethodRequestPerm, RequestPermissionParams{
+	_, err := s.call(ctx, MethodRequestPerm, RequestPermissionParams{
 		SessionID: sessionID,
 		ToolCall:  toolCall,
 		Options:   options,
@@ -182,7 +268,7 @@ func (s *Server) RequestPermission(ctx context.Context, sessionID string, toolCa
 // ReadTextFile requests the client to read a file.
 func (s *Server) ReadTextFile(ctx context.Context, sessionID, path string) (string, error) {
 	var result FSReadTextFileResult
-	_, err := s.conn.Call(ctx, MethodFSReadTextFile, FSReadTextFileParams{
+	_, err := s.call(ctx, MethodFSReadTextFile, FSReadTextFileParams{
 		SessionID: sessionID,
 		Path:      path,
 	}, &result)
@@ -195,7 +281,7 @@ func (s *Server) ReadTextFile(ctx context.Context, sessionID, path string) (stri
 // WriteTextFile requests the client to write a file.
 func (s *Server) WriteTextFile(ctx context.Context, sessionID, path, content string) error {
 	var result FSWriteTextFileResult
-	_, err := s.conn.Call(ctx, MethodFSWriteTextFile, FSWriteTextFileParams{
+	_, err := s.call(ctx, MethodFSWriteTextFile, FSWriteTextFileParams{
 		SessionID: sessionID,
 		Path:      path,
 		Content:   content,
@@ -207,7 +293,7 @@ func (s *Server) WriteTextFile(ctx context.Context, sessionID, path, content str
 func (s *Server) TerminalExec(ctx context.Context, sessionID, command string, args []string, cwd string, env []EnvVariable) (output string, exitCode int, err error) {
 	// Create terminal
 	var createResult TerminalCreateResult
-	_, err = s.conn.Call(ctx, MethodTerminalCreate, TerminalCreateParams{
+	_, err = s.call(ctx, MethodTerminalCreate, TerminalCreateParams{
 		SessionID: sessionID,
 		Command:   command,
 		Args:      args,
@@ -230,7 +316,7 @@ func (s *Server) TerminalExec(ctx context.Context, sessionID, command string, ar
 
 	// Wait for exit
 	var waitResult TerminalWaitResult
-	_, err = s.conn.Call(ctx, MethodTerminalWait, TerminalWaitParams{
+	_, err = s.call(ctx, MethodTerminalWait, TerminalWaitParams{
 		SessionID:  sessionID,
 		TerminalID: tid,
 	}, &waitResult)
@@ -245,7 +331,7 @@ func (s *Server) TerminalExec(ctx context.Context, sessionID, command string, ar
 
 	// Get output
 	var outResult TerminalOutputResult
-	_, err = s.conn.Call(ctx, MethodTerminalOutput, TerminalOutputParams{
+	_, err = s.call(ctx, MethodTerminalOutput, TerminalOutputParams{
 		SessionID:  sessionID,
 		TerminalID: tid,
 	}, &outResult)
@@ -264,10 +350,12 @@ func (s *Server) handle(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc
 		return s.handleInitialize(ctx, reply, req)
 	case MethodSessionNew:
 		return s.handleSessionNew(ctx, reply, req)
+	case MethodSessionLoad:
+		return s.handleSessionLoad(ctx, reply, req)
 	case MethodSessionPrompt:
 		return s.handleSessionPrompt(ctx, reply, req)
 	case MethodSessionCancel:
-		return s.handleSessionCancel(ctx, req)
+		return s.handleSessionCancel(ctx, reply, req)
 	case MethodSessionList:
 		return s.handleSessionList(ctx, reply, req)
 	case MethodSessionSetMode:
@@ -298,7 +386,7 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 			Version: buildinfo.Version,
 		},
 		AgentCapabilities: AgentCapabilities{
-			LoadSession: false,
+			LoadSession: s.onSessionLoad != nil,
 			PromptCapabilities: &PromptCapabilities{
 				Image: true,
 			},
@@ -321,7 +409,34 @@ func (s *Server) handleSessionNew(ctx context.Context, reply jsonrpc2.Replier, r
 		return reply(ctx, nil, err)
 	}
 
-	return reply(ctx, SessionNewResult{SessionID: sessionID}, nil)
+	result := SessionNewResult{SessionID: sessionID}
+	if s.sessionModes != nil {
+		result.Modes = s.sessionModes(ctx, sessionID)
+	}
+	return reply(ctx, result, nil)
+}
+
+func (s *Server) handleSessionLoad(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc2.Request) error {
+	if s.onSessionLoad == nil {
+		return reply(ctx, nil, fmt.Errorf("method %q: %w", req.Method(), jsonrpc2.ErrMethodNotFound))
+	}
+	var params SessionLoadParams
+	if err := json.Unmarshal(req.Params(), &params); err != nil {
+		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
+	}
+	afterReply, err := s.onSessionLoad(ctx, params)
+	if err != nil {
+		return reply(ctx, nil, err)
+	}
+	result := SessionLoadResult{}
+	if s.sessionModes != nil {
+		result.Modes = s.sessionModes(ctx, params.SessionID)
+	}
+	replyErr := reply(ctx, result, nil)
+	if afterReply != nil {
+		afterReply()
+	}
+	return replyErr
 }
 
 // handleSessionPrompt blocks until the turn completes, then replies with stopReason.
@@ -331,19 +446,9 @@ func (s *Server) handleSessionPrompt(ctx context.Context, reply jsonrpc2.Replier
 		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
 	}
 
-	// Extract text and images from prompt content blocks
-	var text string
-	var images []ContentBlock
-	for _, block := range params.Prompt {
-		switch block.Type {
-		case "text":
-			if text != "" {
-				text += "\n"
-			}
-			text += block.Text
-		case "image":
-			images = append(images, block)
-		}
+	text, images, err := promptInput(params.Prompt)
+	if err != nil {
+		return reply(ctx, nil, err)
 	}
 
 	if s.onSessionPrompt == nil {
@@ -351,8 +456,8 @@ func (s *Server) handleSessionPrompt(ctx context.Context, reply jsonrpc2.Replier
 	}
 
 	// Per ACP spec, the session/prompt request stays open until the turn
-	// finishes. AsyncHandler already runs each request in its own goroutine,
-	// so we can safely block here without stalling other message processing.
+	// finishes. Run dispatches each request in its own goroutine, so blocking
+	// here does not stall cancel or other sessions.
 	//
 	// We derive a context that cancels if either the server shuts down
 	// (serverCtx) or the request is cancelled (ctx, e.g. client disconnects).
@@ -378,24 +483,65 @@ func (s *Server) handleSessionPrompt(ctx context.Context, reply jsonrpc2.Replier
 	return reply(ctx, SessionPromptResult{StopReason: stopReason}, nil)
 }
 
-// handleSessionCancel handles the cancel notification (no reply per ACP spec).
-func (s *Server) handleSessionCancel(_ context.Context, req jsonrpc2.Request) error {
+// handleSessionCancel handles the cancel notification. Nothing is written
+// on the wire for a notification, but jsonrpc2.ReplyHandler panics unless
+// every handled message calls reply, so it is still invoked.
+func (s *Server) handleSessionCancel(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc2.Request) error {
 	var params SessionCancelParams
 	if err := json.Unmarshal(req.Params(), &params); err != nil {
-		return err
+		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
 	}
 
 	if s.onSessionCancel != nil {
 		s.onSessionCancel(s.serverCtx, params.SessionID)
 	}
 
-	return nil
+	return reply(ctx, nil, nil)
+}
+
+// promptInput flattens prompt blocks into text plus images. Resource links
+// (which every agent must accept) become text references so the agent can
+// open them; block types this agent did not advertise are rejected rather
+// than silently dropped.
+func promptInput(blocks []ContentBlock) (string, []ContentBlock, error) {
+	var text string
+	var images []ContentBlock
+	appendText := func(value string) {
+		if text != "" {
+			text += "\n"
+		}
+		text += value
+	}
+	for _, block := range blocks {
+		switch block.Type {
+		case "text":
+			appendText(block.Text)
+		case "image":
+			images = append(images, block)
+		case "resource_link":
+			name := block.Name
+			if name == "" {
+				name = block.URI
+			}
+			appendText(fmt.Sprintf("[%s](%s)", name, block.URI))
+		default:
+			return "", nil, fmt.Errorf("unsupported prompt content type %q", block.Type)
+		}
+	}
+	return text, images, nil
 }
 
 func (s *Server) handleSessionList(ctx context.Context, reply jsonrpc2.Replier, req jsonrpc2.Request) error {
 	var params SessionListParams
 	if req.Params() != nil {
 		_ = json.Unmarshal(req.Params(), &params)
+	}
+	if s.onSessionList != nil {
+		result, err := s.onSessionList(ctx, params)
+		if err != nil {
+			return reply(ctx, nil, err)
+		}
+		return reply(ctx, result, nil)
 	}
 
 	s.mu.RLock()
@@ -417,7 +563,11 @@ func (s *Server) handleSessionSetMode(ctx context.Context, reply jsonrpc2.Replie
 		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
 	}
 
-	// TODO: propagate mode change to session/agent
+	if s.onSetMode != nil {
+		if err := s.onSetMode(ctx, params.SessionID, params.ModeID); err != nil {
+			return reply(ctx, nil, err)
+		}
+	}
 	return reply(ctx, SessionSetModeResult{}, nil)
 }
 

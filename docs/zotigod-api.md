@@ -1,6 +1,6 @@
 # zotigod HTTP API
 
-`zotigod` exposes a small HTTP API for desktop clients. It listens on `127.0.0.1:8766` by default. Desktop may cache responses locally, but zotigo remains the source of truth for session state and display history.
+`zotigod` exposes a small HTTP API for desktop clients. The TUI and the ACP adapter use the same API; see [TUI and ACP on the session service](terminal-and-acp-clients.md). It listens on `127.0.0.1:8766` by default. Desktop may cache responses locally, but zotigo remains the source of truth for session state and display history.
 
 ## Remote access and authentication
 
@@ -205,7 +205,7 @@ Errors keep the non-2xx HTTP status and return a stable error body:
 }
 ```
 
-Current error codes include `unauthorized`, `invalid_request`, `not_found`, `method_not_allowed`, `conflict`, `request_too_large`, `session_not_live`, `session_in_use`, `profile_not_found`, `active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`, `command_pending`, `no_active_turn`, `turn_mismatch`, `command_id_conflict`, `service_unavailable`, and `internal_error`.
+Current error codes include `unauthorized`, `invalid_request`, `not_found`, `method_not_allowed`, `conflict`, `request_too_large`, `session_not_live`, `session_in_use`, `profile_not_found`, `active_turn`, `approval_pending`, `runtime_occupied`, `turn_stopping`, `command_pending`, `no_active_turn`, `turn_mismatch`, `command_id_conflict`, `workspace_not_ready`, `workspace_ambiguous`, `service_unavailable`, and `internal_error`.
 
 Internal HTTP endpoints also use this envelope, except `GET /internal/sessions/{id}/commands` successful responses. The commands endpoint intentionally returns the raw command page so replayed HTTP commands and live WebSocket command frames can share the same command DTO. Command endpoint errors still use the structured `{ "code", "message" }` shape.
 
@@ -350,19 +350,25 @@ Sessions default to `agent: "zotigo"`. A Codex-backed Session selects a concrete
 
 `profile` is valid only for Zotigo Sessions. `model` and `reasoning_effort` are valid only for Codex Sessions and are checked against the paginated `model/list` catalog using the runtime model slug. Creating a Codex Session does not create, reuse, or modify a Codex local Project. The worker uses the Session working directory as `cwd`. For a Workspace session this is the complete Workspace root, so `code/`, `notes/`, `artifacts/`, and root-level instructions share one context boundary; a Scratch session uses its own persistent directory. The first message creates a thread without `projectId`, and zotigod persists the returned thread ID as the Session backend binding. Resume uses the same `cwd` and does not change any existing Codex Project assignment.
 
-This bridge version does not expose Codex approval callbacks. Codex Sessions therefore use Codex `approvalPolicy: "never"`; `approval_policy` may be omitted or set to `bypass_permissions`, and later approval-policy changes return `409`. The ordinary Zotigo runtime retains the approval behavior described below.
+Codex Sessions translate `approval_policy` to the Codex `approvalPolicy` (see "Change a session approval policy") and surface Codex approval requests through the same approval flow as Zotigo Sessions.
 
 `GET /agents` performs binary discovery without starting app-server. `POST /agents/codex/prepare` starts the local UDS app-server and returns the model/reasoning catalog. Discovery checks `ZOTIGO_CODEX_BINARY` (an absolute executable path), then `codex` on `PATH`, then the standard per-user and system-wide ChatGPT.app locations on macOS. Codex is omitted from `GET /agents` when discovery fails. Restart zotigod after changing its environment or installing a runtime so the runtime registry is rebuilt.
 
 `PUT /sessions/{id}/codex-settings` updates `model` and `reasoning_effort` for a Codex Session. The values apply to the next turn; the Codex thread and Project binding do not change. The endpoint returns `409` while the Session is bound to a Channel conversation because that binding owns an immutable runtime snapshot.
 
-An explicit `working_directory` must be an absolute path that resolves to an existing directory. A workspace session uses the workspace root. A new session without either `workspace_id` or `working_directory` receives its own `<session-store-root>/scratch/<session-id>` directory (normally `~/.zotigo/scratch/<session-id>`); persistent session storage is required. Its profile is resolved against that directory and global configuration, not the daemon's launch directory. Existing sessions and explicitly supplied directories are unchanged. The directory is persisted and returned as `working_directory`. This directory selection applies to both Zotigo and Codex sessions; Codex does not require `workspace_id`. An explicitly selected Workspace must still be ready.
+An explicit `working_directory` must be an absolute path that resolves to an existing directory. Session ownership (Project/Workspace) and execution `cwd` are separate:
+
+- `workspace_id` alone runs the session at the Workspace root.
+- `workspace_id` with `working_directory` keeps that directory as `cwd` (for example `<workspace>/code/backend`). It must be the root or a descendant of the Workspace root, compared both lexically and after resolving symlinks; otherwise the request returns `400`.
+- `working_directory` alone creates a directory session. When the directory is inside a Workspace, the session is bound to it automatically and keeps the given `cwd`. A directory outside every Workspace stays an ordinary directory session: it has no `session_organization` row until a title, pin or archive operation creates an unowned one, and no Project or Workspace directory structure is created. If the containing Workspace is not ready (for example archived) the request returns `409 workspace_not_ready`; if more than one Workspace claims the directory it returns `409 workspace_ambiguous` and the client must pass `workspace_id`. Without a usable catalog the daemon keeps its previous behavior and creates an unowned session.
+
+Session ownership is reported by `GET /catalog/sessions/{id}` (`organization.workspace_id`, `organization.project_id`); the session DTO itself is unchanged apart from the additive `last_prompt` preview used by terminal resume pickers. A Workspace-owned session whose `cwd` is inside the Workspace reports availability `ready`; only a `cwd` outside its Workspace reports `cwd_mismatch`. A new session without either `workspace_id` or `working_directory` receives its own `<session-store-root>/scratch/<session-id>` directory (normally `~/.zotigo/scratch/<session-id>`); persistent session storage is required. Its profile is resolved against that directory and global configuration, not the daemon's launch directory. Existing sessions and explicitly supplied directories are unchanged. The directory is persisted and returned as `working_directory`. This directory selection applies to both Zotigo and Codex sessions; Codex does not require `workspace_id`. An explicitly selected Workspace must still be ready.
 
 `profile` is an optional profile name returned by `GET /config/profiles`. When it is omitted, zotigod resolves the project's current `default_profile` during session creation. The resolved profile is persisted and returned as `profile`, so worker restarts and offline session recovery keep using the profile selected for that session. An unknown explicit profile returns `400`. Legacy sessions without a stored profile continue to resolve the current project default when a worker starts.
 
 Changing the project default later does not change new-format sessions. Use the profile endpoint below to change the profile selected for an existing session.
 
-For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Desktop clients may also set it to `bypass_permissions` for Full access. The value is persisted with the session and restored by replacement workers. The public Desktop API does not accept `manual`.
+For Zotigo Sessions, `approval_policy` is optional and defaults to `auto`. Clients may also set `manual` (ask before every action above the safe level, without the classifier) or `bypass_permissions` for Full access. The value is persisted with the session and restored by replacement workers. Channel connections and conversations still accept only `auto` and `bypass_permissions`, so a `manual` session cannot be bound to a Channel.
 
 Workers launched for the session use this directory as their process working directory and as the source for project config, skills, project instructions, tools, shell execution, and LSP state. Legacy sessions without a stored working directory fall back to the worker process current directory.
 
@@ -410,13 +416,13 @@ Starting or resuming a session validates its stored `profile_name` against the c
 }
 ```
 
-The accepted values are `auto` and `bypass_permissions`. The latter skips tool safety classification and approval for the session, so clients should label it clearly as Full access.
+The accepted values are `manual`, `auto` and `bypass_permissions`. For Codex Sessions `manual` maps to Codex `untrusted`, `auto` to `on-request` and `bypass_permissions` to `never`. `bypass_permissions` skips tool safety classification and approval for the session, so clients should label it clearly as Full access.
 
 Session responses report the policy selected by the client. A profile may make the effective runtime policy more restrictive—for example, `auto` may fall back to manual approval when its classifier is unavailable. Clients should therefore label `auto` as Auto or Default, not as approval-free operation.
 
 The change is accepted only while the session is idle. An open turn, pending approval, or queued first message returns `409`. Offline and not-yet-started sessions apply the change immediately and return `200` with `status: "applied"`. A running worker receives a durable command and the API returns `202` with `status: "pending"` and a `command_id`.
 
-The worker applies changes in a fail-safe order. Returning from Full access to Auto changes the in-memory Agent before persisting Auto; enabling Full access changes the Agent only after persistence succeeds. It then appends an `approval_policy_changed` completion item. Command replay uses that item to distinguish an applied command from one interrupted by a worker crash. The stored session value is used when a replacement worker starts.
+The worker applies changes in a fail-safe order, ranking the policies `manual` < `auto` < `bypass_permissions`. A change to a lower policy updates the in-memory Agent before persisting it; a change to a higher policy updates the Agent only after persistence succeeds. It then appends an `approval_policy_changed` completion item. Command replay uses that item to distinguish an applied command from one interrupted by a worker crash. The stored session value is used when a replacement worker starts.
 
 Persistence is ordered fail-safe by permission direction. Enabling Full access updates the list/index views before the authoritative session JSON; returning to Auto updates the authoritative JSON first. A crash can therefore make list views temporarily report a more permissive policy than the worker will use, but never a less permissive one. Retrying the same Auto selection repairs those derived views.
 
@@ -824,7 +830,7 @@ Desktop can submit user input, request a running session to pause the current tu
 
 zotigod first ensures that the session worker owner is online, then sends one input-admission request to that owner. The owner chooses message or steering and durably records the accepted command before acknowledging the HTTP request. After a command is recorded, the command log is the recovery source of truth; workers replay both message and steering commands after reconnecting.
 
-Starting a session launches an internal worker process from the current `zotigod` executable. The worker connects back over WebSocket; connecting a `starting` session transitions it to `running`. If zotigod launched a worker but it does not connect before the startup timeout, the session is marked `failed` and the start or message request returns `503`.
+Starting a session launches an internal worker process from the current `zotigod` executable (or, for an embedded service, from the host `zotigo`/`zotigo-acp` executable through its hidden `__zotigod-worker` entrypoint). The worker connects back over WebSocket; connecting a `starting` session transitions it to `running`. If zotigod launched a worker but it does not connect before the startup timeout, the session is marked `failed` and the start or message request returns `503`.
 
 Worker launch belongs to the daemon rather than to the HTTP request that first triggered it. If that request is canceled, the shared launch continues and a later request can observe the same `starting` session. A daemon-owned startup timeout still marks the session `failed` even when no request remains waiting.
 
@@ -1142,6 +1148,8 @@ Denied decisions can include a reason:
   ]
 }
 ```
+
+The decision request may set `"stop_turn": true` when every decision denies. The worker then records the denials and interrupts the turn in the same step (a `turn_interrupted` item with reason `user_pause` follows the `approval_decision`), so the agent does not continue past the denial. This is the approval-time equivalent of `POST /pause`, which is rejected with `approval_pending` while an approval is open. `stop_turn` with any approved decision returns `400`.
 
 The decision request must include exactly one decision for each pending tool call. Unknown, duplicate, missing, or missing-`approved` decisions are rejected. zotigod forwards a valid decision to the live worker over its WebSocket. The worker appends the `approval_decision` display item, queues an acknowledgement of the durable result, and only then resumes the pending Agent actions. After zotigod receives that acknowledgement it moves the daemon session back to `running` and returns `200` to the Desktop client. On worker disconnect or reconnect, zotigod reconciles a paused session from the durable display log. There is no approval polling endpoint.
 

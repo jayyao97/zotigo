@@ -36,7 +36,7 @@ func (l *processWorkerLauncher) StartCodex(ctx context.Context, spec zotigorunti
 	if spec.SessionBinding != nil && spec.SessionBinding.ConversationID != "" {
 		args = append(args, "--codex-thread-id", spec.SessionBinding.ConversationID)
 	}
-	cmd := exec.Command(l.executable, args...)
+	cmd := exec.Command(l.executable, l.workerArgs(args...)...)
 	cmd.Dir = spec.WorkingDirectory
 	cmd.Env = workerProcessEnv(l.env, l.authToken)
 	cmd.Stdout = l.output
@@ -54,7 +54,11 @@ func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string, workin
 }
 
 type processWorkerLauncher struct {
-	executable  string
+	executable string
+	// argsPrefix selects worker mode in host binaries that embed the service
+	// (for example `zotigo __zotigod-worker --worker ...`). zotigod itself
+	// dispatches worker flags directly and leaves it empty.
+	argsPrefix  []string
 	daemonURL   string
 	authToken   string
 	workDir     string
@@ -93,15 +97,19 @@ func newProcessWorkerLauncher(daemonURL string, authToken string, logger *log.Lo
 	}, nil
 }
 
+func (l *processWorkerLauncher) workerArgs(args ...string) []string {
+	return append(append([]string(nil), l.argsPrefix...), args...)
+}
+
 func (l *processWorkerLauncher) Start(ctx context.Context, sessionID string, workingDirectory string) error {
 	if l == nil {
 		return nil
 	}
-	cmd := exec.Command(l.executable,
+	cmd := exec.Command(l.executable, l.workerArgs(
 		"--worker",
 		"--daemon-url", l.daemonURL,
 		"--session-id", sessionID,
-	)
+	)...)
 	cmd.Dir = l.workDir
 	if workingDirectory != "" {
 		cmd.Dir = workingDirectory

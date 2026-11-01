@@ -16,6 +16,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/config"
 )
 
 const (
@@ -38,11 +39,11 @@ type FileStore struct {
 // If rootDir is empty, it defaults to ~/.zotigo
 func NewFileStore(rootDir string) (*FileStore, error) {
 	if rootDir == "" {
-		home, err := os.UserHomeDir()
+		dir, err := config.StateDir()
 		if err != nil {
-			return nil, fmt.Errorf("failed to get home directory: %w", err)
+			return nil, err
 		}
-		rootDir = filepath.Join(home, ".zotigo")
+		rootDir = dir
 	}
 
 	sessionsDir := filepath.Join(rootDir, "sessions")
