@@ -1296,3 +1296,21 @@ in session image storage, not base64 in the queue. At most 100 pending messages
 may be queued; their combined text/images must fit the normal message limits.
 Drain or cancel pending queues before downgrading the schema: migration 13 down
 drops the queue table. Deploy this daemon before clients using queue endpoints.
+
+## Application updates
+
+`GET /updates` returns the managed Daemon's installed version, commit, custom-build flag,
+update channel, checked timestamp, candidate release and durable update phase.
+An unmanaged installation returns 501. These routes use the public owner bearer token;
+worker credentials are not accepted.
+
+`POST /updates` accepts `{ "action": "check" | "channel" | "prepare" | "apply" | "cancel", "channel"?: "stable" | "development" }`.
+The `channel` field is required only for the channel action. Changing it never installs a release.
+Prepare and apply return after submitting an independent update job; poll GET for its outcome.
+Cancel requests cancellation while waiting for idle, before activation begins.
+No request accepts a shell command, repository URL, filesystem prefix or arbitrary source revision.
+
+`POST /updates/drain` is used by the host updater during a waiting job. It closes input
+admission and returns a boolean indicating whether existing turns and human requests have finished.
+It rejects calls without a waiting job. See [application updates](application-updates.md) for
+release metadata, compatibility, host ownership and recovery details.

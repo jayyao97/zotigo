@@ -10,10 +10,11 @@ import (
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 // conversationSummaryInstruction is the prompt for summarizing conversation history.
-const conversationSummaryInstruction = `Please summarize the following conversation. Focus on:
+const conversationSummaryInstruction = `Please summarize the conversation. Focus on:
 - The user's main goals and intent
 - Key progress made
 - Important files, paths, or data mentioned
@@ -26,11 +27,7 @@ Format your response as XML:
   <current_state>Current state</current_state>
   <pending>Pending tasks</pending>
   <key_info>Important files/data</key_info>
-</context_summary>
-
-Conversation to summarize:
-
-`
+</context_summary>`
 
 // ProviderSummarizer implements Summarizer using an LLM provider.
 //
@@ -78,6 +75,7 @@ func NewProviderSummarizer(provider providers.Provider, opts ...SummarizerOption
 func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []protocol.Message) (string, error) {
 	var sb strings.Builder
 	sb.WriteString(conversationSummaryInstruction)
+	sb.WriteString("\n\nConversation to summarize:\n\n")
 
 	// Append message content
 	for _, msg := range messages {
@@ -120,7 +118,7 @@ func (s *ProviderSummarizer) SummarizeMessages(ctx context.Context, messages []p
 		},
 	}
 
-	return s.summarize(ctx, reqMessages)
+	return s.summarize(ctx, reqMessages, nil)
 }
 
 // SummarizeText generates a summary of text with a specific instruction.
@@ -136,26 +134,40 @@ func (s *ProviderSummarizer) SummarizeText(ctx context.Context, text string, ins
 		},
 	}
 
-	return s.summarize(ctx, reqMessages)
+	return s.summarize(ctx, reqMessages, nil)
+}
+
+// SummarizePrompt keeps the main request's prefix intact, including tools and
+// multimodal/reasoning parts. Only the compaction instruction is appended.
+func (s *ProviderSummarizer) SummarizePrompt(ctx context.Context, messages []protocol.Message, toolList []tools.Tool) (string, error) {
+	request := append([]protocol.Message(nil), messages...)
+	request = append(request, protocol.NewUserMessage(`Summarize the entire conversation above for continuation after compaction. Recent messages will also be retained verbatim; describe their current state without treating completed work as pending. Runtime context messages are context, not user goals.
+Do not call any tools or continue the task. Output only the summary as text.
+`+conversationSummaryInstruction))
+	return s.summarize(ctx, request, toolList)
 }
 
 // A partial or interrupted stream is not a summary: committing it would
 // permanently remove history that the model never had a chance to preserve.
-func (s *ProviderSummarizer) summarize(ctx context.Context, messages []protocol.Message) (result string, err error) {
+func (s *ProviderSummarizer) summarize(ctx context.Context, messages []protocol.Message, toolList []tools.Tool) (result string, err error) {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
-	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, messages, nil, nil)
+	ctx = s.observer.StartGeneration(ctx, observability.GenerationCompactor, s.model, messages, toolList, nil)
 	var usage *protocol.Usage
 	defer func() { s.observer.EndGeneration(ctx, observability.GenerationOutput{Text: result}, usage, err) }()
-	events, err := s.provider.StreamChat(ctx, messages, nil)
+	events, err := s.provider.StreamChat(ctx, messages, toolList)
 	if err != nil {
 		return "", fmt.Errorf("summarize request failed: %w", err)
 	}
 	defer func() {
 		// Providers may send a terminal event after cancellation. Consume through
-		// close so their unbuffered sends and stream cleanup can finish.
+		// close so their unbuffered sends and stream cleanup can finish, retaining
+		// any final usage even when a tool call made the summary unusable.
 		cancel()
-		for range events {
+		for event := range events {
+			if event.Usage != nil {
+				usage = event.Usage
+			}
 		}
 	}()
 	var response strings.Builder
@@ -168,6 +180,8 @@ func (s *ProviderSummarizer) summarize(ctx context.Context, messages []protocol.
 				return "", fmt.Errorf("summarizer stream ended without completion")
 			}
 			switch event.Type {
+			case protocol.EventTypeToolCallDelta, protocol.EventTypeToolCallEnd:
+				return "", fmt.Errorf("summarizer attempted a tool call")
 			case protocol.EventTypeContentDelta:
 				if event.ContentPartDelta != nil && (event.ContentPartDelta.Type == "" || event.ContentPartDelta.Type == protocol.ContentTypeText) {
 					response.WriteString(event.ContentPartDelta.Text)

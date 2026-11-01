@@ -77,6 +77,12 @@ binary=zotigo
 [ "$component" = cli ] || binary=zotigod
 mkdir "$stage/output"
 (cd "$source_dir" && go build -trimpath -o "$stage/output/$binary" "./cmd/$binary")
+if [ "$component" = daemon ]; then
+  (cd "$source_dir" && go build -trimpath -o "$stage/output/zotigo-update" ./cmd/zotigo-update)
+  cp "$source_dir/update.json" "$stage/output/UPDATE.json"
+  mkdir "$stage/output/update-support"
+  cp "$source_dir/scripts/install-common.sh" "$source_dir/scripts/apply-update.sh" "$stage/output/update-support/"
+fi
 if [ "$platform" = Darwin ] && [ "$component" = daemon ]; then
   sh "$source_dir/scripts/sign-macos-daemon.sh" "$stage/output/$binary"
 fi

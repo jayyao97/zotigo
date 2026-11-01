@@ -357,6 +357,11 @@ type sessionInputConstraints struct {
 }
 
 func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (commandResponse, error) {
+	h.updateMu.RLock()
+	defer h.updateMu.RUnlock()
+	if h.updater != nil && h.updater.Draining() {
+		return commandResponse{}, fmt.Errorf("%w: daemon is waiting to apply an update", errSessionUnavailable)
+	}
 	if h.workers.InputStopping(id) {
 		return commandResponse{}, errWorkerInputStopping
 	}

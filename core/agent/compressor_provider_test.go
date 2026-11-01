@@ -3,11 +3,14 @@ package agent
 import (
 	"context"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent/prompt"
 	"github.com/jayyao97/zotigo/core/config"
+	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/services"
@@ -15,18 +18,27 @@ import (
 )
 
 type compactionProvider struct {
-	calls int
-	fail  bool
+	calls      int
+	fail       bool
+	requests   [][]protocol.Message
+	toolLists  [][]tools.Tool
+	rejectFull bool
+	toolCall   bool
 }
 
 func (*compactionProvider) Name() string { return "compaction-wiring-test" }
 func (p *compactionProvider) StreamChat(_ context.Context, msgs []protocol.Message, toolset []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
 	p.calls++
-	if len(toolset) != 0 || !strings.Contains(msgs[0].Content[0].Text, "Conversation to summarize:") {
-		return nil, errors.New("unexpected compaction request")
+	p.requests = append(p.requests, msgs)
+	p.toolLists = append(p.toolLists, toolset)
+	if p.rejectFull && len(msgs) > 1 {
+		return nil, providers.ErrContextLengthExceeded
 	}
-	ch := make(chan protocol.Event, 2)
+	ch := make(chan protocol.Event, 3)
 	ch <- protocol.NewTextDeltaEvent("LLM summary: preserve the agreed metric and pending work")
+	if p.toolCall {
+		ch <- protocol.Event{Type: protocol.EventTypeToolCallEnd, ToolCall: &protocol.ToolCall{Name: "view_image"}}
+	}
 	if p.fail {
 		ch <- protocol.NewErrorEvent(errors.New("summary unavailable"))
 	} else {
@@ -86,6 +98,91 @@ func TestAgentDefaultCompactionUsesLLMAndTracksProfile(t *testing.T) {
 	}
 }
 
+func TestCompactionPreservesMainPromptPrefix(t *testing.T) {
+	for _, mode := range []string{"automatic", "manual", "reactive", "summary-overflow", "tool-call"} {
+		t.Run(mode, func(t *testing.T) {
+			p := &compactionProvider{rejectFull: mode == "summary-overflow", toolCall: mode == "tool-call"}
+			a := calibratedTestAgent()
+			local, err := executor.NewLocalExecutor(t.TempDir())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.executor = local
+			a.provider = p
+			a.promptBuilder = prompt.NewSystemPromptBuilder(prompt.WithStaticPrompt("stable system"))
+			a.tools = map[string]tools.Tool{"view_image": &imageResultTestTool{}}
+			a.configureCompressorSummarizer()
+			a.conversation.history[1].Content = append(a.conversation.history[1].Content,
+				protocol.ContentPart{Type: protocol.ContentTypeReasoning, Text: "reasoning evidence"},
+				protocol.ContentPart{Type: protocol.ContentTypeImage, Image: &protocol.MediaPart{Data: []byte("image"), MediaType: "image/png"}})
+			a.conversation.history[1].Content = append(a.conversation.history[1].Content,
+				protocol.ContentPart{Type: protocol.ContentTypeToolCall, ToolCall: &protocol.ToolCall{ID: "image-call", Name: "view_image", Arguments: `{}`}})
+			a.conversation.history = append(a.conversation.history[:2:2], append([]protocol.Message{
+				protocol.NewToolMessage([]protocol.ToolResult{{ToolCallID: "image-call", ToolName: "view_image", Text: strings.Repeat("large result ", 4000)}}),
+			}, a.conversation.history[2:]...)...)
+			// Capture the actual main prompt below the threshold, then trigger
+			// compaction without changing any of the model-visible messages.
+			a.compressor.SetContextWindow(10000000)
+			prefix, _, _, err := a.buildContext(context.Background())
+			if err != nil {
+				t.Fatal(err)
+			}
+			a.compressor.SetContextWindow(1000)
+			before := services.ContextDigest(a.conversation.history)
+			switch mode {
+			case "automatic":
+				_, _, _, err = a.buildContext(context.Background())
+			case "reactive":
+				retries := 0
+				if !a.tryReactiveRecover(context.Background(), providers.ErrContextLengthExceeded, &retries, 1, make(chan protocol.Event, 2)) {
+					t.Fatal("reactive recovery failed")
+				}
+			default:
+				_, err = a.ForceCompress(context.Background())
+			}
+			if mode == "tool-call" {
+				if err == nil || services.ContextDigest(a.conversation.history) != before {
+					t.Fatal("tool call must reject summary and preserve history")
+				}
+			} else if err != nil {
+				t.Fatal(err)
+			}
+			wantCalls := 1
+			if mode == "summary-overflow" {
+				wantCalls = 2
+			}
+			if p.calls != wantCalls {
+				t.Fatalf("calls = %d, want %d", p.calls, wantCalls)
+			}
+			if mode != "reactive" {
+				got := p.requests[0]
+				if len(got) != len(prefix)+1 {
+					t.Fatal("compaction changed main request prefix")
+				}
+				for i := range prefix {
+					// System message creation timestamps are local bookkeeping;
+					// providers consume the role and content, not CreatedAt.
+					if got[i].Role != prefix[i].Role || !reflect.DeepEqual(got[i].Content, prefix[i].Content) {
+						t.Fatalf("compaction changed main request message %d", i)
+					}
+				}
+				if !reflect.DeepEqual(p.toolLists[0], sortedToolList(a.tools)) {
+					t.Fatal("compaction changed tools")
+				}
+				if !strings.Contains(got[len(got)-1].Content[0].Text, "Do not call any tools") {
+					t.Fatal("missing text-only instruction")
+				}
+			}
+			if mode == "reactive" || mode == "summary-overflow" {
+				last := len(p.requests) - 1
+				if len(p.requests[last]) != 1 || len(p.toolLists[last]) != 0 || !strings.Contains(p.requests[last][0].Content[0].Text, "Conversation to summarize:") {
+					t.Fatal("fallback did not use flattened history")
+				}
+			}
+		})
+	}
+}
+
 type blockedCompactionProvider struct{ started chan struct{} }
 
 func (*blockedCompactionProvider) Name() string { return "blocked-compact" }
@@ -100,6 +197,7 @@ func TestCompactionAdmissionAndCancellation(t *testing.T) {
 			a := calibratedTestAgent()
 			a.state = StateRunning
 			p := &blockedCompactionProvider{started: make(chan struct{})}
+			a.provider = p
 			a.compressor.SetSummarizer(services.NewProviderSummarizer(p))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()

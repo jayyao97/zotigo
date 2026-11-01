@@ -33,6 +33,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/update"
 )
 
 const defaultAddr = "127.0.0.1:8766"
@@ -470,6 +471,8 @@ func canTransition(state SessionState, from []SessionState) bool {
 }
 
 type handler struct {
+	updater              *update.Manager
+	updateMu             sync.RWMutex
 	registry             *sessionRegistry
 	items                displayItemSource
 	store                zotigosession.Store
@@ -698,7 +701,14 @@ func Run(args []string) (exitCode int) {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	var updater *update.Manager
+	if publicAuthToken != "" {
+		if executable, err := os.Executable(); err == nil {
+			updater, _ = update.ForExecutable(executable, "daemon")
+		}
+	}
 	server.Handler = newDefaultHandler(handlerOptions{
+		updater:            updater,
 		maintenanceContext: ctx,
 		launcher:           launcher,
 		runtimes:           runtimes,
@@ -803,6 +813,7 @@ func NewHandler() http.Handler {
 }
 
 type handlerOptions struct {
+	updater              *update.Manager
 	maintenanceContext   context.Context
 	launcher             workerLauncher
 	runtimes             *runtimeRegistry
@@ -940,6 +951,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		items = eventingItems
 	}
 	handler := &handler{
+		updater:              options.updater,
 		registry:             registry,
 		items:                items,
 		store:                options.store,
@@ -1055,6 +1067,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	})
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
+	mux.HandleFunc("/updates", handler.handleUpdates)
+	mux.HandleFunc("/updates/drain", handler.handleUpdateDrain)
 	mux.HandleFunc("/skills", handler.handleSkills)
 	mux.HandleFunc("/agents", handler.handleAgents)
 	mux.HandleFunc("/agents/codex/prepare", handler.handleCodexPrepare)
@@ -1603,6 +1617,11 @@ func (h *handler) ensureSessionRunning(ctx context.Context, id string) (Session,
 
 // The caller holds the workspace lifecycle fence, if the session is assigned.
 func (h *handler) ensureSessionRunningInWorkspace(ctx context.Context, id string) (Session, error) {
+	h.updateMu.RLock()
+	defer h.updateMu.RUnlock()
+	if h.updater != nil && h.updater.Draining() {
+		return Session{}, fmt.Errorf("%w: daemon is waiting to apply an update", errSessionUnavailable)
+	}
 	unlock := h.sessionOps.lock(id)
 	if unavailable, err := h.ensureSessionActivatable(ctx, id); err != nil {
 		unlock()

@@ -409,7 +409,12 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 }
 
 func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []workspace.QueuedInput, startOnly bool) error {
+	h.updateMu.RLock()
+	defer h.updateMu.RUnlock()
 	command, err := mergeQueuedInputs(rows)
+	if h.updater != nil && h.updater.Draining() {
+		err = fmt.Errorf("%w: daemon is waiting to apply an update", errSessionUnavailable)
+	}
 	possiblyAdmitted := false
 	if err == nil {
 		err = h.hydrateQueuedImages(&command)
