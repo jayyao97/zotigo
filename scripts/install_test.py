@@ -24,6 +24,7 @@ class InstallTest(unittest.TestCase):
         self.source.mkdir()
         shutil.copy(REPO / "install.sh", self.source)
         shutil.copy(REPO / "go.mod", self.source)
+        shutil.copy(REPO / "update.json", self.source)
         shutil.copytree(REPO / "scripts", self.source / "scripts")
         for args in [["init", "-q"], ["add", "."],
                      ["-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "-qm", "fixture"],

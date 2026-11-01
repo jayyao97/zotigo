@@ -793,13 +793,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			outCh <- protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: contextUsage}
 			// Prepare tools list (sorted by name for deterministic ordering,
 			// which is required for Anthropic prompt caching to work)
-			var toolList []tools.Tool
-			for _, t := range toolsMap {
-				toolList = append(toolList, t)
-			}
-			sort.Slice(toolList, func(i, j int) bool {
-				return toolList[i].Name() < toolList[j].Name()
-			})
+			toolList := sortedToolList(toolsMap)
 
 			estimatedTokens := 0
 			if a.compressor != nil {
@@ -2470,7 +2464,7 @@ func (a *Agent) buildContext(ctx context.Context) ([]protocol.Message, protocol.
 	// The compression path owns the single calibrated threshold check; an outer
 	// local-only gate would suppress valid API-driven compaction.
 	if a.compressor != nil {
-		result, err := a.compressHistoryWithPromptLocked(ctx, false, contextInput)
+		result, err := a.compressHistoryWithPromptLocked(ctx, false, false, contextInput, msgs)
 		if err != nil {
 			return nil, contextInput, nil, fmt.Errorf("compact context: %w", err)
 		}
@@ -2632,13 +2626,25 @@ func (a *Agent) compressHistoryLocked(
 	ctx context.Context,
 	force bool,
 ) (services.CompressionResult, error) {
-	return a.compressHistoryWithPromptLocked(ctx, force, a.contextPromptLocked())
+	system := a.systemPromptMessages()
+	return a.compressHistoryWithPromptLocked(ctx, force, false, a.contextPromptFor(system), system)
+}
+
+func sortedToolList(toolMap map[string]tools.Tool) []tools.Tool {
+	var toolList []tools.Tool
+	for _, tool := range toolMap {
+		toolList = append(toolList, tool)
+	}
+	sort.Slice(toolList, func(i, j int) bool { return toolList[i].Name() < toolList[j].Name() })
+	return toolList
 }
 
 func (a *Agent) compressHistoryWithPromptLocked(
 	ctx context.Context,
 	force bool,
+	reactive bool,
 	prompt protocol.ContextInput,
+	system []protocol.Message,
 ) (services.CompressionResult, error) {
 	// Match the UI usage path: ContextTokens owns prompt projection.
 	tokens, _ := a.compressor.ContextTokens(a.conversation.history, prompt)
@@ -2657,7 +2663,22 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	)
 	a.compacting.Store(true)
 	defer a.compacting.Store(false)
-	compressed, result, err = a.compressor.ForceCompress(ctx, history)
+	if !reactive && a.provider != nil && a.compressorSummarizer == nil {
+		messages := append(append([]protocol.Message(nil), system...), history...)
+		toolList := sortedToolList(a.tools)
+		summarizer := services.NewProviderSummarizer(a.provider, services.WithSummarizerObserver(a.observer, a.cfg.Model))
+		compressed, result, err = a.compressor.ForceCompressWithSummary(ctx, history, func(ctx context.Context) (string, error) {
+			return summarizer.SummarizePrompt(ctx, messages, toolList)
+		})
+		// An appended summary instruction can cross the provider's limit even
+		// before the next main request does. Only length errors use the smaller
+		// flattened request; cancellation and incomplete summaries must fail.
+		if errors.Is(err, providers.ErrContextLengthExceeded) {
+			compressed, result, err = a.compressor.ForceCompress(ctx, history)
+		}
+	} else {
+		compressed, result, err = a.compressor.ForceCompress(ctx, history)
+	}
 	if err != nil || !result.Compressed {
 		return result, err
 	}
@@ -2756,7 +2777,8 @@ func (a *Agent) tryReactiveRecover(ctx context.Context, err error, retries *int,
 	}
 
 	a.mu.Lock()
-	result, cerr := a.compressHistoryLocked(ctx, true)
+	system := a.systemPromptMessages()
+	result, cerr := a.compressHistoryWithPromptLocked(ctx, true, true, a.contextPromptFor(system), system)
 	a.mu.Unlock()
 
 	if cerr != nil || !result.Compressed {

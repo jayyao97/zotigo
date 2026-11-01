@@ -16,6 +16,7 @@ install_init() {
   root="$prefix/$component"
   mkdir "$root/install.lock" 2>/dev/null || fail "Another $component installation holds $root/install.lock; remove it only if that installer is no longer running."
   stage=$(mktemp -d "$root/releases/build.XXXXXX")
+  if [ "${ZOTIGO_PREPARE_UPDATE:-}" = 1 ]; then printf 'prepare\n' > "$root/install.lock/update-owner"; fi
   trap 'install_cleanup' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
@@ -29,6 +30,7 @@ install_cleanup() {
     fi
   fi
   rm -rf "$stage"
+  if [ "${ZOTIGO_PREPARE_UPDATE:-}" = 1 ]; then rm -f "$root/install.lock/update-owner"; fi
   rmdir "$root/install.lock"
 }
 
@@ -99,6 +101,12 @@ assert_stopped() {
 }
 
 publish_install() {
+  if [ "${ZOTIGO_PREPARE_UPDATE:-}" = 1 ]; then
+    printf 'version=%s\ncommit=%s\ndirty=%s\n' "$version" "$commit" "$dirty" > "$stage/output/INSTALLATION"
+    [ ! -e "$root/prepared" ] || fail 'A prepared update already exists.'
+    mv "$stage/output" "$root/prepared"
+    exit 0
+  fi
   assert_stopped
   if [ "$platform" = Darwin ] && [ "$component" = daemon ]; then
     publish_macos_daemon
@@ -157,6 +165,22 @@ service_check() {
 
 service_install() {
   [ "$service" = yes ] || { printf 'Start manually: %s/current/run\n' "$root"; return 0; }
+  # The recovery entrypoint survives a failed swap of current, including the
+  # fixed-path macOS daemon directory. Upgrade it only while the service is down.
+  if [ -x "$root/current/zotigo-update" ]; then
+    cp "$root/current/zotigo-update" "$root/updater.new"
+    mv "$root/updater.new" "$root/updater"
+    {
+      echo '#!/bin/sh'
+      printf '%s recover --prefix %s --component %s || exit 1\n' "$(quote "$root/updater")" "$(quote "$prefix")" "$(quote "$component")"
+      printf 'exec %s\n' "$(quote "$root/current/run")"
+    } > "$root/launch.new"
+    chmod +x "$root/launch.new"
+    mv "$root/launch.new" "$root/launch"
+    service_launcher="$root/launch"
+  else
+    service_launcher="$root/current/run"
+  fi
   case "$platform" in
     Linux)
       service_file="$HOME/.config/systemd/user/zotigo-$component.service"
@@ -167,7 +191,7 @@ service_install() {
 [Unit]
 Description=Zotigo $component
 [Service]
-ExecStart="$root/current/run"
+ExecStart="$service_launcher"
 WorkingDirectory=%h
 Restart=on-failure
 RestartSec=3
@@ -193,7 +217,7 @@ EOF
 <plist version="1.0"><dict>
 <!-- Zotigo installer: $prefix -->
 <key>Label</key><string>com.zotigo.$component</string>
-<key>ProgramArguments</key><array><string>$root/current/run</string></array>
+<key>ProgramArguments</key><array><string>$service_launcher</string></array>
 <key>WorkingDirectory</key><string>$HOME</string>
 <key>Umask</key><integer>63</integer>
 <key>RunAtLoad</key><true/>

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -15,6 +16,42 @@ import (
 type summaryTestProvider struct {
 	events   []protocol.Event
 	messages []protocol.Message
+}
+
+type summaryUsageObserver struct {
+	observability.Noop
+	usage *protocol.Usage
+	err   error
+	ends  int
+}
+
+func (o *summaryUsageObserver) EndGeneration(_ context.Context, _ observability.GenerationOutput, usage *protocol.Usage, err error) {
+	o.usage, o.err = usage, err
+	o.ends++
+}
+
+func TestSummarizerRejectedToolCallRetainsTerminalUsage(t *testing.T) {
+	want := protocol.Usage{InputTokens: 123, OutputTokens: 4, CacheReadInputTokens: 100}
+	for _, toolEvent := range []protocol.EventType{protocol.EventTypeToolCallDelta, protocol.EventTypeToolCallEnd} {
+		for _, terminal := range []protocol.EventType{protocol.EventTypeFinish, protocol.EventTypeError} {
+			t.Run(string(toolEvent)+"/"+string(terminal), func(t *testing.T) {
+				observer := &summaryUsageObserver{}
+				provider := &summaryTestProvider{events: []protocol.Event{
+					protocol.NewTextDeltaEvent("partial summary"),
+					{Type: toolEvent},
+					{Type: terminal, FinishReason: protocol.FinishReasonToolCalls, Usage: &want},
+					{Type: protocol.EventTypeError, Error: context.Canceled},
+				}}
+				summary, err := NewProviderSummarizer(provider, WithSummarizerObserver(observer, "test")).SummarizePrompt(context.Background(), []protocol.Message{protocol.NewUserMessage("history")}, nil)
+				if err == nil || !strings.Contains(err.Error(), "attempted a tool call") || summary != "" {
+					t.Fatalf("summary=%q err=%v", summary, err)
+				}
+				if observer.ends != 1 || observer.err != err || observer.usage == nil || *observer.usage != want {
+					t.Fatalf("observer: ends=%d usage=%+v err=%v", observer.ends, observer.usage, observer.err)
+				}
+			})
+		}
+	}
 }
 
 func (*summaryTestProvider) Name() string { return "summary-test" }

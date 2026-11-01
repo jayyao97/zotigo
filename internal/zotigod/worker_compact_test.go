@@ -67,8 +67,11 @@ func TestCompactingInputRejectionIsStructured(t *testing.T) {
 type workerCompactProvider struct{ workerPromptCaptureProvider }
 
 func (p *workerCompactProvider) StreamChat(_ context.Context, messages []protocol.Message, toolset []tools.Tool, _ ...providers.StreamChatOption) (<-chan protocol.Event, error) {
-	if len(toolset) != 0 {
-		return nil, errors.New("compaction must not expose tools")
+	if len(toolset) == 0 || len(messages) < 2 || messages[0].Role != protocol.RoleSystem {
+		return nil, errors.New("compaction must preserve the main request prefix")
+	}
+	if !strings.Contains(messages[len(messages)-1].Content[0].Text, "Do not call any tools") {
+		return nil, errors.New("compaction must append a text-only summary instruction")
 	}
 	p.mu.Lock()
 	p.messages = append(p.messages, messages)
@@ -158,11 +161,18 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 	if len(saved.AgentSnapshot.History) >= len(sess.AgentSnapshot.History) {
 		t.Fatal("compacted history was not saved")
 	}
-	if got := p.joinedPrompts(); strings.Contains(got, "/compact") || !strings.Contains(got, "old question detail") {
+	if got := p.joinedPrompts(); !strings.Contains(got, "old question detail") {
 		t.Fatal("model must receive the older history, not the slash command")
 	}
 	p.mu.Lock()
 	requests := len(p.messages)
+	for _, request := range p.messages {
+		for _, message := range request {
+			if message.Role == protocol.RoleUser && len(message.Content) == 1 && message.Content[0].Text == "/compact" {
+				t.Error("slash command was forwarded to the model")
+			}
+		}
+	}
 	p.mu.Unlock()
 	if requests != 1 {
 		t.Fatalf("duplicate command triggered %d summary requests", requests)

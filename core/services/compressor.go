@@ -58,7 +58,7 @@ type CompressorConfig struct {
 	// PreserveRatio is how much of recent messages to preserve (default 0.3 = 30%)
 	PreserveRatio float64
 
-	// ToolOutputThreshold is max tokens for a single tool output before summarizing
+	// ToolOutputThreshold is max tokens for a single tool output in the prompt.
 	ToolOutputThreshold int
 
 	// TokenCounter is an optional custom token counter
@@ -76,7 +76,7 @@ func DefaultCompressorConfig() CompressorConfig {
 		TriggerRatio:        0.8,  // Trigger at 80%
 		TargetRatio:         0.5,  // Target 50%
 		PreserveRatio:       0.3,  // Preserve 30% of recent
-		ToolOutputThreshold: 2000, // Summarize outputs > 2000 tokens
+		ToolOutputThreshold: 2000, // Truncate outputs > 2000 tokens
 		TokenCounter:        nil,  // Use default estimator
 	}
 }
@@ -200,7 +200,7 @@ func (c *Compressor) Compress(ctx context.Context, messages []protocol.Message) 
 		}, nil
 	}
 
-	return c.compressLocked(ctx, messages)
+	return c.compressLocked(ctx, messages, nil)
 }
 
 // ForceCompress unconditionally compresses, bypassing the threshold
@@ -212,12 +212,22 @@ func (c *Compressor) ForceCompress(ctx context.Context, messages []protocol.Mess
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
-	return c.compressLocked(ctx, messages)
+	return c.compressLocked(ctx, messages, nil)
+}
+
+// ForceCompressWithSummary uses a caller-owned full-prompt summary while keeping
+// partitioning, transcript storage and history reconstruction in the compressor.
+// The callback runs under the compressor lock and must not call the compressor.
+func (c *Compressor) ForceCompressWithSummary(ctx context.Context, messages []protocol.Message, summarize func(context.Context) (string, error)) ([]protocol.Message, CompressionResult, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
+	return c.compressLocked(ctx, messages, summarize)
 }
 
 // compressLocked runs the actual partition + summarize. Caller must
 // hold c.mu.
-func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Message) ([]protocol.Message, CompressionResult, error) {
+func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Message, summarize func(context.Context) (string, error)) ([]protocol.Message, CompressionResult, error) {
 	result := CompressionResult{
 		OriginalTokens: c.countTokens(messages),
 		MessagesBefore: len(messages),
@@ -278,20 +288,19 @@ func (c *Compressor) compressLocked(ctx context.Context, messages []protocol.Mes
 	var summary string
 	var err error
 
-	if c.summarizer != nil {
+	if summarize != nil {
+		summary, err = summarize(ctx)
+	} else if c.summarizer != nil {
 		summary, err = c.summarizer.SummarizeMessages(ctx, summaryInput)
-		if err != nil {
-			return messages, result, fmt.Errorf("summarize conversation: %w", err)
-		}
-		if strings.TrimSpace(summary) == "" {
-			return messages, result, fmt.Errorf("summarize conversation: empty summary")
-		}
 	} else {
 		summary = c.simpleSummary(summaryInput)
 	}
-
-	// Summarize long tool outputs in preserved messages
-	toPreserve = c.summarizeToolOutputs(ctx, toPreserve)
+	if err != nil {
+		return messages, result, fmt.Errorf("summarize conversation: %w", err)
+	}
+	if strings.TrimSpace(summary) == "" {
+		return messages, result, fmt.Errorf("summarize conversation: empty summary")
+	}
 
 	// Create summary message with optional transcript path reference
 	summaryText := "[Previous conversation summary]\n" + summary
@@ -412,61 +421,6 @@ func (c *Compressor) findSafePartitionPoint(messages []protocol.Message, preserv
 
 	// Fallback: just use the rough index
 	return roughIdx
-}
-
-// summarizeToolOutputs summarizes tool outputs that exceed the threshold
-func (c *Compressor) summarizeToolOutputs(ctx context.Context, messages []protocol.Message) []protocol.Message {
-	result := make([]protocol.Message, len(messages))
-	copy(result, messages)
-
-	for i, msg := range result {
-		if msg.Role == protocol.RoleTool {
-			newContent := make([]protocol.ContentPart, 0, len(msg.Content))
-			for _, part := range msg.Content {
-				if part.Type == protocol.ContentTypeToolResult && part.ToolResult != nil {
-					// These recent reports already went through the independent
-					// report budget in truncateToolResults. Summarizing them again
-					// would discard findings and the full-report recovery path.
-					if part.ToolResult.ToolName == "spawn" {
-						newContent = append(newContent, part)
-						continue
-					}
-					text := part.ToolResult.Text
-					tokens := c.counter(text)
-
-					if tokens > c.config.ToolOutputThreshold {
-						// Try LLM summarization first
-						var summarized string
-						if c.summarizer != nil {
-							var err error
-							summarized, err = c.summarizer.SummarizeText(ctx, text, ToolOutputSummarizeInstruction)
-							if err != nil {
-								// Fallback to truncation
-								summarized = c.truncateText(text, c.config.ToolOutputThreshold)
-							}
-						} else {
-							summarized = c.truncateText(text, c.config.ToolOutputThreshold)
-						}
-
-						newPart := part
-						newPart.ToolResult = &protocol.ToolResult{
-							ToolCallID: part.ToolResult.ToolCallID,
-							ToolName:   part.ToolResult.ToolName,
-							Type:       part.ToolResult.Type,
-							Text:       summarized,
-							IsError:    part.ToolResult.IsError,
-						}
-						newContent = append(newContent, newPart)
-						continue
-					}
-				}
-				newContent = append(newContent, part)
-			}
-			result[i].Content = newContent
-		}
-	}
-
-	return result
 }
 
 // TruncateToolResults is a simpler version that just truncates without LLM
@@ -839,25 +793,6 @@ func extractPath(argsJSON string) string {
 	return rest[:end]
 }
 
-// truncateText truncates text to approximately the given token count
-func (c *Compressor) truncateText(text string, maxTokens int) string {
-	maxChars := maxTokens * 4 // Rough estimate
-	if len(text) <= maxChars {
-		return text
-	}
-
-	// Try to truncate at a newline
-	truncated := text[:maxChars]
-	if idx := strings.LastIndex(truncated, "\n"); idx > maxChars/2 {
-		return truncated[:idx]
-	}
-
-	for len(truncated) > 0 && !utf8.RuneStart(text[len(truncated)]) {
-		truncated = truncated[:len(truncated)-1]
-	}
-	return truncated
-}
-
 // estimateTokens provides a rough token count estimation
 func estimateTokens(text string) int {
 	if len(text) == 0 {
@@ -865,12 +800,3 @@ func estimateTokens(text string) int {
 	}
 	return (len(text) + 3) / 4
 }
-
-// ToolOutputSummarizeInstruction is the prompt for summarizing tool outputs
-const ToolOutputSummarizeInstruction = `Summarize this tool output concisely while preserving:
-- Error messages and stack traces
-- File paths and line numbers
-- Key data points and results
-- Status/success indicators
-
-Keep it informative but brief.`
