@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
+
+	"github.com/jayyao97/zotigo/core/protocol"
 )
 
 // Command represents a slash command that can be executed in the CLI.
@@ -25,34 +27,52 @@ type Command interface {
 	Execute(ctx context.Context, env *Environment, args []string) error
 }
 
-// Environment provides access to the CLI environment for commands.
+// Environment provides access to the CLI environment for commands. The
+// session runs in the session service; commands reach it through these
+// hooks instead of touching an in-process agent.
 type Environment struct {
-	// Agent is the current agent instance.
-	Agent interface{}
-
-	// Session is the current session.
-	Session interface{}
-
-	// Config holds the current configuration.
-	Config interface{}
-
-	// SkillManager manages skills.
-	SkillManager interface{}
-
 	// Output is a function to display output to the user.
 	Output func(format string, args ...interface{})
 
-	// ClearHistory clears the conversation history.
-	ClearHistory func()
+	// NewSession replaces the current session with a fresh one in the same
+	// directory. The previous session stays in history and can be resumed.
+	NewSession func() error
 
-	// GetModels returns available model names.
+	// Compact asks the session service to compact the conversation history.
+	Compact func() error
+
+	// Skills lists the skills enabled for the session, optionally rescanning.
+	Skills func(ctx context.Context, reload bool) ([]SkillInfo, error)
+
+	// Usage reports token usage observed for the session.
+	Usage func() UsageReport
+
+	// GetModels returns available model (profile) names.
 	GetModels func() []string
 
-	// SetModel sets the current model.
+	// SetModel sets the current model (profile).
 	SetModel func(model string) error
 
 	// Exec executes a shell command and returns the output.
 	Exec func(ctx context.Context, cmd string) (string, error)
+}
+
+// SkillInfo describes one discovered skill.
+type SkillInfo struct {
+	Name        string
+	Description string
+	Scope       string
+}
+
+// UsageReport summarizes token usage for the current session. Session and
+// Turns cover the turns this client has observed in the durable log;
+// ContextTokens/ContextWindow are the service's context occupancy estimate
+// (zero when unavailable).
+type UsageReport struct {
+	Session       protocol.Usage
+	Turns         int
+	ContextTokens int
+	ContextWindow int
 }
 
 // Registry manages command registration and lookup.

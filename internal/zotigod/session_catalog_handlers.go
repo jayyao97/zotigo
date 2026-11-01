@@ -5,7 +5,6 @@ import (
 	"errors"
 	"net/http"
 	"os"
-	"path/filepath"
 	"sort"
 	"time"
 
@@ -470,7 +469,7 @@ func (h *handler) sessionAvailability(ctx context.Context, runtime *Session, org
 		if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
 			return "workspace_not_ready", nil
 		}
-		if !sameFilesystemPath(runtime.WorkingDirectory, workspace.RootPath) {
+		if !zotigoworkspace.PathWithin(workspace.RootPath, runtime.WorkingDirectory) {
 			return "cwd_mismatch", nil
 		}
 	} else {
@@ -526,8 +525,4 @@ func projectionID(projection sessionProjection) string {
 
 func sessionIsActive(session Session) bool {
 	return session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePausing || session.State == SessionStatePaused
-}
-
-func sameFilesystemPath(left string, right string) bool {
-	return filepath.Clean(left) == filepath.Clean(right)
 }

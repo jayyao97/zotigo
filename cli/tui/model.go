@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"log"
 	"os"
@@ -14,11 +15,11 @@ import (
 	"charm.land/bubbles/v2/viewport"
 	tea "charm.land/bubbletea/v2"
 	"charm.land/lipgloss/v2"
+	"github.com/google/uuid"
 	"github.com/jayyao97/zotigo/cli/commands"
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
 var (
@@ -38,60 +39,133 @@ var (
 	promptStyle         = lipgloss.NewStyle().Foreground(lipgloss.Color("205")).Bold(true)
 )
 
+// SessionService is the subset of the zotigod client the TUI drives. The
+// session service owns execution, persistence, approvals and recovery; the
+// TUI only submits input and renders the durable item stream.
+type SessionService interface {
+	CreateSession(ctx context.Context, req zotigodclient.CreateSessionRequest) (zotigodclient.Session, error)
+	GetSession(ctx context.Context, id string) (zotigodclient.Session, error)
+	SubmitMessage(ctx context.Context, id string, req zotigodclient.MessageRequest) (zotigodclient.Command, error)
+	Items(ctx context.Context, id string, after uint64, before uint64, limit int) (zotigodclient.ItemsPage, error)
+	Pause(ctx context.Context, id string, turnID string) (zotigodclient.Command, error)
+	DecideApproval(ctx context.Context, id string, approvalID string, decisions []zotigodclient.ApprovalDecision, stopTurn bool) error
+	SetApprovalPolicy(ctx context.Context, id string, policy string) error
+	SetProfile(ctx context.Context, id string, profile string) error
+	Profiles(ctx context.Context, workingDirectory string) (zotigodclient.Profiles, error)
+	Skills(ctx context.Context, sessionID string, forceReload bool) ([]zotigodclient.Skill, error)
+	Subscribe(ctx context.Context, id string, after uint64, opts zotigodclient.StreamOptions) <-chan zotigodclient.Event
+}
+
+// ModelOptions configures a TUI bound to one service session.
+type ModelOptions struct {
+	Service  SessionService
+	Session  zotigodclient.Session
+	Registry *commands.Registry
+	// History is the recent durable display log rendered at startup.
+	History          []session.DisplayItem
+	HistoryTruncated bool
+	// Cursor is the last durable sequence already reflected by History;
+	// the live stream starts after it.
+	Cursor uint64
+	// Location describes session ownership, for example
+	// "Workspace backend-fix (code/backend)" or "Directory /tmp/x".
+	Location string
+	// Embedded reports that the session service lives in this process.
+	Embedded bool
+}
+
 type Model struct {
-	agent              *agent.Agent
-	sessionMgr         *session.Manager
-	sessionID          string
-	cmdRegistry        *commands.Registry
-	ctx                context.Context
+	service     SessionService
+	session     zotigodclient.Session
+	location    string
+	embedded    bool
+	cmdRegistry *commands.Registry
+	ctx         context.Context
+	cancel      context.CancelFunc
+
+	history          []session.DisplayItem
+	historyTruncated bool
+	cursor           uint64
+	events           <-chan zotigodclient.Event
+	reconnecting     bool
+	streamClosed     bool
+
 	input              textarea.Model
 	transcript         []string
 	viewport           viewport.Model
 	viewportContent    string
 	viewportEnabled    bool
 	viewportAutoScroll bool
-	currentAsstMsg     string
-	thinking           bool
-	approving          bool
-	approvalChoice     int
-	approvalItemChoice int
-	pendingApprovals   []*agent.PendingAction
-	approvalDecisions  map[string]bool
-	approvalContext    string
-	pendingToolName    string
-	pendingToolArgs    string
-	spawnBroker        *SpawnApprovalBroker
-	spawnRequest       *spawnApprovalRequest
-	err                error
-	eventCh            <-chan protocol.Event
 	width              int
 	height             int
 	initialPrinted     bool
 	kittyChecked       bool
-	autoApprove        bool
-	bypassPermissions  bool
-	resumeBypass       bool
-	streamFlushed      int // lines already committed to scrollback during streaming
-	turnStartTime      time.Time
-	displayTurnID      string
-	displayAsstContent []session.DisplayContentPart
-	needsAsstMarker    bool // next text content block should get a ⏺ prefix
-	streamingReasoning bool // currently streaming reasoning content
+
+	// Streaming state for the current assistant block.
+	currentAsstMsg     string
+	streamItemID       string
+	streamFlushed      int
+	needsAsstMarker    bool
+	streamingReasoning bool
+	streamed           map[string]map[string]string
+	// finalized holds durable assistant items already rendered. Deltas and
+	// durable items travel separately, so a delta may arrive late.
+	finalized map[string]bool
+
+	// Turn state mirrored from durable lifecycle items.
+	thinking      bool
+	openTurnID    string
+	turnStartTime time.Time
+	stopping      bool
+	ownInputs     map[string]bool
+	// pendingInputs are this TUI's inputs whose turn it has not seen start
+	// or join yet; submissions records how each submission ended. Both let
+	// a stop target a turn the event stream has not reported yet.
+	pendingInputs map[string]bool
+	submissions   *zotigodclient.Submissions
+	steeringTurns map[string]string // pending steering input -> joined turn
+
+	// Approval state for the pending approval_request item.
+	approving          bool
+	approvalChoice     int
+	approvalItemChoice int
+	approval           *session.DisplayApproval
+	approvalDecisions  map[string]bool
+	approvalSubmitted  bool
+	pendingToolName    string
+
+	// exitPrompt asks whether a running turn should stop or keep running
+	// in the shared daemon when the user quits.
+	exitPrompt bool
+
+	approvalPolicy string
+	sessionUsage   protocol.Usage
+	lastTurnUsage  *protocol.Usage
+	turns          int
+	contextUsage   *zotigodclient.ContextUsage
+	// pendingCmds collects commands scheduled by slash-command hooks, which
+	// run synchronously inside Update.
+	pendingCmds []tea.Cmd
 }
 
-type streamReadyMsg <-chan protocol.Event
-type errMsg error
-type denialSettledMsg struct{}
-
-type ModelOption func(*Model)
-
-func WithSpawnApprovalBroker(broker *SpawnApprovalBroker) ModelOption {
-	return func(model *Model) {
-		model.spawnBroker = broker
-	}
+// serviceEventMsg carries a stream event tagged with its session, so events
+// still in flight from a replaced session are ignored.
+type serviceEventMsg struct {
+	sessionID string
+	event     zotigodclient.Event
 }
 
-func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegistry *commands.Registry, opts ...ModelOption) *Model {
+type submitResultMsg struct {
+	inputID string
+	command zotigodclient.Command
+	err     error
+}
+
+type sessionRefreshedMsg zotigodclient.Session
+
+type serviceNoticeMsg string
+
+func NewModel(opts ModelOptions) *Model {
 	ta := textarea.New()
 	ta.Placeholder = "Ask Zotigo..."
 	ta.Focus()
@@ -103,7 +177,6 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	// Do not use textarea's built-in prompt (it appears on every wrapped visual line).
 	ta.Prompt = ""
 
-	// Custom styles
 	styles := ta.Styles()
 	styles.Focused.Base = lipgloss.NewStyle()
 	styles.Focused.Text = lipgloss.NewStyle()
@@ -116,126 +189,102 @@ func NewModel(ag *agent.Agent, sessMgr *session.Manager, sessID string, cmdRegis
 	vp := viewport.New()
 	vp.SoftWrap = false
 	vp.MouseWheelEnabled = true
-	viewportEnabled := shouldUseViewportRenderer()
 
-	m := Model{
-		agent:              ag,
-		sessionMgr:         sessMgr,
-		sessionID:          sessID,
-		cmdRegistry:        cmdRegistry,
-		ctx:                context.Background(),
+	ctx, cancel := context.WithCancel(context.Background())
+	m := &Model{
+		service:            opts.Service,
+		session:            opts.Session,
+		location:           opts.Location,
+		embedded:           opts.Embedded,
+		cmdRegistry:        opts.Registry,
+		ctx:                ctx,
+		cancel:             cancel,
+		history:            opts.History,
+		historyTruncated:   opts.HistoryTruncated,
+		cursor:             opts.Cursor,
 		input:              ta,
 		viewport:           vp,
-		viewportEnabled:    viewportEnabled,
+		viewportEnabled:    shouldUseViewportRenderer(),
 		viewportAutoScroll: true,
-		// Keep the local auto-approve toggle in sync with the agent's
-		// actual policy — new sessions default to Auto, and resuming
-		// a session inherits whatever policy was active. Without this
-		// sync, shift-tab would start at "off" while the agent was
-		// actually in Auto.
-		autoApprove:       ag.Describe().ApprovalPolicy == agent.ApprovalPolicyAuto,
-		bypassPermissions: ag.Describe().ApprovalPolicy == agent.ApprovalPolicyBypass,
+		streamed:           make(map[string]map[string]string),
+		ownInputs:          make(map[string]bool),
+		pendingInputs:      make(map[string]bool),
+		finalized:          make(map[string]bool),
+		submissions:        zotigodclient.NewSubmissions(),
+		steeringTurns:      make(map[string]string),
+		approvalPolicy:     opts.Session.ApprovalPolicy,
+		contextUsage:       opts.Session.ContextUsage,
+		needsAsstMarker:    true,
 	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(&m)
+	m.restoreFromHistory()
+	return m
+}
+
+// restoreFromHistory rebuilds turn, approval and usage state from the
+// durable log so a resumed TUI shows what the service is doing now.
+func (m *Model) restoreFromHistory() {
+	m.openTurnID = lastOpenDisplayTurnID(m.history)
+	m.thinking = m.openTurnID != ""
+	if m.thinking {
+		m.turnStartTime = time.Now()
+	}
+	for _, item := range m.history {
+		if item.Type == session.DisplayItemTurnCompleted && item.Turn != nil && item.Turn.Usage != nil {
+			m.addTurnUsage(*item.Turn.Usage)
+		}
+		if item.Type == session.DisplayItemAssistantMessage {
+			// Already printed from history; ignore deltas still in flight.
+			m.finalized[item.ID] = true
 		}
 	}
-
-	// A bypassed resume executes registered pending tools immediately. Normal
-	// policies restore the approval UI so the user can approve or deny them.
-	snap := ag.Snapshot()
-	if snap.State == agent.StatePaused && len(snap.PendingActions) > 0 {
-		m.restoreOpenDisplayTurnID()
-		if m.bypassPermissions {
-			m.resumeBypass = true
-			m.thinking = true
-			m.turnStartTime = time.Now()
-		} else {
-			m.approving = true
-			m.approvalChoice = 0
-			m.setPendingApprovals(snap.PendingActions)
-		}
+	// A pending approval is only actionable while a live worker holds it.
+	// An offline session's replacement worker denies it on restart.
+	if pending := pendingApproval(m.history, m.openTurnID); pending != nil && m.session.Live {
+		m.showApproval(pending)
 	}
-
-	return &m
 }
 
 func (m *Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{textarea.Blink}
-	if cmd := waitForSpawnApproval(m.spawnBroker); cmd != nil {
-		cmds = append(cmds, cmd)
-	}
-	if !m.resumeBypass {
-		return tea.Batch(cmds...)
-	}
-	ch, err := m.agent.ExecuteBypassedPendingActions(m.ctx)
-	m.resumeBypass = false
-	if err != nil {
-		cmds = append(cmds, func() tea.Msg { return errMsg(err) })
-		return tea.Batch(cmds...)
-	}
-	resume := func() tea.Msg {
-		return streamReadyMsg(ch)
-	}
-	cmds = append(cmds, resume)
-	return tea.Batch(cmds...)
+	m.events = m.service.Subscribe(m.ctx, m.session.ID, m.cursor, zotigodclient.StreamOptions{})
+	return tea.Batch(textarea.Blink, waitForServiceEvent(m.events, m.session.ID))
 }
 
-func (m *Model) printInitialHistory(isRepaint bool) tea.Cmd {
-	items, truncated := m.initialDisplayItems()
+// SessionID reports the bound service session.
+func (m *Model) SessionID() string { return m.session.ID }
 
+// OpenTurnID reports the turn the service is still running, if any.
+func (m *Model) OpenTurnID() string { return m.openTurnID }
+
+// Close stops the event stream.
+func (m *Model) Close() { m.cancel() }
+
+func (m *Model) printInitialHistory() tea.Cmd {
 	headerText := "Welcome to Zotigo CLI"
-	if len(items) > 0 {
+	if len(m.history) > 0 {
 		headerText = "Welcome back to Zotigo CLI"
 	}
-
 	header := headerStyle.Render("── " + headerText + " ──")
 
 	var cmds []tea.Cmd
 	cmds = append(cmds, m.commitLine(header))
-	cmds = append(cmds, m.commitLine(renderAgentBanner(m.agent.Describe())))
-	if truncated {
+	cmds = append(cmds, m.commitLine(renderSessionBanner(m.session, m.location, m.embedded)))
+	if m.historyTruncated {
 		cmds = append(cmds, m.commitLine(headerStyle.Render("── (...earlier messages truncated...) ──")))
 	}
 	cmds = append(cmds, m.commitLine(""))
-
-	for _, item := range items {
+	for _, item := range m.history {
+		if item.Subagent != nil {
+			continue
+		}
 		if str, ok := renderDisplayItem(item); ok {
 			cmds = append(cmds, m.commitLine(str))
 		}
 	}
+	if m.thinking && !m.approving {
+		cmds = append(cmds, m.commitLine(timingStyle.Render("… a turn is still running in the session service")))
+	}
 	cmds = append(cmds, m.commitLine(""))
 	return tea.Sequence(cmds...)
-}
-
-func (m *Model) initialDisplayItems() ([]session.DisplayItem, bool) {
-	if m.sessionMgr == nil || m.sessionID == "" {
-		return nil, false
-	}
-	items, ok, err := m.sessionMgr.ListDisplayItems(m.sessionID)
-	if err != nil || !ok {
-		return nil, false
-	}
-
-	const maxHistory = 100
-	truncated := false
-	if len(items) > maxHistory {
-		items = items[len(items)-maxHistory:]
-		truncated = true
-	}
-	return items, truncated
-}
-
-func (m *Model) restoreOpenDisplayTurnID() {
-	if m.sessionMgr == nil || m.sessionID == "" {
-		return
-	}
-	items, ok, err := m.sessionMgr.ListDisplayItems(m.sessionID)
-	if err != nil || !ok {
-		return
-	}
-	m.displayTurnID = lastOpenDisplayTurnID(items)
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -247,34 +296,52 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.appendTranscript(string(msg))
 		return m, nil
 
-	case spawnApprovalRequestMsg:
-		if msg.request == nil {
-			return m, waitForSpawnApproval(m.spawnBroker)
-		}
-		m.spawnRequest = msg.request
-		m.approving = true
-		m.approvalChoice = 0
-		m.setPendingApprovals(msg.request.request.Actions)
-		m.approvalContext = "Subagent " + msg.request.request.AgentName
-		return m, waitForSpawnApprovalCancellation(msg.request)
-
-	case spawnApprovalResolvedMsg:
-		return m, waitForSpawnApproval(m.spawnBroker)
-
-	case spawnApprovalCanceledMsg:
-		if m.spawnRequest != msg.request {
+	case serviceEventMsg:
+		if msg.sessionID != m.session.ID {
 			return m, nil
 		}
-		m.spawnRequest = nil
-		m.approving = false
-		m.approvalContext = ""
-		m.pendingApprovals = nil
-		m.approvalDecisions = nil
-		m.pendingToolName = ""
-		return m, tea.Batch(
-			m.commitLine(warningStyle.Render("⚠ ")+"Subagent approval expired or was canceled"),
-			waitForSpawnApproval(m.spawnBroker),
-		)
+		return m, tea.Batch(m.handleServiceEvent(msg.event), m.nextServiceEvent())
+
+	case submitResultMsg:
+		return m, m.handleSubmitResult(msg)
+
+	case sessionRefreshedMsg:
+		m.session = zotigodclient.Session(msg)
+		m.contextUsage = m.session.ContextUsage
+		m.approvalPolicy = m.session.ApprovalPolicy
+		return m, nil
+
+	case serviceNoticeMsg:
+		return m, m.commitLine(string(msg))
+
+	case approvalFailedMsg:
+		m.approvalSubmitted = false
+		return m, m.commitLine(string(msg))
+
+	case exitStoppedMsg:
+		log.Printf("cli_stop_exit session=%s result=%d err=%v", m.session.ID, msg.result, msg.err)
+		if msg.err != nil {
+			// Do not exit claiming a stop that did not happen.
+			return m, m.commitLine(errorStyle.Render("✗ ") + "Could not stop the turn; still attached: " + msg.err.Error())
+		}
+		m.stopping = true
+		return m, tea.Sequence(m.commitLine(timingStyle.Render(stopResultLine(msg.result))), m.quit())
+
+	case stopFinishedMsg:
+		log.Printf("cli_stop session=%s result=%d err=%v", m.session.ID, msg.result, msg.err)
+		if msg.err != nil {
+			m.stopping = false
+			return m, m.commitLine(errorStyle.Render("✗ ") + "Stop failed: " + msg.err.Error())
+		}
+		for _, id := range msg.inputs {
+			delete(m.pendingInputs, id)
+			delete(m.steeringTurns, id)
+		}
+		if msg.result != zotigodclient.StopRequested {
+			m.stopping = false
+			return m, m.commitLine(timingStyle.Render(stopResultLine(msg.result)))
+		}
+		return m, nil
 
 	case tea.MouseWheelMsg:
 		if !m.viewportEnabled {
@@ -292,7 +359,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.width = msg.Width
 		m.height = msg.Height
 
-		// textarea width = screen width - borders - padding - prompt width - safety margin
 		frameWidth := inputStyle.GetHorizontalFrameSize()
 		promptWidth := lipgloss.Width(promptStyle.Render("➜ "))
 		inputWidth := m.width - frameWidth - promptWidth - 1
@@ -305,9 +371,8 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		if !m.initialPrinted {
 			m.initialPrinted = true
-			return m, m.printInitialHistory(false)
+			return m, m.printInitialHistory()
 		}
-
 		return m, nil
 
 	case tea.KeyboardEnhancementsMsg:
@@ -330,34 +395,42 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		keyStr := msg.String()
 
 		if keyStr == "=" || keyStr == ";" || keyStr == "u" || keyStr == "[" {
-			if !m.input.Focused() || m.thinking {
+			if !m.input.Focused() {
 				return m, nil
 			}
 		}
 
-		if keyStr == "ctrl+c" || keyStr == "esc" {
-			m.saveSession()
-			if summary := renderUsageSummary(m.agent); summary != "" {
-				return m, tea.Sequence(m.commitLine("\n"+summary), tea.Quit)
+		if m.exitPrompt {
+			return m.handleExitPromptKey(keyStr)
+		}
+		if keyStr == "ctrl+c" {
+			if m.mayBeRunning() && !m.embedded {
+				// With the shared daemon the turn can outlive the TUI; ask
+				// instead of choosing silently.
+				m.exitPrompt = true
+				return m, nil
 			}
-			return m, tea.Quit
+			return m, m.quit()
+		}
+		if keyStr == "esc" {
+			// Esc interrupts a running turn, including one an unconfirmed
+			// input may have started; with nothing running it exits.
+			if m.mayBeRunning() && !m.approving {
+				return m, m.requestPause()
+			}
+			if !m.approving {
+				return m, m.quit()
+			}
 		}
 
 		if keyStr == "shift+tab" {
-			m.bypassPermissions = false
-			m.autoApprove = !m.autoApprove
-			if m.autoApprove {
-				m.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)
-			} else {
-				m.agent.SetApprovalPolicy(agent.ApprovalPolicyManual)
-			}
-			// Re-focus textarea to maintain cursor blink cycle
-			cmd := m.input.Focus()
-			return m, cmd
+			return m, tea.Batch(m.cycleApprovalPolicy(), m.input.Focus())
 		}
 
 		if m.approving {
 			switch keyStr {
+			case "esc":
+				return m.denyApproval("")
 			case "up", "k":
 				if m.approvalChoice > 0 {
 					m.approvalChoice--
@@ -370,32 +443,20 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, nil
 			case "enter":
 				switch m.approvalChoice {
-				case 0: // Accept
-					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
-						return m.acceptCurrentApproval()
-					}
-					return m.submitApproval()
-				case 1: // Deny → back to input
-					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
-						return m.denyCurrentApproval("")
-					}
-					return m.denyAndReturn("")
-				case 2: // Feedback textarea → deny with text
+				case 0:
+					return m.acceptApproval()
+				case 1:
+					return m.denyApproval("")
+				case 2:
 					v := m.input.Value()
 					if strings.TrimSpace(v) == "" {
-						return m, nil // empty text, do nothing
+						return m, nil
 					}
 					m.input.Reset()
-					if len(m.pendingApprovals) > 1 || m.spawnRequest != nil {
-						return m.denyCurrentApproval(v)
-					}
-					return m.denyAndReturn(v)
+					return m.denyApproval(v)
 				}
 			}
-			// When approvalChoice==2, let other keys fall through to textarea update
-			if m.approvalChoice == 2 {
-				// fall through to bottom textarea update logic
-			} else {
+			if m.approvalChoice != 2 {
 				return m, nil
 			}
 		}
@@ -414,338 +475,54 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 
-		if keyStr == "enter" {
-			if m.thinking {
-				return m, nil
-			}
+		if keyStr == "enter" && !m.approving {
 			v := m.input.Value()
 			if strings.TrimSpace(v) == "" {
 				return m, nil
 			}
-
-			// Slash command routing
 			if commands.IsCommand(v) {
 				cmdName, args, _ := commands.Parse(v)
-
-				// 1. Try builtin commands (e.g., /help, /clear, /model)
-				if cmd, ok := m.cmdRegistry.Get(cmdName); ok {
+				if command, ok := m.cmdRegistry.Get(cmdName); ok {
 					m.input.Reset()
 					var output strings.Builder
 					env := m.buildCmdEnv(&output)
-					err := cmd.Execute(m.ctx, env, args)
+					err := command.Execute(m.ctx, env, args)
+					scheduled := m.pendingCmds
+					m.pendingCmds = nil
 					if err != nil {
-						return m, m.commitLine(errorStyle.Render("✗ ") + "Error: " + err.Error())
+						scheduled = append(scheduled, m.commitLine(errorStyle.Render("✗ ")+"Error: "+err.Error()))
+					} else if output.Len() > 0 {
+						scheduled = append([]tea.Cmd{m.commitLine(output.String())}, scheduled...)
 					}
-					if output.Len() > 0 {
-						return m, m.commitLine(output.String())
-					}
-					return m, nil
+					return m, tea.Sequence(scheduled...)
 				}
-
-				// 2. Not a builtin command — send as user message to the model
-				// The model has all skill instructions injected and can handle
-				// slash-style invocations like "/commit fix bug" naturally.
+				// Other slash input (skills, /compact) goes to the session
+				// service, which owns its interpretation.
 			}
-
-			// Parse input for @file references
-			var msg protocol.Message
-			msg.Role = protocol.RoleUser
-			msg.CreatedAt = time.Now()
-
-			re := regexp.MustCompile(`(?:^|\s)@([^\s]+)`) // Corrected escaping for backslash in regex
-			matches := re.FindAllStringSubmatchIndex(v, -1)
-
-			lastIndex := 0
-			for _, match := range matches {
-				start, end := match[0], match[1]
-				path := v[match[2]:match[3]]
-
-				if start > lastIndex {
-					msg.Content = append(msg.Content, protocol.ContentPart{
-						Type: protocol.ContentTypeText,
-						Text: v[lastIndex:start],
-					})
-				}
-
-				isImage := false
-				if isImagePath(path) {
-					if _, err := os.Stat(path); err == nil {
-						data, err := os.ReadFile(path)
-						if err == nil {
-							mime := "image/png"
-							ext := strings.ToLower(filepath.Ext(path))
-							switch ext {
-							case ".jpg", ".jpeg":
-								mime = "image/jpeg"
-							case ".webp":
-								mime = "image/webp"
-							}
-							msg.Content = append(msg.Content, protocol.ContentPart{
-								Type: protocol.ContentTypeImage,
-								Image: &protocol.MediaPart{
-									Data:      data,
-									MediaType: mime,
-								},
-							})
-							isImage = true
-						}
-					}
-				}
-
-				if !isImage {
-					msg.Content = append(msg.Content, protocol.ContentPart{
-						Type: protocol.ContentTypeText,
-						Text: v[start:end],
-					})
-				}
-				lastIndex = end
-			}
-
-			if lastIndex < len(v) {
-				msg.Content = append(msg.Content, protocol.ContentPart{
-					Type: protocol.ContentTypeText,
-					Text: v[lastIndex:],
-				})
-			}
-
 			m.input.Reset()
-			m.thinking = true
-			m.turnStartTime = time.Now()
-			m.displayTurnID = fmt.Sprintf("turn_%d", m.turnStartTime.UnixNano())
-			m.needsAsstMarker = true
-			m.currentAsstMsg = ""
-			m.displayAsstContent = nil
-			m.appendDisplayItem(session.DisplayItem{
-				Type: session.DisplayItemTurnStarted,
-				Turn: &session.DisplayTurn{ID: m.displayTurnID},
-			})
-			m.appendDisplayItem(displayMessageItem(session.DisplayItemUserMessage, protocol.RoleUser, msg))
-
-			userMsgStr, _ := renderMessage(msg)
-			return m, tea.Batch(m.commitLine(userMsgStr), m.startRun(msg))
+			return m, m.submitInput(v)
 		}
-	case streamReadyMsg:
-		m.resumeBypass = false
-		m.eventCh = msg
-		m.currentAsstMsg = ""
-		m.displayAsstContent = nil
-		m.streamFlushed = 0
-		m.needsAsstMarker = true
-		return m, waitForNextEvent(m.eventCh)
-
-	case protocol.Event:
-		switch msg.Type {
-		case protocol.EventTypeContentDelta:
-			if msg.ContentPartDelta != nil {
-				isReasoning := msg.ContentPartDelta.Type == protocol.ContentTypeReasoning
-				var pendingFlush tea.Cmd
-
-				// Transition: start reasoning block
-				if isReasoning && !m.streamingReasoning {
-					m.streamingReasoning = true
-					m.currentAsstMsg += reasoningLabelStyle.Render("⏺ Thinking...") + "\n"
-					m.needsAsstMarker = true // reset for when text starts
-				}
-				// Transition: reasoning ended, text started
-				if !isReasoning && m.streamingReasoning {
-					m.streamingReasoning = false
-					if !strings.HasSuffix(m.currentAsstMsg, "\n") {
-						m.currentAsstMsg += "\n"
-					}
-					pendingFlush = m.flushStreamedLines()
-				}
-
-				if !isReasoning && m.needsAsstMarker {
-					m.currentAsstMsg += asstMarkerStyle.Render("⏺ ")
-					m.needsAsstMarker = false
-				}
-				if isReasoning {
-					m.currentAsstMsg += reasoningStyle.Render(msg.ContentPartDelta.Text)
-					m.appendAssistantDisplayPart(string(protocol.ContentTypeReasoning), msg.ContentPartDelta.Text)
-				} else {
-					m.currentAsstMsg += msg.ContentPartDelta.Text
-					m.appendAssistantDisplayPart(string(protocol.ContentTypeText), msg.ContentPartDelta.Text)
-				}
-				if cmd := m.flushStreamedLines(); cmd != nil {
-					if pendingFlush != nil {
-						return m, tea.Batch(pendingFlush, cmd, waitForNextEvent(m.eventCh))
-					}
-					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
-				}
-				if pendingFlush != nil {
-					return m, tea.Batch(pendingFlush, waitForNextEvent(m.eventCh))
-				}
-			}
-		case protocol.EventTypeToolCallDelta:
-			if msg.ToolCallDelta != nil && msg.ToolCallDelta.Name != "" {
-				// Flush any pending text before the tool call
-				if m.currentAsstMsg != "" {
-					if !strings.HasSuffix(m.currentAsstMsg, "\n") {
-						m.currentAsstMsg += "\n"
-					}
-					if cmd := m.flushStreamedLines(); cmd != nil {
-						m.currentAsstMsg = fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCallDelta.Name))
-						return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
-					}
-				}
-				m.currentAsstMsg = fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCallDelta.Name))
-			}
-		case protocol.EventTypeToolCallEnd:
-			if msg.ToolCall != nil {
-				placeholder := fmt.Sprintf("⏺ %s ...", toPascalCase(msg.ToolCall.Name))
-				full := toolMarkerStyle.Render("⏺ ") + formatToolCall(msg.ToolCall) + "\n"
-				m.currentAsstMsg = strings.Replace(m.currentAsstMsg, placeholder, full, 1)
-				m.appendToolCallDisplayPart(msg.ToolCall)
-				m.needsAsstMarker = true
-				// Flush tool call to scrollback so next content starts fresh
-				if cmd := m.flushStreamedLines(); cmd != nil {
-					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
-				}
-			}
-		case protocol.EventTypeToolResultDone:
-			if msg.ToolResult != nil {
-				rendered := renderProtocolToolResult(msg.ToolResult)
-				m.currentAsstMsg += rendered + "\n"
-				m.appendToolResultDisplayPart(msg.ToolResult)
-				if cmd := m.flushStreamedLines(); cmd != nil {
-					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
-				}
-			}
-		case protocol.EventTypeToolProgress:
-			if msg.ToolResult != nil {
-				rendered := renderProtocolToolResult(msg.ToolResult)
-				m.currentAsstMsg += rendered + "\n"
-				m.appendToolResultDisplayPart(msg.ToolResult)
-				if cmd := m.flushStreamedLines(); cmd != nil {
-					return m, tea.Batch(cmd, waitForNextEvent(m.eventCh))
-				}
-			}
-		case protocol.EventTypeFinish:
-			m.thinking = false
-			m.streamingReasoning = false
-			snap := m.agent.Snapshot()
-			timingSuffix := "\n" + timingStyle.Render("✻ Completed in "+formatDuration(time.Since(m.turnStartTime)))
-
-			if m.streamFlushed > 0 {
-				// Lines were incrementally committed — just flush the remaining tail
-				var batchCmds []tea.Cmd
-				if m.currentAsstMsg != "" {
-					batchCmds = append(batchCmds, m.commitLine(m.currentAsstMsg))
-				}
-				m.currentAsstMsg = ""
-				m.streamFlushed = 0
-
-				if msg.FinishReason == "need_approval" {
-					m.approving = true
-					m.approvalChoice = 0
-					m.setPendingApprovals(snap.PendingActions)
-					m.pendingToolArgs = ""
-					m.appendTurnPaused()
-					m.saveSession()
-					if len(batchCmds) > 0 {
-						return m, tea.Batch(batchCmds...)
-					}
-					return m, nil
-				}
-
-				batchCmds = append(batchCmds, m.commitLine(timingSuffix))
-				m.eventCh = nil
-				m.appendTurnCompleted(msg.FinishReason)
-				m.saveSession()
-				return m, tea.Sequence(batchCmds...)
-			}
-
-			// Short reply — no incremental flush happened, use renderMessage
-			formattedMsg := ""
-			if len(snap.History) > 0 {
-				lastMsg := snap.History[len(snap.History)-1]
-				if lastMsg.Role == protocol.RoleAssistant {
-					if str, ok := renderMessage(lastMsg); ok {
-						formattedMsg = str
-					}
-				}
-			}
-			if formattedMsg == "" && m.currentAsstMsg != "" {
-				formattedMsg = "\n" + m.currentAsstMsg
-			}
-
-			if msg.FinishReason == "need_approval" {
-				m.approving = true
-				m.approvalChoice = 0
-				m.setPendingApprovals(snap.PendingActions)
-				m.pendingToolArgs = ""
-
-				m.currentAsstMsg = ""
-				m.appendTurnPaused()
-				m.saveSession()
-				if formattedMsg != "" {
-					return m, m.commitLine(formattedMsg)
-				}
-				return m, nil
-			}
-
-			m.currentAsstMsg = ""
-			m.eventCh = nil
-			m.appendTurnCompleted(msg.FinishReason)
-			m.saveSession()
-			if formattedMsg != "" {
-				return m, tea.Sequence(m.commitLine(formattedMsg), m.commitLine(timingSuffix))
-			}
-			return m, m.commitLine(timingSuffix)
-
-		case protocol.EventTypeError:
-			log.Printf("cli_turn_error session=%s error=%v", m.sessionID, msg.Error)
-			m.err = msg.Error
-			m.thinking = false
-			m.appendTurnFailed(msg.Error)
-			m.saveSession()
-			errStr := "\n" + errorStyle.Render("✗ ") + "Error: " + fmt.Sprintf("%v", msg.Error)
-			return m, m.commitLine(errStr)
-		}
-		return m, waitForNextEvent(m.eventCh)
-
-	case denialSettledMsg:
-		m.saveSession()
-		return m, nil
-
-	case errMsg:
-		log.Printf("cli_runtime_error: %v", msg)
-		if strings.Contains(msg.Error(), "agent is not paused") {
-			return m, nil
-		}
-		m.err = msg
-		m.thinking = false
-		if m.eventCh != nil || m.approving || m.hasOpenDisplayTurn() {
-			m.appendTurnFailed(msg)
-			m.saveSession()
-		}
-		errStr := "\n" + errorStyle.Render("✗ ") + "System Error: " + fmt.Sprintf("%v", msg)
-		return m, m.commitLine(errStr)
 	}
 
 	if !m.approving || m.approvalChoice == 2 {
 		// Filter IME composition events: key press with no printable text
-		// and not a special/functional key. These are intermediate states
-		// from CJK input methods that cause cursor flickering.
+		// and not a special/functional key.
 		if k, ok := msg.(tea.KeyPressMsg); ok {
 			if len(k.Text) == 0 && !isSpecialKey(k) {
 				return m, nil
 			}
 		}
 
-		// Before handling key input, predict line wrap and pre-grow the input height.
 		if k, ok := msg.(tea.KeyPressMsg); ok && len(k.Text) > 0 {
 			w := m.input.Width()
 			if w > 0 {
 				val := m.input.Value()
-				// Compute the width of the current last line.
 				lastLineLen := 0
 				if idx := strings.LastIndex(val, "\n"); idx >= 0 {
 					lastLineLen = lipgloss.Width(val[idx+1:])
 				} else {
 					lastLineLen = lipgloss.Width(val)
 				}
-				// If adding the next char exceeds width, allocate one more line in advance.
 				if lastLineLen+lipgloss.Width(k.Text) >= w {
 					m.input.SetHeight(m.inputLineCount() + 1)
 				}
@@ -754,85 +531,359 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		m.input, cmd = m.input.Update(msg)
 		cmds = append(cmds, cmd)
-
 		m.input.SetHeight(m.inputLineCount())
 	}
 
 	return m, tea.Batch(cmds...)
 }
 
-func (m *Model) startRun(msg protocol.Message) tea.Cmd {
-	return func() tea.Msg {
-		ch, err := m.agent.RunMessage(m.ctx, msg)
-		if err != nil {
-			return errMsg(err)
+func (m *Model) quit() tea.Cmd {
+	var lines []tea.Cmd
+	if summary := renderUsageSummary(m.sessionUsage, m.turns, m.session.Profile); summary != "" {
+		lines = append(lines, m.commitLine("\n"+summary))
+	}
+	if m.thinking && !m.stopping {
+		if m.embedded {
+			lines = append(lines, m.commitLine(warningStyle.Render("⚠ ")+"Stopping the running turn (--no-daemon sessions end with this process)."))
+		} else {
+			lines = append(lines, m.commitLine(timingStyle.Render(fmt.Sprintf("The running turn continues in zotigod. Reattach with: zotigo --resume (session %s)", m.session.ID))))
 		}
-		return streamReadyMsg(ch)
+	}
+	m.cancel()
+	lines = append(lines, tea.Quit)
+	return tea.Sequence(lines...)
+}
+
+// exitStoppedMsg ends the TUI once the running turn is known to stop.
+type exitStoppedMsg struct {
+	result zotigodclient.StopResult
+	err    error
+}
+
+// stopFinishedMsg reports an Esc stop that did not exit the TUI.
+type stopFinishedMsg struct {
+	// inputs were the stop's input targets; a confirmed stop has placed
+	// all of them, so they no longer keep the TUI busy.
+	inputs []string
+	result zotigodclient.StopResult
+	err    error
+}
+
+const stopTimeout = 15 * time.Second
+
+func (m *Model) handleExitPromptKey(keyStr string) (tea.Model, tea.Cmd) {
+	switch keyStr {
+	case "s", "S":
+		m.exitPrompt = false
+		return m, tea.Batch(m.commitLine(timingStyle.Render("Stopping the turn…")), m.stopTurnAndQuit())
+	case "b", "B", "ctrl+c":
+		m.exitPrompt = false
+		return m, m.quit()
+	case "esc", "c", "C":
+		m.exitPrompt = false
+		return m, m.input.Focus()
+	}
+	return m, nil
+}
+
+// mayBeRunning reports whether a turn is running or an input of this TUI
+// may have started one the event stream has not reported yet (in flight,
+// or its submission result was lost).
+func (m *Model) mayBeRunning() bool {
+	return m.thinking || len(m.pendingInputs) > 0
+}
+
+// stopTarget is the turn this TUI shows as running plus its own inputs
+// whose turn the event stream has not reported yet.
+func (m *Model) stopTarget() zotigodclient.StopTarget {
+	inputs := make([]string, 0, len(m.pendingInputs))
+	for id := range m.pendingInputs {
+		inputs = append(inputs, id)
+	}
+	return zotigodclient.StopTarget{
+		TurnID:      m.openTurnID,
+		InputIDs:    inputs,
+		Submissions: m.submissions,
+	}
+}
+
+func (m *Model) stopTurnCmd(done func(zotigodclient.StopResult, error) tea.Msg) tea.Cmd {
+	service, sessionID, target, parent := m.service, m.session.ID, m.stopTarget(), m.ctx
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(parent, stopTimeout)
+		defer cancel()
+		result, err := zotigodclient.StopTurn(ctx, service, sessionID, target)
+		return done(result, err)
+	}
+}
+
+// stopTurnAndQuit exits only after the service accepted the stop or the
+// turn is known to have finished; a failed stop keeps the TUI open.
+func (m *Model) stopTurnAndQuit() tea.Cmd {
+	return m.stopTurnCmd(func(result zotigodclient.StopResult, err error) tea.Msg {
+		return exitStoppedMsg{result: result, err: err}
+	})
+}
+
+func stopResultLine(result zotigodclient.StopResult) string {
+	switch result {
+	case zotigodclient.StopRequested:
+		return "Stopped the running turn."
+	case zotigodclient.StopAlreadyEnded:
+		return "The turn had already finished."
+	default:
+		return "No turn was running."
+	}
+}
+
+// imageReferencePattern matches @path references in the prompt.
+var imageReferencePattern = regexp.MustCompile(`(?:^|\s)@([^\s]+)`)
+
+// buildMessageRequest turns prompt text into a service message. Readable
+// @image references become inline images; other references stay as text
+// for the agent to resolve against the session cwd.
+func buildMessageRequest(text string) zotigodclient.MessageRequest {
+	req := zotigodclient.MessageRequest{ClientMessageID: "tui_" + uuid.NewString()}
+	var body strings.Builder
+	lastIndex := 0
+	for _, match := range imageReferencePattern.FindAllStringSubmatchIndex(text, -1) {
+		start, end := match[0], match[1]
+		path := text[match[2]:match[3]]
+		body.WriteString(text[lastIndex:start])
+		if image, ok := readImageReference(path); ok {
+			req.Images = append(req.Images, image)
+		} else {
+			body.WriteString(text[start:end])
+		}
+		lastIndex = end
+	}
+	body.WriteString(text[lastIndex:])
+	req.Text = strings.TrimSpace(body.String())
+	return req
+}
+
+func readImageReference(path string) (zotigodclient.Image, bool) {
+	if !isImagePath(path) {
+		return zotigodclient.Image{}, false
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return zotigodclient.Image{}, false
+	}
+	mime := "image/png"
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".jpg", ".jpeg":
+		mime = "image/jpeg"
+	case ".webp":
+		mime = "image/webp"
+	}
+	return zotigodclient.Image{MimeType: mime, DataBase64: base64.StdEncoding.EncodeToString(data)}, true
+}
+
+// submitInput sends input to the service. The service decides whether it
+// starts a turn or steers the open one; the TUI renders the input at once
+// and recognizes the durable copy by its client message id.
+func (m *Model) submitInput(text string) tea.Cmd {
+	req := buildMessageRequest(text)
+	m.ownInputs[req.ClientMessageID] = true
+	m.pendingInputs[req.ClientMessageID] = true
+	submissions := m.submissions
+	if !m.thinking {
+		m.thinking = true
+		m.turnStartTime = time.Now()
+	}
+	rendered := "\n" + userMarkerStyle.Render("❯ ") + text
+	service, sessionID, ctx := m.service, m.session.ID, m.ctx
+	return tea.Batch(m.finishStreamBlock(), m.commitLine(rendered), func() tea.Msg {
+		command, err := zotigodclient.SubmitTracked(ctx, service, sessionID, req, submissions)
+		return submitResultMsg{inputID: req.ClientMessageID, command: command, err: err}
+	})
+}
+
+func (m *Model) handleSubmitResult(msg submitResultMsg) tea.Cmd {
+	if msg.err != nil && !zotigodclient.SubmissionRejectedErr(msg.err) {
+		// The service may have recorded it and started a turn; keep it as
+		// a stop target until the event stream shows where it went.
+		if m.openTurnID == "" {
+			m.thinking = false
+		}
+		return m.commitLine(warningStyle.Render("⚠ ") + "Could not confirm the message was accepted; if it started a turn it will appear here and Ctrl+C can still stop it (" + msg.err.Error() + ")")
+	}
+	if msg.err != nil {
+		delete(m.ownInputs, msg.inputID)
+		delete(m.pendingInputs, msg.inputID)
+		if m.openTurnID == "" {
+			m.thinking = false
+		}
+		return m.commitLine(errorStyle.Render("✗ ") + "Message not accepted: " + msg.err.Error())
+	}
+	if msg.command.Type == "steering" {
+		switch msg.command.TurnID {
+		case "":
+		case m.openTurnID:
+			delete(m.pendingInputs, msg.inputID)
+		default:
+			// Joined a turn this TUI has not seen start; StopTurn finds it
+			// from the input until that turn's events arrive.
+			m.steeringTurns[msg.inputID] = msg.command.TurnID
+		}
+		return m.commitLine(timingStyle.Render("↳ added to the running turn"))
+	}
+	return nil
+}
+
+func (m *Model) requestPause() tea.Cmd {
+	if m.stopping {
+		return nil
+	}
+	m.stopping = true
+	inputs := m.stopTarget().InputIDs
+	return tea.Batch(m.commitLine(timingStyle.Render("Stopping…")), m.stopTurnCmd(func(result zotigodclient.StopResult, err error) tea.Msg {
+		return stopFinishedMsg{inputs: inputs, result: result, err: err}
+	}))
+}
+
+// nextApprovalPolicy is the Shift+Tab order: Manual → Auto → Full access.
+func nextApprovalPolicy(current string) string {
+	switch current {
+	case "manual":
+		return "auto"
+	case "bypass_permissions":
+		return "manual"
+	default:
+		return "bypass_permissions"
+	}
+}
+
+// cycleApprovalPolicy moves the session to the next approval policy. The
+// service only changes policy while the session is idle.
+func (m *Model) cycleApprovalPolicy() tea.Cmd {
+	target := nextApprovalPolicy(m.approvalPolicy)
+	service, sessionID, ctx := m.service, m.session.ID, m.ctx
+	return func() tea.Msg {
+		if err := service.SetApprovalPolicy(ctx, sessionID, target); err != nil {
+			return serviceNoticeMsg(errorStyle.Render("✗ ") + "Approval policy unchanged: " + err.Error())
+		}
+		session, err := service.GetSession(ctx, sessionID)
+		if err != nil {
+			return serviceNoticeMsg(errorStyle.Render("✗ ") + "Refresh session: " + err.Error())
+		}
+		return sessionRefreshedMsg(session)
+	}
+}
+
+func (m *Model) refreshSession() tea.Cmd {
+	service, sessionID, ctx := m.service, m.session.ID, m.ctx
+	return func() tea.Msg {
+		session, err := service.GetSession(ctx, sessionID)
+		if err != nil {
+			return nil
+		}
+		return sessionRefreshedMsg(session)
 	}
 }
 
 func (m *Model) buildCmdEnv(output *strings.Builder) *commands.Environment {
+	service, sessionID, workDir := m.service, m.session.ID, m.session.WorkingDirectory
 	return &commands.Environment{
-		Agent:        m.agent,
-		SkillManager: m.agent.SkillManager(),
 		Output: func(format string, args ...interface{}) {
 			fmt.Fprintf(output, format+"\n", args...)
 		},
-		ClearHistory: func() {
-			m.agent.ClearHistory()
+		NewSession: m.startNewSession,
+		Compact: func() error {
+			if m.thinking {
+				return fmt.Errorf("compaction runs between turns; wait for the running turn or stop it first")
+			}
+			m.pendingCmds = append(m.pendingCmds, m.submitInput("/compact"))
+			return nil
+		},
+		Skills: func(ctx context.Context, reload bool) ([]commands.SkillInfo, error) {
+			listed, err := service.Skills(ctx, sessionID, reload)
+			if err != nil {
+				return nil, err
+			}
+			result := make([]commands.SkillInfo, 0, len(listed))
+			for _, skill := range listed {
+				if skill.Enabled {
+					result = append(result, commands.SkillInfo{Name: skill.Name, Description: skill.Description, Scope: skill.Scope})
+				}
+			}
+			return result, nil
+		},
+		GetModels: func() []string {
+			profiles, err := service.Profiles(m.ctx, workDir)
+			if err != nil {
+				return nil
+			}
+			names := make([]string, 0, len(profiles.Profiles))
+			for _, profile := range profiles.Profiles {
+				names = append(names, fmt.Sprintf("%s (%s/%s)", profile.Name, profile.Provider, profile.Model))
+			}
+			return names
+		},
+		SetModel: func(profile string) error {
+			return service.SetProfile(m.ctx, sessionID, profile)
+		},
+		Usage: func() commands.UsageReport {
+			report := commands.UsageReport{Session: m.sessionUsage, Turns: m.turns}
+			if usage := m.contextUsage; usage != nil && usage.Status == "available" {
+				report.ContextTokens, report.ContextWindow = usage.Tokens, usage.Window
+			}
+			return report
 		},
 	}
 }
 
-func waitForNextEvent(ch <-chan protocol.Event) tea.Cmd {
+func waitForServiceEvent(events <-chan zotigodclient.Event, sessionID string) tea.Cmd {
 	return func() tea.Msg {
-		if ch == nil {
-			return nil
-		}
-		evt, ok := <-ch
+		event, ok := <-events
 		if !ok {
 			return nil
 		}
-		return evt
+		return serviceEventMsg{sessionID: sessionID, event: event}
 	}
 }
 
-func (m *Model) flushStreamedLines() tea.Cmd {
-	// Flush all complete lines (up to the last \n) to scrollback.
-	// Only the incomplete trailing fragment stays in View().
-	idx := strings.LastIndex(m.currentAsstMsg, "\n")
-	if idx < 0 {
-		return nil // no complete line yet
+func (m *Model) nextServiceEvent() tea.Cmd {
+	if m.streamClosed {
+		return nil
 	}
-	toCommit := m.currentAsstMsg[:idx]
-	m.currentAsstMsg = m.currentAsstMsg[idx+1:]
-
-	prefix := ""
-	if m.streamFlushed == 0 {
-		prefix = "\n"
-	}
-	m.streamFlushed++
-	return m.commitLine(prefix + toCommit)
+	return waitForServiceEvent(m.events, m.session.ID)
 }
 
-func (m *Model) saveSession() {
-	if m.sessionMgr == nil || m.sessionID == "" {
-		return
+// startNewSession replaces the bound session with a fresh one in the same
+// directory, keeping the policy and profile. The service decides ownership
+// again from the directory, exactly as at startup.
+func (m *Model) startNewSession() error {
+	if m.thinking {
+		return fmt.Errorf("a turn is still running; wait for it or stop it with Esc first")
 	}
-
-	snap := m.agent.Snapshot()
-
-	if m.currentAsstMsg != "" {
-		partialMsg := protocol.NewAssistantMessage(m.currentAsstMsg)
-		snap.History = append(snap.History, partialMsg)
+	created, err := m.service.CreateSession(m.ctx, zotigodclient.CreateSessionRequest{
+		WorkingDirectory: m.session.WorkingDirectory,
+		Profile:          m.session.Profile,
+		ApprovalPolicy:   m.approvalPolicy,
+	})
+	if err != nil {
+		return fmt.Errorf("create session: %w", err)
 	}
-
-	sess, err := m.sessionMgr.Load(m.sessionID)
-	if err == nil {
-		if contextCompacted(sess, snap) {
-			_, _ = m.sessionMgr.AppendDisplayItem(m.sessionID, session.DisplayItem{Type: session.DisplayItemContextCompacted})
-		}
-		sessionadapter.ApplySnapshot(sess, snap, sessionadapter.LastUserPrompt(snap.History))
-		_ = m.sessionMgr.Save(sess)
-	}
+	m.cancel()
+	m.ctx, m.cancel = context.WithCancel(context.Background())
+	m.session = created
+	m.history, m.historyTruncated, m.cursor = nil, false, 0
+	m.streamClosed, m.reconnecting = false, false
+	m.streamed = make(map[string]map[string]string)
+	m.finalized = make(map[string]bool)
+	m.ownInputs = make(map[string]bool)
+	m.pendingInputs = make(map[string]bool)
+	m.steeringTurns = make(map[string]string)
+	m.endTurn()
+	m.sessionUsage, m.lastTurnUsage, m.turns = protocol.Usage{}, nil, 0
+	m.contextUsage = created.ContextUsage
+	m.approvalPolicy = created.ApprovalPolicy
+	m.events = m.service.Subscribe(m.ctx, m.session.ID, 0, zotigodclient.StreamOptions{})
+	m.pendingCmds = append(m.pendingCmds,
+		m.commitLine("\n"+headerStyle.Render("── New session ──")),
+		m.commitLine(renderSessionBanner(m.session, m.location, m.embedded)),
+		waitForServiceEvent(m.events, m.session.ID))
+	return nil
 }

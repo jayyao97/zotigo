@@ -11,6 +11,11 @@ import (
 
 type submitApprovalDecisionRequest struct {
 	Decisions []approvalDecisionRequestDTO `json:"decisions"`
+	// StopTurn denies every pending call and interrupts the turn in the
+	// same worker step, so the agent cannot continue past the denial. It
+	// is the approval-time equivalent of pause, which is rejected while an
+	// approval is pending.
+	StopTurn bool `json:"stop_turn,omitempty"`
 }
 
 type approvalDecisionRequestDTO struct {
@@ -73,8 +78,16 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if req.StopTurn {
+		for _, decision := range decisions {
+			if decision.Approved {
+				writeAPIError(w, http.StatusBadRequest, "stop_turn requires every decision to deny")
+				return
+			}
+		}
+	}
 
-	resolved, err := h.workers.SubmitApproval(r.Context(), id, approval.ID, decisions)
+	resolved, err := h.workers.SubmitApproval(r.Context(), id, approval.ID, decisions, req.StopTurn)
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, fmt.Sprintf("submit approval decision: %v", err))
 		return

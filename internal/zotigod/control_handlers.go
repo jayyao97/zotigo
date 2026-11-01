@@ -593,9 +593,9 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 		case errors.Is(err, errPauseInputStopTimeout):
 			writeAPIErrorCode(w, http.StatusGatewayTimeout, "input_stop_timeout", "timed out waiting for in-flight input to stop")
 		case errors.Is(err, errApprovalPending):
-			writeAPIError(w, http.StatusConflict, "pause rejected while approval is pending")
+			writeAPIErrorCode(w, http.StatusConflict, "approval_pending", "pause rejected while approval is pending")
 		case errors.Is(err, errTurnMismatch):
-			writeAPIError(w, http.StatusConflict, "pause turn_id does not match active turn")
+			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "pause turn_id does not match active turn")
 		case errors.Is(err, errNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires an active turn")
 		case errors.Is(err, errWorkerOffline):

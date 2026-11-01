@@ -38,9 +38,12 @@ func (m *Model) inlineView() tea.View {
 		sb.WriteString(asstMarkerStyle.Render("⏺ ") + "Thinking...\n")
 	}
 
-	if m.approving {
+	switch {
+	case m.exitPrompt:
+		m.writeExitPrompt(&sb)
+	case m.approving:
 		m.writeApprovalView(&sb)
-	} else {
+	default:
 		m.writeInputFooter(&sb)
 	}
 
@@ -93,9 +96,12 @@ func altScreenView(s string) tea.View {
 func (m *Model) liveView() string {
 	var sb strings.Builder
 
-	if m.approving {
+	switch {
+	case m.exitPrompt:
+		m.writeExitPrompt(&sb)
+	case m.approving:
 		m.writeApprovalView(&sb)
-	} else {
+	default:
 		m.writeInputFooter(&sb)
 	}
 
@@ -104,31 +110,41 @@ func (m *Model) liveView() string {
 	return sb.String()
 }
 
+func (m *Model) writeExitPrompt(sb *strings.Builder) {
+	sb.WriteString(warningStyle.Render("A turn is still running in zotigod. Exit how?"))
+	sb.WriteString("\n")
+	sb.WriteString("  [s] Stop the turn and exit\n")
+	fmt.Fprintf(sb, "  [b] Keep it running in the background and exit (reattach: zotigo --resume, session %s)\n", m.session.ID)
+	sb.WriteString("  [esc] Cancel")
+}
+
 func (m *Model) writeApprovalView(sb *strings.Builder) {
-	if m.approvalContext != "" {
-		sb.WriteString(warningStyle.Render("⚠ ") + m.approvalContext + " requests approval\n")
+	if m.approval == nil {
+		return
 	}
-	if len(m.pendingApprovals) > 1 {
-		current := m.pendingApprovals[m.approvalItemChoice]
-		tc := current.ToolCall
-		if tc == nil {
-			tc = &protocol.ToolCall{Name: current.Name, Arguments: current.Arguments}
-		}
+	pending := m.approval.Pending
+	if len(pending) > 1 {
+		current := pending[m.approvalItemChoice]
+		tc := &protocol.ToolCall{ID: current.ToolCallID, Name: current.ToolName, Arguments: current.Arguments}
 		sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + formatToolCall(tc) + "\n")
-		sb.WriteString(blurredChoice.Render(fmt.Sprintf("  Approval %d/%d", m.approvalItemChoice+1, len(m.pendingApprovals))) + "\n")
-		if hint := approvalHintForAction(current); hint != "" {
+		sb.WriteString(blurredChoice.Render(fmt.Sprintf("  Approval %d/%d", m.approvalItemChoice+1, len(pending))) + "\n")
+		if hint := approvalHintForAction(&current); hint != "" {
 			sb.WriteString(blurredChoice.Render("  " + hint))
 			sb.WriteString("\n")
 		}
 		sb.WriteString("\n")
 	} else {
 		sb.WriteString(warningStyle.Render("⚠ ") + "Execute: " + m.pendingToolName + "\n")
-		if len(m.pendingApprovals) == 1 {
-			if hint := approvalHintForAction(m.pendingApprovals[0]); hint != "" {
+		if len(pending) == 1 {
+			if hint := approvalHintForAction(&pending[0]); hint != "" {
 				sb.WriteString(blurredChoice.Render("  " + hint))
 				sb.WriteString("\n")
 			}
 		}
+	}
+	if m.approvalSubmitted {
+		sb.WriteString(blurredChoice.Render("  Submitting decision…"))
+		return
 	}
 
 	// Accept line
@@ -139,7 +155,7 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 	}
 
 	// Deny line
-	denyLabel := denyLabelForApprovalCount(len(m.pendingApprovals))
+	denyLabel := denyLabelForApprovalCount(len(pending))
 	if m.approvalChoice == 1 {
 		fmt.Fprintf(sb, "  %s %s\n", focusedChoice.Render(">"), focusedChoice.Render(denyLabel))
 	} else {
@@ -159,15 +175,17 @@ func (m *Model) writeApprovalView(sb *strings.Builder) {
 }
 
 func (m *Model) writeInputFooter(sb *strings.Builder) {
-	if m.bypassPermissions {
-		sb.WriteString(errorStyle.Render(">> BYPASS PERMISSIONS — safety checks disabled"))
-		sb.WriteString("\n")
-	} else if m.autoApprove {
-		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto-approve"))
-		sb.WriteString("\n")
+	switch m.approvalPolicy {
+	case "bypass_permissions":
+		sb.WriteString(errorStyle.Render(">> FULL ACCESS — safety checks disabled (shift+tab to cycle)"))
+	case "manual":
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("39")).Bold(true).Render(">> Manual — ask before every change (shift+tab to cycle)"))
+	default:
+		sb.WriteString(lipgloss.NewStyle().Foreground(lipgloss.Color("208")).Bold(true).Render(">> Auto (shift+tab to cycle)"))
 	}
+	sb.WriteString("\n")
 
-	if status := renderUsageStatus(m.agent); status != "" {
+	if status := renderUsageStatus(m.contextUsage, m.lastTurnUsage, m.sessionUsage); status != "" {
 		sb.WriteString(status)
 		sb.WriteString("\n")
 	}

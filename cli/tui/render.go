@@ -8,9 +8,9 @@ import (
 	"time"
 
 	"charm.land/lipgloss/v2"
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
 // reBlankRun matches 3+ consecutive newlines (2+ blank lines) for compression.
@@ -83,55 +83,6 @@ func renderDisplayToolResult(result *session.DisplayToolResult) string {
 		return ""
 	}
 	return renderToolResultFromDisplay(result, defaultToolResultMaxLines)
-}
-
-func renderMessage(msg protocol.Message) (string, bool) {
-	switch msg.Role {
-	case protocol.RoleUser:
-		text := msg.String()
-		if text == "" {
-			return "", false
-		}
-		return "\n" + userMarkerStyle.Render("❯ ") + text, true
-
-	case protocol.RoleAssistant:
-		var parts []string
-		for _, p := range msg.Content {
-			switch p.Type {
-			case protocol.ContentTypeText:
-				if p.Text != "" {
-					parts = append(parts, "\n"+asstMarkerStyle.Render("⏺ ")+p.Text)
-				}
-			case protocol.ContentTypeReasoning:
-				if p.Text != "" {
-					parts = append(parts, "\n"+reasoningLabelStyle.Render("⏺ Thinking: ")+reasoningStyle.Render(p.Text))
-				}
-			case protocol.ContentTypeToolCall:
-				if p.ToolCall != nil {
-					parts = append(parts, "\n"+toolMarkerStyle.Render("⏺ ")+formatToolCall(p.ToolCall))
-				}
-			}
-		}
-		if len(parts) == 0 {
-			return "", false
-		}
-		return strings.Join(parts, ""), true
-
-	case protocol.RoleTool:
-		var parts []string
-		for _, p := range msg.Content {
-			if p.Type == protocol.ContentTypeToolResult && p.ToolResult != nil {
-				parts = append(parts, renderProtocolToolResult(p.ToolResult))
-			}
-		}
-		if len(parts) == 0 {
-			return "", false
-		}
-		return "\n" + strings.Join(parts, "\n"), true
-
-	default:
-		return "", false
-	}
 }
 
 // primaryArgKey maps tool names to the single most informative argument.
@@ -229,16 +180,12 @@ func formatSpawnToolCall(name string, args map[string]any) string {
 	return fmt.Sprintf("%s(%s)", name, strings.Join(parts, ", "))
 }
 
-func approvalHintForAction(action *agent.PendingAction) string {
-	if action == nil || action.Name != "spawn" {
+func approvalHintForAction(action *session.DisplayPendingApproval) string {
+	if action == nil || action.ToolName != "spawn" {
 		return ""
 	}
-	arguments := action.Arguments
-	if arguments == "" && action.ToolCall != nil {
-		arguments = action.ToolCall.Arguments
-	}
 	var args map[string]any
-	if err := json.Unmarshal([]byte(arguments), &args); err != nil {
+	if err := json.Unmarshal([]byte(action.Arguments), &args); err != nil {
 		return ""
 	}
 	agentType := fmt.Sprintf("%v", args["agent_type"])
@@ -260,15 +207,6 @@ func truncateToolArg(s string) string {
 		return s[:77] + "..."
 	}
 	return s
-}
-
-func renderProtocolToolResult(tr *protocol.ToolResult) string {
-	return formatToolResult(tr, defaultToolResultMaxLines)
-}
-
-// formatToolResult renders tool result lines with ⎿ prefix and indentation.
-func formatToolResult(tr *protocol.ToolResult, maxLines int) string {
-	return renderToolResultFromDisplay(displayToolResultFromProtocol(tr), maxLines)
 }
 
 func renderToolResultFromDisplay(tr *session.DisplayToolResult, maxLines int) string {
@@ -383,36 +321,26 @@ func toolResultOutputText(text string, jsonValue any) string {
 	}
 }
 
-// formatPendingActions builds the approval header string from pending tool actions.
-// Includes the classifier/policy reason when available so users can see why
-// approval was requested.
-func formatPendingActions(actions []*agent.PendingAction) string {
-	var parts []string
-	for _, act := range actions {
-		tc := act.ToolCall
-		if tc == nil {
-			tc = &protocol.ToolCall{Name: act.Name, Arguments: act.Arguments}
+// formatPendingApprovals builds the approval header from the service's
+// pending tool calls, including the reason the call needs approval.
+func formatPendingApprovals(pending []session.DisplayPendingApproval) string {
+	parts := make([]string, 0, len(pending))
+	for _, action := range pending {
+		line := formatToolCall(&protocol.ToolCall{ID: action.ToolCallID, Name: action.ToolName, Arguments: action.Arguments})
+		if strings.HasPrefix(action.Source, "subagent:") {
+			line = "[" + strings.TrimPrefix(action.Source, "subagent:") + "] " + line
 		}
-		line := formatToolCall(tc)
-		if reason := strings.TrimSpace(act.Decision.Reason); reason != "" {
-			badge := ""
-			switch act.Decision.Source {
-			case agent.SafetyDecisionSourceClassifier:
-				badge = "classifier"
-			case agent.SafetyDecisionSourceHardRule:
-				badge = "policy"
-			case agent.SafetyDecisionSourceBypass:
-				badge = "bypass"
-			}
-			if act.Decision.RiskLevel != "" && act.Decision.RiskLevel != "normal" {
-				badge = strings.TrimSpace(badge + " " + act.Decision.RiskLevel)
-			}
-			if badge != "" {
-				line += fmt.Sprintf("\n  ⚠ [%s] %s", badge, reason)
+		reason := strings.TrimSpace(action.Reason)
+		if reason == "" {
+			reason = strings.TrimSpace(action.Description)
+		}
+		if reason != "" {
+			if action.RiskLevel != "" && action.RiskLevel != "normal" {
+				line += fmt.Sprintf("\n  ⚠ [%s] %s", action.RiskLevel, reason)
 			} else {
 				line += fmt.Sprintf("\n  ⚠ %s", reason)
 			}
-			if act.Decision.RequiresSnapshot {
+			if action.RequiresSnapshot {
 				line += " (snapshot will be created)"
 			}
 		}
@@ -421,11 +349,9 @@ func formatPendingActions(actions []*agent.PendingAction) string {
 	return strings.Join(parts, "\n")
 }
 
-// renderAgentBanner formats the resolved agent configuration into a
-// compact, non-secret banner shown right under the welcome header.
-// Fields that are unset (e.g. no classifier configured) are omitted so
-// the block stays tight.
-func renderAgentBanner(d agent.Description) string {
+// renderSessionBanner formats the non-secret session facts shown under the
+// welcome header: where it runs, who owns it and how it is configured.
+func renderSessionBanner(sess zotigodclient.Session, location string, embedded bool) string {
 	subStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	keyStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("248"))
 
@@ -436,34 +362,15 @@ func renderAgentBanner(d agent.Description) string {
 		}
 		rows = append(rows, "  "+keyStyle.Render(k+":")+" "+subStyle.Render(v))
 	}
-
-	add("Provider", d.Provider)
-	add("Model", d.Model)
-	if d.ThinkingLevel != "" {
-		add("Thinking", d.ThinkingLevel)
+	add("Session", sess.ID)
+	add("Location", location)
+	add("Directory", sess.WorkingDirectory)
+	add("Profile", sess.Profile)
+	add("Policy", approvalPolicyLabel(sess.ApprovalPolicy))
+	if embedded {
+		add("Service", "in-process (--no-daemon)")
+	} else {
+		add("Service", "zotigod")
 	}
-	add("Policy", string(d.ApprovalPolicy))
-
-	switch {
-	case d.ApprovalPolicy == agent.ApprovalPolicyBypass:
-		add("Classifier", "bypassed")
-	case d.ClassifierAvailable:
-		cls := d.ClassifierProvider
-		if d.ClassifierModel != "" {
-			cls += " / " + d.ClassifierModel
-		}
-		if d.ReviewThreshold != "" {
-			cls += " (threshold=" + d.ReviewThreshold + ")"
-		}
-		add("Classifier", cls)
-	case d.ClassifierEnabled:
-		// Enabled in config but not wired — usually means the resolver
-		// failed (missing classifier profile). Surface it so the user
-		// isn't surprised when approvals start firing.
-		add("Classifier", "enabled but unavailable (falling back to approval)")
-	default:
-		add("Classifier", "off")
-	}
-
 	return strings.Join(rows, "\n")
 }

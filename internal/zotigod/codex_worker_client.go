@@ -1252,7 +1252,7 @@ func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID st
 	}
 	sess.ApprovalPolicy = target
 	sess.UpdatedAt = time.Now().UTC()
-	loweringPermissions := from == agent.ApprovalPolicyBypass && target == agent.ApprovalPolicyAuto
+	loweringPermissions := lowersPermissions(from, target)
 	if loweringPermissions {
 		r.cfg.ApprovalPolicy = string(target)
 	}
@@ -1462,10 +1462,15 @@ func codexAdditionalContext(requestContext *protocol.RequestContext) (map[string
 }
 
 func codexApprovalPolicy(policy string) string {
-	if agent.ApprovalPolicy(policy) == agent.ApprovalPolicyBypass {
+	switch agent.ApprovalPolicy(policy) {
+	case agent.ApprovalPolicyBypass:
 		return "never"
+	case agent.ApprovalPolicyManual:
+		// Commands need approval unless an exec policy rule allows them.
+		return "untrusted"
+	default:
+		return "on-request"
 	}
-	return "on-request"
 }
 
 func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message codexapp.Message) error {

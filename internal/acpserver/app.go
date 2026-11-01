@@ -1,238 +1,154 @@
+// Package acpserver adapts the Agent Client Protocol to the zotigod session
+// service. Editors speak ACP over stdio; sessions, tool execution, approvals
+// and persistence belong to the service, exactly as for the TUI and Desktop.
+//
+// Mapping:
+//   - ACP sessionId is the zotigod session ID, so session/load can reattach
+//     to any zotigo session whose cwd matches.
+//   - session/new with only a cwd creates a directory session; the service
+//     binds it to the Workspace containing that cwd, if any. Starting with
+//     --workspace binds every new session to that Workspace and requires the
+//     cwd to be inside it.
+//   - session/prompt submits a message (start-or-steer) and waits for the
+//     turn that consumes it; session/cancel pauses that turn.
+//   - Approval requests become session/request_permission; the first durable
+//     decision wins across all clients.
+//
+// Tools run in the session runtime on the service host, not through the
+// client's fs/* and terminal/* methods, so they work with clients that do
+// not implement those methods. core/acp.RemoteExecutor remains available to
+// library users who embed an agent directly.
 package acpserver
 
 import (
 	"context"
+	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/acp"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/config"
-	"github.com/jayyao97/zotigo/core/protocol"
-	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
-	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
-	_ "github.com/jayyao97/zotigo/core/providers/gemini"
-	_ "github.com/jayyao97/zotigo/core/providers/openai"
-	"github.com/jayyao97/zotigo/core/runner"
-	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
-
-type sessionState struct {
-	mu      sync.Mutex
-	runner  *runner.Runner
-	session *acp.Session
-
-	cancelFn context.CancelFunc
-}
 
 // Run starts the ACP server and returns a process exit code.
 func Run(args []string) int {
-	_ = args // reserved for symmetry with cliapp.Run
-
+	if len(args) > 0 && args[0] == zotigod.WorkerSubcommand {
+		// Session worker launched by an embedded (--no-daemon) service.
+		return zotigod.Run(args[1:])
+	}
 	log.SetOutput(os.Stderr)
 	log.SetPrefix("[zotigo-acp] ")
 	log.SetFlags(log.LstdFlags)
 	logger := log.New(os.Stderr, "[zotigo-acp] ", log.LstdFlags)
 
+	fs := flag.NewFlagSet("zotigo-acp", flag.ContinueOnError)
+	fs.SetOutput(os.Stderr)
+	noDaemon := fs.Bool("no-daemon", false, "Run the session service inside this process (requires --state-dir); sessions stop when the editor disconnects")
+	stateDir := fs.String("state-dir", "", "Isolated state directory for --no-daemon; must not be ~/.zotigo")
+	workspaceID := fs.String("workspace", "", "Bind new sessions to this Zotigo Workspace; session cwd must be inside it")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	cm := config.NewManager()
-	cfg, err := cm.Load()
+	conn, err := zotigodclient.Connect(ctx, zotigodclient.ConnectOptions{
+		NoDaemon: *noDaemon,
+		StateDir: *stateDir,
+		Logger:   log.New(os.Stderr, "[zotigod-embedded] ", log.LstdFlags),
+	})
 	if err != nil {
-		logger.Printf("Failed to load config: %v", err)
+		logger.Printf("Failed to connect to the session service: %v", err)
 		return 1
 	}
+	defer func() {
+		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := conn.Close(closeCtx); err != nil {
+			logger.Printf("Closing session service: %v", err)
+		}
+	}()
 
-	_, profile, err := cfg.ResolveProfile("")
+	adapter, err := newAdapter(ctx, conn.Client, conn.Embedded, *workspaceID, logger)
 	if err != nil {
-		logger.Printf("Failed to resolve profile: %v", err)
+		logger.Printf("%v", err)
 		return 1
 	}
+	server := adapter.newServer(&stdioRWC{r: os.Stdin, w: os.Stdout})
 
-	state := newServerState(cfg, profile, logger)
-	acpServer := state.newServer(&stdioRWC{r: os.Stdin, w: os.Stdout})
-	state.server = acpServer
-
-	logger.Println("Starting ACP server on stdio...")
-	if err := acpServer.Run(ctx); err != nil {
-		logger.Printf("ACP server error: %v", err)
+	logger.Printf("Starting ACP server on stdio (service=%s embedded=%v workspace=%q)", conn.BaseURL(), conn.Embedded, *workspaceID)
+	runErr := server.Run(ctx)
+	adapter.shutdown()
+	if runErr != nil && !errors.Is(runErr, context.Canceled) && !errors.Is(runErr, io.EOF) {
+		logger.Printf("ACP server error: %v", runErr)
 		return 1
 	}
 	return 0
 }
 
-type serverState struct {
-	cfg     *config.Config
-	profile config.ProfileConfig
-	logger  *log.Logger
-
-	server *acp.Server
-
-	mu       sync.RWMutex
-	sessions map[string]*sessionState
-}
-
-func newServerState(cfg *config.Config, profile config.ProfileConfig, logger *log.Logger) *serverState {
-	return &serverState{
-		cfg:      cfg,
-		profile:  profile,
+// newAdapter validates the optional Workspace binding up front so a
+// misconfigured editor fails at startup instead of at the first session.
+func newAdapter(ctx context.Context, client *zotigodclient.Client, embedded bool, workspaceID string, logger *log.Logger) (*adapter, error) {
+	a := &adapter{
+		client:   client,
+		embedded: embedded,
 		logger:   logger,
-		sessions: make(map[string]*sessionState),
+		sessions: make(map[string]*acpSession),
 	}
+	if workspaceID != "" {
+		workspace, err := client.GetWorkspace(ctx, workspaceID)
+		if err != nil {
+			return nil, fmt.Errorf("--workspace %s: %w", workspaceID, err)
+		}
+		if workspace.Status != "ready" {
+			return nil, fmt.Errorf("--workspace %s is %s, not ready", workspaceID, workspace.Status)
+		}
+		a.workspace = &workspace
+	}
+	return a, nil
 }
 
-func (s *serverState) newServer(rwc io.ReadWriteCloser) *acp.Server {
-	return acp.NewServer(rwc,
+func (a *adapter) newServer(rwc io.ReadWriteCloser) *acp.Server {
+	a.server = acp.NewServer(rwc,
 		acp.OnInitialized(func(caps acp.ClientCapabilities) {
-			s.logger.Printf("Client connected, fs.read=%v, fs.write=%v, terminal=%v",
+			a.logger.Printf("Client connected, fs.read=%v, fs.write=%v, terminal=%v (tools run in the session runtime)",
 				caps.FS.ReadTextFile, caps.FS.WriteTextFile, caps.Terminal)
 		}),
-		acp.OnSessionNew(s.onSessionNew),
-		acp.OnSessionPrompt(s.onSessionPrompt),
-		acp.OnSessionCancel(s.onSessionCancel),
+		acp.OnSessionNew(a.onSessionNew),
+		acp.OnSessionLoad(a.onSessionLoad),
+		acp.OnSessionList(a.onSessionList),
+		acp.OnSessionPrompt(a.onSessionPrompt),
+		acp.OnSessionCancel(a.onSessionCancel),
+		acp.OnSessionModes(a.sessionModes, a.onSetMode),
 	)
+	return a.server
 }
 
-func (s *serverState) onSessionNew(ctx context.Context, params acp.SessionNewParams) (string, error) {
-	workDir := params.Cwd
-	if workDir == "" {
-		workDir, _ = os.Getwd()
+// validateCwd enforces an absolute, existing cwd. ACP clients must send
+// one; the adapter never substitutes its own directory.
+func validateCwd(cwd string) (string, error) {
+	if cwd == "" {
+		return "", errors.New("cwd is required")
 	}
-
-	sessionID := fmt.Sprintf("acp-%d", time.Now().UnixNano())
-	exec := acp.NewRemoteExecutor(s.server, sessionID, workDir)
-
-	home, _ := os.UserHomeDir()
-	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
-
-	sm, err := wiring.NewSkillManager(workDir)
+	if !filepath.IsAbs(cwd) {
+		return "", fmt.Errorf("cwd must be absolute: %q", cwd)
+	}
+	info, err := os.Stat(cwd)
 	if err != nil {
-		s.logger.Printf("Warning: failed to load skills: %v", err)
+		return "", fmt.Errorf("cwd: %w", err)
 	}
-	pb := wiring.NewSystemPromptBuilder(wiring.PromptConfig{
-		WorkDir:      workDir,
-		SkillManager: sm,
-	})
-	ucb := wiring.NewUserContextBuilder(wiring.PromptConfig{
-		WorkDir:                    workDir,
-		Transport:                  "ACP (Editor Integration)",
-		IncludeProjectInstructions: true,
-	})
-
-	ag, err := wiring.NewAgent(wiring.AgentConfig{
-		Profile:            s.profile,
-		Executor:           exec,
-		PromptBuilder:      pb,
-		UserContextBuilder: ucb,
-		ApprovalPolicy:     agent.ApprovalPolicyManual,
-		TranscriptDir:      transcriptDir,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to create agent: %w", err)
+	if !info.IsDir() {
+		return "", fmt.Errorf("cwd is not a directory: %q", cwd)
 	}
-
-	// ACP does not own an LSP manager or subagent scope here, so LSP and
-	// spawn tools stay disabled by leaving those host options unset.
-	if err := wiring.RegisterDefaultTools(ag, wiring.ToolSetConfig{
-		Config:           s.cfg,
-		Profile:          s.profile,
-		DisableViewImage: true,
-	}); err != nil {
-		return "", fmt.Errorf("failed to register tools: %w", err)
-	}
-	ag.SetSkillManager(sm)
-
-	acpTransport := acp.NewTransport(s.server, sessionID)
-	r := runner.New(ag, acpTransport)
-
-	sess := acp.NewSession(sessionID, workDir)
-	s.server.RegisterSession(sessionID, sess)
-
-	s.mu.Lock()
-	s.sessions[sessionID] = &sessionState{
-		runner:  r,
-		session: sess,
-	}
-	s.mu.Unlock()
-
-	s.logger.Printf("Session created: %s (workDir=%s)", sessionID, workDir)
-	return sessionID, nil
-}
-
-func (s *serverState) onSessionPrompt(ctx context.Context, sessionID string, text string, images []acp.ContentBlock) acp.PromptResult {
-	state, ok := s.session(sessionID)
-	if !ok {
-		return acp.PromptResult{Err: fmt.Errorf("session %q not found", sessionID)}
-	}
-
-	cancelPrompt(state)
-
-	// Derive promptCtx from both the server ctx and the request ctx, so
-	// cancellation from either side (session/cancel or transport close)
-	// propagates to the agent.
-	promptCtx, cancel := context.WithCancel(ctx)
-
-	state.mu.Lock()
-	state.cancelFn = cancel
-	state.mu.Unlock()
-	state.session.SetCancel(cancel)
-
-	msg := protocol.NewUserMessage(text)
-	for _, img := range images {
-		if img.Data != "" {
-			msg.Content = append(msg.Content, protocol.ContentPart{
-				Type: protocol.ContentTypeImage,
-				Image: &protocol.MediaPart{
-					Data:      []byte(img.Data),
-					MediaType: img.MimeType,
-				},
-			})
-		}
-	}
-
-	err := state.runner.RunFullTurn(promptCtx, msg)
-
-	cancelled := promptCtx.Err() != nil
-	cancel()
-
-	if err != nil {
-		if cancelled {
-			return acp.PromptResult{StopReason: acp.StopReasonCancelled}
-		}
-		return acp.PromptResult{Err: err}
-	}
-
-	return acp.PromptResult{StopReason: acp.StopReasonEndTurn}
-}
-
-func (s *serverState) onSessionCancel(_ context.Context, sessionID string) {
-	state, ok := s.session(sessionID)
-	if ok {
-		cancelPrompt(state)
-	}
-}
-
-func (s *serverState) session(sessionID string) (*sessionState, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	state, ok := s.sessions[sessionID]
-	return state, ok
-}
-
-func cancelPrompt(s *sessionState) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.cancelFn != nil {
-		s.cancelFn()
-		s.cancelFn = nil
-	}
+	return filepath.Clean(cwd), nil
 }
 
 type stdioRWC struct {

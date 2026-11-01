@@ -417,3 +417,76 @@ func TestServer_SessionUpdate_WireFormat(t *testing.T) {
 		t.Errorf("expected status=pending, got %s", toolUpdate.Update.Status)
 	}
 }
+
+// A session/cancel notification must not crash the server: jsonrpc2's
+// ReplyHandler panics when a handled message is never replied to.
+func TestServer_SessionCancelNotificationDoesNotPanic(t *testing.T) {
+	serverSide, clientSide := newPipePair()
+	cancelled := make(chan string, 1)
+	srv := acp.NewServer(serverSide, acp.OnSessionCancel(func(_ context.Context, sessionID string) {
+		cancelled <- sessionID
+	}))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go srv.Run(ctx)
+	client := clientConn(clientSide)
+	defer client.Close()
+
+	if err := client.Notify(ctx, acp.MethodSessionCancel, acp.SessionCancelParams{SessionID: "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-cancelled:
+		if got != "s1" {
+			t.Fatalf("cancelled session = %q", got)
+		}
+	case <-ctx.Done():
+		t.Fatal("cancel callback not invoked")
+	}
+	var result acp.InitializeResult
+	if _, err := client.Call(ctx, acp.MethodInitialize, acp.InitializeParams{ProtocolVersion: 1}, &result); err != nil {
+		t.Fatalf("server stopped after cancel notification: %v", err)
+	}
+}
+
+// session/cancel must reach the agent while the prompt it cancels is still
+// open; a serialized dispatcher would deliver it only after the turn ended.
+func TestServer_CancelReachesRunningPrompt(t *testing.T) {
+	serverSide, clientSide := newPipePair()
+	cancelled := make(chan struct{})
+	srv := acp.NewServer(serverSide,
+		acp.OnSessionPrompt(func(ctx context.Context, sessionID string, text string, images []acp.ContentBlock) acp.PromptResult {
+			select {
+			case <-cancelled:
+				return acp.PromptResult{StopReason: acp.StopReasonCancelled}
+			case <-ctx.Done():
+				return acp.PromptResult{StopReason: acp.StopReasonCancelled}
+			}
+		}),
+		acp.OnSessionCancel(func(context.Context, string) { close(cancelled) }),
+	)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	go srv.Run(ctx)
+	client := clientConn(clientSide)
+	defer client.Close()
+
+	done := make(chan acp.SessionPromptResult, 1)
+	go func() {
+		var result acp.SessionPromptResult
+		_, _ = client.Call(ctx, acp.MethodSessionPrompt, acp.SessionPromptParams{SessionID: "s1", Prompt: []acp.ContentBlock{{Type: "text", Text: "hi"}}}, &result)
+		done <- result
+	}()
+	time.Sleep(50 * time.Millisecond)
+	if err := client.Notify(ctx, acp.MethodSessionCancel, acp.SessionCancelParams{SessionID: "s1"}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case result := <-done:
+		if result.StopReason != acp.StopReasonCancelled {
+			t.Fatalf("stop reason = %q", result.StopReason)
+		}
+	case <-ctx.Done():
+		t.Fatal("cancel was not delivered while the prompt was running")
+	}
+}

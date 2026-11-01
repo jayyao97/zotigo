@@ -5,9 +5,8 @@ import (
 	"strings"
 
 	"charm.land/lipgloss/v2"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
 
 var (
@@ -17,47 +16,16 @@ var (
 	usageDangerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
 )
 
-// renderUsageStatus builds the one-line "context: ... · session in/out:
-// ..." readout shown above the prompt. Returns "" when no usage is
-// available yet (fresh session before the first turn) so the prompt
-// doesn't get an empty line above it.
-func renderUsageStatus(ag *agent.Agent) string {
-	if ag == nil {
-		return ""
-	}
-	snap := ag.Snapshot()
-	if len(snap.History) == 0 {
-		return ""
-	}
-
-	last, hasLast := protocol.LastTurnUsage(snap.History)
-	session := protocol.SessionUsage(snap.History)
-	if !hasLast && session.TotalTokens == 0 {
-		return ""
-	}
-
-	desc := ag.Describe()
-	// Profile config wins; otherwise assume the conservative default.
-	// Users on smaller models (gpt-4 8k, local llama) should set
-	// `context_window` in their profile rather than relying on this.
-	ctxLimit := desc.ContextWindow
-	if ctxLimit == 0 {
-		ctxLimit = config.DefaultContextWindow
-	}
-
+// renderUsageStatus builds the one-line context/usage readout shown above
+// the prompt. Context occupancy comes from the session service, which owns
+// the authoritative estimate; cumulative output comes from completed turns.
+// Returns "" before anything is known so the prompt has no empty line.
+func renderUsageStatus(contextUsage *zotigodclient.ContextUsage, last *protocol.Usage, total protocol.Usage) string {
 	var parts []string
-
-	// "ctx" and "cache" describe the LAST TURN — they answer
-	// "how full is the prompt I'm about to send" and "how much of
-	// it just hit the cache". Session-cumulative input would
-	// double-count history (each turn re-bills the whole prompt),
-	// so we deliberately leave it off the status line. Cumulative
-	// output is fine to show because each turn's output is unique.
-	if hasLast {
-		used := last.TotalInput()
-		ctxPart := fmt.Sprintf("ctx %s", formatTokens(used))
-		if ctxLimit > 0 {
-			pct := float64(used) / float64(ctxLimit) * 100
+	if contextUsage != nil && contextUsage.Status == "available" && contextUsage.Tokens > 0 {
+		ctxPart := fmt.Sprintf("ctx %s", formatTokens(contextUsage.Tokens))
+		if contextUsage.Window > 0 {
+			pct := float64(contextUsage.Tokens) / float64(contextUsage.Window) * 100
 			pctStr := fmt.Sprintf("%.0f%%", pct)
 			switch {
 			case pct >= 90:
@@ -65,39 +33,29 @@ func renderUsageStatus(ag *agent.Agent) string {
 			case pct >= 70:
 				pctStr = usageWarnStyle.Render(pctStr)
 			}
-			ctxPart = fmt.Sprintf("ctx %s/%s (%s)",
-				formatTokens(used), formatTokens(ctxLimit), pctStr)
+			ctxPart = fmt.Sprintf("ctx %s/%s (%s)", formatTokens(contextUsage.Tokens), formatTokens(contextUsage.Window), pctStr)
 		}
 		parts = append(parts, ctxPart)
-		if last.CacheReadInputTokens > 0 {
-			parts = append(parts, "cache "+formatTokens(last.CacheReadInputTokens))
-		}
 	}
-
-	if session.OutputTokens > 0 {
-		parts = append(parts, "session out "+formatTokens(session.OutputTokens))
+	if last != nil && last.CacheReadInputTokens > 0 {
+		parts = append(parts, "cache "+formatTokens(last.CacheReadInputTokens))
 	}
-
+	if total.OutputTokens > 0 {
+		parts = append(parts, "session out "+formatTokens(total.OutputTokens))
+	}
+	if len(parts) == 0 {
+		return ""
+	}
 	return usageStyle.Render("◇ " + strings.Join(parts, " · "))
 }
 
-// renderUsageSummary builds the multi-line block printed when the user
-// quits the session. Returns "" when the session never produced a turn
-// — printing "0 tokens" would just be noise.
-func renderUsageSummary(ag *agent.Agent) string {
-	if ag == nil {
-		return ""
-	}
-	snap := ag.Snapshot()
-	session := protocol.SessionUsage(snap.History)
-	turns := protocol.CountAssistantTurns(snap.History)
+// renderUsageSummary builds the block printed when the user quits.
+// Returns "" when this TUI saw no completed turn.
+func renderUsageSummary(session protocol.Usage, turns int, profile string) string {
 	if turns == 0 || session.TotalTokens == 0 {
 		return ""
 	}
-
-	desc := ag.Describe()
-	header := usageDimStyle.Render(fmt.Sprintf("── Session usage (%s/%s, %d turns) ──", desc.Provider, desc.Model, turns))
-
+	header := usageDimStyle.Render(fmt.Sprintf("── Session usage (%s, %d turns) ──", profile, turns))
 	rows := []string{
 		header,
 		fmt.Sprintf("  %s %s", padLabel("Input (new)"), formatTokens(session.InputTokens)),

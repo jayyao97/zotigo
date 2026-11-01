@@ -267,6 +267,15 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 					runErr = fmt.Errorf("release approval: %w", err)
 					return runErr
 				}
+				if decision.StopTurn {
+					// Interrupt in the same worker step that released the
+					// denials, before any further command is processed, so
+					// the agent's next model call is cancelled.
+					if err := runtime.pauseTurn(ctx, &pauseCommandPayload{TurnID: resolution.approval.TurnID, Reason: userPauseReason}); err != nil {
+						runErr = fmt.Errorf("stop turn after denial: %w", err)
+						return runErr
+					}
+				}
 			}
 		}
 	}
@@ -452,8 +461,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "skills", stepStarted)
-	home, _ := os.UserHomeDir()
-	transcriptDir := filepath.Join(home, ".zotigo", "sessions", "compacted")
+	transcriptDir := compactedTranscriptDir()
 	observer := wiring.NewObserver(appConfig.Observability, cfg.SessionID, map[string]any{
 		"zotigo_session": cfg.SessionID,
 		"process_start":  time.Now().UTC().Format(time.RFC3339),
@@ -998,7 +1006,7 @@ func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string,
 	from := sess.ApprovalPolicy
 	sess.ApprovalPolicy = target
 	sess.UpdatedAt = time.Now().UTC()
-	loweringPermissions := from == agent.ApprovalPolicyBypass && target == agent.ApprovalPolicyAuto
+	loweringPermissions := lowersPermissions(from, target)
 	if loweringPermissions {
 		// Stop bypassing approval before publishing the safer persisted value.
 		// If persistence fails, keeping the Agent on Auto is the safe outcome.
@@ -1352,7 +1360,9 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		if !r.turnActive {
 			break
 		}
-		if r.agent == nil || r.agent.Snapshot().State != agent.StateIdle || r.turnDone == nil {
+		// A stopping turn is about to finish; wait for it instead of
+		// rejecting input that arrives while the agent is still unwinding.
+		if r.agent == nil || (r.agent.Snapshot().State != agent.StateIdle && !r.turnStopping) || r.turnDone == nil {
 			r.mu.Unlock()
 			return errActiveTurn
 		}
@@ -2062,12 +2072,24 @@ func saveWorkerCommandCursor(sessionID string, cursor workerCommandCursor) error
 	return os.Rename(tmpPath, path)
 }
 
+// compactedTranscriptDir is where native workers archive full transcripts
+// before compaction. It follows the process state root (~/.zotigo, or
+// --state-dir), not a handler's custom session store, so the fork API finds
+// archives where workers wrote them.
+func compactedTranscriptDir() string {
+	root, err := config.StateDir()
+	if err != nil {
+		root = filepath.Join(os.TempDir(), "zotigo")
+	}
+	return filepath.Join(root, "sessions", "compacted")
+}
+
 func workerCommandCursorPath(sessionID string) string {
-	home, err := os.UserHomeDir()
+	root, err := config.StateDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "zotigo-"+sessionID+".cursor")
 	}
-	return filepath.Join(home, ".zotigo", "sessions", sessionID+".worker.cursor")
+	return filepath.Join(root, "sessions", sessionID+".worker.cursor")
 }
 
 func isExpectedWorkerClose(err error) bool {

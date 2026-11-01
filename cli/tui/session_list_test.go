@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"testing"
@@ -20,40 +19,26 @@ func newTestSessionsModel(n, cursor, height int) SessionSelectionModel {
 	}
 }
 
-// newTestModelWithStore creates a model backed by a real FileStore in tmpDir.
-// Each of the n sessions is persisted so Delete() actually has something to
-// remove. Session IDs are zero-padded to satisfy the ID[5:13] slice in the
-// View/status messages.
-func newTestModelWithStore(t *testing.T, n, cursor, height int) (SessionSelectionModel, *session.Manager) {
+// newTestModelWithArchive creates a picker whose archive hook records the
+// archived IDs. Session IDs are long enough for the short-ID display.
+func newTestModelWithArchive(t *testing.T, n, cursor, height int) (SessionSelectionModel, map[string]bool) {
 	t.Helper()
-	tmp := t.TempDir()
-	store, err := session.NewFileStore(tmp)
-	if err != nil {
-		t.Fatalf("new store: %v", err)
-	}
-	mgr := session.NewManagerWithStore(store)
+	archived := map[string]bool{}
 	metas := make([]session.Metadata, 0, n)
 	for i := range n {
-		// ID must be at least 13 chars for the ID[5:13] slice used in the View.
-		id := fmt.Sprintf("sess_test%04d", i)
-		meta := session.Metadata{
-			ID:               id,
+		metas = append(metas, session.Metadata{
+			ID:               fmt.Sprintf("sess_test%04d", i),
 			WorkingDirectory: "/tmp",
 			UpdatedAt:        time.Now(),
-		}
-		sess := &session.Session{Metadata: meta}
-		if err := store.Put(context.Background(), sess); err != nil {
-			t.Fatalf("put: %v", err)
-		}
-		metas = append(metas, meta)
+		})
 	}
-	m := SessionSelectionModel{
-		sessions: metas,
-		manager:  mgr,
-		cursor:   cursor,
-		height:   height,
-	}
-	return m, mgr
+	m := NewSessionSelectionModel(metas, func(id string) error {
+		archived[id] = true
+		return nil
+	}, nil, nil)
+	m.cursor = cursor
+	m.height = height
+	return m, archived
 }
 
 func keyPress(s string) tea.KeyPressMsg {
@@ -133,11 +118,11 @@ func TestClampOffset_OffsetNeverPastEnd(t *testing.T) {
 }
 
 func TestDelete_FirstDEntersConfirm(t *testing.T) {
-	m, _ := newTestModelWithStore(t, 3, 1, 20)
+	m, _ := newTestModelWithArchive(t, 3, 1, 20)
 	m2, _ := m.Update(keyPress("d"))
 	got := m2.(SessionSelectionModel)
-	if !got.pendingDelete {
-		t.Fatalf("first 'd' should enter pendingDelete state")
+	if !got.pendingArchive {
+		t.Fatalf("first 'd' should enter pendingArchive state")
 	}
 	if len(got.sessions) != 3 {
 		t.Fatalf("list should be unchanged until confirmation, got %d", len(got.sessions))
@@ -145,15 +130,15 @@ func TestDelete_FirstDEntersConfirm(t *testing.T) {
 }
 
 func TestDelete_ConfirmRemovesFromStoreAndList(t *testing.T) {
-	m, mgr := newTestModelWithStore(t, 3, 1, 20)
+	m, archived := newTestModelWithArchive(t, 3, 1, 20)
 	targetID := m.sessions[1].ID
 
 	m2, _ := m.Update(keyPress("d"))
 	m3, _ := m2.(SessionSelectionModel).Update(keyPress("y"))
 	got := m3.(SessionSelectionModel)
 
-	if got.pendingDelete {
-		t.Fatal("pendingDelete should be cleared after confirm")
+	if got.pendingArchive {
+		t.Fatal("pendingArchive should be cleared after confirm")
 	}
 	if len(got.sessions) != 2 {
 		t.Fatalf("expected 2 sessions after delete, got %d", len(got.sessions))
@@ -163,21 +148,20 @@ func TestDelete_ConfirmRemovesFromStoreAndList(t *testing.T) {
 			t.Fatalf("deleted session %s still present", targetID)
 		}
 	}
-	// Store must also have dropped it.
-	if _, err := mgr.Load(targetID); err == nil {
-		t.Fatalf("expected Load(%s) to fail after delete", targetID)
+	if !archived[targetID] {
+		t.Fatalf("expected %s to be archived through the service", targetID)
 	}
 }
 
 func TestDelete_CancelLeavesListIntact(t *testing.T) {
-	m, _ := newTestModelWithStore(t, 3, 1, 20)
+	m, _ := newTestModelWithArchive(t, 3, 1, 20)
 	m2, _ := m.Update(keyPress("d"))
 	// Any non-y key should cancel — use "n".
 	m3, _ := m2.(SessionSelectionModel).Update(keyPress("n"))
 	got := m3.(SessionSelectionModel)
 
-	if got.pendingDelete {
-		t.Fatal("pendingDelete should be cleared on cancel")
+	if got.pendingArchive {
+		t.Fatal("pendingArchive should be cleared on cancel")
 	}
 	if len(got.sessions) != 3 {
 		t.Fatalf("list should be untouched, got %d", len(got.sessions))
@@ -185,15 +169,15 @@ func TestDelete_CancelLeavesListIntact(t *testing.T) {
 }
 
 func TestDelete_ArrowCancelsAndDoesNotNavigate(t *testing.T) {
-	// While in pendingDelete, an arrow key must cancel *without* moving the
+	// While in pendingArchive, an arrow key must cancel *without* moving the
 	// cursor — otherwise a user aborting delete would also scroll away from
 	// the row they were inspecting.
-	m, _ := newTestModelWithStore(t, 3, 1, 20)
+	m, _ := newTestModelWithArchive(t, 3, 1, 20)
 	m2, _ := m.Update(keyPress("d"))
 	m3, _ := m2.(SessionSelectionModel).Update(keyPress("down"))
 	got := m3.(SessionSelectionModel)
 
-	if got.pendingDelete {
+	if got.pendingArchive {
 		t.Fatal("arrow should cancel pending delete")
 	}
 	if got.cursor != 1 {
@@ -202,7 +186,7 @@ func TestDelete_ArrowCancelsAndDoesNotNavigate(t *testing.T) {
 }
 
 func TestDelete_CursorClampsWhenLastRowDeleted(t *testing.T) {
-	m, _ := newTestModelWithStore(t, 3, 2, 20) // cursor on last row
+	m, _ := newTestModelWithArchive(t, 3, 2, 20) // cursor on last row
 	m2, _ := m.Update(keyPress("d"))
 	m3, _ := m2.(SessionSelectionModel).Update(keyPress("y"))
 	got := m3.(SessionSelectionModel)
@@ -216,7 +200,7 @@ func TestDelete_CursorClampsWhenLastRowDeleted(t *testing.T) {
 }
 
 func TestView_UnknownHeightDoesNotRenderFullLongList(t *testing.T) {
-	m, _ := newTestModelWithStore(t, 50, 0, 0)
+	m, _ := newTestModelWithArchive(t, 50, 0, 0)
 	view := m.viewString()
 
 	if strings.Contains(view, "1–50 of 50") {
@@ -228,7 +212,7 @@ func TestView_UnknownHeightDoesNotRenderFullLongList(t *testing.T) {
 }
 
 func TestView_SessionRowsStaySingleLine(t *testing.T) {
-	m, _ := newTestModelWithStore(t, 20, 0, 8)
+	m, _ := newTestModelWithArchive(t, 20, 0, 8)
 	m.width = 48
 	m.sessions[0].LastPrompt = "<system-reminder>\n## Skills\n\n### Available skills"
 	m.sessions[1].LastPrompt = "再详细解释一下方程法、假设法和列表法"

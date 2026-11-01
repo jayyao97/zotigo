@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"syscall"
+
+	"github.com/jayyao97/zotigo/core/config"
 )
 
 const monitorArgument = "--internal-crash-monitor"
@@ -21,11 +23,11 @@ func MonitorCrashes(component string) func() {
 		// Drain after service-manager termination; EOF exits normally, while the
 		// manager's final SIGKILL timeout remains a backstop for a stuck monitor.
 		signal.Ignore(os.Interrupt, syscall.SIGTERM)
-		home, err := os.UserHomeDir()
+		root, err := config.StateDir()
 		if err != nil {
 			os.Exit(1)
 		}
-		output, err := newWriter(filepath.Join(home, ".zotigo", "logs", component), maxBytes, maxFiles, maxTotalBytes)
+		output, err := newWriter(filepath.Join(root, "logs", component), maxBytes, maxFiles, maxTotalBytes)
 		if err != nil {
 			os.Exit(1)
 		}

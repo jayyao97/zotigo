@@ -69,6 +69,7 @@ type Session struct {
 	Model                string                    `json:"model,omitempty"`
 	ReasoningEffort      string                    `json:"reasoning_effort,omitempty"`
 	ApprovalPolicy       agent.ApprovalPolicy      `json:"approval_policy"`
+	LastPrompt           string                    `json:"last_prompt,omitempty"`
 	CreatedAt            time.Time                 `json:"created_at"`
 	UpdatedAt            time.Time                 `json:"updated_at"`
 	StartedAt            *time.Time                `json:"started_at,omitempty"`
@@ -1251,11 +1252,21 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusConflict, "workspace is not ready")
 				return
 			}
-			if req.WorkingDirectory != "" && filepath.Clean(req.WorkingDirectory) != filepath.Clean(workspace.RootPath) {
-				writeAPIError(w, http.StatusBadRequest, "working_directory must match the selected workspace")
-				return
-			}
 			workingDirectory = workspace.RootPath
+			if strings.TrimSpace(req.WorkingDirectory) != "" {
+				// Ownership and execution cwd are separate: a session started
+				// from code/backend keeps that directory as its cwd.
+				explicit, err := resolveWorkingDirectory(req.WorkingDirectory)
+				if err != nil {
+					writeAPIError(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				if !zotigoworkspace.PathWithin(workspace.RootPath, explicit) {
+					writeAPIError(w, http.StatusBadRequest, "working_directory must be inside the selected workspace")
+					return
+				}
+				workingDirectory = explicit
+			}
 			assignedWorkspaceID = workspace.ID
 		} else if strings.TrimSpace(req.WorkingDirectory) == "" {
 			root := h.sessionStoreRoot()
@@ -1271,6 +1282,12 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 				writeAPIError(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			workspaceID, releaseWorkspace, ok := h.workspaceOwningDirectory(w, r.Context(), workingDirectory)
+			if !ok {
+				return
+			}
+			defer releaseWorkspace()
+			assignedWorkspaceID = workspaceID
 		}
 		approvalPolicy, err := normalizeSessionApprovalPolicy(req.ApprovalPolicy, true)
 		if err != nil {
@@ -1393,6 +1410,47 @@ func resolveWorkingDirectory(raw string) (string, error) {
 	return workDir, nil
 }
 
+// workspaceOwningDirectory binds a directory session to the Workspace that
+// contains its cwd. A directory outside every Workspace stays an ordinary
+// directory session. A directory inside a Workspace that cannot accept new
+// sessions, or inside several Workspaces, is rejected rather than silently
+// left unowned. The returned release function holds the same Workspace
+// locks as an explicit workspace_id request until the caller finishes.
+func (h *handler) workspaceOwningDirectory(w http.ResponseWriter, ctx context.Context, workingDirectory string) (string, func(), bool) {
+	noop := func() {}
+	if h.catalog == nil {
+		// Without a catalog there is no Workspace model to bind against;
+		// this matches the daemon's existing degraded-catalog behavior.
+		return "", noop, true
+	}
+	owner, err := h.catalog.WorkspaceContainingPath(ctx, workingDirectory)
+	switch {
+	case errors.Is(err, zotigoworkspace.ErrNotFound):
+		return "", noop, true
+	case errors.Is(err, zotigoworkspace.ErrConflict):
+		writeAPIErrorCode(w, http.StatusConflict, "workspace_ambiguous", err.Error()+"; pass workspace_id explicitly")
+		return "", noop, false
+	case err != nil:
+		h.writeCatalogError(w, err)
+		return "", noop, false
+	}
+	workspace, release, err := h.lockWorkspaceForUse(ctx, owner.ID)
+	if err != nil {
+		if errors.Is(err, zotigoworkspace.ErrConflict) {
+			writeAPIErrorCode(w, http.StatusConflict, "workspace_not_ready", fmt.Sprintf("working_directory belongs to workspace %s: %v", owner.ID, err))
+			return "", noop, false
+		}
+		h.writeCatalogError(w, err)
+		return "", noop, false
+	}
+	if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
+		release()
+		writeAPIErrorCode(w, http.StatusConflict, "workspace_not_ready", fmt.Sprintf("working_directory belongs to workspace %s, which is %s", workspace.ID, workspace.Status))
+		return "", noop, false
+	}
+	return workspace.ID, release, true
+}
+
 func (h *handler) persistSession(ctx context.Context, session Session) error {
 	if h.store == nil {
 		return nil
@@ -1453,6 +1511,7 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 			sessions[idx].ReasoningEffort = meta.ReasoningEffort
 			sessions[idx].ApprovalPolicy = meta.ApprovalPolicy
 			sessions[idx].UpdatedAt = meta.UpdatedAt
+			sessions[idx].LastPrompt = meta.LastPrompt
 			sessions[idx].ChannelToolsVersion = meta.Capabilities.ChannelToolsVersion
 			sessions[idx].SessionToolsVersion = meta.Capabilities.SessionToolsVersion
 			sessions[idx].ChannelToolsEligible = channelToolsEligible(meta)
@@ -1496,6 +1555,7 @@ func sessionFromMetadata(meta zotigosession.Metadata, state SessionState, live b
 		Model:                meta.Model,
 		ReasoningEffort:      meta.ReasoningEffort,
 		ApprovalPolicy:       approvalPolicy,
+		LastPrompt:           meta.LastPrompt,
 		CreatedAt:            meta.CreatedAt,
 		UpdatedAt:            meta.UpdatedAt,
 		ContextUsage:         unavailableSessionContextUsage(),
