@@ -109,7 +109,7 @@ func (m *Manager) withLock(wait bool, fn func() error) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	flags := syscall.LOCK_EX
 	if !wait {
 		flags |= syscall.LOCK_NB
@@ -117,7 +117,7 @@ func (m *Manager) withLock(wait bool, fn func() error) error {
 	if err := syscall.Flock(int(f.Fd()), flags); err != nil {
 		return errUpdateBusy
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer func() { _ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN) }()
 	return fn()
 }
 
@@ -131,7 +131,7 @@ func atomicJSON(name string, value any) error {
 		return err
 	}
 	tmp := f.Name()
-	defer os.Remove(tmp)
+	defer func() { _ = os.Remove(tmp) }()
 	if _, err = f.Write(data); err == nil {
 		err = f.Sync()
 	}

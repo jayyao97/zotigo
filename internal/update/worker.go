@@ -148,14 +148,15 @@ func (m *Manager) Worker(action string) error {
 		if err != nil {
 			return err
 		}
-		defer log.Close()
+		defer func() { _ = log.Close() }()
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
 		defer cancel()
-		if action == "prepare" {
+		switch action {
+		case "prepare":
 			err = m.prepare(ctx, &s, log)
-		} else if action == "apply" {
+		case "apply":
 			err = m.apply(ctx, &s, log)
-		} else {
+		default:
 			err = fmt.Errorf("invalid worker action")
 		}
 		if err != nil {
@@ -187,7 +188,7 @@ func (m *Manager) prepare(ctx context.Context, s *Status, log io.Writer) error {
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(checkout)
+	defer func() { _ = os.RemoveAll(checkout) }()
 	if err = run(ctx, log, checkout, "git", "init", "-q"); err != nil {
 		return err
 	}
