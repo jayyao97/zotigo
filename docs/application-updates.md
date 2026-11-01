@@ -16,7 +16,7 @@
 - `data_epoch`：持久化格式的双向兼容代际。同一代际必须允许旧版读取新版写入的数据，才允许自动回退。
 - UI 的 `daemon-version`：源码构建使用的配套 Daemon revision。
 
-先发布配套 Daemon tag，再发布 UI tag。当前待发布组合为 Daemon `v0.0.4-dev.30`、UI `v0.0.4-dev.37`。开发测试可用 UI 安装器的 `--daemon-source` 指向本地 checkout。代码提交本身不会成为可检测的更新；必须发布版本标签。不要重用或移动已发布标签。
+先发布配套 Daemon tag，再发布 UI tag。当前待发布组合为 Daemon `v0.0.4-dev.31`、UI `v0.0.4-dev.38`。开发测试可用 UI 安装器的 `--daemon-source` 指向本地 checkout。代码提交本身不会成为可检测的更新；必须发布版本标签。不要重用或移动已发布标签。
 
 ## 渠道与版本检测
 
