@@ -22,7 +22,7 @@ cleanup() {
   fi
   if [ "$code" != 0 ] && [ "$switched" = yes ]; then
     # Do not replace a running binary if the service cannot be stopped.
-    stop_service || exit 1
+    stop_and_wait || exit 1
     if [ -L "$stage/old-current" ]; then
       atomic_link "$(readlink "$stage/old-current")" "$root/current"
     else
@@ -30,7 +30,23 @@ cleanup() {
       mv "$stage/old-current" "$root/current"
     fi
   fi
-  if [ "$code" != 0 ] && [ "$stopped" = yes ]; then start_service || :; fi
+  if [ "$code" != 0 ] && [ "$stopped" = yes ]; then
+    # bootout can return while launchd and the old process are still exiting.
+    # Keep recovery metadata if we cannot safely restart and verify the old service.
+    if [ "$switched" != yes ]; then wait_stopped || exit 1; fi
+    version=$(sed -n 's/^version=//p' "$root/current/INSTALLATION")
+    if ! start_service_retry; then
+      printf 'Failed to restart the previous %s installation; recovery metadata retained.\n' "$component" >&2
+      exit 1
+    fi
+    if [ "$component" != desktop ]; then
+      if ! (service_verify; exit 0); then
+        printf 'Previous %s installation did not recover; recovery metadata retained.\n' "$component" >&2
+        exit 1
+      fi
+    fi
+    printf 'Previous %s installation restored and started.\n' "$component" >&2
+  fi
   if [ "$component" = daemon ]; then rm -f "$prefix/updates/daemon/draining"; fi
   rm -f "$root/install.lock/update-owner" "$prefix/updates/$component/journal"
   rmdir "$root/install.lock"
@@ -49,7 +65,7 @@ stop_service() {
       [ -z "$desktop_pid" ] || kill "$desktop_pid" 2>/dev/null || :
       sleep 2
     fi
-    (assert_stopped)
+    (assert_stopped; exit 0)
     return
   fi
   case "$platform" in
@@ -71,6 +87,35 @@ start_service() {
       Darwin) launchctl bootstrap "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.zotigo.$component.plist" ;;
     esac
   fi
+}
+wait_stopped() {
+  # Explicit subshell exit also works inside dash EXIT traps (rollback).
+  stop_attempts=0
+  until (assert_stopped; exit 0) > "$stage/stop-check" 2>&1; do
+    stop_attempts=$((stop_attempts + 1))
+    if [ "$stop_attempts" -ge 30 ]; then
+      cat "$stage/stop-check" >&2
+      printf 'Timed out waiting for %s to stop; no running files were replaced.\n' "$component" >&2
+      return 1
+    fi
+    sleep 1
+  done
+}
+stop_and_wait() {
+  # A nonzero bootout may also mean the service is already unloaded. The
+  # process and service checks below, not the command's return, decide safety.
+  stop_service || printf 'Stop command failed; checking whether %s has exited.\n' "$component" >&2
+  wait_stopped
+}
+start_service_retry() {
+  start_attempts=0
+  until start_service; do
+    # Do not repeatedly bootstrap a job that was registered despite an error.
+    if [ "$component" != desktop ] && service_running; then return 0; fi
+    start_attempts=$((start_attempts + 1))
+    [ "$start_attempts" -lt 15 ] || return 1
+    sleep 1
+  done
 }
 version=$(sed -n 's/^version=//p' "$root/prepared/INSTALLATION")
 [ -n "$version" ] || fail 'Prepared installation metadata is missing.'
@@ -102,13 +147,14 @@ printf 'applying\n' > "$prefix/updates/$component/progress"
 [ ! -f "$prefix/updates/$component/cancel" ] || exit 10
 if [ "$component" = desktop ]; then
   attempts=0
-  until (assert_stopped) >/dev/null 2>&1; do
+  until (assert_stopped; exit 0) >/dev/null 2>&1; do
     attempts=$((attempts + 1))
     [ "$attempts" -lt 120 ] || fail 'Quit Desktop to apply its prepared update.'
     sleep 1
   done
 else
-  stop_service
+  stopped=yes
+  stop_and_wait
 fi
 stopped=yes
 assert_stopped
@@ -134,7 +180,7 @@ else
 fi
 switched=yes
 if [ "$component" = desktop ]; then rm -f "$prefix/updates/desktop/started.json"; fi
-start_service
+start_service_retry
 printf 'verifying\n' > "$prefix/updates/$component/progress"
 if [ "$component" != desktop ]; then
   service_verify

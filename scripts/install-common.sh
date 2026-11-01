@@ -264,7 +264,8 @@ service_verify() {
     if service_running && curl "$@" "$check_url" > "$stage/health" 2>/dev/null; then
       [ "$component" != web ] || return 0
       # A different daemon on the same port may have the same release version.
-      expected_pid=$(service_pid) || expected_pid=
+      # Preserve the probe status even when verification runs from an EXIT trap.
+      expected_pid=$(service_pid; exit $?) || expected_pid=
       case "$expected_pid" in
         ''|0|*[!0-9]*) ;;
         *)

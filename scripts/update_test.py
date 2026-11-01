@@ -142,6 +142,9 @@ exec '{real_mv}' "$@"
         self.assert_old_current()
         self.assertTrue(self.running.exists())
         self.assertFalse((self.work / "draining").exists())
+        self.assertTrue((self.work / "journal").exists(), "failed recovery must retain its journal")
+        self.assertTrue((self.root / "install.lock").exists())
+        self.assertIn("did not recover", result.stderr)
 
     def test_concurrent_installer_is_not_interrupted(self):
         (self.root / "install.lock").mkdir()
@@ -150,6 +153,94 @@ exec '{real_mv}' "$@"
         self.assertTrue(self.running.exists())
         self.assert_old_current()
         self.assertTrue((self.root / "install.lock").exists())
+
+    def delayed_macos(self):
+        # Simulate launchd independently of the host OS; never invoke real services.
+        if (self.root / "current").is_symlink():
+            (self.root / "current").unlink()
+            shutil.copytree(self.old, self.root / "current")
+            (self.root / "current" / "RELEASE").write_text(str(self.old) + "\n")
+        self.tool("uname", "echo Darwin\n")
+        self.tool("lsof", '''[ ! -f "$FIXTURE_RUNNING" ] || echo "n$FIXTURE_ROOT/current/zotigod"
+''')
+        real_mv = shutil.which("mv")
+        self.tool("mv", f'''if [ "$1" = -fh ] && [ "{platform.system()}" = Linux ]; then shift; exec '{real_mv}' -fT "$@"; fi
+exec '{real_mv}' "$@"
+''')
+        self.tool("launchctl", '''
+case "$1" in
+  bootout) echo 5 > "$FIXTURE_RUNNING.stopping" ;;
+  bootstrap)
+    [ ! -f "$FIXTURE_RUNNING.stopping" ] || exit 5
+    n=0; [ ! -f "$FIXTURE_RUNNING.starts" ] || n=$(cat "$FIXTURE_RUNNING.starts")
+    n=$((n + 1)); echo "$n" > "$FIXTURE_RUNNING.starts"
+    [ "$n" -gt 2 ] || exit 5
+    touch "$FIXTURE_RUNNING" ;;
+  print)
+    case "$2" in
+      */com.zotigo.*) [ -f "$FIXTURE_RUNNING" ] || exit 113
+        printf 'state = running\\npid = 999999\\n' ;;
+    esac ;;
+esac
+''')
+        self.tool("sleep", '''
+if [ -f "$FIXTURE_RUNNING.stopping" ]; then
+  n=$(cat "$FIXTURE_RUNNING.stopping")
+  n=$((n - 1))
+  if [ "$n" -le 0 ] && [ "${STUCK_STOP:-0}" != 1 ]; then
+    rm -f "$FIXTURE_RUNNING" "$FIXTURE_RUNNING.stopping"
+  else echo "$n" > "$FIXTURE_RUNNING.stopping"; fi
+fi
+''')
+        self.tool("curl", '''
+case "$*" in
+  *updates/drain*) echo '{"data":true}' ;;
+  */health*)
+    version=$(sed -n 's/^version=//p' "$FIXTURE_ROOT/current/INSTALLATION")
+    [ "${FAIL_NEW_VERIFY:-0}:$version" != "1:1.0.1" ] || exit 1
+    printf '{"version":"%s","process_id":"999999"}' "$version"
+    echo "$version" >> "$FIXTURE_RUNNING.verified" ;;
+  */projects*) echo '{}' ;;
+esac
+''')
+
+    def test_macos_waits_for_exit_and_retries_bootstrap(self):
+        self.delayed_macos()
+        result = self.apply()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.1\n")
+        self.assertTrue(self.running.exists())
+        self.assertIn("1.0.1", Path(str(self.running) + ".verified").read_text())
+
+    def test_macos_failed_activation_waits_and_verifies_rollback(self):
+        self.delayed_macos()
+        result = self.apply(FAIL_NEW_VERIFY="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.0\n")
+        self.assertTrue(self.running.exists())
+        self.assertIn("1.0.0", Path(str(self.running) + ".verified").read_text())
+        self.assertFalse((self.root / "install.lock").exists())
+
+    def test_macos_failure_before_swap_restarts_and_verifies_old_service(self):
+        self.delayed_macos()
+        real_mv = shutil.which("mv")
+        self.tool("mv", f'''[ "$1" != "$FIXTURE_ROOT/prepared" ] || exit 1
+exec '{real_mv}' "$@"
+''')
+        result = self.apply()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.0\n")
+        self.assertTrue(self.running.exists())
+        self.assertIn("1.0.0", Path(str(self.running) + ".verified").read_text())
+        self.assertFalse((self.root / "install.lock").exists())
+
+    def test_macos_stop_timeout_never_replaces_running_installation(self):
+        self.delayed_macos()
+        result = self.apply(STUCK_STOP="1")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.0\n")
+        self.assertTrue((self.root / "prepared").exists())
+        self.assertTrue(self.running.exists())
 
     def assert_old_current(self):
         self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.0\n")
