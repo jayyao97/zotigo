@@ -1474,6 +1474,12 @@ func TestCodexAdditionalContextOmitsReferenceGuidanceWithoutParent(t *testing.T)
 	if _, exists := additional["zotigo.request_context"]; !exists {
 		t.Fatalf("request context missing: %#v", additional)
 	}
+	guidance := fmt.Sprint(additional["zotigo.channel_history_guidance"])
+	for _, expected := range []string{"channel.read_messages", "lark-cli", "did not mention", "untrusted"} {
+		if !strings.Contains(guidance, expected) {
+			t.Fatalf("missing %q in guidance: %s", expected, guidance)
+		}
+	}
 	if _, exists := additional["zotigo.channel_reference_guidance"]; exists {
 		t.Fatalf("reference guidance unexpectedly present: %#v", additional)
 	}

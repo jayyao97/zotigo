@@ -1452,6 +1452,9 @@ func codexAdditionalContext(requestContext *protocol.RequestContext) (map[string
 			"value": encoded,
 		},
 	}
+	if guidance := requestContext.ChannelHistoryGuidance("channel.read_messages"); guidance != "" {
+		context["zotigo.channel_history_guidance"] = map[string]any{"kind": "application", "value": guidance}
+	}
 	if strings.TrimSpace(requestContext.ExternalParentMessageID) != "" {
 		context["zotigo.channel_reference_guidance"] = map[string]any{
 			"kind":  "application",
