@@ -2,6 +2,8 @@ package update
 
 import (
 	"context"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -18,6 +20,36 @@ func TestReleaseManifestMatchesBinary(t *testing.T) {
 	}
 	if ref := os.Getenv("GITHUB_REF"); strings.HasPrefix(ref, "refs/tags/v") && strings.TrimPrefix(ref, "refs/tags/v") != manifest.Version {
 		t.Fatalf("release tag %s does not match manifest", ref)
+	}
+}
+
+func TestApplicationUpdateRejectsPreCallbackDataEpoch(t *testing.T) {
+	m := fixtureManager(t)
+	target, err := readManifest(filepath.Join("..", "..", "update.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.Data <= 1 {
+		t.Fatalf("callback schema must not advertise epoch-1 rollback compatibility: %+v", target)
+	}
+	current := target
+	current.Data = 1
+	for path, manifest := range map[string]Manifest{m.current("UPDATE.json"): current, filepath.Join(m.Prefix, "daemon", "prepared", "UPDATE.json"): target} {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		data, err := json.Marshal(manifest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Rejection must occur before reading or executing any service-stop script.
+	err = m.apply(context.Background(), &Status{Target: &Release{Version: target.Version}}, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "incompatible") {
+		t.Fatalf("unsafe update allowed: %v", err)
 	}
 }
 

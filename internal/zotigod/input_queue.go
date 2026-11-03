@@ -43,6 +43,10 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 			writeAPIError(w, 400, err.Error())
 			return
 		}
+		if strings.HasPrefix(strings.TrimSpace(req.ClientMessageID), "completion:") {
+			writeAPIError(w, 400, "client_message_id prefix completion: is reserved for background notifications")
+			return
+		}
 		images, err := validateMessageImages(req.Images)
 		if err != nil {
 			writeAPIError(w, 400, err.Error())
@@ -199,6 +203,10 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		command.Message.Text = strings.TrimSpace(req.Text)
+		if r.Method == http.MethodPatch && strings.HasPrefix(row.ID, "completion:") {
+			writeAPIError(w, 409, "completion notifications have fixed content; cancel and send a new message instead")
+			return
+		}
 		if r.Method == http.MethodPatch && req.ImageIndices != nil {
 			images := make([]commandImageData, 0, len(*req.ImageIndices))
 			seen := make(map[int]bool)
@@ -296,6 +304,9 @@ func (h *handler) handleSendQueuedInput(w http.ResponseWriter, r *http.Request) 
 	}
 	if err == nil {
 		row.BatchID = "queue_" + uuid.NewString()
+		if strings.HasPrefix(row.ID, "completion:") {
+			row.BatchID = row.ID
+		}
 		err = h.catalog.ClaimQueuedInput(ctx, id, itemID, req.Revision, row.BatchID)
 		if err == nil {
 			err = h.submitQueuedInputs(ctx, id, []workspace.QueuedInput{*row}, false)
@@ -362,13 +373,14 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			}
 		}
 	}
-	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingHumanRequest(items) {
+	turnActive := lastOpenTurnID(items) != ""
+	if hasPendingMessageCommand(items) || hasPendingHumanRequest(items) || (turnActive && resume) {
 		if resume {
 			return errActiveTurn
 		}
 		return nil
 	}
-	if afterTurn && !resume {
+	if afterTurn && !resume && !turnActive {
 		for i := len(items) - 1; i >= 0; i-- {
 			switch items[i].Type {
 			case zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
@@ -395,13 +407,41 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			}
 		}
 	}
+	var steering *workspace.QueuedInput
+	if turnActive {
+		// Only explicitly opted-in callbacks may pass ordinary queued messages
+		// while a turn is active. Paused/uncertain batches above remain a fence.
+		for _, row := range rows {
+			if !strings.HasPrefix(row.ID, "completion:") {
+				continue
+			}
+			trigger, err := h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(row.ID, "completion:"))
+			if err != nil {
+				return err
+			}
+			if trigger.DeliveryMode == "steer" {
+				copy := row
+				steering = &copy
+				break
+			}
+		}
+		if steering == nil {
+			return nil
+		}
+	}
 	if _, err = h.ensureSessionRunning(ctx, id); err != nil {
 		return err
 	}
 	if !h.ensureWorkerOnline(ctx, id) {
 		return errWorkerOffline
 	}
-	rows, err = h.catalog.ClaimQueuedInputs(ctx, id, "queue_"+uuid.NewString(), resume)
+	if steering != nil {
+		steering.BatchID = steering.ID
+		err = h.catalog.ClaimQueuedInput(ctx, id, steering.ID, steering.Revision, steering.BatchID)
+		rows = []workspace.QueuedInput{*steering}
+	} else {
+		rows, err = h.catalog.ClaimQueuedInputs(ctx, id, "queue_"+uuid.NewString(), resume)
+	}
 	if err != nil || len(rows) == 0 {
 		return err
 	}
@@ -427,7 +467,25 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 		} else if unavailable != "" {
 			err = errSessionUnavailable
 		} else {
-			submission, err = h.workers.BeginInput(id, workerInputRequest{Command: command, StartOnly: startOnly})
+			request := workerInputRequest{Command: command, StartOnly: startOnly}
+			if strings.HasPrefix(command.ID, "completion:") {
+				var stored *zotigosession.Session
+				stored, err = h.validateCompletionInput(ctx, id, command.ID)
+				if err == nil {
+					var trigger workspace.CompletionTrigger
+					trigger, err = h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(command.ID, "completion:"))
+					request.StartOnly = trigger.DeliveryMode != "steer"
+					if err == nil && !request.StartOnly {
+						err = validateCompletionSteering(ctx, h.items, id, command)
+					}
+					request.RequiredApprovalPolicy = stored.ApprovalPolicy
+					request.RequiredPromptRevision = stored.PromptConfig.Revision
+					request.RequirePromptRevision = true
+				}
+			}
+			if err == nil {
+				submission, err = h.workers.BeginInput(id, request)
+			}
 			if err == nil {
 				submission.OnFinish(h.sessionOps.reserveInput(id))
 			}
@@ -467,7 +525,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 		releaseErr := h.catalog.ReleaseQueuedBatch(context.Background(), id, rows[0].BatchID)
 		// A concurrent ordinary send may win the idle boundary. Leave the queue
 		// eligible for that turn's completion instead of treating it as failure.
-		if startOnly && errors.Is(err, errActiveTurn) && releaseErr == nil {
+		if (startOnly || strings.HasPrefix(command.ID, "completion:")) && (errors.Is(err, errActiveTurn) || errors.Is(err, errWorkerInputStopping)) && releaseErr == nil {
 			return nil
 		}
 		return errors.Join(err, releaseErr)
@@ -528,6 +586,12 @@ func mergeQueuedInputs(rows []workspace.QueuedInput) (commandResponse, error) {
 		}
 		if input.Message == nil {
 			return command, fmt.Errorf("queued input %s has no message", row.ID)
+		}
+		if strings.HasPrefix(row.ID, "completion:") {
+			if len(rows) != 1 || row.BatchID != row.ID {
+				return command, fmt.Errorf("completion notification cannot be merged")
+			}
+			command.Message.RequestContext = input.Message.RequestContext.Clone()
 		}
 		if input.Message.Text != "" {
 			texts = append(texts, input.Message.Text)

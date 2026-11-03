@@ -835,6 +835,9 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		steering := steeringCommandForRequest(request, turnID)
 		r.display.QueueSteering(steering)
 		err := r.agent.QueueTurnUserMessageWithAdmission(message, func() error {
+			if err := validateCompletionSteering(ctx, r.display.items, r.sessionID, request.Command); err != nil {
+				return err
+			}
 			stored, appendErr := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, steering)
 			if appendErr == nil {
 				steering = stored

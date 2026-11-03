@@ -538,6 +538,26 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request workerInpu
 		return existing, nil
 	}
 
+	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
+		stored, err := r.store.Get(ctx, r.cfg.SessionID)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		if stored == nil {
+			return commandResponse{}, errSessionNotFound
+		}
+		policy, err := normalizeSessionApprovalPolicy(stored.ApprovalPolicy, true)
+		if err != nil {
+			return commandResponse{}, err
+		}
+		if (request.RequiredApprovalPolicy != "" && policy != request.RequiredApprovalPolicy) ||
+			(request.RequirePromptRevision && stored.PromptConfig.Revision != request.RequiredPromptRevision) {
+			return commandResponse{}, errInputPolicyMismatch
+		}
+	}
+	if err := validateCompletionSteering(ctx, source, r.cfg.SessionID, request.Command); err != nil {
+		return commandResponse{}, err
+	}
 	activeTurnID := r.activeTurnID
 	if request.StartOnly && activeTurnID != "" {
 		return commandResponse{}, errActiveTurn

@@ -472,6 +472,7 @@ func canTransition(state SessionState, from []SessionState) bool {
 }
 
 type handler struct {
+	callbackBaseURL      string
 	updater              *update.Manager
 	updateMu             sync.RWMutex
 	registry             *sessionRegistry
@@ -715,6 +716,7 @@ func Run(args []string) (exitCode int) {
 		}
 	}
 	server.Handler = newDefaultHandler(handlerOptions{
+		callbackBaseURL:    workerCallback,
 		updater:            updater,
 		maintenanceContext: ctx,
 		launcher:           launcher,
@@ -821,6 +823,7 @@ func NewHandler() http.Handler {
 }
 
 type handlerOptions struct {
+	callbackBaseURL      string
 	updater              *update.Manager
 	maintenanceContext   context.Context
 	launcher             workerLauncher
@@ -975,6 +978,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workspaceOps:         options.workspaceOps,
 		approvalOps:          newSessionOperationLocks(),
 		queueOps:             newSessionOperationLocks(),
+		callbackBaseURL:      options.callbackBaseURL,
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 		events:               options.events,
@@ -1140,6 +1144,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/events", withPathValue("id", handler.handleSessionEvents))
 	mux.HandleFunc("/sessions/{id}/messages", withPathValue("id", handler.handleSessionMessage))
 	mux.HandleFunc("/sessions/{id}/queue", withPathValue("id", handler.handleInputQueue))
+	mux.HandleFunc("POST /completion-triggers/{trigger}/fire", handler.handleFireCompletionTrigger)
+	mux.HandleFunc("GET /sessions/{id}/completion-triggers", handler.handleCompletionTriggers)
+	mux.HandleFunc("DELETE /sessions/{id}/completion-triggers/{trigger}", handler.handleCompletionTriggers)
 	mux.HandleFunc("/sessions/{id}/queue/resume", withPathValue("id", handler.handleResumeInputQueue))
 	mux.HandleFunc("/sessions/{id}/queue/{item}", handler.handleQueuedInput)
 	mux.HandleFunc("/sessions/{id}/queue/{item}/send", handler.handleSendQueuedInput)

@@ -139,6 +139,63 @@ func TestCodexStartOnlyRejectsActiveTurnWithoutRPCOrPersistence(t *testing.T) {
 	}
 }
 
+func TestCodexCompletionSteerDefersPendingApproval(t *testing.T) {
+	rpc := &codexWorkerRPC{turnID: "turn-active"}
+	runtime, store := newCodexInputTestRuntime(t, "callback-approval", rpc)
+	runtime.activeTurnID = "turn-active"
+	for _, item := range []zotigosession.DisplayItem{
+		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-active"}},
+		{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "approval", TurnID: "turn-active"}},
+	} {
+		if _, err := store.AppendDisplayItem(context.Background(), "callback-approval", item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{ID: "completion:cb", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "task completed"}}}, nil, nil)
+	if result.ErrorCode != "active_turn" || len(rpc.methods) != 0 {
+		t.Fatalf("callback bypassed approval: %+v calls=%v", result, rpc.methods)
+	}
+}
+
+func TestCodexInputRejectsChangedRequiredPolicy(t *testing.T) {
+	for _, mismatch := range []string{"approval", "prompt", "matching"} {
+		t.Run(mismatch, func(t *testing.T) {
+			rpc := &codexWorkerRPC{turnID: "turn-new"}
+			runtime, store := newCodexInputTestRuntime(t, "policy-input", rpc)
+			stored, err := store.Get(context.Background(), "policy-input")
+			if err != nil {
+				t.Fatal(err)
+			}
+			stored.ApprovalPolicy = agent.ApprovalPolicyAuto
+			stored.PromptConfig.Revision = 2
+			if err := store.Put(context.Background(), stored); err != nil {
+				t.Fatal(err)
+			}
+			request := workerInputRequest{StartOnly: true, RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequirePromptRevision: true, RequiredPromptRevision: 2, Command: commandResponse{ID: "callback", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "Analyze result"}}}
+			switch mismatch {
+			case "approval":
+				request.RequiredApprovalPolicy = agent.ApprovalPolicyManual
+			case "prompt":
+				request.RequiredPromptRevision = 1
+			}
+			result := runtime.AcceptInput(context.Background(), request, nil, nil)
+			if mismatch == "matching" {
+				if result.Error != "" || len(rpc.methods) != 1 || rpc.methods[0] != "turn/start" {
+					t.Fatalf("matching input rejected: %+v calls=%v", result, rpc.methods)
+				}
+				return
+			}
+			if result.ErrorCode != "input_policy_mismatch" || len(rpc.methods) != 0 {
+				t.Fatalf("changed policy reached runtime: %+v calls=%v", result, rpc.methods)
+			}
+			items, _, err := store.ListDisplayItems(context.Background(), "policy-input")
+			if err != nil || len(items) != 0 {
+				t.Fatalf("rejected input persisted: %v %v", items, err)
+			}
+		})
+	}
+}
+
 func TestWorkerInputErrorMatchesActiveTurn(t *testing.T) {
 	t.Parallel()
 	err := &workerInputError{Code: "active_turn", Message: "a turn is already active"}

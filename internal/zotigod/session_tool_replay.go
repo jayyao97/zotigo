@@ -15,7 +15,7 @@ import (
 // durable command replay performs this second RPC, avoiding recursive RLocks
 // while the daemon waits for a live worker admission.
 func authorizeRuntimeToolReplay(ctx context.Context, client *workerRuntimeToolClient, commandID string) error {
-	if !strings.HasPrefix(commandID, "session_tool:") {
+	if !strings.HasPrefix(commandID, "session_tool:") && !strings.HasPrefix(commandID, "completion:") {
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
@@ -31,6 +31,24 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 	}
 	if err := decodeSessionToolArguments(raw, &input); err != nil {
 		return "", err
+	}
+	if strings.HasPrefix(input.CommandID, "completion:") {
+		_, err := h.validateCompletionInput(ctx, targetID, input.CommandID)
+		if err != nil {
+			return "", err
+		}
+		value, err := h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(input.CommandID, "completion:"))
+		if err != nil {
+			return "", err
+		}
+		_, found, err := findExistingSessionInput(ctx, h.items, targetID, commandResponse{ID: input.CommandID, Message: &messageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
+		if err != nil {
+			return "", err
+		}
+		if !found {
+			return "", errors.New("completion input is not durably admitted")
+		}
+		return `{"authorized":true}`, nil
 	}
 	parts := strings.Split(input.CommandID, ":")
 	if len(parts) != 3 || parts[0] != "session_tool" {

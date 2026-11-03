@@ -1261,10 +1261,14 @@ gaps. Clients restore their regular timeline when leaving search. Message-ID
 lookup uses `(session_id, item_id)`.
 ## Queued session input
 
+The case-sensitive `completion:` prefix is reserved for host-created callback
+queue entries. Public queue submissions using that `client_message_id` prefix
+return 400 without inserting an entry.
+
 `POST /sessions/{id}/queue` accepts the same `text`, `images`, `skills`, and
 `client_message_id` fields as `/messages`. It returns a public command with
 `type: "queued"`. Unlike `/messages`, it never steers an active turn. When idle,
-the daemon claims all currently queued messages in order and submits one merged
+the daemon claims ordinary queued messages up to the next completion notification and submits one merged
 message with `StartOnly` admission. Text sections are separated by blank lines;
 image references retain order and skill names are deduplicated.
 
@@ -1322,3 +1326,77 @@ No request accepts a shell command, repository URL, filesystem prefix or arbitra
 admission and returns a boolean indicating whether existing turns and human requests have finished.
 It rejects calls without a waiting job. See [application updates](application-updates.md) for
 release metadata, compatibility, host ownership and recovery details.
+
+## One-shot completion callbacks
+
+`zotigo.create_completion_trigger` is a resident session tool in native workers
+and newly created Codex threads. Existing Codex threads retain their original
+dynamic tool definitions; start a new session to receive the added tool. Embedded
+hosts without a callback URL cannot create triggers. Channel and delegated or
+callback-initiated turns cannot create triggers.
+
+Arguments: `title` (1–200 bytes), `on_fire` (1–8192 bytes), and optional
+`expires_in_seconds` (60–604800, default 86400), and `delivery_mode` (`queue` by
+default, or `steer`). The daemon derives the target
+session/workspace from the active host turn. The result contains `trigger_id`,
+`callback_url`, `callback_token`, `expires_at`, `state`, and `delivery_mode`. Repeating the same tool
+call returns the same receipt; at most 16 unexpired pending triggers per session.
+
+The background script sends `POST /completion-triggers/{trigger_id}/fire` with
+`Authorization: Bearer <callback_token>` and an empty body, `{}`, or a JSON object
+`{"text":"task results or additional context"}`. `text` is optional and limited
+to 16 KiB of UTF-8; the encoded HTTP body is limited to 100 KiB. Unknown fields,
+invalid JSON, and oversized payloads return 400 without consuming the trigger. That token
+only authorizes this one callback, not session history or other daemon APIs. The
+script must be able to reach the returned daemon URL; a loopback URL works only
+on that daemon's host. Do not retrieve the daemon's general auth token. Callback
+payloads cannot change the target or grant new authorization. The input presents
+the registered `on_fire` instruction separately from JSON-quoted callback text,
+with a reminder to treat the latter as external data rather than a new user
+request. This provenance reminder is not a prompt-injection security boundary.
+A successful HTTP 202 (or 200 on retry) means the notification was accepted,
+not that the follow-up finished. Retrying must preserve the decoded `text`;
+a changed payload returns 409 and cannot overwrite the original delivery.
+
+Consumption and queue insertion are one catalog transaction. Retries cannot
+submit another turn. Queue mode waits until idle; steer mode reuses normal
+start-or-steer admission to feed an active turn or start a new one when idle.
+Steer callbacks can pass ordinary queued inputs while a turn is active, but not
+paused/uncertain batches. Pending human input, stopping, and compaction defer
+delivery. Both modes retain their own command ID and
+`request_context.source: completion_trigger`; notifications are never merged
+with user input. Workspace, archive, and approval/prompt
+constraints are checked again at admission and durable replay. Changed constraints
+leave the queue blocked for user inspection. Expired/cancelled triggers return 410;
+invalid callback credentials return 401; unavailable targets or full queues return
+409 without consuming the trigger. Daemon restart pauses queued input, requiring
+explicit resume. This feature does not monitor files or run a background process
+on the model's behalf.
+
+For queue mode, the model should end its turn after launching the background task
+or completing independent work; queued notifications cannot unblock an active
+turn. The mode is fixed at creation. A callback sender can provide only `text`,
+not switch delivery modes or supply a different target session.
+
+Authenticated clients can use `GET /sessions/{id}/completion-triggers` to list
+unexpired pending triggers and `DELETE /sessions/{id}/completion-triggers/{id}`
+to revoke one. No callback credential is included in that list. Once fired, use
+the ordinary queue delete/resume actions; callback queue content is immutable.
+Desktop/Web show pending callbacks beside the input queue. Old daemons returning
+404/405 simply omit that panel. Unfired expired records are retained for up to
+another week and pruned when a trigger is created. Fired records, including their
+callback text, remain available for queued delivery and durable replay.
+
+Catalog migration 16 adds the trigger registry and signing key metadata. Before
+running an older binary, stop all workers and use the newer binary's offline
+`catalog-migrate --to 15` command (or restore a consistent backup). Downgrade
+revokes pending triggers and removes callback queue entries; ordinary inputs and
+session history are preserved.
+
+This release uses `data_epoch: 2`. Existing epoch-1 updaters cannot safely roll
+back a schema-16 catalog by restoring only the previous binary, so they reject
+this release for application updates. Install it during a maintenance window:
+stop the daemon and all session workers, back up the complete state directory,
+and run the installer for the chosen release; startup performs the migration.
+Use the explicit offline downgrade or the consistent backup for rollback. An
+automatic upgrade path requires a migration-aware updater shipped beforehand.
