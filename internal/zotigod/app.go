@@ -493,6 +493,7 @@ type handler struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	codexSync            *codexSessionSyncer
+	codexUnavailable     error
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 	channels             *channels.Service
@@ -669,21 +670,26 @@ func Run(args []string) (exitCode int) {
 		defer launcher.Close()
 	}
 	runtimes := newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher})
-	var codexHost *codexapp.Host
-	if binaryPath, _, discoverErr := codexapp.Discover(); discoverErr == nil && launcher != nil {
-		cacheDir, cacheErr := os.UserCacheDir()
-		if cacheErr == nil {
-			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), log.Writer(), codexapp.HostOptions{StopWhenIdle: true})
-		}
-		if cacheErr != nil {
-			logger.Printf("Codex runtime disabled: %v", cacheErr)
-		} else {
-			codexAdapter := codexapp.NewAdapter(codexHost, launcher.StartCodex)
-			runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher}, codexAdapter)
+	var codexHost codexapp.HostProvider
+	binaryPath, _, codexErr := codexapp.Discover()
+	if codexErr == nil && launcher == nil {
+		codexErr = errors.New("worker launcher is unavailable")
+	}
+	if codexErr == nil {
+		var cacheDir string
+		cacheDir, codexErr = os.UserCacheDir()
+		if codexErr == nil {
+			var host *codexapp.Host
+			host, codexErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), log.Writer(), codexapp.HostOptions{StopWhenIdle: true})
+			if codexErr == nil {
+				codexHost = host
+				defer func() { _ = host.Close() }()
+				runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher}, codexapp.NewAdapter(host, launcher.StartCodex))
+			}
 		}
 	}
-	if codexHost != nil {
-		defer func() { _ = codexHost.Close() }()
+	if codexErr != nil {
+		logger.Printf("Codex runtime unavailable: %v", codexErr)
 	}
 	server := &http.Server{
 		Addr:              *addr,
@@ -714,6 +720,7 @@ func Run(args []string) (exitCode int) {
 		launcher:           launcher,
 		runtimes:           runtimes,
 		codexHost:          codexHost,
+		codexUnavailable:   codexErr,
 		publicAuthToken:    publicAuthToken,
 		workerAuthToken:    workerAuthToken,
 		logger:             logger,
@@ -833,6 +840,7 @@ type handlerOptions struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	codexHost            codexapp.HostProvider
+	codexUnavailable     error
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 	channels             *channels.Service
@@ -959,6 +967,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workers:              options.workers,
 		launcher:             options.launcher,
 		runtimes:             options.runtimes,
+		codexUnavailable:     options.codexUnavailable,
 		workerConnectTimeout: options.workerConnectTimeout,
 		workerLaunchTimeout:  options.workerLaunchTimeout,
 		inputStopTimeout:     options.inputStopTimeout,

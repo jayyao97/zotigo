@@ -2,25 +2,29 @@
 
 ## Codex discovery in background services
 
-When installing the daemon, the installer captures an absolute `codex` executable
+The installer captures an explicit `ZOTIGO_CODEX_BINARY` or an absolute `codex`
 from the caller's PATH before selecting build toolchains. It validates `--version`
-with the launcher's PATH and records a usable result as a default in that release's
-`run` script, not in the user's `daemon.env`. The launcher loads `daemon.env` after
-this default, so explicit configuration wins. A new installation captures again;
-if a captured path is later removed, reinstall from a terminal where Codex works
-or set an explicit path. Existing configuration files are never rewritten.
+and stores discovered defaults and the launcher PATH in `config/runtime.env`,
+which survives upgrades. Existing releases' generated PATH and Codex assignments
+are migrated from their `run` script without executing that script. This preserves
+custom Codex paths when a background update worker has a minimal PATH.
+
+The launcher loads user-owned `config/daemon.env` afterward, so explicit overrides
+still win. If a saved path is removed, set `ZOTIGO_CODEX_BINARY` in `daemon.env` to
+the new absolute executable path and restart the daemon. User configuration is
+never rewritten during upgrades.
 
 For `curl ... | sh` in a logged-in terminal, the installer inherits that terminal's
 PATH; it does not load shell profiles. A non-interactive SSH command may not have
 the same PATH. Missing or unusable Codex does not prevent installation and leaves
 runtime discovery in effect. The installer retains its toolchain-adjusted PATH in
-the launcher, including interpreter lookup for script-based Codex entry points.
+`config/runtime.env`, including interpreter lookup for script-based Codex entry points.
 It does not make external Node/version-manager directories immutable.
 
 The daemon does not load interactive shell startup files. Codex discovery checks
 `ZOTIGO_CODEX_BINARY` first (an absolute executable path), then `codex` on the
 daemon's `PATH`, then `~/.local/bin/codex`. On macOS it also checks the existing
-user and system `Applications/ChatGPT.app/Contents/Resources/codex` locations.
+user and system ChatGPT.app bundles, checking `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` before the legacy `Contents/Resources/codex` location.
 The user-bin entry may be a symlink to a standalone Codex release. Discovery does
 not modify `PATH`, install Codex, or choose among version-manager installations.
 
@@ -72,6 +76,7 @@ Default prefix: `~/.local/share/zotigo`; override with `--prefix /absolute/path`
 - `cli/releases/`, `daemon/releases/`: separate builds, never overwritten in place.
 - Each component's `current` symlink selects its installation, except the macOS daemon: its `current` is a real directory so the executable's resolved path stays fixed. `previous` retains the prior release archive.
 - `current/INSTALLATION`: code-owned release version, source commit, and `dirty=true|false`.
+- `config/runtime.env`: preserved installer-discovered launch defaults.
 - `config/daemon.env`: user-owned shell assignments, preserved on upgrade.
 - On first configuration (no `daemon.env` and no `daemon/current/INSTALLATION`), the installer creates `config/daemon.token` with 32 random bytes encoded as hex and mode `0600`, and sets `ZOTIGOD_AUTH_TOKEN_FILE` in `daemon.env`. OpenSSL is required for this generation. Authentication is enabled even on loopback. An existing token is reused after an interrupted install; upgrades never rotate it or enable authentication on an existing configuration. If an installed daemon has lost `daemon.env`, restore it before reinstalling.
 - Diagnostic logs live outside the prefix, in `~/.zotigo/logs/cli/` and `~/.zotigo/logs/daemon/`.

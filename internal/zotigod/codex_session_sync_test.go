@@ -1030,3 +1030,20 @@ func TestCodexSessionSyncContinuesPastUnavailableHistoricalImage(t *testing.T) {
 		t.Fatalf("sync checkpoint = %#v, err=%v", stored, err)
 	}
 }
+
+func TestCodexSessionSyncWithTypedNilHostReturnsError(t *testing.T) {
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-missing-runtime", Agent: "codex", ConversationID: "thread-missing", CreatedAt: now, UpdatedAt: now}}); err != nil {
+		t.Fatal(err)
+	}
+	var host *codexapp.Host
+	syncer := newCodexSessionSyncer(host, store, storedDisplayItemSource{store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
+	if err := syncer.Sync(context.Background()); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("sync error = %v", err)
+	}
+}

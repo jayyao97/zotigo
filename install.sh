@@ -63,7 +63,7 @@ install_init
 # Capture the caller's choice before build toolchains can prepend to PATH.
 detected_codex=
 if [ "$component" = daemon ]; then
-  candidate=$(command -v codex 2>/dev/null || :)
+  candidate=${ZOTIGO_CODEX_BINARY:-$(command -v codex 2>/dev/null || :)}
   case "$candidate" in /*) [ ! -f "$candidate" ] || [ ! -x "$candidate" ] || detected_codex=$candidate ;; esac
 fi
 need git
@@ -115,13 +115,28 @@ if [ "$component" = daemon ]; then
     } > "$stage/daemon.env"
     mv "$stage/daemon.env" "$config"
   fi
+  # Runtime discovery belongs to the installation, not a replaceable release.
+  # Migrate only generated assignments, never execute the old launcher.
+  runtime_config="$prefix/config/runtime.env"
+  if [ ! -e "$runtime_config" ]; then
+    [ ! -L "$runtime_config" ] || fail "Runtime configuration is a broken symlink: $runtime_config"
+    if [ -f "$root/current/run" ]; then
+      sed -n '/^PATH=.*; export PATH$/p; /^\[ -n "${ZOTIGO_CODEX_BINARY:-}" \] || ZOTIGO_CODEX_BINARY=/p; /^export ZOTIGO_CODEX_BINARY$/p' "$root/current/run" > "$stage/runtime.env"
+    else
+      : > "$stage/runtime.env"
+    fi
+    if [ ! -s "$stage/runtime.env" ]; then
+      printf 'PATH=%s; export PATH\n' "$(quote "$PATH")" > "$stage/runtime.env"
+    fi
+    if [ -n "$detected_codex" ]; then
+      printf '[ -n "${ZOTIGO_CODEX_BINARY:-}" ] || ZOTIGO_CODEX_BINARY=%s\nexport ZOTIGO_CODEX_BINARY\n' "$(quote "$detected_codex")" >> "$stage/runtime.env"
+    fi
+    chmod 600 "$stage/runtime.env"
+    mv "$stage/runtime.env" "$runtime_config"
+  fi
   {
     echo '#!/bin/sh'
-    printf 'PATH=%s; export PATH\n' "$(quote "$PATH")"
-    if [ -n "$detected_codex" ]; then
-      printf '[ -n "${ZOTIGO_CODEX_BINARY:-}" ] || ZOTIGO_CODEX_BINARY=%s\n' "$(quote "$detected_codex")"
-      echo 'export ZOTIGO_CODEX_BINARY'
-    fi
+    printf '. %s\n' "$(quote "$runtime_config")"
     printf '. %s\n' "$(quote "$config")"
     printf 'set -- %s --addr "$ZOTIGOD_ADDR"\n' "$(quote "$root/current/zotigod")"
     echo '[ -z "${ZOTIGOD_AUTH_TOKEN_FILE:-}" ] || set -- "$@" --auth-token-file "$ZOTIGOD_AUTH_TOKEN_FILE"'

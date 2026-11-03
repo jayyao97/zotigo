@@ -42,7 +42,7 @@ printf '#!/bin/sh\\necho "zotigo 1.0.0"\\n' > "$2"
 chmod +x "$2"
 ''')
         compiler.chmod(0o755)
-        self.env = {**os.environ, "PATH": f"{self.tools}:{os.environ['PATH']}",
+        self.env = {**os.environ, "ZOTIGO_CODEX_BINARY": "", "PATH": f"{self.tools}:{os.environ['PATH']}",
                     "ZOTIGO_MACOS_SIGNING_IDENTITY": "1" * 40,
                     "ZOTIGO_MACOS_SIGNING_IDENTITY_FILE": str(self.base / "signing-identity")}
         # Compiler output is a shell fixture, never sign with the host's keychain.
@@ -171,8 +171,16 @@ exec '{real_mv}' "$@"
         launcher = self.prefix / "daemon/current/run"
         clean_env = {**self.env, "ZOTIGO_CODEX_BINARY": ""}
         self.assertEqual(subprocess.check_output([str(launcher)], env=clean_env, text=True).strip(), str(codex))
+        # Legacy releases embedded defaults in run rather than persistent config.
+        runtime_config = self.prefix / "config/runtime.env"
+        launcher.write_text("\n".join(runtime_config.read_text() if "runtime.env" in line and line.startswith(". ") else line for line in launcher.read_text().splitlines()) + "\n")
+        runtime_config.unlink()
         explicit = {**clean_env, "ZOTIGO_CODEX_BINARY": "/explicit/codex"}
         self.assertEqual(subprocess.check_output([str(launcher)], env=explicit, text=True).strip(), "/explicit/codex")
+        # Upgrade from a service environment without the interactive Codex path.
+        result = self.install(component="daemon")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(subprocess.check_output([str(launcher)], env=clean_env, text=True).strip(), str(codex))
         config = self.prefix / "config/daemon.env"
         content = config.read_text() + '\nexport ZOTIGO_CODEX_BINARY=/configured/codex\n'
         config.write_text(content)

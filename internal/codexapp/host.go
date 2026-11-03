@@ -103,15 +103,20 @@ func discoverBinaryPath() (string, error) {
 		}
 	}
 	if runtime.GOOS == "darwin" {
-		candidates := []string{"/Applications/ChatGPT.app/Contents/Resources/codex"}
+		candidates := macOSCodexCandidates("/Applications")
 		if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
-			candidates = append([]string{filepath.Join(home, "Applications", "ChatGPT.app", "Contents", "Resources", "codex")}, candidates...)
+			candidates = append(macOSCodexCandidates(filepath.Join(home, "Applications")), candidates...)
 		}
 		if binaryPath := firstExecutable(candidates...); binaryPath != "" {
 			return binaryPath, nil
 		}
 	}
-	return "", exec.ErrNotFound
+	return "", fmt.Errorf("codex executable not found; configure %s with an absolute path: %w", codexBinaryEnv, exec.ErrNotFound)
+}
+
+func macOSCodexCandidates(applications string) []string {
+	resources := filepath.Join(applications, "ChatGPT.app", "Contents", "Resources")
+	return []string{filepath.Join(resources, "codex-cli", "CodexCLI.app", "Contents", "MacOS", "codex"), filepath.Join(resources, "codex")}
 }
 
 func firstExecutable(candidates ...string) string {
@@ -130,6 +135,9 @@ func (h *Host) Ensure(ctx context.Context) (RPC, string, error) {
 }
 
 func (h *Host) Acquire(ctx context.Context) (*Lease, error) {
+	if h == nil {
+		return nil, fmt.Errorf("codex runtime is unavailable: host is not configured")
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	client, version, err := h.ensureLocked(ctx)

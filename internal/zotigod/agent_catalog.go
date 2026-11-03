@@ -10,13 +10,15 @@ import (
 )
 
 type agentCatalogResponse struct {
-	DefaultAgent string         `json:"default_agent"`
-	Agents       []agentCatalog `json:"agents"`
+	DefaultAgent      string         `json:"default_agent"`
+	Agents            []agentCatalog `json:"agents"`
+	UnavailableAgents []agentCatalog `json:"unavailable_agents,omitempty"`
 }
 
 type agentCatalog struct {
 	ID           string                   `json:"id"`
 	Label        string                   `json:"label"`
+	Reason       string                   `json:"reason,omitempty"`
 	Availability string                   `json:"availability"`
 	Version      string                   `json:"version,omitempty"`
 	Capabilities agentCatalogCapabilities `json:"capabilities"`
@@ -49,11 +51,18 @@ func (h *handler) handleAgents(w http.ResponseWriter, r *http.Request) {
 		ID: string(zotigoruntime.AgentZotigo), Label: "Zotigo", Availability: "available",
 		Capabilities: agentCatalogCapabilities{Profiles: true, Steering: true, Approvals: true, PreToolUseHooks: true, PostToolUseHooks: true},
 	}}}
-	if _, _, err := codexapp.Discover(); err == nil {
+	discoverErr := h.codexUnavailable
+	if discoverErr == nil {
+		_, _, discoverErr = codexapp.Discover()
+	}
+	if discoverErr == nil {
 		response.Agents = append(response.Agents, agentCatalog{
 			ID: string(zotigoruntime.AgentCodex), Label: "Codex", Availability: "installed",
 			Capabilities: agentCatalogCapabilities{Models: true, Steering: true, Approvals: false, PostToolUseHooks: true},
 		})
+	}
+	if discoverErr != nil {
+		response.UnavailableAgents = append(response.UnavailableAgents, agentCatalog{ID: "codex", Label: "Codex", Availability: "unavailable", Reason: discoverErr.Error()})
 	}
 	writeAPIJSON(w, http.StatusOK, response)
 }
@@ -73,6 +82,9 @@ func (h *handler) handleCodexPrepare(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) codexCapabilities(ctx context.Context) (zotigoruntime.Capabilities, error) {
+	if h.codexUnavailable != nil {
+		return zotigoruntime.Capabilities{}, h.codexUnavailable
+	}
 	adapter, err := h.runtimes.adapter(zotigoruntime.AgentCodex)
 	if err != nil {
 		return zotigoruntime.Capabilities{}, err

@@ -80,6 +80,9 @@ func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) 
 }
 
 func (h *handler) codexSyncDiagnostics(ctx context.Context, requested bool) []sessionSyncDiagnostic {
+	if requested && h.codexUnavailable != nil {
+		return []sessionSyncDiagnostic{{Code: "codex_unavailable", Message: h.codexUnavailable.Error()}}
+	}
 	if !requested || h.codexSync == nil {
 		return nil
 	}
