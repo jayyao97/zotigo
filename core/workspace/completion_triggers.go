@@ -182,20 +182,45 @@ func (s *Store) CancelCompletionTrigger(ctx context.Context, sessionID, id strin
 	return err
 }
 func (s *Store) ListCompletionTriggers(ctx context.Context, sessionID string) ([]CompletionTrigger, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT payload FROM completion_triggers WHERE session_id=? AND state='pending' AND expires_at>? ORDER BY expires_at`, sessionID, time.Now().Unix())
+	return s.listCompletionTriggers(ctx, sessionID, false, "")
+}
+
+func (s *Store) CompletionTriggerHistory(ctx context.Context, sessionID, targetID string) ([]CompletionTrigger, error) {
+	return s.listCompletionTriggers(ctx, sessionID, true, targetID)
+}
+
+func (s *Store) listCompletionTriggers(ctx context.Context, sessionID string, history bool, targetID string) ([]CompletionTrigger, error) {
+	now := time.Now().Unix()
+	query := `SELECT payload,state FROM completion_triggers WHERE session_id=? AND state='pending' AND expires_at>? ORDER BY expires_at`
+	args := []any{sessionID, now}
+	if history {
+		// Bound decoded payloads while retaining every live notification and an
+		// explicitly requested old receipt. All three branches stay session-scoped.
+		query = `SELECT payload,state FROM completion_triggers WHERE session_id=? AND id IN (
+			SELECT id FROM completion_triggers WHERE session_id=? AND state='pending' AND expires_at>?
+			UNION SELECT id FROM (SELECT id FROM completion_triggers WHERE session_id=? AND (state<>'pending' OR expires_at<=?) ORDER BY expires_at DESC,id LIMIT 100)
+			UNION SELECT id FROM completion_triggers WHERE session_id=? AND id=?
+		) ORDER BY CASE WHEN state='pending' AND expires_at>? THEN 0 ELSE 1 END,expires_at DESC,id`
+		args = []any{sessionID, sessionID, now, sessionID, now, sessionID, targetID, now}
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 	values := []CompletionTrigger{}
 	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
+		var raw, state string
+		if err := rows.Scan(&raw, &state); err != nil {
 			return nil, err
 		}
 		var value CompletionTrigger
 		if err := json.Unmarshal([]byte(raw), &value); err != nil {
 			return nil, err
+		}
+		value.State = state
+		if value.State == "pending" && !value.ExpiresAt.After(time.Now()) {
+			value.State = "expired"
 		}
 		values = append(values, value)
 	}

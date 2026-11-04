@@ -186,3 +186,95 @@ func TestCompletionCleanupRetainsFiredAuthority(t *testing.T) {
 		}
 	}
 }
+
+func TestCompletionTriggerHistoryStatesAndSessionScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(catalogtest.NewRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, id := range []string{"pending", "cancelled", "fired", "expired", "other"} {
+		sessionID := "s"
+		if id == "other" {
+			sessionID = "other-session"
+		}
+		expires := time.Now().Add(time.Hour)
+		if id == "expired" {
+			expires = time.Now().Add(-time.Minute)
+		}
+		if _, _, err := store.CreateCompletionTrigger(ctx, CompletionTrigger{ID: id, SessionID: sessionID, ExpiresAt: expires}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.CancelCompletionTrigger(ctx, "s", "cancelled"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.FireCompletionTrigger(ctx, "fired", "done", []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := store.ListCompletionTriggers(ctx, "s")
+	if err != nil || len(pending) != 1 || pending[0].ID != "pending" {
+		t.Fatalf("pending: %+v %v", pending, err)
+	}
+	history, err := store.CompletionTriggerHistory(ctx, "s", "")
+	if err != nil || len(history) != 4 {
+		t.Fatalf("history: %+v %v", history, err)
+	}
+	for _, item := range history {
+		if item.State != item.ID {
+			t.Errorf("incorrect state: %+v", item)
+		}
+	}
+}
+
+func TestCompletionHistoryBoundAndTargetScope(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(catalogtest.NewRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for i := 0; i < 105; i++ {
+		id := fmt.Sprintf("history-%03d", i)
+		if _, _, err := store.CreateCompletionTrigger(ctx, CompletionTrigger{ID: id, SessionID: "s", ExpiresAt: time.Now().Add(time.Duration(i+1) * time.Minute)}); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.CancelCompletionTrigger(ctx, "s", id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"pending-a", "pending-b", "foreign"} {
+		sessionID := "s"
+		if id == "foreign" {
+			sessionID = "other"
+		}
+		if _, _, err := store.CreateCompletionTrigger(ctx, CompletionTrigger{ID: id, SessionID: sessionID, ExpiresAt: time.Now().Add(time.Hour)}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		target string
+		count  int
+	}{{"", 102}, {"history-000", 103}, {"foreign", 102}} {
+		history, err := store.CompletionTriggerHistory(ctx, "s", tc.target)
+		if err != nil || len(history) != tc.count {
+			t.Fatalf("target=%s count=%d err=%v", tc.target, len(history), err)
+		}
+		pending, targetFound := 0, false
+		for _, item := range history {
+			if item.SessionID != "s" {
+				t.Fatalf("foreign session: %+v", item)
+			}
+			if item.State == "pending" {
+				pending++
+			}
+			if item.ID == "history-000" {
+				targetFound = true
+			}
+		}
+		if pending != 2 || targetFound != (tc.target == "history-000") {
+			t.Fatalf("pending=%d targetFound=%t", pending, targetFound)
+		}
+	}
+}
