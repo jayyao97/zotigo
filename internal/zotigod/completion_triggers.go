@@ -241,10 +241,23 @@ func (h *handler) handleCompletionTriggers(w http.ResponseWriter, r *http.Reques
 		writeAPIJSON(w, 200, map[string]bool{"ok": true})
 		return
 	}
-	values, err := h.catalog.ListCompletionTriggers(r.Context(), r.PathValue("id"))
+	var values []workspace.CompletionTrigger
+	var err error
+	if r.URL.Query().Get("include_history") == "true" {
+		values, err = h.catalog.CompletionTriggerHistory(r.Context(), r.PathValue("id"), r.URL.Query().Get("target"))
+	} else {
+		values, err = h.catalog.ListCompletionTriggers(r.Context(), r.PathValue("id"))
+	}
 	if err != nil {
 		writeAPIError(w, 500, err.Error())
 		return
 	}
-	writeAPIJSON(w, 200, map[string]any{"items": values})
+	items := make([]map[string]any, 0, len(values))
+	for _, value := range values {
+		items = append(items, map[string]any{
+			"id": value.ID, "title": value.Title, "on_fire": value.OnFire,
+			"expires_at": value.ExpiresAt, "state": value.State,
+		})
+	}
+	writeAPIJSON(w, 200, map[string]any{"items": items})
 }

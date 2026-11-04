@@ -1382,8 +1382,15 @@ Authenticated clients can use `GET /sessions/{id}/completion-triggers` to list
 unexpired pending triggers and `DELETE /sessions/{id}/completion-triggers/{id}`
 to revoke one. No callback credential is included in that list. Once fired, use
 the ordinary queue delete/resume actions; callback queue content is immutable.
-Desktop/Web show pending callbacks beside the input queue. Old daemons returning
-404/405 simply omit that panel. Unfired expired records are retained for up to
+Desktop/Web show callbacks in the session’s Background notifications side panel.
+The creation tool result links to its notification; ordinary queued messages remain
+above the composer. The panel requests `?include_history=true` to include fired,
+cancelled, and expired records with their current `state`. The response includes
+all live pending notifications plus at most 100 terminal records ordered by expiry
+(most recent first). An optional `target` trigger ID also includes that historical
+record, only if it belongs to this session, so old tool-call links remain usable. Without that parameter,
+the endpoint continues to return only unexpired pending triggers. Old daemons
+returning 404/405 show an unsupported message. Unfired expired records are retained for up to
 another week and pruned when a trigger is created. Fired records, including their
 callback text, remain available for queued delivery and durable replay.
 

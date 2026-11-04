@@ -76,6 +76,31 @@ func TestCompletionTriggerToolAndHTTPDelivery(t *testing.T) {
 	if code := call("POST", path, receipt.Token, `{"text":"changed"}`); code != 409 {
 		t.Fatalf("changed retry: %d", code)
 	}
+	for _, history := range []bool{false, true} {
+		r := httptest.NewRequest("GET", "/sessions/"+caller.SessionID+"/completion-triggers?include_history="+fmt.Sprint(history), nil)
+		r.Header.Set("Authorization", "Bearer global")
+		w := httptest.NewRecorder()
+		api.ServeHTTP(w, r)
+		var response apiResponse[struct {
+			Items []map[string]any `json:"items"`
+		}]
+		if w.Code != 200 || json.Unmarshal(w.Body.Bytes(), &response) != nil {
+			t.Fatalf("list: %d %s", w.Code, w.Body.String())
+		}
+		if !history && len(response.Data.Items) != 0 {
+			t.Fatal("pending list included fired callback")
+		}
+		if history {
+			if len(response.Data.Items) != 1 || response.Data.Items[0]["state"] != "fired" {
+				t.Fatalf("missing historical state: %+v", response.Data.Items)
+			}
+			for _, field := range []string{"callback_token", "callback_text", "policy", "session_id"} {
+				if _, ok := response.Data.Items[0][field]; ok {
+					t.Fatalf("list leaked %s", field)
+				}
+			}
+		}
+	}
 	rows, err := h.catalog.QueuedInputs(ctx, caller.SessionID)
 	if err != nil || len(rows) != 1 {
 		t.Fatalf("queue: %v %v", rows, err)
