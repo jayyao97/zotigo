@@ -69,6 +69,21 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 		// Steering from the same principal preserves the turn's authority. Do
 		// not let a different sender borrow the initiating input's grants.
 		if sessionScope && started && item.Command != nil && item.Command.Type == sessionCommandSteering {
+			// Host-created callback feedback contributes data, not a new principal.
+			// Preserve the initiating user's authority only for a verified receipt;
+			// callback-initiated turns still hit the delegation fence below.
+			if strings.HasPrefix(item.ID, "completion:") && h.catalog != nil {
+				trigger, err := h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(item.ID, "completion:"))
+				if err != nil {
+					return caller, err
+				}
+				if trigger.SessionID != id || trigger.State != "fired" || trigger.DeliveryMode != "steer" ||
+					item.Command.Text != completionPrompt(trigger.OnFire, trigger.CallbackText) ||
+					!sameRequestContext(item.Command.RequestContext, completionOrigin(trigger)) {
+					return caller, errors.New("completion steering has no matching host receipt")
+				}
+				continue
+			}
 			if input == nil || input.Command == nil ||
 				strings.HasPrefix(item.ID, "session_tool:") ||
 				(strings.HasPrefix(item.ID, "channel:") && item.Command.RequestContext == nil) ||
@@ -80,7 +95,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	if input == nil || input.Command == nil {
 		return caller, errors.New("runtime tool caller has no durable host input")
 	}
-	if sessionScope && strings.HasPrefix(input.ID, "session_tool:") {
+	if sessionScope && (strings.HasPrefix(input.ID, "session_tool:") || strings.HasPrefix(input.ID, "completion:")) {
 		return caller, errors.New("delegated tasks cannot invoke session tools again")
 	}
 	caller.Origin = input.Command.RequestContext.Clone()
@@ -182,6 +197,8 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 			return errors.New("source workspace changed during authorization")
 		}
 		switch request.Name {
+		case "create_completion_trigger":
+			result, err = h.createCompletionTrigger(ctx, fresh, request)
 		case "list_sessions":
 			result, err = h.listToolSessions(ctx, caller, request.Arguments)
 		case "read_session":

@@ -216,3 +216,6 @@ CREATE TABLE session_input_queue (
   UNIQUE(session_id, id)
 );
 CREATE INDEX idx_session_input_queue ON session_input_queue(session_id, state, sequence);
+
+CREATE TABLE completion_triggers (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','fired','cancelled')));
+CREATE INDEX completion_triggers_session ON completion_triggers(session_id,state,expires_at);

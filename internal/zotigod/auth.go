@@ -19,6 +19,12 @@ func authenticatedHandler(next http.Handler, publicToken string, workerToken str
 		return next
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This exact endpoint authenticates its own single-trigger credential.
+		parts := strings.Split(r.URL.Path, "/")
+		if r.Method == http.MethodPost && len(parts) == 4 && parts[1] == "completion-triggers" && parts[2] != "" && parts[3] == "fire" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if r.URL.Path == "/health" {
 			next.ServeHTTP(w, r)
 			return

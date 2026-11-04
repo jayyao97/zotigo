@@ -85,6 +85,9 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		handler.ServeHTTP(rec, httptest.NewRequest(method, "/sessions/"+sessionID+"/queue"+path, strings.NewReader(body)))
 		return rec
 	}
+	if rec := request("POST", "", `{"client_message_id":"completion:user-selected","text":"ordinary input"}`); rec.Code != 400 {
+		t.Fatalf("reserved callback ID accepted: %d %s", rec.Code, rec.Body.String())
+	}
 	for _, id := range []string{"a", "b", "c"} {
 		rec := request("POST", "", `{"client_message_id":"`+id+`","text":"`+id+`"}`)
 		if rec.Code != 201 {

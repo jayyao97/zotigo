@@ -472,6 +472,7 @@ func canTransition(state SessionState, from []SessionState) bool {
 }
 
 type handler struct {
+	callbackBaseURL      string
 	updater              *update.Manager
 	updateMu             sync.RWMutex
 	registry             *sessionRegistry
@@ -493,6 +494,7 @@ type handler struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	codexSync            *codexSessionSyncer
+	codexUnavailable     error
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 	channels             *channels.Service
@@ -669,21 +671,26 @@ func Run(args []string) (exitCode int) {
 		defer launcher.Close()
 	}
 	runtimes := newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher})
-	var codexHost *codexapp.Host
-	if binaryPath, _, discoverErr := codexapp.Discover(); discoverErr == nil && launcher != nil {
-		cacheDir, cacheErr := os.UserCacheDir()
-		if cacheErr == nil {
-			codexHost, cacheErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), log.Writer(), codexapp.HostOptions{StopWhenIdle: true})
-		}
-		if cacheErr != nil {
-			logger.Printf("Codex runtime disabled: %v", cacheErr)
-		} else {
-			codexAdapter := codexapp.NewAdapter(codexHost, launcher.StartCodex)
-			runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher}, codexAdapter)
+	var codexHost codexapp.HostProvider
+	binaryPath, _, codexErr := codexapp.Discover()
+	if codexErr == nil && launcher == nil {
+		codexErr = errors.New("worker launcher is unavailable")
+	}
+	if codexErr == nil {
+		var cacheDir string
+		cacheDir, codexErr = os.UserCacheDir()
+		if codexErr == nil {
+			var host *codexapp.Host
+			host, codexErr = codexapp.NewHost(binaryPath, filepath.Join(cacheDir, "zotigod", "runtime"), log.Writer(), codexapp.HostOptions{StopWhenIdle: true})
+			if codexErr == nil {
+				codexHost = host
+				defer func() { _ = host.Close() }()
+				runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: launcher}, codexapp.NewAdapter(host, launcher.StartCodex))
+			}
 		}
 	}
-	if codexHost != nil {
-		defer func() { _ = codexHost.Close() }()
+	if codexErr != nil {
+		logger.Printf("Codex runtime unavailable: %v", codexErr)
 	}
 	server := &http.Server{
 		Addr:              *addr,
@@ -709,11 +716,13 @@ func Run(args []string) (exitCode int) {
 		}
 	}
 	server.Handler = newDefaultHandler(handlerOptions{
+		callbackBaseURL:    workerCallback,
 		updater:            updater,
 		maintenanceContext: ctx,
 		launcher:           launcher,
 		runtimes:           runtimes,
 		codexHost:          codexHost,
+		codexUnavailable:   codexErr,
 		publicAuthToken:    publicAuthToken,
 		workerAuthToken:    workerAuthToken,
 		logger:             logger,
@@ -814,6 +823,7 @@ func NewHandler() http.Handler {
 }
 
 type handlerOptions struct {
+	callbackBaseURL      string
 	updater              *update.Manager
 	maintenanceContext   context.Context
 	launcher             workerLauncher
@@ -833,6 +843,7 @@ type handlerOptions struct {
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	codexHost            codexapp.HostProvider
+	codexUnavailable     error
 	logger               *log.Logger
 	hooks                hookEventDispatcher
 	channels             *channels.Service
@@ -959,6 +970,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workers:              options.workers,
 		launcher:             options.launcher,
 		runtimes:             options.runtimes,
+		codexUnavailable:     options.codexUnavailable,
 		workerConnectTimeout: options.workerConnectTimeout,
 		workerLaunchTimeout:  options.workerLaunchTimeout,
 		inputStopTimeout:     options.inputStopTimeout,
@@ -966,6 +978,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		workspaceOps:         options.workspaceOps,
 		approvalOps:          newSessionOperationLocks(),
 		queueOps:             newSessionOperationLocks(),
+		callbackBaseURL:      options.callbackBaseURL,
 		titleSuggestion:      options.titleSuggestion,
 		titleTimeout:         options.titleTimeout,
 		events:               options.events,
@@ -1131,6 +1144,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/sessions/{id}/events", withPathValue("id", handler.handleSessionEvents))
 	mux.HandleFunc("/sessions/{id}/messages", withPathValue("id", handler.handleSessionMessage))
 	mux.HandleFunc("/sessions/{id}/queue", withPathValue("id", handler.handleInputQueue))
+	mux.HandleFunc("POST /completion-triggers/{trigger}/fire", handler.handleFireCompletionTrigger)
+	mux.HandleFunc("GET /sessions/{id}/completion-triggers", handler.handleCompletionTriggers)
+	mux.HandleFunc("DELETE /sessions/{id}/completion-triggers/{trigger}", handler.handleCompletionTriggers)
 	mux.HandleFunc("/sessions/{id}/queue/resume", withPathValue("id", handler.handleResumeInputQueue))
 	mux.HandleFunc("/sessions/{id}/queue/{item}", handler.handleQueuedInput)
 	mux.HandleFunc("/sessions/{id}/queue/{item}/send", handler.handleSendQueuedInput)

@@ -286,6 +286,34 @@ func TestFileStore_GetNotFound(t *testing.T) {
 	}
 }
 
+func TestFileStoreDeleteRemovesCompletionReceipts(t *testing.T) {
+	store, err := NewFileStore(catalogtest.NewRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+	for _, id := range []string{"deleted", "kept"} {
+		if err := store.Put(ctx, &Session{Metadata: Metadata{ID: id, CreatedAt: time.Now(), UpdatedAt: time.Now()}}); err != nil {
+			t.Fatal(err)
+		}
+		for _, state := range []string{"pending", "fired", "cancelled"} {
+			if _, err := store.index.db.ExecContext(ctx, `INSERT INTO completion_triggers(id,session_id,payload,expires_at,state) VALUES(?,?,?,?,?)`, id+state, id, `{"on_fire":"private instruction","callback_text":"private results"}`, time.Now().Unix(), state); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := store.Delete(ctx, "deleted"); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{"deleted": 0, "kept": 3} {
+		var count int
+		if err := store.index.db.QueryRowContext(ctx, `SELECT count(*) FROM completion_triggers WHERE session_id=?`, id).Scan(&count); err != nil || count != want {
+			t.Fatalf("receipts for %s = %d want %d: %v", id, count, want, err)
+		}
+	}
+}
+
 func TestFileStore_Delete(t *testing.T) {
 	tmpDir := catalogtest.NewRoot(t)
 	store, err := NewFileStore(tmpDir)

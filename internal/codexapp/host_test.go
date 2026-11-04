@@ -323,3 +323,50 @@ func TestHostHelperProcess(t *testing.T) {
 	<-ctx.Done()
 	_ = server.Close()
 }
+
+func TestNilHostAcquireReturnsUnavailable(t *testing.T) {
+	var host *Host
+	var provider HostProvider = host
+	if _, err := provider.Acquire(context.Background()); err == nil {
+		t.Fatal("nil host must report unavailable")
+	}
+}
+
+func TestMacOSCodexCandidatesSupportCurrentAndLegacyBundles(t *testing.T) {
+	apps := t.TempDir()
+	candidates := macOSCodexCandidates(apps)
+	for _, candidate := range candidates {
+		if err := os.MkdirAll(filepath.Dir(candidate), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(candidate, []byte("#!/bin/sh\necho test\n"), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := firstExecutable(candidates...); got != candidates[0] || !strings.Contains(got, "CodexCLI.app") {
+		t.Fatalf("selected %q", got)
+	}
+	if err := os.Remove(candidates[0]); err != nil {
+		t.Fatal(err)
+	}
+	if got := firstExecutable(candidates...); got != candidates[1] {
+		t.Fatalf("legacy selected %q", got)
+	}
+}
+
+func TestDiscoverReportsInvalidConfiguredRuntime(t *testing.T) {
+	for _, mode := range []string{"missing", "version-fails"} {
+		t.Run(mode, func(t *testing.T) {
+			binary := filepath.Join(t.TempDir(), "codex")
+			if mode == "version-fails" {
+				if err := os.WriteFile(binary, []byte("#!/bin/sh\nexit 1\n"), 0700); err != nil {
+					t.Fatal(err)
+				}
+			}
+			t.Setenv(codexBinaryEnv, binary)
+			if _, _, err := Discover(); err == nil {
+				t.Fatal("expected discovery error")
+			}
+		})
+	}
+}

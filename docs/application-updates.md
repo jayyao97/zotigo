@@ -16,7 +16,15 @@
 - `data_epoch`：持久化格式的双向兼容代际。同一代际必须允许旧版读取新版写入的数据，才允许自动回退。
 - UI 的 `daemon-version`：源码构建使用的配套 Daemon revision。
 
-先发布配套 Daemon tag，再发布 UI tag。当前待发布组合为 Daemon `v0.0.4-dev.31`、UI `v0.0.4-dev.38`。开发测试可用 UI 安装器的 `--daemon-source` 指向本地 checkout。代码提交本身不会成为可检测的更新；必须发布版本标签。不要重用或移动已发布标签。
+Completion callback 引入 catalog schema 16，因此对应 Daemon 的 `data_epoch`
+提高到 `2`。epoch-1 更新器只会回退二进制，不能恢复已经迁移的数据库，
+所以旧安装会在准备阶段拒绝这一跨代升级。首次跨代需要停止 Daemon 和全部
+session worker、备份完整状态目录，再使用目标版本安装器升级。需要回退时，
+先停止服务，用新版 `catalog-migrate --root <state-root> --to 15` 离线降级，
+或者恢复一致的备份，再启动旧版。自动跨代升级需先发布支持数据库恢复的更新器，
+不能仅修改新版本的回滚脚本。
+
+先发布配套 Daemon tag，再发布 UI tag。当前待发布组合为 Daemon `v0.0.4-dev.32`、UI `v0.0.4-dev.41`。开发测试可用 UI 安装器的 `--daemon-source` 指向本地 checkout。代码提交本身不会成为可检测的更新；必须发布版本标签。不要重用或移动已发布标签。
 
 ## 渠道与版本检测
 

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"strings"
 )
 
 var ErrQueueConflict = errors.New("queued input changed or is already being sent")
@@ -108,7 +109,21 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 		if paused > 0 && !resume {
 			return nil, nil
 		}
-		if _, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND batch_id='' AND state IN ('queued','paused')`, batchID, sessionID); err != nil {
+		// Completion notifications keep their identity and authority when mixed
+		// with ordinary queued input. Batch only the prefix before the next one.
+		var first string
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') ORDER BY sequence LIMIT 1`, sessionID).Scan(&first); errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		} else if err != nil {
+			return nil, err
+		}
+		if strings.HasPrefix(first, "completion:") {
+			batchID = first
+			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND id=?`, batchID, sessionID, first)
+		} else {
+			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') AND sequence < COALESCE((SELECT MIN(sequence) FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') AND id GLOB 'completion:*'),9223372036854775807)`, batchID, sessionID, sessionID)
+		}
+		if err != nil {
 			return nil, err
 		}
 	}
