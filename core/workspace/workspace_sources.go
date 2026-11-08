@@ -22,8 +22,12 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 	source, err := scanSource(db.QueryRowContext(ctx, `
 		SELECT id, project_id, kind, canonical_path, git_common_dir,
 		       git_object_format, folder_mode, source_key, created_at, updated_at
-		FROM sources WHERE id = ? AND project_id = ? AND registered = 1
-	`, selection.SourceID, workspace.ProjectID))
+		FROM sources WHERE id = ? AND project_id = ? AND (
+		 registered = 1 OR (? AND EXISTS(
+		  SELECT 1 FROM source_repositories sr JOIN sources replacement ON replacement.id=sr.replacement_source_id
+		  WHERE sr.source_id=sources.id AND replacement.registered=1
+		 )))
+	`, selection.SourceID, workspace.ProjectID, selection.preparedLocalSource))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
@@ -82,9 +86,9 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO workspace_checkouts(
 				workspace_id, source_id, worktree_path, base_ref,
-				base_commit, branch_name, owned_head, status
-			) VALUES(?, ?, ?, ?, ?, ?, ?, 'planned')
-		`, workspace.ID, source.ID, target, baseRef, baseCommit, branchName, baseCommit); err != nil {
+				base_commit, branch_name, owned_head, status, used_cached_base, base_synced_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+		`, workspace.ID, source.ID, target, baseRef, baseCommit, branchName, baseCommit, selection.usedCachedBase, nullableTimeMillis(selection.baseSyncedAt)); err != nil {
 			if isConstraintError(err) {
 				return fmt.Errorf("%w: source is already bound to the workspace", ErrConflict)
 			}
@@ -168,7 +172,7 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 		items = append(items, WorkspaceSource{
 			Source: source, TargetPath: checkout.WorktreePath, WorktreePath: checkout.WorktreePath,
 			BaseRef: checkout.BaseRef, BaseCommit: checkout.BaseCommit, BranchName: checkout.BranchName,
-			Status: checkout.Status, Error: checkout.Error,
+			Status: checkout.Status, Error: checkout.Error, UsedCachedBase: checkout.UsedCachedBase, BaseSyncedAt: checkout.BaseSyncedAt,
 		})
 	}
 	for _, folder := range folders {
@@ -187,9 +191,6 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, selection WorkspaceSourceInput) (WorkspaceSource, error) {
 	s.operationMu.Lock()
 	workspace, err := s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
-	if err == nil {
-		err = s.migrateRepositorySources(ctx)
-	}
 	s.operationMu.Unlock()
 	if err != nil {
 		return WorkspaceSource{}, err

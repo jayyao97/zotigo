@@ -19,13 +19,17 @@ import (
 const schemaVersion = catalogschema.Version
 
 type Store struct {
-	db              *sql.DB
-	rootDir         string
-	operationMu     sync.Mutex
-	repositoryMu    sync.Mutex
-	repositoryLocks map[string]chan struct{}
-	writerLock      *flock.Flock
-	schemaLock      *flock.Flock
+	db                *sql.DB
+	rootDir           string
+	operationMu       sync.Mutex
+	repositoryMu      sync.Mutex
+	repositoryLocks   map[string]chan struct{}
+	maintenanceMu     sync.Mutex
+	maintenanceCancel context.CancelFunc
+	maintenanceDone   chan struct{}
+	maintenanceWake   chan struct{}
+	writerLock        *flock.Flock
+	schemaLock        *flock.Flock
 }
 
 // OpenReadOnly opens an existing catalog without running migrations or writing
@@ -70,10 +74,6 @@ func Open(rootDir string) (*Store, error) {
 		_ = store.Close()
 		return nil, err
 	}
-	if err := store.migrateRepositorySources(context.Background()); err != nil {
-		_ = store.Close()
-		return nil, fmt.Errorf("migrate repository sources: %w", err)
-	}
 	return store, nil
 }
 
@@ -114,6 +114,7 @@ func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 }
 
 func (s *Store) Close() error {
+	s.stopRepositoryMaintenance()
 	err := s.db.Close()
 	if s.schemaLock != nil {
 		err = errors.Join(err, s.schemaLock.Close())

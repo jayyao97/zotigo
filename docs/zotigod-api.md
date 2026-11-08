@@ -1416,7 +1416,8 @@ ordinary daemon authentication token.
 
 - `GET /repositories`: `{ "repositories": [...] }` within the standard `data`
   envelope. Each repository has `id`, `name`, `remote_url`, `canonical_path`,
-  `default_branch`, `created_at`, and `updated_at`. An empty `default_branch`
+  `default_branch`, `created_at`, and `updated_at`, plus optional `last_synced_at`
+  and `last_sync_error`. An empty `default_branch`
   means it has not been fetched or the remote did not advertise a default.
 - `POST /repositories`: `{ "remote_url": "git@host:org/repo.git", "name": "optional" }`.
   Returns the repository after cloning/fetching. Repeating the same exact remote
@@ -1426,7 +1427,7 @@ ordinary daemon authentication token.
   alternative to the existing local `{ "path": "...", "folder_mode": "..." }`.
   Remote registration and project association are distinct; several projects
   share one cache. Source responses add `repository_id`, `remote_url`, and
-  `default_branch` where applicable.
+  `default_branch`, `last_synced_at`, and `last_sync_error` where applicable.
 
 When creating a workspace or adding a repository to it, omit `base_ref` for the
 remote's current default branch, detected using its advertised HEAD after fetch.
@@ -1434,9 +1435,20 @@ An explicit branch name, `origin/name`, `refs/heads/name`, or
 `refs/remotes/origin/name` selects that remote branch. A literal branch named
 `origin/name` takes precedence over interpreting it as shorthand for `name`;
 use the full ref to disambiguate. Missing remote HEAD requires
-an explicit choice; no `main`/`master` guess is made. Every new binding fetches
-first and fails explicitly if the remote is unavailable. The plan pins the fetched
-commit, so a later fetch cannot move its starting point. Workspace branch names
+an explicit choice; no `main`/`master` guess is made. New bindings allow up to ten
+seconds for refresh, including waiting for another refresh of that repository.
+Network failure or that deadline falls back to an existing successfully synced
+cache, provided the requested commit is available. Identity changes, invalid
+inputs and caller cancellation still fail. A new remote with no successful cache
+must finish preparation before it can be used. Successful default commits have
+protected Git refs independent of pruneable origin refs, so a partial refresh
+cannot destroy the previous default backup. Other explicitly requested branches
+must exist in the local remote-tracking cache.
+
+Workspace source responses persist `used_cached_base: true` and `base_synced_at`
+when fallback was used. These describe the creation-time snapshot and do not
+change after later synchronization. The plan pins the selected commit, so a later
+fetch cannot move its starting point. Workspace branch names
 continue to be generated unless explicitly supplied. Existing workspaces are
 never automatically pulled, rebased, or reset.
 
@@ -1453,14 +1465,24 @@ Migrated repositories can reuse original local objects during clone with
 `--reference-if-able` and `--dissociate`, leaving no dependency on that object
 store after cloning. Absolute local remote paths are supported.
 
-Schema 17 automatically associates existing registered Git sources having one
-unambiguous, supported remote with a managed repository. This metadata migration
-does not access the network. Sources without a remote, with multiple remotes, or
-with unsupported credential-bearing URLs remain local. A project receives a
-managed replacement source; the original source identity remains available to
-existing workspaces for archive, restore and deletion. Old client source IDs are
-translated when creating new bindings. Worktree paths, indexes, uncommitted
-changes, session working directories, and original Git metadata remain unchanged.
+Schema 17 adds durable source migration state. Catalog startup and ordinary
+list/create operations do not scan Git remotes. The serving daemon prepares
+eligible local sources in the background: sources having one unambiguous supported
+remote are switched to a managed replacement only after clone, synchronization
+and importing local refs succeed. Until then the original source remains registered
+and usable, including offline. Failed preparation is recorded and retries after
+restart or in a later maintenance pass; it does not prevent daemon startup.
+Sources without a remote, with multiple remotes, or unsupported URLs are marked
+local and are not repeatedly probed. Re-registering such a source permits another
+eligibility check. Adding a source wakes the background loop.
+
+A separate ten-minute maintenance loop refreshes existing caches; initial clones
+do not block it. Each repository retains its last successful sync time and latest
+sync error. Maintenance stops with the daemon. The original source identity remains
+available to existing workspaces for archive, restore and deletion. Old client
+source IDs are translated when creating new bindings after migration. Worktree
+paths, indexes, uncommitted changes, session directories and original Git metadata
+remain unchanged.
 This intentionally does not reparent existing linked worktrees: they still depend
 on their original Git common directory, which must not be deleted while in use.
 
@@ -1468,14 +1490,14 @@ On first managed preparation, local heads/tags from each original source are
 imported into `refs/zotigo/imported/<source-id>/heads/*` and `.../tags/*`, once per
 source, preserving unpublished refs without colliding with remote branches.
 Explicit `base_ref` may select an imported ref. Original worktree refs/files are
-not removed. If an original directory was already moved/deleted, remote creation
-can proceed but unavailable local-only objects cannot be recovered automatically.
-Subsequent managed workspaces do not depend on the original directory.
+not removed. If an original directory is unavailable, automatic migration stays
+pending rather than switching without its local-only objects. Subsequent managed
+workspaces do not depend on the original directory.
 
 This release uses `data_epoch: 3`: stop daemon/workers and back up the full state
 directory for the cross-epoch installer upgrade. Binary-only rollback is unsafe.
 An explicit offline downgrade to schema 16 drops repository catalog metadata.
 Replacements with no workspace bindings restore their original local source
-registrations, including metadata-only migrations whose caches were never cloned.
+registrations. Pending preparations have never replaced their local registration.
 Already-bound managed caches remain ordinary local sources. All workspaces,
 branches, and original source rows survive; no Git directories are deleted.

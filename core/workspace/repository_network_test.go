@@ -15,6 +15,10 @@ import (
 )
 
 func blockRepositoryFetch(t *testing.T) (wait func(), release func()) {
+	return blockRepositoryFetchAt(t, "")
+}
+
+func blockRepositoryFetchAt(t *testing.T, directory string) (wait func(), release func()) {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("test Git wrapper uses POSIX shell")
@@ -25,11 +29,12 @@ func blockRepositoryFetch(t *testing.T) (wait func(), release func()) {
 	}
 	dir := t.TempDir()
 	started, released := filepath.Join(dir, "started"), filepath.Join(dir, "released")
-	script := "#!/bin/sh\nif [ \"$3\" = fetch ]; then\n : > \"$ZOTIGO_TEST_FETCH_STARTED\"\n while [ ! -f \"$ZOTIGO_TEST_FETCH_RELEASED\" ]; do sleep 0.01; done\nfi\nexec \"$ZOTIGO_TEST_REAL_GIT\" \"$@\"\n"
+	script := "#!/bin/sh\nif [ \"$3\" = fetch ] && { [ -z \"$ZOTIGO_TEST_FETCH_DIRECTORY\" ] || [ \"$2\" = \"$ZOTIGO_TEST_FETCH_DIRECTORY\" ]; }; then\n : > \"$ZOTIGO_TEST_FETCH_STARTED\"\n while [ ! -f \"$ZOTIGO_TEST_FETCH_RELEASED\" ]; do sleep 0.01; done\nfi\nexec \"$ZOTIGO_TEST_REAL_GIT\" \"$@\"\n"
 	if err := os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("ZOTIGO_TEST_REAL_GIT", git)
+	t.Setenv("ZOTIGO_TEST_FETCH_DIRECTORY", directory)
 	t.Setenv("ZOTIGO_TEST_FETCH_STARTED", started)
 	t.Setenv("ZOTIGO_TEST_FETCH_RELEASED", released)
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
@@ -278,6 +283,14 @@ func TestMigratedRepositoryCloneDissociatesReference(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := store.migrateRepositorySources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := store.ListSources(ctx, project.ID)
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("sources=%+v %v", sources, err)
+	}
+	source = sources[0]
 	_, err = store.CreateWorkspacePlan(ctx, project.ID, "Managed", []WorkspaceSourceInput{{SourceID: source.ID}})
 	if err != nil {
 		t.Fatal(err)

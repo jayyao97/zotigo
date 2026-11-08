@@ -864,6 +864,13 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 	opts.catalogErr = catalogErr
 	if catalogErr == nil {
 		opts.catalogErr = catalog.RecoverQueuedInputs(context.Background())
+		if opts.maintenanceContext != nil {
+			catalog.StartRepositoryMaintenance(opts.maintenanceContext, func(err error) {
+				if opts.logger != nil {
+					opts.logger.Printf("repository_maintenance_failed: %v", err)
+				}
+			})
+		}
 	}
 	items := storedDisplayItemSource{store: store}
 	return newHandler(newSessionRegistry(), items, opts)

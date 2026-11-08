@@ -174,30 +174,23 @@ func (s *Store) AddSource(ctx context.Context, projectID string, input SourceInp
 		}
 		return Source{}, fmt.Errorf("add source: %w", err)
 	}
-	if source.Kind == SourceKindGit {
-		if err := s.migrateRepositorySources(ctx); err != nil {
-			return Source{}, err
-		}
-		var replacement sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, source.ID).Scan(&replacement)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			return Source{}, err
-		}
-		if replacement.Valid {
-			tx, err := s.db.BeginTx(ctx, nil)
-			if err != nil {
-				return Source{}, err
-			}
-			defer func() { _ = tx.Rollback() }()
-			if _, err := tx.ExecContext(ctx, `UPDATE sources SET registered=CASE WHEN id=? THEN 1 ELSE 0 END WHERE id IN (?,?)`, replacement.String, replacement.String, source.ID); err != nil {
-				return Source{}, err
-			}
-			if err := tx.Commit(); err != nil {
-				return Source{}, err
-			}
-			return s.GetSource(ctx, projectID, replacement.String)
-		}
+	// Re-adding an already migrated path keeps its established managed identity;
+	// a new path is left local until background preparation succeeds.
+	var replacement sql.NullString
+	err = s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, source.ID).Scan(&replacement)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Source{}, err
 	}
+	if replacement.Valid {
+		if _, err := s.db.ExecContext(ctx, `UPDATE sources SET registered=CASE WHEN id=? THEN 1 ELSE 0 END WHERE id IN (?,?)`, replacement.String, replacement.String, source.ID); err != nil {
+			return Source{}, err
+		}
+		return s.GetSource(ctx, projectID, replacement.String)
+	}
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM source_repository_migrations WHERE source_id=? AND status='local'`, source.ID); err != nil {
+		return Source{}, err
+	}
+	s.wakeRepositoryMigration()
 	return s.sourceRepository(ctx, source)
 }
 
@@ -252,8 +245,20 @@ func (s *Store) DeleteSource(ctx context.Context, projectID string, sourceID str
 	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return err
 	}
+	// A client can still hold the original ID after background migration has
+	// switched the project registration. Remove the current project reference.
+	var currentID string
+	err := s.db.QueryRowContext(ctx, `SELECT COALESCE(sr.replacement_source_id,s.id)
+	 FROM sources s LEFT JOIN source_repositories sr ON sr.source_id=s.id
+	 WHERE s.id=? AND s.project_id=?`, sourceID, projectID).Scan(&currentID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("resolve source for deletion: %w", err)
+	}
 	// Existing bindings still need this metadata for restore and deletion.
-	result, err := s.db.ExecContext(ctx, `UPDATE sources SET registered = 0, updated_at = ? WHERE id = ? AND project_id = ?`, unixMillis(time.Now().UTC()), sourceID, projectID)
+	result, err := s.db.ExecContext(ctx, `UPDATE sources SET registered = 0, updated_at = ? WHERE id = ? AND project_id = ?`, unixMillis(time.Now().UTC()), currentID, projectID)
 	if err != nil {
 		return fmt.Errorf("delete source: %w", err)
 	}
@@ -310,12 +315,6 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	}
 	if project.Status != ProjectStatusActive {
 		return Workspace{}, fmt.Errorf("%w: project is %s", ErrConflict, project.Status)
-	}
-	s.operationMu.Lock()
-	migrationErr := s.migrateRepositorySources(ctx)
-	s.operationMu.Unlock()
-	if migrationErr != nil {
-		return Workspace{}, migrationErr
 	}
 	prepared := make([]WorkspaceSourceInput, len(selections))
 	for index, selection := range selections {
@@ -450,7 +449,7 @@ func (s *Store) setWorkspaceStatus(ctx context.Context, id string, status Worksp
 func (s *Store) workspaceBindings(ctx context.Context, workspaceID string) ([]Checkout, []FolderBinding, error) {
 	checkoutRows, err := s.db.QueryContext(ctx, `
 		SELECT workspace_id, source_id, worktree_path, base_ref, base_commit,
-		       branch_name, owned_head, status, error
+		       branch_name, owned_head, status, error, used_cached_base, base_synced_at
 		FROM workspace_checkouts WHERE workspace_id = ? ORDER BY source_id
 	`, workspaceID)
 	if err != nil {
@@ -460,13 +459,18 @@ func (s *Store) workspaceBindings(ctx context.Context, workspaceID string) ([]Ch
 	for checkoutRows.Next() {
 		var checkout Checkout
 		var errorText sql.NullString
+		var synced sql.NullInt64
 		if err := checkoutRows.Scan(&checkout.WorkspaceID, &checkout.SourceID,
 			&checkout.WorktreePath, &checkout.BaseRef, &checkout.BaseCommit,
-			&checkout.BranchName, &checkout.OwnedHead, &checkout.Status, &errorText); err != nil {
+			&checkout.BranchName, &checkout.OwnedHead, &checkout.Status, &errorText, &checkout.UsedCachedBase, &synced); err != nil {
 			_ = checkoutRows.Close()
 			return nil, nil, fmt.Errorf("scan workspace checkout: %w", err)
 		}
 		checkout.Error = errorText.String
+		if synced.Valid {
+			value := fromUnixMillis(synced.Int64)
+			checkout.BaseSyncedAt = &value
+		}
 		checkouts = append(checkouts, checkout)
 	}
 	if err := checkoutRows.Err(); err != nil {

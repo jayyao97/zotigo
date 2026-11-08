@@ -18,24 +18,29 @@ import (
 // Repository is a daemon-owned Git cache shared by project source references.
 // Existing worktrees keep their original source identity until they are removed.
 type Repository struct {
-	ID            string    `json:"id"`
-	Name          string    `json:"name"`
-	RemoteURL     string    `json:"remote_url"`
-	CanonicalPath string    `json:"canonical_path"`
-	DefaultBranch string    `json:"default_branch"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	defaultCommit string
+	LastSyncedAt  *time.Time `json:"last_synced_at,omitempty"`
+	LastSyncError string     `json:"last_sync_error,omitempty"`
+	ID            string     `json:"id"`
+	Name          string     `json:"name"`
+	RemoteURL     string     `json:"remote_url"`
+	CanonicalPath string     `json:"canonical_path"`
+	DefaultBranch string     `json:"default_branch"`
+	CreatedAt     time.Time  `json:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at"`
 }
 
-const repositoryColumns = `id, name, remote_url, canonical_path, default_branch, created_at, updated_at`
+const repositoryColumns = `id, name, remote_url, canonical_path, default_branch, created_at, updated_at, last_synced_at, last_sync_error, default_commit`
 
 func scanRepository(row scanner) (Repository, error) {
 	var repo Repository
 	var created, updated int64
-	if err := row.Scan(&repo.ID, &repo.Name, &repo.RemoteURL, &repo.CanonicalPath, &repo.DefaultBranch, &created, &updated); err != nil {
+	var synced sql.NullInt64
+	if err := row.Scan(&repo.ID, &repo.Name, &repo.RemoteURL, &repo.CanonicalPath, &repo.DefaultBranch, &created, &updated, &synced, &repo.LastSyncError, &repo.defaultCommit); err != nil {
 		return repo, scanError("repository", err)
 	}
 	repo.CreatedAt, repo.UpdatedAt = fromUnixMillis(created), fromUnixMillis(updated)
+	repo.LastSyncedAt = nullableTime(synced)
 	return repo, nil
 }
 
@@ -44,11 +49,6 @@ func (s *Store) GetRepository(ctx context.Context, id string) (Repository, error
 }
 
 func (s *Store) ListRepositories(ctx context.Context) ([]Repository, error) {
-	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
-	if err := s.migrateRepositorySources(ctx); err != nil {
-		return nil, err
-	}
 	rows, err := s.db.QueryContext(ctx, `SELECT `+repositoryColumns+` FROM repositories ORDER BY name, id`)
 	if err != nil {
 		return nil, err
@@ -144,8 +144,7 @@ func (s *Store) CreateRepository(ctx context.Context, remote, name string) (Repo
 	return s.refreshRepository(ctx, repo)
 }
 
-// refreshRepository never modifies a user checkout, and never silently uses a
-// stale remote ref when fetch fails. Failed clones can be retried independently.
+// refreshRepository never modifies a user checkout. Failed clones remain retryable.
 func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Repository, error) {
 	unlock, err := s.lockRepository(ctx, repo.ID)
 	if err != nil {
@@ -182,7 +181,12 @@ func runRepositoryGit(ctx context.Context, timeout time.Duration, directory stri
 	return runGit(ctx, directory, args...)
 }
 
-func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (Repository, error) {
+func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (result Repository, resultErr error) {
+	defer func() {
+		if resultErr != nil && ctx.Err() == nil {
+			_, _ = s.db.ExecContext(ctx, `UPDATE repositories SET last_sync_error=? WHERE id=?`, resultErr.Error(), repo.ID)
+		}
+	}()
 	if _, err := os.Stat(repo.CanonicalPath); os.IsNotExist(err) {
 		parent := filepath.Dir(repo.CanonicalPath)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -197,7 +201,7 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (R
 		// branches under a separate namespace rather than overwriting remote refs.
 		args := []string{"clone", "--no-checkout", "--no-hardlinks"}
 		var reference string
-		err = s.db.QueryRowContext(ctx, `SELECT s.canonical_path FROM sources s JOIN source_repositories sr ON sr.source_id=s.id WHERE sr.repository_id=? AND sr.replacement_source_id IS NOT NULL ORDER BY s.id LIMIT 1`, repo.ID).Scan(&reference)
+		err = s.db.QueryRowContext(ctx, `SELECT s.canonical_path FROM sources s JOIN source_repository_migrations m ON m.source_id=s.id WHERE m.repository_id=? AND m.status IN ('pending','retry') ORDER BY s.id LIMIT 1`, repo.ID).Scan(&reference)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return Repository{}, err
 		}
@@ -214,26 +218,15 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (R
 	} else if err != nil {
 		return Repository{}, err
 	}
-	inspection, err := InspectSource(ctx, repo.CanonicalPath)
-	if err != nil {
-		return Repository{}, err
-	}
-	if inspection.Kind != SourceKindGit || inspection.CanonicalPath != repo.CanonicalPath || inspection.GitCommonDir != filepath.Join(repo.CanonicalPath, ".git") {
-		return Repository{}, fmt.Errorf("%w: managed repository identity changed", ErrConflict)
-	}
-	origin, err := runGit(ctx, repo.CanonicalPath, "config", "--get", "remote.origin.url")
-	if err != nil || strings.TrimSpace(origin) != repo.RemoteURL {
-		return Repository{}, fmt.Errorf("%w: managed repository remote changed", ErrConflict)
-	}
-	if err := s.importLocalRepositoryRefs(ctx, repo); err != nil {
+	if err := verifyRepositoryIdentity(ctx, repo); err != nil {
 		return Repository{}, err
 	}
 	if _, err := runRepositoryGit(ctx, 5*time.Minute, repo.CanonicalPath, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
-		return Repository{}, fmt.Errorf("fetch repository failed; check remote access on this daemon: %w", err)
+		return Repository{}, &repositorySyncError{fmt.Errorf("fetch repository failed; check remote access on this daemon: %w", err)}
 	}
 	output, err := runRepositoryGit(ctx, time.Minute, repo.CanonicalPath, "ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
-		return Repository{}, fmt.Errorf("detect remote default branch: %w", err)
+		return Repository{}, &repositorySyncError{fmt.Errorf("detect remote default branch: %w", err)}
 	}
 	branch := ""
 	for _, line := range strings.Split(output, "\n") {
@@ -241,12 +234,20 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (R
 			branch = strings.TrimSuffix(strings.TrimPrefix(line, "ref: refs/heads/"), "\tHEAD")
 		}
 	}
+	defaultCommit := ""
 	if branch != "" {
-		if _, err := runGit(ctx, repo.CanonicalPath, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}"); err != nil {
+		resolved, err := runGit(ctx, repo.CanonicalPath, "rev-parse", "--verify", "refs/remotes/origin/"+branch+"^{commit}")
+		if err != nil {
 			return Repository{}, fmt.Errorf("%w: remote default branch is unavailable", ErrConflict)
 		}
+		defaultCommit = strings.TrimSpace(resolved)
+		// A later fetch can prune or force-update origin refs before failing. Keep
+		// successful default commits independently reachable for offline fallback.
+		if _, err := runGit(ctx, repo.CanonicalPath, "update-ref", "refs/zotigo/default-cache/"+defaultCommit, defaultCommit); err != nil {
+			return Repository{}, err
+		}
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE repositories SET default_branch = ?, updated_at = ? WHERE id = ?`, branch, unixMillis(time.Now().UTC()), repo.ID)
+	_, err = s.db.ExecContext(ctx, `UPDATE repositories SET default_branch = ?, default_commit = ?, updated_at = ?, last_synced_at = ?, last_sync_error = '' WHERE id = ?`, branch, defaultCommit, unixMillis(time.Now().UTC()), unixMillis(time.Now().UTC()), repo.ID)
 	if err != nil {
 		return Repository{}, err
 	}
@@ -261,7 +262,13 @@ func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID
 	if err != nil {
 		return Source{}, err
 	}
-	repo, err = s.refreshRepository(ctx, repo)
+	if repo.LastSyncedAt == nil {
+		repo, err = s.refreshRepository(ctx, repo)
+	} else {
+		var unlock func()
+		repo, _, unlock, err = s.refreshRepositoryForUse(ctx, repo)
+		unlock()
+	}
 	if err != nil {
 		return Source{}, err
 	}
@@ -295,48 +302,10 @@ func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID
 	return s.GetSource(ctx, projectID, sourceID)
 }
 
-func (s *Store) importLocalRepositoryRefs(ctx context.Context, repo Repository) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.canonical_path FROM source_repositories sr JOIN sources s ON s.id=sr.source_id WHERE sr.repository_id=? AND sr.replacement_source_id IS NOT NULL AND sr.imported=0`, repo.ID)
-	if err != nil {
-		return err
-	}
-	type seed struct{ id, path string }
-	var seeds []seed
-	for rows.Next() {
-		var item seed
-		if err := rows.Scan(&item.id, &item.path); err != nil {
-			_ = rows.Close()
-			return err
-		}
-		seeds = append(seeds, item)
-	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return err
-	}
-	for _, seed := range seeds {
-		// The originals are never deleted by migration. A missing original can
-		// no longer supply its local-only refs, but must not block remote use.
-		if _, err := os.Stat(seed.path); os.IsNotExist(err) {
-			continue
-		} else if err != nil {
-			return err
-		}
-		prefix := "refs/zotigo/imported/" + seed.id + "/"
-		if _, err := runRepositoryGit(ctx, 5*time.Minute, repo.CanonicalPath, "fetch", "--no-tags", "--", seed.path, "+refs/heads/*:"+prefix+"heads/*", "+refs/tags/*:"+prefix+"tags/*"); err != nil {
-			return fmt.Errorf("preserve original local refs: %w", err)
-		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE source_repositories SET imported=1 WHERE source_id=?`, seed.id); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (s *Store) sourceRepository(ctx context.Context, source Source) (Source, error) {
-	var id, remote, branch string
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.remote_url,r.default_branch FROM repositories r JOIN source_repositories sr ON sr.repository_id=r.id WHERE sr.source_id=?`, source.ID).Scan(&id, &remote, &branch)
+	var id, remote, branch, syncError string
+	var synced sql.NullInt64
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.remote_url,r.default_branch,r.last_synced_at,r.last_sync_error FROM repositories r JOIN source_repositories sr ON sr.repository_id=r.id WHERE sr.source_id=?`, source.ID).Scan(&id, &remote, &branch, &synced, &syncError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return source, nil
 	}
@@ -344,50 +313,61 @@ func (s *Store) sourceRepository(ctx context.Context, source Source) (Source, er
 		return Source{}, err
 	}
 	source.RepositoryID, source.RemoteURL, source.DefaultBranch = id, remote, branch
+	source.LastSyncedAt, source.LastSyncError = nullableTime(synced), syncError
 	return source, nil
 }
 
 func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string, selection WorkspaceSourceInput) (WorkspaceSourceInput, error) {
-	var replacement sql.NullString
-	err := s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, selection.SourceID).Scan(&replacement)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return selection, err
-	}
-	if replacement.Valid {
-		selection.SourceID = replacement.String
-	}
-	source, err := s.GetSource(ctx, projectID, selection.SourceID)
-	if err != nil {
-		if errors.Is(err, ErrNotFound) {
-			return selection, fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
+	// Take a consistent registration snapshot before any network work. A
+	// background migration may otherwise switch IDs between these reads.
+	source, err := func() (Source, error) {
+		s.operationMu.Lock()
+		defer s.operationMu.Unlock()
+		var replacement sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, selection.SourceID).Scan(&replacement)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Source{}, err
 		}
+		if replacement.Valid {
+			selection.SourceID = replacement.String
+		}
+		source, err := s.GetSource(ctx, projectID, selection.SourceID)
+		if err != nil {
+			if errors.Is(err, ErrNotFound) {
+				return Source{}, fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
+			}
+			return Source{}, err
+		}
+		var registered bool
+		if err := s.db.QueryRowContext(ctx, `SELECT registered FROM sources WHERE id=?`, source.ID).Scan(&registered); err != nil {
+			return Source{}, err
+		}
+		if !registered {
+			return Source{}, fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
+		}
+
+		return source, nil
+	}()
+	if err != nil {
 		return selection, err
-	}
-	var registered bool
-	if err := s.db.QueryRowContext(ctx, `SELECT registered FROM sources WHERE id=?`, source.ID).Scan(&registered); err != nil {
-		return selection, err
-	}
-	if !registered {
-		return selection, fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
 	}
 	if source.RepositoryID == "" {
+		selection.preparedLocalSource = true
 		return selection, nil
 	}
 	repo, err := s.GetRepository(ctx, source.RepositoryID)
 	if err != nil {
 		return selection, err
 	}
-	unlock, err := s.lockRepository(ctx, repo.ID)
+	repo, usedCache, unlock, err := s.refreshRepositoryForUse(ctx, repo)
 	if err != nil {
 		return selection, err
 	}
 	defer unlock()
-	repo, err = s.refreshRepositoryLocked(ctx, repo)
-	if err != nil {
-		return selection, err
-	}
+	selection.usedCachedBase, selection.baseSyncedAt = usedCache, repo.LastSyncedAt
 	ref := strings.TrimSpace(selection.BaseRef)
-	if ref == "" || ref == "HEAD" {
+	defaultRequested := ref == "" || ref == "HEAD"
+	if defaultRequested {
 		ref = repo.DefaultBranch
 	}
 	if ref == "" {
@@ -396,90 +376,35 @@ func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string
 	if strings.HasPrefix(ref, "refs/zotigo/imported/") {
 		selection.BaseRef = ref
 	} else {
-		if strings.HasPrefix(ref, "refs/remotes/origin/") {
-			ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
-		} else if strings.HasPrefix(ref, "refs/heads/") {
-			ref = strings.TrimPrefix(ref, "refs/heads/")
-		} else if strings.HasPrefix(ref, "origin/") {
-			// Prefer an actual branch named origin/foo to the shorthand for foo.
-			if _, err := runGit(ctx, repo.CanonicalPath, "show-ref", "--verify", "refs/remotes/origin/"+ref); err != nil {
-				ref = strings.TrimPrefix(ref, "origin/")
+		// Advertised default names are literal, including an origin/ prefix.
+		if ref != repo.DefaultBranch {
+			if strings.HasPrefix(ref, "refs/remotes/origin/") {
+				ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
+			} else if strings.HasPrefix(ref, "refs/heads/") {
+				ref = strings.TrimPrefix(ref, "refs/heads/")
+			} else if strings.HasPrefix(ref, "origin/") {
+				// Prefer an actual branch named origin/foo to the shorthand for foo.
+				if _, err := runGit(ctx, repo.CanonicalPath, "show-ref", "--verify", "refs/remotes/origin/"+ref); err != nil {
+					ref = strings.TrimPrefix(ref, "origin/")
+				}
 			}
+
 		}
 		if _, err := runGit(ctx, repo.CanonicalPath, "check-ref-format", "refs/heads/"+ref); err != nil {
 			return selection, fmt.Errorf("%w: invalid base branch", ErrInvalid)
 		}
 		selection.BaseRef = "refs/remotes/origin/" + ref
 	}
-	commit, err := runGit(ctx, repo.CanonicalPath, "rev-parse", "--verify", selection.BaseRef+"^{commit}")
+	resolveRef := selection.BaseRef
+	if usedCache && selection.BaseRef == "refs/remotes/origin/"+repo.DefaultBranch && repo.defaultCommit != "" {
+		resolveRef = "refs/zotigo/default-cache/" + repo.defaultCommit
+	}
+	commit, err := runGit(ctx, repo.CanonicalPath, "rev-parse", "--verify", resolveRef+"^{commit}")
 	if err != nil {
 		return selection, fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 	}
 	selection.resolvedBaseCommit = strings.TrimSpace(commit)
 	return selection, nil
-}
-
-// Only catalog references change during migration. Existing worktrees continue
-// resolving their old source for archive/restore/delete, including dirty indexes.
-// No network access occurs while enumerating or migrating project sources.
-func (s *Store) migrateRepositorySources(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.project_id,s.kind,s.canonical_path,s.git_common_dir,s.git_object_format,s.folder_mode,s.source_key,s.created_at,s.updated_at FROM sources s LEFT JOIN source_repositories sr ON sr.source_id=s.id WHERE s.registered=1 AND s.kind='git' AND sr.source_id IS NULL`)
-	if err != nil {
-		return err
-	}
-	var sources []Source
-	for rows.Next() {
-		source, err := scanSource(rows)
-		if err != nil {
-			_ = rows.Close()
-			return err
-		}
-		sources = append(sources, source)
-	}
-	err = rows.Err()
-	_ = rows.Close()
-	if err != nil {
-		return err
-	}
-	for _, source := range sources {
-		if verifySourceIdentity(ctx, source) != nil {
-			continue
-		}
-		remotes, err := runGit(ctx, source.CanonicalPath, "remote")
-		if err != nil {
-			continue
-		}
-		names := strings.Fields(remotes)
-		if len(names) != 1 {
-			continue
-		}
-		remote, err := runGit(ctx, source.CanonicalPath, "remote", "get-url", names[0])
-		if err != nil {
-			continue
-		}
-		remote = strings.TrimSpace(remote)
-		if !filepath.IsAbs(remote) && !strings.Contains(remote, ":") {
-			resolved, err := canonicalDirectory(filepath.Join(source.CanonicalPath, remote))
-			if err != nil {
-				continue
-			}
-			remote = resolved
-		}
-		if validateRemote(remote) != nil {
-			continue
-		}
-		repo, err := s.registerRepository(ctx, remote, filepath.Base(source.CanonicalPath))
-		if err != nil {
-			if errors.Is(err, ErrInvalid) {
-				continue
-			}
-			return err
-		}
-		if err := s.replaceLocalSource(ctx, source, repo); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func (s *Store) replaceLocalSource(ctx context.Context, source Source, repo Repository) error {
@@ -488,6 +413,13 @@ func (s *Store) replaceLocalSource(ctx context.Context, source Source, repo Repo
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
+	var registered bool
+	if err := tx.QueryRowContext(ctx, `SELECT s.registered AND p.status='active' FROM sources s JOIN projects p ON p.id=s.project_id WHERE s.id=?`, source.ID).Scan(&registered); err != nil {
+		return err
+	}
+	if !registered {
+		return fmt.Errorf("%w: original source is no longer active", ErrConflict)
+	}
 	var replacement string
 	err = tx.QueryRowContext(ctx, `SELECT id FROM sources WHERE project_id=? AND canonical_path=?`, source.ProjectID, repo.CanonicalPath).Scan(&replacement)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -508,6 +440,9 @@ func (s *Store) replaceLocalSource(ctx context.Context, source Source, repo Repo
 		return err
 	}
 	if _, err = tx.ExecContext(ctx, `UPDATE sources SET registered=0 WHERE id=?`, source.ID); err != nil {
+		return err
+	}
+	if _, err = tx.ExecContext(ctx, `UPDATE source_repository_migrations SET status='complete',last_error='',next_attempt_at=0 WHERE source_id=?`, source.ID); err != nil {
 		return err
 	}
 	return tx.Commit()

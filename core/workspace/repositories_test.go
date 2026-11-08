@@ -103,8 +103,16 @@ func TestManagedRepositorySharedFreshDefaultAndOverrides(t *testing.T) {
 	if err := os.Rename(remote, remote+"-offline"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.CreateWorkspacePlan(ctx, p1.ID, "Offline", []WorkspaceSourceInput{{SourceID: s1.ID}}); err == nil {
-		t.Fatal("used stale remote while offline")
+	offline, err := store.CreateWorkspacePlan(ctx, p1.ID, "Offline", []WorkspaceSourceInput{{SourceID: s1.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	offlineSources, err := store.ListWorkspaceSources(ctx, offline.ID)
+	if err != nil || len(offlineSources) != 1 || !offlineSources[0].UsedCachedBase || offlineSources[0].BaseSyncedAt == nil {
+		t.Fatalf("cached source=%+v err=%v", offlineSources, err)
+	}
+	if _, err := store.ProvisionWorkspace(ctx, offline.ID); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -133,7 +141,7 @@ func TestManagedRepositoryMigrationPreservesLegacyWorktree(t *testing.T) {
 	runGitProvisionCommand(t, oldSource.CanonicalPath, "checkout", "-b", "unpublished")
 	runGitProvisionCommand(t, oldSource.CanonicalPath, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "local only")
 	localHead := strings.TrimSpace(runGitProvisionCommand(t, oldSource.CanonicalPath, "rev-parse", "HEAD"))
-	if _, err := store.ListRepositories(ctx); err != nil {
+	if err := store.migrateRepositorySources(ctx); err != nil {
 		t.Fatal(err)
 	}
 	sources, err := store.ListSources(ctx, legacy.ProjectID)
@@ -143,8 +151,8 @@ func TestManagedRepositoryMigrationPreservesLegacyWorktree(t *testing.T) {
 	if len(sources) != 1 || sources[0].ID == oldSource.ID || sources[0].RepositoryID == "" {
 		t.Fatalf("migration=%+v", sources)
 	}
-	if _, err := os.Stat(sources[0].CanonicalPath); !os.IsNotExist(err) {
-		t.Fatalf("GET unexpectedly cloned: %v", err)
+	if _, err := os.Stat(sources[0].CanonicalPath); err != nil {
+		t.Fatalf("migration switched before preparing clone: %v", err)
 	}
 	// Old clients may still submit their original source ID.
 	fresh, err := store.CreateWorkspacePlan(ctx, legacy.ProjectID, "Managed", []WorkspaceSourceInput{{SourceID: oldSource.ID}})
@@ -295,6 +303,17 @@ func TestManagedRepositoryReregistrationAndProjectDeletion(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if source.RepositoryID != "" {
+		t.Fatal("AddSource synchronously migrated local source")
+	}
+	if err := store.migrateRepositorySources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	sources, err := store.ListSources(ctx, project.ID)
+	if err != nil || len(sources) != 1 {
+		t.Fatalf("sources=%+v %v", sources, err)
+	}
+	source = sources[0]
 	if source.RepositoryID == "" {
 		t.Fatal("local remote was not adopted")
 	}
@@ -376,13 +395,13 @@ func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
 	}
 }
 
-func TestManagedRepositoryMetadataOnlyDowngradeRestoresLocalSource(t *testing.T) {
+func TestManagedRepositoryPreparedUnboundDowngradeRestoresLocalSource(t *testing.T) {
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	runGitProvisionCommand(t, source.CanonicalPath, "clone", "--bare", source.CanonicalPath, remote)
 	runGitProvisionCommand(t, source.CanonicalPath, "remote", "add", "origin", remote)
-	if _, err := store.ListRepositories(ctx); err != nil {
+	if err := store.migrateRepositorySources(ctx); err != nil {
 		t.Fatal(err)
 	}
 	replacements, err := store.ListSources(ctx, legacy.ProjectID)
@@ -392,8 +411,8 @@ func TestManagedRepositoryMetadataOnlyDowngradeRestoresLocalSource(t *testing.T)
 	if len(replacements) != 1 || replacements[0].ID == source.ID {
 		t.Fatal("source not migrated")
 	}
-	if _, err := os.Stat(replacements[0].CanonicalPath); !os.IsNotExist(err) {
-		t.Fatal("cache unexpectedly exists")
+	if _, err := os.Stat(replacements[0].CanonicalPath); err != nil {
+		t.Fatal("migration cache was not prepared")
 	}
 	root := store.RootDir()
 	if err := store.Close(); err != nil {
@@ -471,7 +490,7 @@ func TestManagedRepositoryMigrationReactivatesReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	runGitProvisionCommand(t, local.CanonicalPath, "remote", "add", "origin", remote)
-	if _, err := store.ListRepositories(ctx); err != nil {
+	if err := store.migrateRepositorySources(ctx); err != nil {
 		t.Fatal(err)
 	}
 	sources, err := store.ListSources(ctx, legacy.ProjectID)
