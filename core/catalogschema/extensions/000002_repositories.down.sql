@@ -20,4 +20,3 @@ ALTER TABLE workspace_checkouts DROP COLUMN used_cached_base;
 ALTER TABLE workspace_checkouts DROP COLUMN base_synced_at;
 DROP TABLE source_repositories;
 DROP TABLE repositories;
-UPDATE schema_meta SET version = 16 WHERE singleton = 1;

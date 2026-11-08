@@ -126,6 +126,13 @@ func ready(ctx context.Context, db *sql.DB) (bool, error) {
 	if recorded != version {
 		return false, fmt.Errorf("catalog migration journal version %d differs from schema version %d", recorded, version)
 	}
+	extensions, err := extensionVersion(ctx, db)
+	if err != nil {
+		return false, err
+	}
+	if extensions < ExtensionVersion {
+		return false, nil
+	}
 	var imported bool
 	err = db.QueryRowContext(ctx, "SELECT EXISTS(SELECT 1 FROM metadata WHERE key=? AND value='1')", importMarker).Scan(&imported)
 	return imported, err
@@ -133,6 +140,9 @@ func ready(ctx context.Context, db *sql.DB) (bool, error) {
 
 func upgrade(ctx context.Context, db *sql.DB, root string) error {
 	if err := Migrate(ctx, db, Version); err != nil {
+		return err
+	}
+	if err := ensureExtensions(ctx, db); err != nil {
 		return err
 	}
 	return importSessionIndex(ctx, db, root)

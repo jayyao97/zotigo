@@ -156,7 +156,7 @@ func (s *Store) FireCompletionTrigger(ctx context.Context, id, callbackText stri
 	if state != "pending" || expiry <= time.Now().Unix() {
 		return false, ErrTriggerUnavailable
 	}
-	if _, err = tx.ExecContext(ctx, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES(?,?,?,'queued')`, sessionID, "completion:"+id, string(payload)); err != nil {
+	if _, err = tx.ExecContext(ctx, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES(?,?,?,'completion_queued')`, sessionID, "completion:"+id, string(payload)); err != nil {
 		return false, err
 	}
 	value.CallbackText, value.State = callbackText, "fired"

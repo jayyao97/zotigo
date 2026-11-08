@@ -32,7 +32,7 @@ func (s *Store) sourceBranches(ctx context.Context, projectID, sourceID string, 
 	s.operationMu.Lock()
 	source, err := func() (Source, error) {
 		var currentID string
-		if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(sr.replacement_source_id,s.id)
+		if err := s.db.QueryRowContext(ctx, `SELECT CASE WHEN s.registered=1 THEN s.id ELSE COALESCE(sr.replacement_source_id,s.id) END
  FROM sources s LEFT JOIN source_repositories sr ON sr.source_id=s.id
  WHERE s.id=? AND s.project_id=?`, sourceID, projectID).Scan(&currentID); err != nil {
 			return Source{}, scanError("source", err)

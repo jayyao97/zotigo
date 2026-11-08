@@ -212,7 +212,7 @@ CREATE TABLE session_input_queue (
   session_id TEXT NOT NULL,
   id TEXT NOT NULL,
   payload TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('queued', 'paused', 'sending', 'sent', 'cancelled')),
+  state TEXT NOT NULL CHECK(state IN ('queued', 'paused', 'sending', 'sent', 'cancelled', 'completion_queued', 'completion_paused', 'completion_sending', 'completion_sent', 'completion_cancelled')),
   batch_id TEXT NOT NULL DEFAULT '',
   revision INTEGER NOT NULL DEFAULT 1,
   UNIQUE(session_id, id)
@@ -225,8 +225,8 @@ CREATE INDEX completion_triggers_session ON completion_triggers(session_id,state
 CREATE TABLE repositories (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
-  remote_url TEXT NOT NULL UNIQUE,
-  canonical_path TEXT NOT NULL UNIQUE,
+  remote_url TEXT NOT NULL,
+  canonical_path TEXT NOT NULL,
   default_branch TEXT NOT NULL DEFAULT '',
   default_commit TEXT NOT NULL DEFAULT '',
   clone_failure_count INTEGER NOT NULL DEFAULT 0,
@@ -236,6 +236,8 @@ CREATE TABLE repositories (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE UNIQUE INDEX repositories_remote_url ON repositories(remote_url);
+CREATE UNIQUE INDEX repositories_canonical_path ON repositories(canonical_path);
 CREATE TABLE repository_preparations (
   repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
@@ -244,7 +246,7 @@ CREATE TABLE repository_preparations (
 CREATE TABLE source_repositories (
   source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
-  replacement_source_id TEXT REFERENCES sources(id) ON DELETE RESTRICT
+  replacement_source_id TEXT REFERENCES sources(id) ON DELETE SET NULL
 );
 
 CREATE TABLE source_repository_migrations (

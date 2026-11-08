@@ -347,7 +347,7 @@ func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID
 func (s *Store) sourceRepository(ctx context.Context, source Source) (Source, error) {
 	var id, remote, branch, syncError string
 	var synced sql.NullInt64
-	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.remote_url,r.default_branch,r.last_synced_at,r.last_sync_error FROM repositories r JOIN source_repositories sr ON sr.repository_id=r.id WHERE sr.source_id=?`, source.ID).Scan(&id, &remote, &branch, &synced, &syncError)
+	err := s.db.QueryRowContext(ctx, `SELECT r.id,r.remote_url,r.default_branch,r.last_synced_at,r.last_sync_error FROM repositories r JOIN source_repositories sr ON sr.repository_id=r.id JOIN sources s ON s.id=sr.source_id WHERE sr.source_id=? AND s.canonical_path=r.canonical_path`, source.ID).Scan(&id, &remote, &branch, &synced, &syncError)
 	if errors.Is(err, sql.ErrNoRows) {
 		return source, nil
 	}
@@ -366,7 +366,7 @@ func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string
 		s.operationMu.Lock()
 		defer s.operationMu.Unlock()
 		var replacement sql.NullString
-		err := s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, selection.SourceID).Scan(&replacement)
+		err := s.db.QueryRowContext(ctx, `SELECT sr.replacement_source_id FROM source_repositories sr JOIN sources s ON s.id=sr.source_id WHERE sr.source_id=? AND s.registered=0`, selection.SourceID).Scan(&replacement)
 		if err != nil && !errors.Is(err, sql.ErrNoRows) {
 			return Source{}, err
 		}
@@ -446,6 +446,9 @@ func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string
 		return selection, fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 	}
 	selection.resolvedBaseCommit = strings.TrimSpace(commit)
+	// dev.31 validates BaseRef again while provisioning. Persist an immutable
+	// ref so an older daemon can retry this plan after the remote branch moves.
+	selection.BaseRef = selection.resolvedBaseCommit
 	return selection, nil
 }
 

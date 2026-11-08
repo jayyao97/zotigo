@@ -19,7 +19,9 @@ const Baseline = 7
 //go:embed migrations/*.sql
 var migrations embed.FS
 
-const Version = 17
+// Version is the base schema understood by dev.31. Compatible additions have
+// their own journal; changing this value makes dev.31 refuse to open the DB.
+const Version = 15
 
 // NewDriver preserves foreign keys during SQLite table rebuilds.
 func NewDriver(ctx context.Context, db *sql.DB, underlying database.Driver) *Driver {
@@ -67,6 +69,11 @@ func Migrate(ctx context.Context, db *sql.DB, target uint) error {
 		// Adopt only pre-journal catalogs, never overwrite a dirty or inconsistent
 		// journal. Existing 7/8 catalogs already contain their baseline schema.
 		if err := driver.SetVersion(version, false); err != nil {
+			return err
+		}
+	}
+	if target < Version {
+		if err := migrateExtensions(ctx, db, 0); err != nil {
 			return err
 		}
 	}

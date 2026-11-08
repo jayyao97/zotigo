@@ -107,7 +107,7 @@ func TestManagedRepositorySharedFreshDefaultAndOverrides(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if sources[0].BaseRef != "refs/remotes/origin/release" {
+	if sources[0].Source.DefaultBranch != "release" || sources[0].BaseRef != sources[0].BaseCommit {
 		t.Fatalf("default not refreshed: %+v", sources)
 	}
 	if err := os.Rename(remote, remote+"-offline"); err != nil {
@@ -386,14 +386,26 @@ func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigrateCatalog(ctx, root, 16); err != nil {
-		t.Fatalf("downgrade: %v", err)
+	// Binary rollback needs no database downgrade: old readers see schema 15.
+	old, err := openWriter(root, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var version, journal int
+	if err := old.db.QueryRow(`SELECT version FROM schema_meta`).Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if err := old.db.QueryRow(`SELECT version FROM catalog_migrations`).Scan(&journal); err != nil {
+		t.Fatal(err)
+	}
+	if version != 15 || journal != 15 {
+		t.Fatalf("legacy metadata: %d %d", version, journal)
+	}
+	if err := old.Close(); err != nil {
+		t.Fatal(err)
 	}
 	if got := runGitProvisionCommand(t, bindings[0].TargetPath, "rev-parse", "HEAD"); got != head {
 		t.Fatal("downgrade changed worktree")
-	}
-	if err := MigrateCatalog(ctx, root, 17); err != nil {
-		t.Fatalf("re-upgrade: %v", err)
 	}
 	reopened, err := Open(root)
 	if err != nil {
@@ -405,7 +417,7 @@ func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
 	}
 }
 
-func TestManagedRepositoryPreparedUnboundDowngradeRestoresLocalSource(t *testing.T) {
+func TestManagedRepositoryPreparedSourceReadableWithoutMigration(t *testing.T) {
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -428,9 +440,6 @@ func TestManagedRepositoryPreparedUnboundDowngradeRestoresLocalSource(t *testing
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := MigrateCatalog(ctx, root, 16); err != nil {
-		t.Fatal(err)
-	}
 	old, err := openWriter(root, true)
 	if err != nil {
 		t.Fatal(err)
@@ -440,7 +449,7 @@ func TestManagedRepositoryPreparedUnboundDowngradeRestoresLocalSource(t *testing
 	if err := old.db.QueryRow(`SELECT id,canonical_path FROM sources WHERE project_id=? AND registered=1`, legacy.ProjectID).Scan(&registeredID, &registeredPath); err != nil {
 		t.Fatal(err)
 	}
-	if registeredID != source.ID || registeredPath != source.CanonicalPath {
+	if registeredID != replacements[0].ID || registeredPath != replacements[0].CanonicalPath {
 		t.Fatalf("downgrade registration=%s %s", registeredID, registeredPath)
 	}
 	if _, err := runGit(ctx, registeredPath, "rev-parse", "--verify", "HEAD"); err != nil {

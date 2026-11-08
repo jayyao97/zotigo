@@ -10,6 +10,9 @@ import (
 
 var ErrQueueConflict = errors.New("queued input changed or is already being sent")
 
+// Callback states are stored as completion_* so dev.31's queue predicates
+// cannot dispatch them without revalidating callback authority. The API still
+// exposes the ordinary state names; every transition preserves the prefix.
 type QueuedInput struct {
 	ID       string          `json:"id"`
 	Payload  json.RawMessage `json:"-"`
@@ -29,16 +32,21 @@ func (s *Store) QueuedInputByID(ctx context.Context, sessionID, id string) (*Que
 		return nil, err
 	}
 	item.Payload = json.RawMessage(payload)
+	item.State = strings.TrimPrefix(item.State, "completion_")
 	return &item, nil
 }
 
 func (s *Store) QueueInput(ctx context.Context, sessionID, id string, payload []byte) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES(?,?,?,'queued') ON CONFLICT(session_id,id) DO NOTHING`, sessionID, id, string(payload))
+	state := "queued"
+	if strings.HasPrefix(id, "completion:") {
+		state = "completion_queued"
+	}
+	_, err := s.db.ExecContext(ctx, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES(?,?,?,?) ON CONFLICT(session_id,id) DO NOTHING`, sessionID, id, string(payload), state)
 	return err
 }
 
 func (s *Store) QueuedInputs(ctx context.Context, sessionID string) ([]QueuedInput, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,payload,state,batch_id,revision FROM session_input_queue WHERE session_id=? AND state IN ('queued','paused','sending') ORDER BY sequence`, sessionID)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,payload,state,batch_id,revision FROM session_input_queue WHERE session_id=? AND state IN ('queued','paused','sending','completion_queued','completion_paused','completion_sending') ORDER BY sequence`, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -51,6 +59,7 @@ func (s *Store) QueuedInputs(ctx context.Context, sessionID string) ([]QueuedInp
 			return nil, err
 		}
 		item.Payload = json.RawMessage(payload)
+		item.State = strings.TrimPrefix(item.State, "completion_")
 		result = append(result, item)
 	}
 	return result, rows.Err()
@@ -61,9 +70,9 @@ func (s *Store) UpdateQueuedInput(ctx context.Context, sessionID, id string, rev
 	var result sql.Result
 	var err error
 	if remove {
-		result, err = s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='cancelled',revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused')`, sessionID, id, revision)
+		result, err = s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_cancelled' ELSE 'cancelled' END,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused','completion_queued','completion_paused')`, sessionID, id, revision)
 	} else {
-		result, err = s.db.ExecContext(ctx, `UPDATE session_input_queue SET payload=?,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused')`, string(payload), sessionID, id, revision)
+		result, err = s.db.ExecContext(ctx, `UPDATE session_input_queue SET payload=?,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused','completion_queued','completion_paused')`, string(payload), sessionID, id, revision)
 	}
 	if err != nil {
 		return err
@@ -84,12 +93,12 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 	}
 	defer func() { _ = tx.Rollback() }()
 	if resume {
-		if _, err := tx.ExecContext(ctx, `UPDATE session_input_queue SET state='queued',revision=revision+1 WHERE session_id=? AND state='paused' AND batch_id=''`, sessionID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_queued' ELSE 'queued' END,revision=revision+1 WHERE session_id=? AND state IN ('paused','completion_paused') AND batch_id=''`, sessionID); err != nil {
 			return nil, err
 		}
 	}
 	var existing string
-	err = tx.QueryRowContext(ctx, `SELECT batch_id FROM session_input_queue WHERE session_id=? AND batch_id<>'' AND state IN ('queued','paused','sending') ORDER BY sequence LIMIT 1`, sessionID).Scan(&existing)
+	err = tx.QueryRowContext(ctx, `SELECT batch_id FROM session_input_queue WHERE session_id=? AND batch_id<>'' AND state IN ('queued','paused','sending','completion_queued','completion_paused','completion_sending') ORDER BY sequence LIMIT 1`, sessionID).Scan(&existing)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
@@ -98,12 +107,12 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 			return nil, nil
 		}
 		batchID = existing
-		if _, err := tx.ExecContext(ctx, `UPDATE session_input_queue SET state='sending',revision=revision+1 WHERE session_id=? AND batch_id=? AND state='paused'`, sessionID, batchID); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_sending' ELSE 'sending' END,revision=revision+1 WHERE session_id=? AND batch_id=? AND state IN ('paused','completion_paused')`, sessionID, batchID); err != nil {
 			return nil, err
 		}
 	} else {
 		var paused int
-		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM session_input_queue WHERE session_id=? AND state='paused'`, sessionID).Scan(&paused); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT count(*) FROM session_input_queue WHERE session_id=? AND state IN ('paused','completion_paused')`, sessionID).Scan(&paused); err != nil {
 			return nil, err
 		}
 		if paused > 0 && !resume {
@@ -112,22 +121,22 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 		// Completion notifications keep their identity and authority when mixed
 		// with ordinary queued input. Batch only the prefix before the next one.
 		var first string
-		if err := tx.QueryRowContext(ctx, `SELECT id FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') ORDER BY sequence LIMIT 1`, sessionID).Scan(&first); errors.Is(err, sql.ErrNoRows) {
+		if err := tx.QueryRowContext(ctx, `SELECT id FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('queued','paused','completion_queued','completion_paused') ORDER BY sequence LIMIT 1`, sessionID).Scan(&first); errors.Is(err, sql.ErrNoRows) {
 			return nil, nil
 		} else if err != nil {
 			return nil, err
 		}
 		if strings.HasPrefix(first, "completion:") {
 			batchID = first
-			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND id=?`, batchID, sessionID, first)
+			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='completion_sending',revision=revision+1 WHERE session_id=? AND id=?`, batchID, sessionID, first)
 		} else {
-			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') AND sequence < COALESCE((SELECT MIN(sequence) FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') AND id GLOB 'completion:*'),9223372036854775807)`, batchID, sessionID, sessionID)
+			_, err = tx.ExecContext(ctx, `UPDATE session_input_queue SET batch_id=?,state='sending',revision=revision+1 WHERE session_id=? AND batch_id='' AND state IN ('queued','paused') AND sequence < COALESCE((SELECT MIN(sequence) FROM session_input_queue WHERE session_id=? AND batch_id='' AND state IN ('completion_queued','completion_paused') AND id GLOB 'completion:*'),9223372036854775807)`, batchID, sessionID, sessionID)
 		}
 		if err != nil {
 			return nil, err
 		}
 	}
-	rows, err := tx.QueryContext(ctx, `SELECT id,payload,state,batch_id,revision FROM session_input_queue WHERE session_id=? AND batch_id=? AND state IN ('paused','sending') ORDER BY sequence`, sessionID, batchID)
+	rows, err := tx.QueryContext(ctx, `SELECT id,payload,state,batch_id,revision FROM session_input_queue WHERE session_id=? AND batch_id=? AND state IN ('paused','sending','completion_paused','completion_sending') ORDER BY sequence`, sessionID, batchID)
 	if err != nil {
 		return nil, err
 	}
@@ -139,6 +148,7 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 			break
 		}
 		item.Payload = json.RawMessage(payload)
+		item.State = strings.TrimPrefix(item.State, "completion_")
 		result = append(result, item)
 	}
 	scanErr := rows.Err()
@@ -157,7 +167,7 @@ func (s *Store) ClaimQueuedInputs(ctx context.Context, sessionID, batchID string
 
 // ClaimQueuedInput reserves one editable item without changing the other rows.
 func (s *Store) ClaimQueuedInput(ctx context.Context, sessionID, id string, revision int64, batchID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='sending',batch_id=?,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused')`, batchID, sessionID, id, revision)
+	result, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_sending' ELSE 'sending' END,batch_id=?,revision=revision+1 WHERE session_id=? AND id=? AND revision=? AND batch_id='' AND state IN ('queued','paused','completion_queued','completion_paused')`, batchID, sessionID, id, revision)
 	if err != nil {
 		return err
 	}
@@ -173,22 +183,22 @@ func (s *Store) FinishQueuedBatch(ctx context.Context, sessionID, batchID string
 	if success {
 		state = "sent"
 	}
-	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=?,revision=revision+1 WHERE session_id=? AND batch_id=? AND state IN ('paused','sending')`, state, sessionID, batchID)
+	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_' ELSE '' END || ?,revision=revision+1 WHERE session_id=? AND batch_id=? AND state IN ('paused','sending','completion_paused','completion_sending')`, state, sessionID, batchID)
 	return err
 }
 
 // A definite rejection is safe to edit; an uncertain acknowledgement is not.
 func (s *Store) ReleaseQueuedBatch(ctx context.Context, sessionID, batchID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='queued',batch_id='',revision=revision+1 WHERE session_id=? AND batch_id=? AND state IN ('paused','sending')`, sessionID, batchID)
+	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_queued' ELSE 'queued' END,batch_id='',revision=revision+1 WHERE session_id=? AND batch_id=? AND state IN ('paused','sending','completion_paused','completion_sending')`, sessionID, batchID)
 	return err
 }
 
 func (s *Store) PauseQueuedInputs(ctx context.Context, sessionID string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='paused',revision=revision+1 WHERE session_id=? AND state='queued'`, sessionID)
+	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_paused' ELSE 'paused' END,revision=revision+1 WHERE session_id=? AND state IN ('queued','completion_queued')`, sessionID)
 	return err
 }
 
 func (s *Store) RecoverQueuedInputs(ctx context.Context) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state='paused',revision=revision+1 WHERE state IN ('queued','sending')`)
+	_, err := s.db.ExecContext(ctx, `UPDATE session_input_queue SET state=CASE WHEN id GLOB 'completion:*' THEN 'completion_paused' ELSE 'paused' END,revision=revision+1 WHERE state IN ('queued','sending','completion_queued','completion_sending')`)
 	return err
 }
