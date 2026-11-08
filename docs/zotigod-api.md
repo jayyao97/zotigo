@@ -1443,6 +1443,8 @@ ordinary daemon authentication token.
   commits. Later edits to the original checkout are not silently synchronized;
   push those changes to the remote to use them from the managed repository.
 
+- `POST /projects/{project_id}/sources/{source_id}/branches` refreshes a daemon-managed repository (10-second deadline, outside the global catalog lock) and returns the same branch-list response as GET. Clients display GET results immediately, then request POST asynchronously. Refresh failure must preserve the client’s cached list and selection. Local-only sources remain read-only. Concurrent branch refreshes are limited to two per daemon. Remote branch entries mark the current default with `is_default: true`.
+
 When creating a workspace or adding a repository to it, omit `base_ref` for the
 remote's current default branch, detected using its advertised HEAD after fetch.
 An explicit branch name, `origin/name`, `refs/heads/name`, or

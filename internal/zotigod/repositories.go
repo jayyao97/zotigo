@@ -10,12 +10,18 @@ func (h *handler) handleSourceBranches(w http.ResponseWriter, r *http.Request, p
 	if !h.requireCatalog(w) {
 		return
 	}
-	if r.Method != http.MethodGet {
-		w.Header().Set("Allow", "GET")
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		w.Header().Set("Allow", "GET, POST")
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	branches, err := h.catalog.ListSourceBranches(r.Context(), projectID, sourceID)
+	var branches []zotigoworkspace.RepositoryBranch
+	var err error
+	if r.Method == http.MethodPost {
+		branches, err = h.catalog.RefreshSourceBranches(r.Context(), projectID, sourceID)
+	} else {
+		branches, err = h.catalog.ListSourceBranches(r.Context(), projectID, sourceID)
+	}
 	if err != nil {
 		h.writeCatalogError(w, err)
 		return

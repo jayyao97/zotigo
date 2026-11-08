@@ -4,10 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestSourceBranchesExceedScalarGitOutputLimit(t *testing.T) {
@@ -82,5 +84,60 @@ func TestSourceBranchesExposeMigrationSnapshots(t *testing.T) {
 	}
 	if _, err := store.ListSourceBranches(ctx, legacy.ProjectID, original.ID); !errors.Is(err, ErrNotFound) {
 		t.Fatalf("deleted source accepted: %v", err)
+	}
+}
+
+func TestRefreshSourceBranchesFindsNewRemoteBranches(t *testing.T) {
+	ctx := context.Background()
+	store, legacy, source := createGitWorkspaceFixture(t)
+	remote := filepath.Join(t.TempDir(), "remote.git")
+	runGitProvisionCommand(t, source.CanonicalPath, "clone", "--bare", "--", source.CanonicalPath, remote)
+	runGitProvisionCommand(t, source.CanonicalPath, "remote", "add", "origin", remote)
+	if err := store.migrateRepositorySources(ctx); err != nil {
+		t.Fatal(err)
+	}
+	runGitProvisionCommand(t, remote, "branch", "new-release", "HEAD")
+	hasRelease := func(branches []RepositoryBranch) bool {
+		for _, branch := range branches {
+			if branch.Name == "new-release" && branch.Kind == "remote" {
+				return true
+			}
+		}
+		return false
+	}
+	cached, err := store.ListSourceBranches(ctx, legacy.ProjectID, source.ID)
+	if err != nil || hasRelease(cached) {
+		t.Fatalf("unexpected cached branches: %v %v", cached, err)
+	}
+	runGitProvisionCommand(t, remote, "symbolic-ref", "HEAD", "refs/heads/new-release")
+	// A full refresh queue respects the caller deadline without launching fetch.
+	store.branchRefreshSlots <- struct{}{}
+	store.branchRefreshSlots <- struct{}{}
+	shortCtx, cancel := context.WithTimeout(ctx, 20*time.Millisecond)
+	_, queueErr := store.RefreshSourceBranches(shortCtx, legacy.ProjectID, source.ID)
+	cancel()
+	<-store.branchRefreshSlots
+	<-store.branchRefreshSlots
+	if !errors.Is(queueErr, context.DeadlineExceeded) {
+		t.Fatalf("queued refresh: %v", queueErr)
+	}
+	fresh, err := store.RefreshSourceBranches(ctx, legacy.ProjectID, source.ID)
+	if err != nil || !hasRelease(fresh) {
+		t.Fatalf("missing fresh branch: %v %v", fresh, err)
+	}
+	for _, branch := range fresh {
+		if branch.Kind == "remote" && branch.IsDefault != (branch.Name == "new-release") {
+			t.Fatalf("wrong remote default: %+v", branch)
+		}
+	}
+	if err := os.Rename(remote, remote+"-offline"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RefreshSourceBranches(ctx, legacy.ProjectID, source.ID); err == nil {
+		t.Fatal("offline refresh should fail")
+	}
+	cached, err = store.ListSourceBranches(ctx, legacy.ProjectID, source.ID)
+	if err != nil || !hasRelease(cached) {
+		t.Fatalf("cached branches lost offline: %v %v", cached, err)
 	}
 }

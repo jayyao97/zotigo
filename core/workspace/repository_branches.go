@@ -4,9 +4,11 @@ import (
 	"context"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 type RepositoryBranch struct {
+	IsDefault  bool   `json:"is_default,omitempty"`
 	Name       string `json:"name"`
 	Ref        string `json:"ref"`
 	Kind       string `json:"kind"`
@@ -17,6 +19,16 @@ type RepositoryBranch struct {
 // ListSourceBranches reads local refs only. Imported branches are the snapshot
 // preserved during migration, not a live mirror of the former user checkout.
 func (s *Store) ListSourceBranches(ctx context.Context, projectID, sourceID string) ([]RepositoryBranch, error) {
+	return s.sourceBranches(ctx, projectID, sourceID, false)
+}
+
+// RefreshSourceBranches refreshes only daemon-owned repositories with a bounded
+// deadline. Callers can keep already displayed cached branches if it fails.
+func (s *Store) RefreshSourceBranches(ctx context.Context, projectID, sourceID string) ([]RepositoryBranch, error) {
+	return s.sourceBranches(ctx, projectID, sourceID, true)
+}
+
+func (s *Store) sourceBranches(ctx context.Context, projectID, sourceID string, refresh bool) ([]RepositoryBranch, error) {
 	s.operationMu.Lock()
 	source, err := func() (Source, error) {
 		var currentID string
@@ -44,9 +56,34 @@ func (s *Store) ListSourceBranches(ctx context.Context, projectID, sourceID stri
 	if err := verifySourceIdentity(ctx, source); err != nil {
 		return nil, err
 	}
+	if refresh && source.RepositoryID != "" {
+		repo, err := s.GetRepository(ctx, source.RepositoryID)
+		if err != nil {
+			return nil, err
+		}
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		select {
+		case s.branchRefreshSlots <- struct{}{}:
+			defer func() { <-s.branchRefreshSlots }()
+		case <-refreshCtx.Done():
+			return nil, refreshCtx.Err()
+		}
+		_, err = s.refreshRepository(refreshCtx, repo)
+		cancel()
+		if err != nil {
+			return nil, err
+		}
+	}
 	prefixes := []string{"refs/heads/"}
 	names := make(map[string]string)
+	defaultBranch := ""
 	if source.RepositoryID != "" {
+		current, err := s.GetRepository(ctx, source.RepositoryID)
+		if err != nil {
+			return nil, err
+		}
+		defaultBranch = current.DefaultBranch
 		prefixes = []string{"refs/remotes/origin/", "refs/zotigo/imported/"}
 		rows, err := s.db.QueryContext(ctx, `SELECT s.id,s.canonical_path FROM sources s
  JOIN source_repositories sr ON sr.source_id=s.id WHERE sr.repository_id=? AND sr.replacement_source_id IS NOT NULL`, source.RepositoryID)
@@ -82,7 +119,7 @@ func (s *Store) ListSourceBranches(ctx context.Context, projectID, sourceID stri
 		}
 		switch {
 		case strings.HasPrefix(ref, "refs/remotes/origin/"):
-			branches = append(branches, RepositoryBranch{Name: strings.TrimPrefix(ref, "refs/remotes/origin/"), Ref: ref, Kind: "remote"})
+			branches = append(branches, RepositoryBranch{Name: strings.TrimPrefix(ref, "refs/remotes/origin/"), Ref: ref, Kind: "remote", IsDefault: ref == "refs/remotes/origin/"+defaultBranch})
 		case strings.HasPrefix(ref, "refs/heads/"):
 			branches = append(branches, RepositoryBranch{Name: strings.TrimPrefix(ref, "refs/heads/"), Ref: ref, Kind: "local"})
 		case strings.HasPrefix(ref, "refs/zotigo/imported/"):

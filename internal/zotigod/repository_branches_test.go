@@ -41,7 +41,7 @@ func TestSourceBranchesHTTP(t *testing.T) {
 	if len(data.Branches) != 1 || data.Branches[0].Ref != "refs/heads/trunk" || data.Branches[0].Kind != "local" {
 		t.Fatalf("branches=%+v", data.Branches)
 	}
-	if response := requestCatalog(t, handler, http.MethodPost, path, "{}"); response.Code != http.StatusMethodNotAllowed {
+	if response := requestCatalog(t, handler, http.MethodPost, path, "{}"); response.Code != http.StatusOK {
 		t.Fatalf("post=%d", response.Code)
 	}
 	if response := requestCatalog(t, handler, http.MethodGet, "/projects/missing/sources/"+source.ID+"/branches", ""); response.Code != http.StatusNotFound {
