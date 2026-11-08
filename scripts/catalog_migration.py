@@ -18,7 +18,8 @@ def main():
     if not re.fullmatch(r"[a-z][a-z0-9_]*", args.name):
         parser.error("name must contain lowercase letters, digits and underscores")
     root = Path(__file__).resolve().parent.parent
-    directory = root / "core/catalogschema/migrations"
+    directory = root / "core/catalogschema/extensions"
+    base_directory = root / "core/catalogschema/migrations"
     atlas = os.environ.get("ATLAS", "atlas")
 
     def run(*arguments):
@@ -28,8 +29,15 @@ def main():
     # changes the user's catalog, and --check never writes into the repository.
     with tempfile.TemporaryDirectory(prefix="zotigo-migration-") as tmp:
         staging = Path(tmp) / "migrations"
-        shutil.copytree(directory, staging)
+        shutil.copytree(base_directory, staging)
+        base_version = max(int(p.name.split("_", 1)[0]) for p in staging.glob("*.up.sql"))
+        # Atlas sees one complete history; compatible additions are persisted
+        # separately so generation never advances dev.31's base schema marker.
+        for path in directory.glob("*.sql"):
+            number, suffix = path.name.split("_", 1)
+            (staging / f"{base_version + int(number):06d}_{suffix}").write_bytes(path.read_bytes())
         url = f"file://{staging}?format=golang-migrate"
+        run("migrate", "hash", "--dir", url)
         before = set(staging.glob("*.sql"))
         run("migrate", "diff", args.name, "--env", "catalog", "--dir", url)
         generated = sorted(set(staging.glob("*.sql")) - before)
@@ -40,7 +48,7 @@ def main():
             raise SystemExit("schema.sql differs from migration history; generate and review a migration")
         if len(generated) != 2 or {p.name.rsplit(".", 2)[1] for p in generated} != {"up", "down"}:
             raise SystemExit("Expected an up/down pair; inspect whether this schema change is reversible")
-        previous = max(int(p.name.split("_", 1)[0]) for p in before)
+        previous = max(int(p.name.split("_", 1)[0]) for p in directory.glob("*.up.sql"))
         version = previous + 1
         for path in generated:
             direction = path.name.rsplit(".", 2)[1]
@@ -48,22 +56,17 @@ def main():
             # Transaction ownership stays with the embedded Go executor.
             if re.search(r"(?im)^\s*(BEGIN|COMMIT|ROLLBACK)\b", body):
                 raise SystemExit("Generated SQL contains transaction boundaries; review before importing")
-            target = version if direction == "up" else previous
-            body += ("\n-- Keep old binaries and read-only clients aware of the schema version.\n"
-                     f"UPDATE schema_meta SET version = {target} WHERE singleton = 1;\n")
             path.unlink()
-            (staging / f"{version:06d}_{args.name}.{direction}.sql").write_text(body)
-        run("migrate", "hash", "--dir", url)
-        schema_go = root / "core/catalogschema/migrations.go"
-        source, count = re.subn(r"const Version = \d+", f"const Version = {version}", schema_go.read_text())
+            (Path(tmp) / f"{version:06d}_{args.name}.{direction}.sql").write_text(body)
+        schema_go = root / "core/catalogschema/extensions.go"
+        source, count = re.subn(r"const ExtensionVersion = \d+", f"const ExtensionVersion = {version}", schema_go.read_text())
         if count != 1:
-            raise SystemExit("Cannot locate catalogschema.Version; repository was not changed")
-        for path in staging.glob(f"{version:06d}_*.sql"):
+            raise SystemExit("Cannot locate catalogschema.ExtensionVersion; repository was not changed")
+        for path in Path(tmp).glob(f"{version:06d}_*.sql"):
             shutil.copyfile(path, directory / path.name)
             print(f"Generated {directory / path.name}")
-        shutil.copyfile(staging / "atlas.sum", directory / "atlas.sum")
         schema_go.write_text(source)
-        print("Review both SQL files and add any required data backfills before committing.")
+        print("Review old-reader/writer compatibility and both SQL files before committing. Base schema stays unchanged.")
 
 
 if __name__ == "__main__":

@@ -2,7 +2,7 @@
 
 `core/catalogschema/schema.sql` declares the desired catalog and session index structure. Atlas Community
 1.3.1 computes its difference from the replayed migration history and generates
-reviewable SQL. `golang-migrate` executes the embedded SQL inside zotigod; users do
+reviewable SQL. Zotigod executes the embedded SQL; users do
 not need Atlas installed, and generation never connects to their catalog.
 
 ## Development
@@ -16,22 +16,25 @@ Set `ATLAS=/path/to/atlas` if it is not on PATH.
 2. Run `make catalog-diff NAME=describe_change`.
 3. Review both generated `.up.sql` and `.down.sql` files. Add explicit data
    backfills when required: a schema diff cannot infer business data transforms.
-4. After editing SQL, run
-   `atlas migrate hash --dir 'file://core/catalogschema/migrations?format=golang-migrate'`.
-5. Run `make catalog-check` and `go test ./core/catalogschema ./core/workspace ./core/session ./internal/zotigod`.
+4. Run `make catalog-check` and `go test ./core/catalogschema ./core/workspace ./core/session ./internal/zotigod`.
    Add data-preservation and rollback tests for the change.
 
-The generator assigns the next sequential version, appends the `schema_meta`
-version update to each direction, and updates `catalogschema.Version` in Go. Commit
-`schema.sql`, both SQL files, `atlas.sum`, and the Go version change together.
+The base history in `migrations/` ends at schema 15, which dev.31 understands.
+The generator replays this history plus `extensions/` in a disposable directory,
+assigns the next extension version, and updates `catalogschema.ExtensionVersion`.
+Commit `schema.sql`, both extension SQL files and the extension version together.
+Never advance `schema_meta` or `catalog_migrations` for a compatible addition.
 `catalog-check` uses a disposable database and fails when a schema change has
 no corresponding migration. Run it before opening a PR; automatic CI wiring is
-not included because the publishing credential cannot update GitHub workflows. Do not edit migrations already released.
+not included because the publishing credential cannot update GitHub workflows.
+Do not edit migrations used by installed releases. The unused dev.32/33 additions
+were moved to extensions for the epoch-1 compatibility correction.
 
 Each file runs in one transaction. Do not include `BEGIN`, `COMMIT`, `ROLLBACK`,
 or statements that cannot run in a transaction. SQLite table rebuilds run with
-foreign-key actions disabled outside the transaction, then check every foreign
-key before commit. This preserves child records across parent table rebuilds.
+foreign-key actions disabled outside the transaction in the base migration driver.
+Compatible extensions keep foreign keys enabled and check every foreign key before
+commit; they may not rebuild referenced parent tables or cascade-delete old data.
 Do not run a generic migrate/Atlas apply command directly against the catalog:
 use zotigod so the catalog lock and foreign-key checks are retained.
 
@@ -90,9 +93,26 @@ Never delete `catalog.sqlite`: it also contains authoritative project/workspace
 organization. Preserve the `catalog_session_import_v10` marker during a rebuild.
 
 `catalog_migrations` is golang-migrate's version/dirty journal. `schema_meta` remains
-the compatibility version checked by old binaries/read-only clients, and changes
-inside the same transaction as the corresponding schema change. A journal mismatch
+the base compatibility version checked by old binaries/read-only clients. Both
+remain 15 for compatible additions. A journal mismatch
 or dirty migration fails startup; it is never silently reset with `Force`.
+
+`catalog_extensions` records additive migrations in the same transaction as their
+DDL and data changes. Startup checks both journals, under the existing catalog and
+schema leases. A failed extension rolls back and can retry without making dev.31
+unable to open the base database. Readers require at least their own extension
+version and accept later compatible additions. Startup fills missing extensions
+but never downgrades a newer extension journal during binary rollback.
+
+Extension 1 adds completion notifications and isolates their queue states with a
+`completion_` prefix. Dev.31's queue predicates ignore those rows; normal inputs
+remain readable and writable. Extension 2 adds managed repositories without moving
+user checkouts. New foreign keys must not prevent old project/source deletion,
+and workspace plans persist an immutable commit so old provisioning can retry them.
+
+New tables are not automatically behaviorally compatible: validate old writes,
+deletes, scheduling, queued payloads, and re-upgrade after old writes. Run the actual
+dev.31 daemon and updater when validating an epoch-1 release.
 
 ## Offline upgrade and rollback
 
@@ -106,8 +126,12 @@ zotigod catalog-migrate --root /path/to/.zotigo --to 7
 
 The command requires an existing catalog and an explicit target between 7 and the
 binary's latest schema version. To upgrade explicitly, pass the latest version
-(currently 11). Normal startup automatically upgrades; downgrade first, then launch
+(currently 15, including current compatible extensions). Normal startup automatically upgrades; downgrade first, then launch
 the matching older binary, otherwise startup will upgrade again.
+
+Rolling back to dev.31 needs no offline downgrade: it reads base schema 15 and
+ignores compatible extensions. Explicitly downgrading below 15 first removes the
+extensions, including callback data, before applying the older base migrations.
 
 Downgrading 8 to 7 discards project/workspace pins, their ordering, and the legacy
 import marker. Existing session pins, session ordering, workspace paths, and

@@ -122,7 +122,7 @@ func TestCompletionTriggerExpiryCancelQuotaAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	values, err := store.ListCompletionTriggers(ctx, "s")
-	if err != nil || len(values) != 0 {
+	if err != nil || len(values) != 15 {
 		t.Fatalf("migration: %v %v", values, err)
 	}
 }

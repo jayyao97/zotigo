@@ -67,6 +67,10 @@ func OpenReadOnly(rootDir string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("workspace catalog version %d is not supported", version)
 	}
+	if err := catalogschema.CheckExtensions(context.Background(), db); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
 	return store, nil
 }
 

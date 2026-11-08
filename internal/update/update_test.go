@@ -23,17 +23,17 @@ func TestReleaseManifestMatchesBinary(t *testing.T) {
 	}
 }
 
-func TestApplicationUpdateRejectsPreCallbackDataEpoch(t *testing.T) {
+func TestApplicationUpdateRejectsIncompatibleDataEpoch(t *testing.T) {
 	m := fixtureManager(t)
 	target, err := readManifest(filepath.Join("..", "..", "update.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if target.Data <= 1 {
-		t.Fatalf("callback schema must not advertise epoch-1 rollback compatibility: %+v", target)
+	if target.Data != 1 {
+		t.Fatalf("release must remain compatible with dev.31: %+v", target)
 	}
 	current := target
-	current.Data = 1
+	current.Data = target.Data + 1
 	for path, manifest := range map[string]Manifest{m.current("UPDATE.json"): current, filepath.Join(m.Prefix, "daemon", "prepared", "UPDATE.json"): target} {
 		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 			t.Fatal(err)

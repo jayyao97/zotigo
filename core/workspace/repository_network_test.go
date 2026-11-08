@@ -261,7 +261,7 @@ func TestRepositoryBaseNamedOriginIsNotTreatedAsAlias(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if prepared.BaseRef != "refs/remotes/origin/origin/topic" {
+	if prepared.BaseRef != strings.TrimSpace(runGitProvisionCommand(t, remote, "rev-parse", "origin/topic")) {
 		t.Fatalf("actual branch was rewritten: %s", prepared.BaseRef)
 	}
 }
