@@ -27,39 +27,34 @@ func (s *Store) startRepositoryMaintenance(ctx context.Context, interval time.Du
 	ctx, s.maintenanceCancel = context.WithCancel(ctx)
 	s.maintenanceDone = make(chan struct{})
 	s.maintenanceWake = make(chan struct{}, 1)
+	s.preparationWake = make(chan struct{}, 1)
 	go func() {
 		defer close(s.maintenanceDone)
-		// Initial clones may be slow. They must not delay refreshing caches
-		// already used by other projects.
+		// One worker per class keeps network concurrency bounded while a slow
+		// migration cannot delay an explicitly registered repository.
 		var tasks sync.WaitGroup
-		for _, migration := range []bool{true, false} {
+		for _, task := range []struct {
+			run  func(context.Context) error
+			wake <-chan struct{}
+		}{
+			{s.prepareRegisteredRepositories, s.preparationWake},
+			{s.migrateRepositorySources, s.maintenanceWake},
+			{s.maintainRepositories, nil},
+		} {
 			tasks.Add(1)
 			go func() {
 				defer tasks.Done()
 				ticker := time.NewTicker(interval)
 				defer ticker.Stop()
-				var wake <-chan struct{}
-				if migration {
-					wake = s.maintenanceWake
-				}
 				for ctx.Err() == nil {
-					var err error
-					if migration {
-						err = s.prepareRegisteredRepositories(ctx)
-						if ctx.Err() == nil {
-							err = errors.Join(err, s.migrateRepositorySources(ctx))
-						}
-					} else {
-						err = s.maintainRepositories(ctx)
-					}
-					if err != nil && ctx.Err() == nil && report != nil {
+					if err := task.run(ctx); err != nil && ctx.Err() == nil && report != nil {
 						report(err)
 					}
 					select {
 					case <-ctx.Done():
 						return
 					case <-ticker.C:
-					case <-wake:
+					case <-task.wake:
 					}
 				}
 			}()
@@ -79,6 +74,17 @@ func (s *Store) wakeRepositoryMigration() {
 	}
 }
 
+func (s *Store) wakeRepositoryPreparation() {
+	s.maintenanceMu.Lock()
+	defer s.maintenanceMu.Unlock()
+	if s.preparationWake != nil {
+		select {
+		case s.preparationWake <- struct{}{}:
+		default:
+		}
+	}
+}
+
 func (s *Store) stopRepositoryMaintenance() {
 	s.maintenanceMu.Lock()
 	cancel, done := s.maintenanceCancel, s.maintenanceDone
@@ -91,7 +97,7 @@ func (s *Store) stopRepositoryMaintenance() {
 
 func (s *Store) maintainRepositories(ctx context.Context) error {
 	var result error
-	repos, err := s.ListRepositories(ctx)
+	repos, err := s.activeRepositories(ctx)
 	if err != nil {
 		return errors.Join(result, err)
 	}
@@ -145,8 +151,7 @@ func (s *Store) migrateRepositorySources(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			_, recordErr := s.db.ExecContext(ctx, `INSERT INTO source_repository_migrations(source_id,status,last_error,next_attempt_at)
- VALUES(?,'retry',?,?) ON CONFLICT(source_id) DO UPDATE SET status='retry',last_error=excluded.last_error,next_attempt_at=excluded.next_attempt_at`, source.ID, err.Error(), unixMillis(time.Now().Add(repositoryMaintenanceInterval)))
+			recordErr := s.recordMigrationFailure(ctx, source.ID, err)
 			result = errors.Join(result, fmt.Errorf("migrate source %s: %w", source.ID, err), recordErr)
 		}
 	}
@@ -219,4 +224,27 @@ func (s *Store) markLocalRepositorySource(ctx context.Context, id string) error 
 	_, err := s.db.ExecContext(ctx, `INSERT INTO source_repository_migrations(source_id,status) VALUES(?,'local')
  ON CONFLICT(source_id) DO UPDATE SET status='local',last_error='',next_attempt_at=0`, id)
 	return err
+}
+
+// Unreferenced library entries remain available for later use, but consume no
+// periodic Git/network work until an active project references them again.
+func (s *Store) activeRepositories(ctx context.Context) ([]Repository, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+repositoryColumns+` FROM repositories WHERE id IN (
+ SELECT sr.repository_id FROM source_repositories sr
+ JOIN sources s ON s.id=sr.source_id JOIN projects p ON p.id=s.project_id
+ WHERE s.registered=1 AND p.status='active'
+ ) ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var repos []Repository
+	for rows.Next() {
+		repo, err := scanRepository(rows)
+		if err != nil {
+			return nil, err
+		}
+		repos = append(repos, repo)
+	}
+	return repos, rows.Err()
 }

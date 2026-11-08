@@ -132,6 +132,10 @@ func TestRepositoryMigrationFailureKeepsLocalAndRetriesAfterRestart(t *testing.T
 	if _, err := reopened.db.Exec(`UPDATE source_repository_migrations SET next_attempt_at=0 WHERE source_id=?`, source.ID); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate expiry of both the source retry and the shared clone cooldown.
+	if _, err := reopened.db.Exec(`UPDATE repositories SET clone_next_attempt_at=0 WHERE id=(SELECT repository_id FROM source_repository_migrations WHERE source_id=?)`, source.ID); err != nil {
+		t.Fatal(err)
+	}
 	if err := reopened.migrateRepositorySources(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -191,6 +195,13 @@ func TestRepositoryMaintenanceRefreshesCachedRemote(t *testing.T) {
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
+		t.Fatal(err)
+	}
+	project, err := store.CreateProject(ctx, "Active")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddRepositorySource(ctx, project.ID, repo.ID); err != nil {
 		t.Fatal(err)
 	}
 	runGitProvisionCommand(t, remote, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "new")

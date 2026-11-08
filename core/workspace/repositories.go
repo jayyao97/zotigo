@@ -146,11 +146,11 @@ func (s *Store) CreateRepository(ctx context.Context, remote, name string) (Repo
  ON CONFLICT(repository_id) DO UPDATE SET next_attempt_at=0`, repo.ID); err != nil {
 			return Repository{}, err
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE repositories SET last_sync_error='' WHERE id=?`, repo.ID); err != nil {
+		if _, err := s.db.ExecContext(ctx, `UPDATE repositories SET last_sync_error='',clone_next_attempt_at=0 WHERE id=?`, repo.ID); err != nil {
 			return Repository{}, err
 		}
 		repo.LastSyncError = ""
-		s.wakeRepositoryMigration()
+		s.wakeRepositoryPreparation()
 	}
 	return repo, nil
 }
@@ -167,8 +167,9 @@ func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Reposit
 
 // Repository network operations are serialized independently of catalog writes.
 // Waiting for another request must remain cancellable as well.
-func (s *Store) lockRepository(ctx context.Context, id string) (func(), error) {
+func (s *Store) repositoryGate(id string) chan struct{} {
 	s.repositoryMu.Lock()
+	defer s.repositoryMu.Unlock()
 	if s.repositoryLocks == nil {
 		s.repositoryLocks = make(map[string]chan struct{})
 	}
@@ -177,12 +178,28 @@ func (s *Store) lockRepository(ctx context.Context, id string) (func(), error) {
 		gate = make(chan struct{}, 1)
 		s.repositoryLocks[id] = gate
 	}
-	s.repositoryMu.Unlock()
+	return gate
+}
+
+func (s *Store) lockRepository(ctx context.Context, id string) (func(), error) {
+	gate := s.repositoryGate(id)
 	select {
 	case gate <- struct{}{}:
 		return func() { <-gate }, nil
 	case <-ctx.Done():
 		return nil, ctx.Err()
+	}
+}
+
+// Preparation must skip a cache already owned by migration so its queue can
+// continue preparing other repositories instead of waiting for that clone.
+func (s *Store) tryLockRepository(id string) (func(), bool) {
+	gate := s.repositoryGate(id)
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, true
+	default:
+		return nil, false
 	}
 }
 
@@ -199,6 +216,14 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (r
 		}
 	}()
 	if _, err := os.Stat(repo.CanonicalPath); os.IsNotExist(err) {
+		var retryAt int64
+		if err := s.db.QueryRowContext(ctx, `SELECT clone_next_attempt_at FROM repositories WHERE id=?`, repo.ID).Scan(&retryAt); err != nil {
+			return Repository{}, err
+		}
+		if retryAt > unixMillis(time.Now()) {
+			return Repository{}, &repositoryCloneRetry{at: retryAt}
+		}
+
 		parent := filepath.Dir(repo.CanonicalPath)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
 			return Repository{}, err
@@ -221,11 +246,19 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (r
 		}
 		args = append(args, "--", repo.RemoteURL, staging)
 		if _, err := runRepositoryGit(ctx, 30*time.Minute, parent, args...); err != nil {
-			return Repository{}, fmt.Errorf("clone repository failed; check remote access on this daemon: %w", err)
+			cause := fmt.Errorf("clone repository failed; check remote access on this daemon: %w", err)
+			if ctx.Err() != nil {
+				return Repository{}, cause
+			}
+			return Repository{}, s.recordCloneFailure(ctx, repo.ID, cause)
 		}
 		if err := os.Rename(staging, repo.CanonicalPath); err != nil {
 			return Repository{}, err
 		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE repositories SET clone_failure_count=0,clone_next_attempt_at=0 WHERE id=?`, repo.ID); err != nil {
+			return Repository{}, err
+		}
+
 	} else if err != nil {
 		return Repository{}, err
 	}

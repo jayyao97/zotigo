@@ -8,7 +8,7 @@ import (
 )
 
 // Explicit remote registration is durable and returns before network work. A
-// single worker prepares this queue alongside migrations; cache refresh is separate.
+// dedicated worker prepares this queue independently of migration and cache refresh.
 func (s *Store) prepareRegisteredRepositories(ctx context.Context) error {
 	rows, err := s.db.QueryContext(ctx, `SELECT repository_id FROM repository_preparations WHERE next_attempt_at <= ? ORDER BY next_attempt_at,repository_id`, unixMillis(time.Now().UTC()))
 	if err != nil {
@@ -35,13 +35,24 @@ func (s *Store) prepareRegisteredRepositories(ctx context.Context) error {
 		}
 		repo, err := s.GetRepository(ctx, id)
 		if err == nil && repo.LastSyncedAt == nil {
-			_, err = s.refreshRepository(ctx, repo)
+			unlock, acquired := s.tryLockRepository(repo.ID)
+			if !acquired {
+				continue
+			}
+			_, err = func() (Repository, error) {
+				defer unlock()
+				current, err := s.GetRepository(ctx, id)
+				if err != nil || current.LastSyncedAt != nil {
+					return current, err
+				}
+				return s.refreshRepositoryLocked(ctx, current)
+			}()
 		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if err != nil {
-			_, recordErr := s.db.ExecContext(ctx, `UPDATE repository_preparations SET next_attempt_at=? WHERE repository_id=?`, unixMillis(time.Now().Add(repositoryMaintenanceInterval)), id)
+			recordErr := s.recordPreparationFailure(ctx, id, err)
 			result = errors.Join(result, fmt.Errorf("prepare repository %s: %w", id, err), recordErr)
 			continue
 		}

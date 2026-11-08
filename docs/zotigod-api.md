@@ -1423,7 +1423,7 @@ ordinary daemon authentication token.
   Returns the registered repository immediately; cloning runs in the daemon's
   background preparation queue. Until `last_synced_at` is present, an empty
   `last_sync_error` means preparation is pending and a nonempty value reports a
-  failed attempt. Failed attempts retry after ten minutes, and the queue survives
+  failed attempt. Failed attempts back off for 10 minutes, 30 minutes, 2 hours, then 6 hours (capped); failure counts and deadlines survive
   daemon restarts. Repeating the same exact remote URL reuses its identity and
   requests an immediate retry if it has never synchronized. A ready repository
   returns its existing state. No network fetch occurs while listing repositories.
@@ -1497,8 +1497,20 @@ Sources without a remote, with multiple remotes, or unsupported URLs are marked
 local and are not repeatedly probed. Re-registering such a source permits another
 eligibility check. Adding a source wakes the background loop.
 
-A separate ten-minute maintenance loop refreshes existing caches; initial clones
-do not block it. Each repository retains its last successful sync time and latest
+Three fixed maintenance workers handle explicit registrations, legacy migrations,
+and periodic cache refresh independently. A slow migration does not block a new
+registration for another repository; each class remains serial, with per-repository
+locking across classes. Migration failures use the same persisted 10-minute,
+30-minute, 2-hour, 6-hour capped backoff as explicit preparation. Initial clone
+failures share one repository-level deadline across all project sources and the
+explicit queue, so several references do not multiply downloads. Explicit
+preparation skips a cache currently locked by migration and continues with other
+repositories. Re-registering a remote is an explicit request to retry immediately.
+
+The ten-minute cache maintenance loop refreshes only repositories referenced by
+registered sources in active projects. Unused library entries and archived projects
+receive no periodic network work; their cached data remains available on demand.
+Initial clones do not block cache refresh. Each repository retains its last successful sync time and latest
 sync error. Maintenance stops with the daemon. The original source identity remains
 available to existing workspaces for archive, restore and deletion. Old client
 source IDs are translated when creating new bindings after migration. Worktree

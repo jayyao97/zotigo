@@ -32,6 +32,7 @@ type Store struct {
 	maintenanceCancel  context.CancelFunc
 	maintenanceDone    chan struct{}
 	maintenanceWake    chan struct{}
+	preparationWake    chan struct{}
 	writerLock         *flock.Flock
 	schemaLock         *flock.Flock
 }
