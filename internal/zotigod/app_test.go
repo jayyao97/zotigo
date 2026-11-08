@@ -3812,7 +3812,9 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	for time.Now().Before(deadline) {
 		stored, err := store.Get(context.Background(), "sess-worker-profile")
 		items, _, itemsErr := store.ListDisplayItems(context.Background(), "sess-worker-profile")
-		if err == nil && stored != nil && stored.ProfileName == "new" && itemsErr == nil && len(items) == 2 {
+		// BeforeApply persists the change before the agent installs it. Wait for
+		// both observations instead of racing the asynchronous runtime switch.
+		if err == nil && stored != nil && stored.ProfileName == "new" && itemsErr == nil && len(items) == 2 && ag.ActiveProfileName() == "new" {
 			break
 		}
 		time.Sleep(time.Millisecond)
