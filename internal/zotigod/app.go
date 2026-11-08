@@ -864,6 +864,13 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 	opts.catalogErr = catalogErr
 	if catalogErr == nil {
 		opts.catalogErr = catalog.RecoverQueuedInputs(context.Background())
+		if opts.maintenanceContext != nil {
+			catalog.StartRepositoryMaintenance(opts.maintenanceContext, func(err error) {
+				if opts.logger != nil {
+					opts.logger.Printf("repository_maintenance_failed: %v", err)
+				}
+			})
+		}
 	}
 	items := storedDisplayItemSource{store: store}
 	return newHandler(newSessionRegistry(), items, opts)
@@ -1098,6 +1105,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/files/list", handler.handleDirectoryList)
 	mux.HandleFunc("/sources/directories", handler.handleDirectoryList)
 	mux.HandleFunc("/projects", handler.handleProjects)
+	mux.HandleFunc("/repositories", handler.handleRepositories)
 	mux.HandleFunc("/projects/{$}", handler.handleProjectNotFound)
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}", withPathValue("project_id", handler.handleProject))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/archive-preview", withPathValue("project_id", handler.handleProjectArchivePreview))
@@ -1108,6 +1116,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/inspect", withPathValue("project_id", handler.handleProjectSourceInspection))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources", withPathValue("project_id", handler.handleProjectSources))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/{source_id}", withPathValues("project_id", "source_id", handler.handleProjectSource))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/{source_id}/branches", withPathValues("project_id", "source_id", handler.handleSourceBranches))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/workspaces", withPathValue("project_id", handler.handleProjectWorkspaces))
 	mux.HandleFunc("/projects/{project_id}/{route...}", handler.handleProjectRouteNotFound)
 	mux.HandleFunc("/workspaces/{$}", handler.handleWorkspaceRouteNotFound)

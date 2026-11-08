@@ -22,8 +22,12 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 	source, err := scanSource(db.QueryRowContext(ctx, `
 		SELECT id, project_id, kind, canonical_path, git_common_dir,
 		       git_object_format, folder_mode, source_key, created_at, updated_at
-		FROM sources WHERE id = ? AND project_id = ? AND registered = 1
-	`, selection.SourceID, workspace.ProjectID))
+		FROM sources WHERE id = ? AND project_id = ? AND (
+		 registered = 1 OR (? AND EXISTS(
+		  SELECT 1 FROM source_repositories sr JOIN sources replacement ON replacement.id=sr.replacement_source_id
+		  WHERE sr.source_id=sources.id AND replacement.registered=1
+		 )))
+	`, selection.SourceID, workspace.ProjectID, selection.preparedLocalSource))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			return fmt.Errorf("%w: workspace source must be registered in the project", ErrInvalid)
@@ -42,7 +46,11 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if err := verifySourceIdentity(ctx, source); err != nil {
 			return err
 		}
-		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", baseRef+"^{commit}")
+		resolveRef := baseRef
+		if selection.resolvedBaseCommit != "" {
+			resolveRef = selection.resolvedBaseCommit
+		}
+		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", resolveRef+"^{commit}")
 		if err != nil {
 			return fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 		}
@@ -51,11 +59,21 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 			return fmt.Errorf("%w: expected base commit changed", ErrConflict)
 		}
 		branchName := strings.TrimSpace(selection.BranchName)
+		if branchName == "" && workspace.Status == WorkspaceStatusReady {
+			// Reuse a workspace's shared branch when adding another repository,
+			// but do not pick arbitrarily if its repositories use different branches.
+			if err := db.QueryRowContext(ctx, `
+				SELECT CASE WHEN COUNT(DISTINCT branch_name) = 1 THEN MIN(branch_name) ELSE '' END
+				FROM workspace_checkouts WHERE workspace_id = ? AND branch_name <> ''
+			`, workspace.ID).Scan(&branchName); err != nil {
+				return fmt.Errorf("inspect workspace branch: %w", err)
+			}
+		}
 		if branchName == "" {
 			if workspace.storageName == workspace.ID {
-				branchName = "zotigo/" + workspace.ID + "/" + source.SourceKey
+				branchName = "feat/" + workspace.ID + "/" + source.SourceKey
 			} else {
-				branchName = "zotigo/" + workspace.storageName
+				branchName = "feat/" + workspace.storageName
 			}
 		}
 		if _, err := runGitMutation(ctx, source.CanonicalPath, "check-ref-format", "--branch", branchName); err != nil {
@@ -68,9 +86,9 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if _, err := db.ExecContext(ctx, `
 			INSERT INTO workspace_checkouts(
 				workspace_id, source_id, worktree_path, base_ref,
-				base_commit, branch_name, owned_head, status
-			) VALUES(?, ?, ?, ?, ?, ?, ?, 'planned')
-		`, workspace.ID, source.ID, target, baseRef, baseCommit, branchName, baseCommit); err != nil {
+				base_commit, branch_name, owned_head, status, used_cached_base, base_synced_at
+			) VALUES(?, ?, ?, ?, ?, ?, ?, 'planned', ?, ?)
+		`, workspace.ID, source.ID, target, baseRef, baseCommit, branchName, baseCommit, selection.usedCachedBase, nullableTimeMillis(selection.baseSyncedAt)); err != nil {
 			if isConstraintError(err) {
 				return fmt.Errorf("%w: source is already bound to the workspace", ErrConflict)
 			}
@@ -154,7 +172,7 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 		items = append(items, WorkspaceSource{
 			Source: source, TargetPath: checkout.WorktreePath, WorktreePath: checkout.WorktreePath,
 			BaseRef: checkout.BaseRef, BaseCommit: checkout.BaseCommit, BranchName: checkout.BranchName,
-			Status: checkout.Status, Error: checkout.Error,
+			Status: checkout.Status, Error: checkout.Error, UsedCachedBase: checkout.UsedCachedBase, BaseSyncedAt: checkout.BaseSyncedAt,
 		})
 	}
 	for _, folder := range folders {
@@ -171,20 +189,22 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 }
 
 func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, selection WorkspaceSourceInput) (WorkspaceSource, error) {
+	releaseCache := s.holdDefaultCacheRefs(ctx)
+	defer releaseCache()
 	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
-
-	workspace, nonce, err := s.workspaceWithNonce(ctx, workspaceID)
+	workspace, err := s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
+	s.operationMu.Unlock()
 	if err != nil {
 		return WorkspaceSource{}, err
 	}
-	if workspace.Status != WorkspaceStatusReady {
-		return WorkspaceSource{}, fmt.Errorf("%w: workspace cannot add sources from %s", ErrConflict, workspace.Status)
-	}
-	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
+	selection, err = s.prepareRepositorySelection(ctx, workspace.ProjectID, selection)
+	if err != nil {
 		return WorkspaceSource{}, err
 	}
-	if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	workspace, err = s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
+	if err != nil {
 		return WorkspaceSource{}, err
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -236,6 +256,35 @@ func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, sele
 		return s.workspaceSource(ctx, workspace, selection.SourceID)
 	}
 	return WorkspaceSource{}, ErrNotFound
+}
+
+// Check once before fetching and again under operationMu before committing:
+// the workspace or source may have changed while the network was in flight.
+func (s *Store) validateAddWorkspaceSource(ctx context.Context, workspaceID, sourceID string) (Workspace, error) {
+	workspace, nonce, err := s.workspaceWithNonce(ctx, workspaceID)
+	if err != nil {
+		return Workspace{}, err
+	}
+	if workspace.Status != WorkspaceStatusReady {
+		return Workspace{}, fmt.Errorf("%w: workspace cannot add sources from %s", ErrConflict, workspace.Status)
+	}
+	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
+		return Workspace{}, err
+	}
+	if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
+		return Workspace{}, err
+	}
+	var duplicate bool
+	if err := s.db.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM workspace_checkouts WHERE workspace_id=? AND source_id=?) OR
+		EXISTS(SELECT 1 FROM workspace_folders WHERE workspace_id=? AND source_id=?) OR
+		EXISTS(SELECT 1 FROM workspace_checkouts c JOIN source_repositories bound ON bound.source_id=c.source_id JOIN source_repositories selected ON selected.repository_id=bound.repository_id WHERE c.workspace_id=? AND selected.source_id=?)`, workspaceID, sourceID, workspaceID, sourceID, workspaceID, sourceID).Scan(&duplicate); err != nil {
+		return Workspace{}, err
+	}
+	if duplicate {
+		return Workspace{}, fmt.Errorf("%w: source is already bound to this workspace", ErrConflict)
+	}
+	return workspace, nil
 }
 
 func (s *Store) cancelUnownedCheckout(ctx context.Context, workspace Workspace, checkout Checkout) error {

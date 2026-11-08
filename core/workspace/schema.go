@@ -19,11 +19,22 @@ import (
 const schemaVersion = catalogschema.Version
 
 type Store struct {
-	db          *sql.DB
-	rootDir     string
-	operationMu sync.Mutex
-	writerLock  *flock.Flock
-	schemaLock  *flock.Flock
+	db                 *sql.DB
+	rootDir            string
+	operationMu        sync.Mutex
+	repositoryMu       sync.Mutex
+	repositoryLocks    map[string]chan struct{}
+	branchRefreshSlots chan struct{}
+	cacheRefsMu        sync.Mutex
+	cacheRefReaders    int
+	cacheRefCleanup    map[string]Repository
+	maintenanceMu      sync.Mutex
+	maintenanceCancel  context.CancelFunc
+	maintenanceDone    chan struct{}
+	maintenanceWake    chan struct{}
+	preparationWake    chan struct{}
+	writerLock         *flock.Flock
+	schemaLock         *flock.Flock
 }
 
 // OpenReadOnly opens an existing catalog without running migrations or writing
@@ -46,7 +57,7 @@ func OpenReadOnly(rootDir string) (*Store, error) {
 		return nil, fmt.Errorf("open workspace catalog read-only: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	store := &Store{db: db, rootDir: rootDir}
+	store := &Store{db: db, rootDir: rootDir, branchRefreshSlots: make(chan struct{}, 2)}
 	var version int
 	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE singleton = 1`).Scan(&version); err != nil {
 		_ = db.Close()
@@ -104,10 +115,11 @@ func openWriter(rootDir string, existingOnly bool) (*Store, error) {
 		_ = lock.Close()
 		return nil, fmt.Errorf("open workspace catalog: %w", err)
 	}
-	return &Store{db: db, rootDir: rootDir, writerLock: lock}, nil
+	return &Store{db: db, rootDir: rootDir, writerLock: lock, branchRefreshSlots: make(chan struct{}, 2)}, nil
 }
 
 func (s *Store) Close() error {
+	s.stopRepositoryMaintenance()
 	err := s.db.Close()
 	if s.schemaLock != nil {
 		err = errors.Join(err, s.schemaLock.Close())

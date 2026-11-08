@@ -49,6 +49,11 @@ type Project struct {
 }
 
 type Source struct {
+	LastSyncedAt    *time.Time `json:"last_synced_at,omitempty"`
+	LastSyncError   string     `json:"last_sync_error,omitempty"`
+	RepositoryID    string     `json:"repository_id,omitempty"`
+	RemoteURL       string     `json:"remote_url,omitempty"`
+	DefaultBranch   string     `json:"default_branch,omitempty"`
 	ID              string     `json:"id"`
 	ProjectID       string     `json:"project_id"`
 	Kind            SourceKind `json:"kind"`
@@ -90,30 +95,39 @@ type WorkspaceSourceInput struct {
 	BaseRef        string     `json:"base_ref,omitempty"`
 	ExpectedCommit string     `json:"expected_commit,omitempty"`
 	BranchName     string     `json:"branch_name,omitempty"`
+	// Pinned under the repository lock before entering the catalog transaction.
+	resolvedBaseCommit  string
+	preparedLocalSource bool
+	usedCachedBase      bool
+	baseSyncedAt        *time.Time
 }
 
 type WorkspaceSource struct {
-	Source       Source     `json:"source"`
-	Mode         FolderMode `json:"mode,omitempty"`
-	TargetPath   string     `json:"target_path"`
-	BaseRef      string     `json:"base_ref,omitempty"`
-	BaseCommit   string     `json:"base_commit,omitempty"`
-	BranchName   string     `json:"branch_name,omitempty"`
-	WorktreePath string     `json:"worktree_path,omitempty"`
-	Status       string     `json:"status"`
-	Error        string     `json:"error,omitempty"`
+	UsedCachedBase bool       `json:"used_cached_base,omitempty"`
+	BaseSyncedAt   *time.Time `json:"base_synced_at,omitempty"`
+	Source         Source     `json:"source"`
+	Mode           FolderMode `json:"mode,omitempty"`
+	TargetPath     string     `json:"target_path"`
+	BaseRef        string     `json:"base_ref,omitempty"`
+	BaseCommit     string     `json:"base_commit,omitempty"`
+	BranchName     string     `json:"branch_name,omitempty"`
+	WorktreePath   string     `json:"worktree_path,omitempty"`
+	Status         string     `json:"status"`
+	Error          string     `json:"error,omitempty"`
 }
 
 type Checkout struct {
-	WorkspaceID  string
-	SourceID     string
-	WorktreePath string
-	BaseRef      string
-	BaseCommit   string
-	BranchName   string
-	OwnedHead    string
-	Status       string
-	Error        string
+	UsedCachedBase bool
+	BaseSyncedAt   *time.Time
+	WorkspaceID    string
+	SourceID       string
+	WorktreePath   string
+	BaseRef        string
+	BaseCommit     string
+	BranchName     string
+	OwnedHead      string
+	Status         string
+	Error          string
 }
 
 type FolderBinding struct {

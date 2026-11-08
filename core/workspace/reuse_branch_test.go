@@ -90,6 +90,49 @@ func TestAddWorkspaceSourceReusesLocalBranch(t *testing.T) {
 	}
 }
 
+func TestAddWorkspaceSourceDefaultsToSharedWorkspaceBranch(t *testing.T) {
+	store, workspace, _ := createGitWorkspaceFixture(t)
+	ctx := context.Background()
+	for _, step := range []struct {
+		name   string
+		branch string
+		want   string
+	}{
+		{name: "shared", want: "zotigo/test-workspace"},
+		{name: "explicit", branch: "feat/custom", want: "feat/custom"},
+		{name: "ambiguous", want: "feat/" + workspace.storageName},
+	} {
+		repository := t.TempDir()
+		t.Run(step.name, func(t *testing.T) {
+			runGitProvisionCommand(t, repository, "init", "-b", "main")
+			runGitProvisionCommand(t, repository, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
+			inspection, err := InspectSource(ctx, repository)
+			if err != nil {
+				t.Fatal(err)
+			}
+			source, err := store.AddSource(ctx, workspace.ProjectID, SourceInput{
+				Kind: inspection.Kind, CanonicalPath: inspection.CanonicalPath,
+				GitCommonDir: inspection.GitCommonDir, GitObjectFormat: inspection.GitObjectFormat, SourceKey: inspection.SourceKey,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			binding, err := store.AddWorkspaceSource(ctx, workspace.ID, WorkspaceSourceInput{
+				SourceID: source.ID, BaseRef: "main", BranchName: step.branch,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if binding.BranchName != step.want {
+				t.Fatalf("branch = %q, want %q", binding.BranchName, step.want)
+			}
+			if got := strings.TrimSpace(runGitProvisionCommand(t, binding.WorktreePath, "branch", "--show-current")); got != step.want {
+				t.Fatalf("checked out branch = %q, want %q", got, step.want)
+			}
+		})
+	}
+}
+
 func TestUnownedPlansDoNotReserveExistingBranch(t *testing.T) {
 	store, previous, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()

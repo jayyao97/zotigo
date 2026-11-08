@@ -105,14 +105,19 @@ func sourceKey(kind SourceKind, identity string) string {
 }
 
 func runGit(ctx context.Context, directory string, args ...string) (string, error) {
+	return runGitWithOutputLimit(ctx, directory, 64*1024, args...)
+}
+
+func runGitWithOutputLimit(ctx context.Context, directory string, outputLimit int, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", directory}, args...)
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
+	cmd.WaitDelay = 2 * time.Second
 	cmd.Env = sanitizedGitEnvironment(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {
 		return "", err
 	}
-	if len(output) > 64*1024 {
+	if len(output) > outputLimit {
 		return "", fmt.Errorf("git output exceeded limit")
 	}
 	return string(output), nil

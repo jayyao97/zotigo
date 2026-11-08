@@ -72,6 +72,8 @@ CREATE TABLE workspace_checkouts (
   base_commit TEXT NOT NULL,
   branch_name TEXT NOT NULL,
   owned_head TEXT NOT NULL,
+  used_cached_base INTEGER NOT NULL DEFAULT 0,
+  base_synced_at INTEGER,
   status TEXT NOT NULL CHECK(status IN ('planned', 'ready', 'error', 'archived')),
   error TEXT,
   PRIMARY KEY(workspace_id, source_id),
@@ -219,3 +221,37 @@ CREATE INDEX idx_session_input_queue ON session_input_queue(session_id, state, s
 
 CREATE TABLE completion_triggers (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','fired','cancelled')));
 CREATE INDEX completion_triggers_session ON completion_triggers(session_id,state,expires_at);
+
+CREATE TABLE repositories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  remote_url TEXT NOT NULL UNIQUE,
+  canonical_path TEXT NOT NULL UNIQUE,
+  default_branch TEXT NOT NULL DEFAULT '',
+  default_commit TEXT NOT NULL DEFAULT '',
+  clone_failure_count INTEGER NOT NULL DEFAULT 0,
+  clone_next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  last_synced_at INTEGER,
+  last_sync_error TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE repository_preparations (
+  repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE source_repositories (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+  replacement_source_id TEXT REFERENCES sources(id) ON DELETE RESTRICT
+);
+
+CREATE TABLE source_repository_migrations (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  repository_id TEXT REFERENCES repositories(id) ON DELETE RESTRICT,
+  status TEXT NOT NULL CHECK(status IN ('local','pending','retry','complete')),
+  last_error TEXT NOT NULL DEFAULT '',
+  next_attempt_at INTEGER NOT NULL DEFAULT 0,
+  failure_count INTEGER NOT NULL DEFAULT 0
+);

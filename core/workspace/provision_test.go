@@ -246,7 +246,7 @@ func TestProvisionWorkspaceUsesSemanticStorageNames(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(worktree, "README.md")); err != nil {
 		t.Fatalf("repository-named worktree: %v", err)
 	}
-	wantBranch := "zotigo/" + wantWorkspaceName
+	wantBranch := "feat/" + wantWorkspaceName
 	if branch := strings.TrimSpace(runGitProvisionCommand(t, worktree, "branch", "--show-current")); branch != wantBranch {
 		t.Fatalf("worktree branch = %q, want %q", branch, wantBranch)
 	}
@@ -631,7 +631,7 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantBranch := "zotigo/" + workspace.storageName
+	wantBranch := "feat/" + workspace.storageName
 	if binding.BranchName != wantBranch || binding.Status != "ready" {
 		t.Fatalf("binding = %+v, want branch %q and ready", binding, wantBranch)
 	}

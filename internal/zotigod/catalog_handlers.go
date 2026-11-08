@@ -17,8 +17,9 @@ type createProjectRequest struct {
 }
 
 type createSourceRequest struct {
-	Path       string                     `json:"path"`
-	FolderMode zotigoworkspace.FolderMode `json:"folder_mode,omitempty"`
+	RepositoryID string                     `json:"repository_id,omitempty"`
+	Path         string                     `json:"path"`
+	FolderMode   zotigoworkspace.FolderMode `json:"folder_mode,omitempty"`
 }
 
 type inspectSourceRequest struct {
@@ -750,6 +751,19 @@ func (h *handler) addProjectSource(w http.ResponseWriter, r *http.Request, proje
 	var request createSourceRequest
 	if err := readRequiredJSON(r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid source request")
+		return
+	}
+	if request.RepositoryID != "" {
+		if request.Path != "" || request.FolderMode != "" {
+			writeAPIError(w, http.StatusBadRequest, "repository_id cannot be combined with path or folder_mode")
+			return
+		}
+		source, err := h.catalog.AddRepositorySource(r.Context(), projectID, request.RepositoryID)
+		if err != nil {
+			h.writeCatalogError(w, err)
+			return
+		}
+		writeAPIJSON(w, http.StatusCreated, source)
 		return
 	}
 	inspection, err := zotigoworkspace.InspectSource(r.Context(), request.Path)

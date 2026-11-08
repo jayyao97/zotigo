@@ -317,7 +317,13 @@ func (s *Store) provisionCheckout(ctx context.Context, workspace Workspace, chec
 			return fmt.Errorf("adopt workspace branch refs: %w", err)
 		}
 	} else {
-		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", checkout.BaseRef+"^{commit}")
+		base := checkout.BaseRef
+		// Managed remotes can advance between planning and provisioning. The
+		// plan already pins the fetched commit; another fetch must not change it.
+		if source.RepositoryID != "" {
+			base = checkout.BaseCommit
+		}
+		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", base+"^{commit}")
 		if err != nil {
 			return fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 		}

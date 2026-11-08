@@ -264,6 +264,7 @@ func (s *Store) finishProjectDelete(ctx context.Context, projectID string) error
 		`DELETE FROM workspace_checkouts WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)`,
 		`DELETE FROM workspace_folders WHERE workspace_id IN (SELECT id FROM workspaces WHERE project_id = ?)`,
 		`DELETE FROM workspaces WHERE project_id = ?`,
+		`DELETE FROM source_repositories WHERE source_id IN (SELECT id FROM sources WHERE project_id = ?)`,
 		`DELETE FROM sources WHERE project_id = ?`,
 		`DELETE FROM projects WHERE id = ?`,
 	} {
