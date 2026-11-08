@@ -45,7 +45,10 @@ func (s *Store) startRepositoryMaintenance(ctx context.Context, interval time.Du
 				for ctx.Err() == nil {
 					var err error
 					if migration {
-						err = s.migrateRepositorySources(ctx)
+						err = s.prepareRegisteredRepositories(ctx)
+						if ctx.Err() == nil {
+							err = errors.Join(err, s.migrateRepositorySources(ctx))
+						}
 					} else {
 						err = s.maintainRepositories(ctx)
 					}

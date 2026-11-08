@@ -24,6 +24,9 @@ type Store struct {
 	operationMu       sync.Mutex
 	repositoryMu      sync.Mutex
 	repositoryLocks   map[string]chan struct{}
+	cacheRefsMu       sync.Mutex
+	cacheRefReaders   int
+	cacheRefCleanup   map[string]Repository
 	maintenanceMu     sync.Mutex
 	maintenanceCancel context.CancelFunc
 	maintenanceDone   chan struct{}

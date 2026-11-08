@@ -58,7 +58,7 @@ func TestRepositoryNetworkRechecksCatalogAfterFetch(t *testing.T) {
 		t.Run(action, func(t *testing.T) {
 			store, remote := repositoryFixture(t)
 			ctx := context.Background()
-			repo, err := store.CreateRepository(ctx, remote, "cache")
+			repo, err := createReadyRepository(store, ctx, remote, "cache")
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -153,7 +153,7 @@ func TestRepositoryCloneDoesNotBlockCatalogOperations(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
-	go func() { _, err := store.CreateRepository(ctx, server.URL+"/slow.git", "slow"); result <- err }()
+	go func() { _, err := createReadyRepository(store, ctx, server.URL+"/slow.git", "slow"); result <- err }()
 	select {
 	case <-started:
 	case <-time.After(10 * time.Second):
@@ -163,7 +163,7 @@ func TestRepositoryCloneDoesNotBlockCatalogOperations(t *testing.T) {
 	go func() {
 		_, _, err := store.CreateCompletionTrigger(context.Background(), CompletionTrigger{ID: "during-clone", SessionID: "s", ExpiresAt: time.Now().Add(time.Hour)})
 		if err == nil {
-			_, err = store.CreateRepository(context.Background(), remote, "fast")
+			_, err = createReadyRepository(store, context.Background(), remote, "fast")
 		}
 		completed <- err
 	}()
@@ -177,7 +177,7 @@ func TestRepositoryCloneDoesNotBlockCatalogOperations(t *testing.T) {
 	}
 	waitCtx, stop := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer stop()
-	if _, err := store.CreateRepository(waitCtx, server.URL+"/slow.git", "slow"); !errors.Is(err, context.DeadlineExceeded) {
+	if _, err := createReadyRepository(store, waitCtx, server.URL+"/slow.git", "slow"); !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("waiting for same repository did not cancel: %v", err)
 	}
 	cancel()
@@ -194,7 +194,7 @@ func TestRepositoryCloneDoesNotBlockCatalogOperations(t *testing.T) {
 func TestRepositoryPreparationPinsCommitAndRechecksSource(t *testing.T) {
 	store, remote := repositoryFixture(t)
 	ctx := context.Background()
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -245,7 +245,7 @@ func TestRepositoryBaseNamedOriginIsNotTreatedAsAlias(t *testing.T) {
 	runGitProvisionCommand(t, remote, "checkout", "-b", "origin/topic")
 	runGitProvisionCommand(t, remote, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "topic")
 	ctx := context.Background()
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}

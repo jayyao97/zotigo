@@ -1116,6 +1116,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/inspect", withPathValue("project_id", handler.handleProjectSourceInspection))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources", withPathValue("project_id", handler.handleProjectSources))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/{source_id}", withPathValues("project_id", "source_id", handler.handleProjectSource))
+	handleOptionalTrailingSlash(mux, "/projects/{project_id}/sources/{source_id}/branches", withPathValues("project_id", "source_id", handler.handleSourceBranches))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/workspaces", withPathValue("project_id", handler.handleProjectWorkspaces))
 	mux.HandleFunc("/projects/{project_id}/{route...}", handler.handleProjectRouteNotFound)
 	mux.HandleFunc("/workspaces/{$}", handler.handleWorkspaceRouteNotFound)

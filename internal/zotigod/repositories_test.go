@@ -1,9 +1,11 @@
 package zotigod
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
@@ -25,8 +27,20 @@ func TestRepositoryCatalogHTTP(t *testing.T) {
 	}
 	var repo zotigoworkspace.Repository
 	decodeCatalogData(t, created, &repo)
-	if repo.DefaultBranch != "trunk" {
+	if repo.LastSyncedAt != nil {
 		t.Fatalf("repo=%+v", repo)
+	}
+	catalog.StartRepositoryMaintenance(context.Background(), nil)
+	deadline := time.Now().Add(10 * time.Second)
+	for repo.LastSyncedAt == nil && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+		repo, err = catalog.GetRepository(context.Background(), repo.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if repo.DefaultBranch != "trunk" || repo.LastSyncedAt == nil {
+		t.Fatalf("repository preparation did not complete: %+v", repo)
 	}
 	var list struct {
 		Repositories []zotigoworkspace.Repository `json:"repositories"`

@@ -15,7 +15,7 @@ import (
 func TestRepositoryCacheFallbackSnapshotAndValidation(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +70,7 @@ func TestRepositoryCacheFallbackSnapshotAndValidation(t *testing.T) {
 func TestRepositoryCacheLockTimeoutUsesLastSuccessfulCache(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestRepositoryMaintenanceDoesNotProbeCheckedLocalSourcesOrOpen(t *testing.T
 func TestRepositoryMaintenanceRefreshesCachedRemote(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -213,7 +213,7 @@ func TestRepositoryDefaultBackupSurvivesPartialRefresh(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	runGitProvisionCommand(t, remote, "branch", "-m", "origin/trunk")
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -262,7 +262,7 @@ func TestRepositoryDefaultBackupSurvivesPartialRefresh(t *testing.T) {
 func TestRepositoryMaintenanceLifecycleWakesAndRefreshes(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "cache")
+	repo, err := createReadyRepository(store, ctx, remote, "cache")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -327,7 +327,7 @@ func TestWorkspaceCreationSurvivesConcurrentLocalMigration(t *testing.T) {
 	want := strings.TrimSpace(runGitProvisionCommand(t, local.CanonicalPath, "rev-parse", "HEAD"))
 	other := filepath.Join(t.TempDir(), "other")
 	runGitProvisionCommand(t, local.CanonicalPath, "clone", localRemote, other)
-	repo, err := store.CreateRepository(ctx, other, "other-cache")
+	repo, err := createReadyRepository(store, ctx, other, "other-cache")
 	if err != nil {
 		t.Fatal(err)
 	}

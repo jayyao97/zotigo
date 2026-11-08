@@ -6,6 +6,23 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
 
+func (h *handler) handleSourceBranches(w http.ResponseWriter, r *http.Request, projectID, sourceID string) {
+	if !h.requireCatalog(w) {
+		return
+	}
+	if r.Method != http.MethodGet {
+		w.Header().Set("Allow", "GET")
+		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	branches, err := h.catalog.ListSourceBranches(r.Context(), projectID, sourceID)
+	if err != nil {
+		h.writeCatalogError(w, err)
+		return
+	}
+	writeAPIJSON(w, http.StatusOK, map[string][]zotigoworkspace.RepositoryBranch{"branches": branches})
+}
+
 func (h *handler) handleRepositories(w http.ResponseWriter, r *http.Request) {
 	if !h.requireCatalog(w) {
 		return

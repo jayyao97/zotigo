@@ -189,6 +189,8 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 }
 
 func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, selection WorkspaceSourceInput) (WorkspaceSource, error) {
+	releaseCache := s.holdDefaultCacheRefs(ctx)
+	defer releaseCache()
 	s.operationMu.Lock()
 	workspace, err := s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
 	s.operationMu.Unlock()

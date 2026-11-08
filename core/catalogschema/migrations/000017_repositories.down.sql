@@ -14,6 +14,7 @@ UPDATE sources SET registered=0 WHERE id IN (
 );
 -- Preserve both source identities and every Git directory. Already-bound
 -- managed copies become ordinary local sources for schema-16 clients.
+DROP TABLE repository_preparations;
 DROP TABLE source_repository_migrations;
 ALTER TABLE workspace_checkouts DROP COLUMN used_cached_base;
 ALTER TABLE workspace_checkouts DROP COLUMN base_synced_at;

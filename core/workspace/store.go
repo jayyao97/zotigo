@@ -305,6 +305,8 @@ func (s *Store) RenameWorkspace(ctx context.Context, id string, title string) (W
 }
 
 func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title string, selections []WorkspaceSourceInput) (Workspace, error) {
+	releaseCache := s.holdDefaultCacheRefs(ctx)
+	defer releaseCache()
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > 200 {
 		return Workspace{}, ErrInvalid

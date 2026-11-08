@@ -10,6 +10,10 @@ CREATE TABLE repositories (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
+CREATE TABLE repository_preparations (
+  repository_id TEXT PRIMARY KEY REFERENCES repositories(id) ON DELETE CASCADE,
+  next_attempt_at INTEGER NOT NULL DEFAULT 0
+);
 CREATE TABLE source_repositories (
   source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
   repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,

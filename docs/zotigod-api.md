@@ -1420,14 +1420,28 @@ ordinary daemon authentication token.
   and `last_sync_error`. An empty `default_branch`
   means it has not been fetched or the remote did not advertise a default.
 - `POST /repositories`: `{ "remote_url": "git@host:org/repo.git", "name": "optional" }`.
-  Returns the repository after cloning/fetching. Repeating the same exact remote
-  URL reuses its identity and retries preparation. Failed preparation retains a
-  retryable catalog entry. No network fetch occurs while listing repositories.
+  Returns the registered repository immediately; cloning runs in the daemon's
+  background preparation queue. Until `last_synced_at` is present, an empty
+  `last_sync_error` means preparation is pending and a nonempty value reports a
+  failed attempt. Failed attempts retry after ten minutes, and the queue survives
+  daemon restarts. Repeating the same exact remote URL reuses its identity and
+  requests an immediate retry if it has never synchronized. A ready repository
+  returns its existing state. No network fetch occurs while listing repositories.
 - `POST /projects/{id}/sources`: accepts `{ "repository_id": "repo_..." }` as an
   alternative to the existing local `{ "path": "...", "folder_mode": "..." }`.
   Remote registration and project association are distinct; several projects
-  share one cache. Source responses add `repository_id`, `remote_url`, and
+  share one cache. A repository without a successful initial synchronization
+  returns HTTP 409 immediately; poll the repository list until it is ready before
+  associating it. Source responses add `repository_id`, `remote_url`, and
   `default_branch`, `last_synced_at`, and `last_sync_error` where applicable.
+- `GET /projects/{id}/sources/{source_id}/branches`: returns
+  `{ "branches": [{ "name": "feature", "ref": "refs/heads/feature", "kind": "local" }] }`.
+  Reads cached refs without network access. Kinds are `remote`, `local`, and
+  `imported`; imported entries also include `source_id` and `source_name` to
+  distinguish original checkouts. Pass the returned exact `ref` as `base_ref`.
+  Imported local branches are migration-time snapshots, including unpublished
+  commits. Later edits to the original checkout are not silently synchronized;
+  push those changes to the remote to use them from the managed repository.
 
 When creating a workspace or adding a repository to it, omit `base_ref` for the
 remote's current default branch, detected using its advertised HEAD after fetch.
@@ -1444,6 +1458,10 @@ must finish preparation before it can be used. Successful default commits have
 protected Git refs independent of pruneable origin refs, so a partial refresh
 cannot destroy the previous default backup. Other explicitly requested branches
 must exist in the local remote-tracking cache.
+After each successful synchronization, obsolete default backup refs are removed.
+Only the committed default and commits still needed by unprovisioned plans remain;
+active plan selection temporarily defers cleanup until its result is persisted.
+Provisioned workspaces protect their commits through their own Git branches.
 
 Workspace source responses persist `used_cached_base: true` and `base_synced_at`
 when fallback was used. These describe the creation-time snapshot and do not
@@ -1458,8 +1476,9 @@ remote-helper syntax are rejected. Remote identity uses exact trimmed strings;
 different SSH aliases, accounts, forks, or transport URLs are not guessed to be
 equivalent. Preparation does not prompt on stdin. Clone has a separate 30-minute
 limit, importing original local refs and fetching each have a five-minute limit,
-and remote HEAD detection has a one-minute limit. Caller cancellation also stops
-preparation. Network operations serialize per repository, without holding the
+and remote HEAD detection has a one-minute limit. Daemon shutdown cancels
+background preparation and leaves pending registrations for the next start.
+Network operations serialize per repository, without holding the
 catalog-wide operation lock; catalog state is rechecked before binding sources.
 Migrated repositories can reuse original local objects during clone with
 `--reference-if-able` and `--dissociate`, leaving no dependency on that object

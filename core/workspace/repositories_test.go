@@ -25,17 +25,27 @@ func repositoryFixture(t *testing.T) (*Store, string) {
 	return store, remote
 }
 
+// Most repository tests exercise a synchronized cache. Registration itself is
+// asynchronous; explicitly prepare it here without starting a background worker.
+func createReadyRepository(store *Store, ctx context.Context, remote, name string) (Repository, error) {
+	repo, err := store.CreateRepository(ctx, remote, name)
+	if err != nil {
+		return Repository{}, err
+	}
+	return store.refreshRepository(ctx, repo)
+}
+
 func TestManagedRepositorySharedFreshDefaultAndOverrides(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "")
+	repo, err := createReadyRepository(store, ctx, remote, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if repo.DefaultBranch != "trunk" {
 		t.Fatalf("default branch=%q", repo.DefaultBranch)
 	}
-	again, err := store.CreateRepository(ctx, remote, "")
+	again, err := createReadyRepository(store, ctx, remote, "")
 	if err != nil || again.ID != repo.ID {
 		t.Fatalf("dedup=%+v %v", again, err)
 	}
@@ -222,7 +232,7 @@ func TestManagedRepositoryFailedCloneCanRetry(t *testing.T) {
 	ctx := context.Background()
 	store, _ := repositoryFixture(t)
 	remote := filepath.Join(t.TempDir(), "not-yet-created")
-	if _, err := store.CreateRepository(ctx, remote, ""); err == nil {
+	if _, err := createReadyRepository(store, ctx, remote, ""); err == nil {
 		t.Fatal("missing remote accepted")
 	}
 	repos, err := store.ListRepositories(ctx)
@@ -234,7 +244,7 @@ func TestManagedRepositoryFailedCloneCanRetry(t *testing.T) {
 	}
 	runGitProvisionCommand(t, remote, "init", "-b", "trunk")
 	runGitProvisionCommand(t, remote, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
-	retried, err := store.CreateRepository(ctx, remote, "")
+	retried, err := createReadyRepository(store, ctx, remote, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -249,7 +259,7 @@ func TestManagedRepositoryMissingDefaultAllowsExplicitBranch(t *testing.T) {
 	bare := filepath.Join(t.TempDir(), "remote.git")
 	runGitProvisionCommand(t, remote, "clone", "--bare", remote, bare)
 	runGitProvisionCommand(t, bare, "symbolic-ref", "HEAD", "refs/heads/missing")
-	repo, err := store.CreateRepository(ctx, bare, "")
+	repo, err := createReadyRepository(store, ctx, bare, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -348,7 +358,7 @@ func TestManagedRepositoryReregistrationAndProjectDeletion(t *testing.T) {
 func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
-	repo, err := store.CreateRepository(ctx, remote, "")
+	repo, err := createReadyRepository(store, ctx, remote, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -478,7 +488,7 @@ func TestManagedRepositoryMigrationReactivatesReplacement(t *testing.T) {
 	store, legacy, local := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
 	runGitProvisionCommand(t, local.CanonicalPath, "clone", "--bare", local.CanonicalPath, remote)
-	repo, err := store.CreateRepository(ctx, remote, "")
+	repo, err := createReadyRepository(store, ctx, remote, "")
 	if err != nil {
 		t.Fatal(err)
 	}

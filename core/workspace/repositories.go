@@ -136,12 +136,23 @@ func (s *Store) registerRepository(ctx context.Context, remote, name string) (Re
 
 func (s *Store) CreateRepository(ctx context.Context, remote, name string) (Repository, error) {
 	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	repo, err := s.registerRepository(ctx, remote, name)
-	s.operationMu.Unlock()
 	if err != nil {
 		return Repository{}, err
 	}
-	return s.refreshRepository(ctx, repo)
+	if repo.LastSyncedAt == nil {
+		if _, err := s.db.ExecContext(ctx, `INSERT INTO repository_preparations(repository_id,next_attempt_at) VALUES(?,0)
+ ON CONFLICT(repository_id) DO UPDATE SET next_attempt_at=0`, repo.ID); err != nil {
+			return Repository{}, err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE repositories SET last_sync_error='' WHERE id=?`, repo.ID); err != nil {
+			return Repository{}, err
+		}
+		repo.LastSyncError = ""
+		s.wakeRepositoryMigration()
+	}
+	return repo, nil
 }
 
 // refreshRepository never modifies a user checkout. Failed clones remain retryable.
@@ -241,14 +252,12 @@ func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (r
 			return Repository{}, fmt.Errorf("%w: remote default branch is unavailable", ErrConflict)
 		}
 		defaultCommit = strings.TrimSpace(resolved)
-		// A later fetch can prune or force-update origin refs before failing. Keep
-		// successful default commits independently reachable for offline fallback.
-		if _, err := runGit(ctx, repo.CanonicalPath, "update-ref", "refs/zotigo/default-cache/"+defaultCommit, defaultCommit); err != nil {
-			return Repository{}, err
-		}
 	}
-	_, err = s.db.ExecContext(ctx, `UPDATE repositories SET default_branch = ?, default_commit = ?, updated_at = ?, last_synced_at = ?, last_sync_error = '' WHERE id = ?`, branch, defaultCommit, unixMillis(time.Now().UTC()), unixMillis(time.Now().UTC()), repo.ID)
+	err = s.publishRepositoryDefault(ctx, repo, branch, defaultCommit)
 	if err != nil {
+		return Repository{}, errors.Join(err, s.pruneDefaultCacheRefs(ctx, repo))
+	}
+	if err := s.pruneDefaultCacheRefs(ctx, repo); err != nil {
 		return Repository{}, err
 	}
 	return s.GetRepository(ctx, repo.ID)
@@ -263,7 +272,7 @@ func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID
 		return Source{}, err
 	}
 	if repo.LastSyncedAt == nil {
-		repo, err = s.refreshRepository(ctx, repo)
+		return Source{}, fmt.Errorf("%w: repository is still being prepared; retry after synchronization", ErrConflict)
 	} else {
 		var unlock func()
 		repo, _, unlock, err = s.refreshRepositoryForUse(ctx, repo)
