@@ -19,11 +19,13 @@ import (
 const schemaVersion = catalogschema.Version
 
 type Store struct {
-	db          *sql.DB
-	rootDir     string
-	operationMu sync.Mutex
-	writerLock  *flock.Flock
-	schemaLock  *flock.Flock
+	db              *sql.DB
+	rootDir         string
+	operationMu     sync.Mutex
+	repositoryMu    sync.Mutex
+	repositoryLocks map[string]chan struct{}
+	writerLock      *flock.Flock
+	schemaLock      *flock.Flock
 }
 
 // OpenReadOnly opens an existing catalog without running migrations or writing

@@ -162,7 +162,7 @@ Catalog schema 8 adds project/workspace position and pin columns plus a one-time
 }
 ```
 
-For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when omitted, zotigod generates a stable `feat/<workspace-slug>-<short-id>` branch when the Workspace is created. Adding a Git Source to an existing Workspace reuses its branch name if all existing checkouts share one; otherwise it generates the default name. Explicit branch names take precedence. Previously created branches are unchanged; later Workspace display-name changes do not rename branches. Folder Sources require an explicit `mode` of `direct`, `reference`, or `copy`.
+For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when omitted, zotigod generates a stable `feat/<workspace-slug>-<short-id>` branch when the Workspace is created. This default applies to both managed repositories and local sources; for a local source the branch is created in the user's original Git repository. Adding a Git Source to an existing Workspace reuses its branch name if all existing checkouts share one; otherwise it generates the default name. Explicit branch names take precedence. Previously created branches are unchanged; later Workspace display-name changes do not rename branches. Folder Sources require an explicit `mode` of `direct`, `reference`, or `copy`.
 
 The Source must be currently registered in the Workspace's Project. A Source registered under another Project is rejected with `400`; register that path as a new Source under the target Project before binding it. Duplicate bindings and Workspaces that are not `ready` return `409`. Failures before Zotigo creates any owned Git ref or folder target roll back the planned binding, so the request can be corrected and submitted again. Failures after owned state exists remain visible on the binding and can be retried through `POST /workspaces/{id}/retry`.
 
@@ -1431,7 +1431,9 @@ ordinary daemon authentication token.
 When creating a workspace or adding a repository to it, omit `base_ref` for the
 remote's current default branch, detected using its advertised HEAD after fetch.
 An explicit branch name, `origin/name`, `refs/heads/name`, or
-`refs/remotes/origin/name` selects that remote branch. Missing remote HEAD requires
+`refs/remotes/origin/name` selects that remote branch. A literal branch named
+`origin/name` takes precedence over interpreting it as shorthand for `name`;
+use the full ref to disambiguate. Missing remote HEAD requires
 an explicit choice; no `main`/`master` guess is made. Every new binding fetches
 first and fails explicitly if the remote is unavailable. The plan pins the fetched
 commit, so a later fetch cannot move its starting point. Workspace branch names
@@ -1442,8 +1444,14 @@ Remote credentials belong in the daemon machine's normal SSH/Git credential
 configuration. Embedded HTTP credentials, URL queries/fragments and external
 remote-helper syntax are rejected. Remote identity uses exact trimmed strings;
 different SSH aliases, accounts, forks, or transport URLs are not guessed to be
-equivalent. Clone/fetch preparation is bounded to two minutes and does not prompt
-on stdin. Absolute local remote paths are supported.
+equivalent. Preparation does not prompt on stdin. Clone has a separate 30-minute
+limit, importing original local refs and fetching each have a five-minute limit,
+and remote HEAD detection has a one-minute limit. Caller cancellation also stops
+preparation. Network operations serialize per repository, without holding the
+catalog-wide operation lock; catalog state is rechecked before binding sources.
+Migrated repositories can reuse original local objects during clone with
+`--reference-if-able` and `--dissociate`, leaving no dependency on that object
+store after cloning. Absolute local remote paths are supported.
 
 Schema 17 automatically associates existing registered Git sources having one
 unambiguous, supported remote with a managed repository. This metadata migration

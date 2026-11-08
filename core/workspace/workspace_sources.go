@@ -42,7 +42,11 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 		if err := verifySourceIdentity(ctx, source); err != nil {
 			return err
 		}
-		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", baseRef+"^{commit}")
+		resolveRef := baseRef
+		if selection.resolvedBaseCommit != "" {
+			resolveRef = selection.resolvedBaseCommit
+		}
+		resolved, err := runGitMutation(ctx, source.CanonicalPath, "rev-parse", "--verify", resolveRef+"^{commit}")
 		if err != nil {
 			return fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 		}
@@ -182,34 +186,23 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 
 func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, selection WorkspaceSourceInput) (WorkspaceSource, error) {
 	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
-
-	workspace, nonce, err := s.workspaceWithNonce(ctx, workspaceID)
+	workspace, err := s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
+	if err == nil {
+		err = s.migrateRepositorySources(ctx)
+	}
+	s.operationMu.Unlock()
 	if err != nil {
-		return WorkspaceSource{}, err
-	}
-	if workspace.Status != WorkspaceStatusReady {
-		return WorkspaceSource{}, fmt.Errorf("%w: workspace cannot add sources from %s", ErrConflict, workspace.Status)
-	}
-	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
-		return WorkspaceSource{}, err
-	}
-	if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
-		return WorkspaceSource{}, err
-	}
-	if err := s.migrateRepositorySources(ctx); err != nil {
 		return WorkspaceSource{}, err
 	}
 	selection, err = s.prepareRepositorySelection(ctx, workspace.ProjectID, selection)
 	if err != nil {
 		return WorkspaceSource{}, err
 	}
-	var duplicate bool
-	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workspace_checkouts c JOIN source_repositories bound ON bound.source_id=c.source_id JOIN source_repositories selected ON selected.repository_id=bound.repository_id WHERE c.workspace_id=? AND selected.source_id=?)`, workspace.ID, selection.SourceID).Scan(&duplicate); err != nil {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	workspace, err = s.validateAddWorkspaceSource(ctx, workspaceID, selection.SourceID)
+	if err != nil {
 		return WorkspaceSource{}, err
-	}
-	if duplicate {
-		return WorkspaceSource{}, fmt.Errorf("%w: repository is already bound to this workspace", ErrConflict)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -260,6 +253,35 @@ func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, sele
 		return s.workspaceSource(ctx, workspace, selection.SourceID)
 	}
 	return WorkspaceSource{}, ErrNotFound
+}
+
+// Check once before fetching and again under operationMu before committing:
+// the workspace or source may have changed while the network was in flight.
+func (s *Store) validateAddWorkspaceSource(ctx context.Context, workspaceID, sourceID string) (Workspace, error) {
+	workspace, nonce, err := s.workspaceWithNonce(ctx, workspaceID)
+	if err != nil {
+		return Workspace{}, err
+	}
+	if workspace.Status != WorkspaceStatusReady {
+		return Workspace{}, fmt.Errorf("%w: workspace cannot add sources from %s", ErrConflict, workspace.Status)
+	}
+	if err := s.requireActiveProject(ctx, workspace.ProjectID); err != nil {
+		return Workspace{}, err
+	}
+	if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
+		return Workspace{}, err
+	}
+	var duplicate bool
+	if err := s.db.QueryRowContext(ctx, `SELECT
+		EXISTS(SELECT 1 FROM workspace_checkouts WHERE workspace_id=? AND source_id=?) OR
+		EXISTS(SELECT 1 FROM workspace_folders WHERE workspace_id=? AND source_id=?) OR
+		EXISTS(SELECT 1 FROM workspace_checkouts c JOIN source_repositories bound ON bound.source_id=c.source_id JOIN source_repositories selected ON selected.repository_id=bound.repository_id WHERE c.workspace_id=? AND selected.source_id=?)`, workspaceID, sourceID, workspaceID, sourceID, workspaceID, sourceID).Scan(&duplicate); err != nil {
+		return Workspace{}, err
+	}
+	if duplicate {
+		return Workspace{}, fmt.Errorf("%w: source is already bound to this workspace", ErrConflict)
+	}
+	return workspace, nil
 }
 
 func (s *Store) cancelUnownedCheckout(ctx context.Context, workspace Workspace, checkout Checkout) error {

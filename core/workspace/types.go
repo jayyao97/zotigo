@@ -93,6 +93,8 @@ type WorkspaceSourceInput struct {
 	BaseRef        string     `json:"base_ref,omitempty"`
 	ExpectedCommit string     `json:"expected_commit,omitempty"`
 	BranchName     string     `json:"branch_name,omitempty"`
+	// Pinned under the repository lock before entering the catalog transaction.
+	resolvedBaseCommit string
 }
 
 type WorkspaceSource struct {

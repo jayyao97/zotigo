@@ -300,8 +300,6 @@ func (s *Store) RenameWorkspace(ctx context.Context, id string, title string) (W
 }
 
 func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title string, selections []WorkspaceSourceInput) (Workspace, error) {
-	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > 200 {
 		return Workspace{}, ErrInvalid
@@ -313,8 +311,11 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	if project.Status != ProjectStatusActive {
 		return Workspace{}, fmt.Errorf("%w: project is %s", ErrConflict, project.Status)
 	}
-	if err := s.migrateRepositorySources(ctx); err != nil {
-		return Workspace{}, err
+	s.operationMu.Lock()
+	migrationErr := s.migrateRepositorySources(ctx)
+	s.operationMu.Unlock()
+	if migrationErr != nil {
+		return Workspace{}, migrationErr
 	}
 	prepared := make([]WorkspaceSourceInput, len(selections))
 	for index, selection := range selections {
@@ -324,6 +325,11 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 		}
 	}
 	selections = prepared
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if err := s.requireActiveProject(ctx, projectID); err != nil {
+		return Workspace{}, err
+	}
 	id := "workspace_" + uuid.NewString()
 	storageName := workspaceStorageName(title, id)
 	rootPath := filepath.Join(s.rootDir, "projects", project.storageName, "workspaces", storageName)

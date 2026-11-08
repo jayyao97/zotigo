@@ -136,8 +136,8 @@ func (s *Store) registerRepository(ctx context.Context, remote, name string) (Re
 
 func (s *Store) CreateRepository(ctx context.Context, remote, name string) (Repository, error) {
 	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
 	repo, err := s.registerRepository(ctx, remote, name)
+	s.operationMu.Unlock()
 	if err != nil {
 		return Repository{}, err
 	}
@@ -147,8 +147,42 @@ func (s *Store) CreateRepository(ctx context.Context, remote, name string) (Repo
 // refreshRepository never modifies a user checkout, and never silently uses a
 // stale remote ref when fetch fails. Failed clones can be retried independently.
 func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Repository, error) {
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	unlock, err := s.lockRepository(ctx, repo.ID)
+	if err != nil {
+		return Repository{}, err
+	}
+	defer unlock()
+	return s.refreshRepositoryLocked(ctx, repo)
+}
+
+// Repository network operations are serialized independently of catalog writes.
+// Waiting for another request must remain cancellable as well.
+func (s *Store) lockRepository(ctx context.Context, id string) (func(), error) {
+	s.repositoryMu.Lock()
+	if s.repositoryLocks == nil {
+		s.repositoryLocks = make(map[string]chan struct{})
+	}
+	gate := s.repositoryLocks[id]
+	if gate == nil {
+		gate = make(chan struct{}, 1)
+		s.repositoryLocks[id] = gate
+	}
+	s.repositoryMu.Unlock()
+	select {
+	case gate <- struct{}{}:
+		return func() { <-gate }, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
+func runRepositoryGit(ctx context.Context, timeout time.Duration, directory string, args ...string) (string, error) {
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	return runGit(ctx, directory, args...)
+}
+
+func (s *Store) refreshRepositoryLocked(ctx context.Context, repo Repository) (Repository, error) {
 	if _, err := os.Stat(repo.CanonicalPath); os.IsNotExist(err) {
 		parent := filepath.Dir(repo.CanonicalPath)
 		if err := os.MkdirAll(parent, 0o700); err != nil {
@@ -161,7 +195,17 @@ func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Reposit
 		defer func() { _ = os.RemoveAll(staging) }()
 		// Clone the remote into an independent object store. Import local-only
 		// branches under a separate namespace rather than overwriting remote refs.
-		if _, err := runGit(ctx, parent, "clone", "--no-checkout", "--no-hardlinks", "--", repo.RemoteURL, staging); err != nil {
+		args := []string{"clone", "--no-checkout", "--no-hardlinks"}
+		var reference string
+		err = s.db.QueryRowContext(ctx, `SELECT s.canonical_path FROM sources s JOIN source_repositories sr ON sr.source_id=s.id WHERE sr.repository_id=? AND sr.replacement_source_id IS NOT NULL ORDER BY s.id LIMIT 1`, repo.ID).Scan(&reference)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Repository{}, err
+		}
+		if reference != "" {
+			args = append(args, "--reference-if-able", reference, "--dissociate")
+		}
+		args = append(args, "--", repo.RemoteURL, staging)
+		if _, err := runRepositoryGit(ctx, 30*time.Minute, parent, args...); err != nil {
 			return Repository{}, fmt.Errorf("clone repository failed; check remote access on this daemon: %w", err)
 		}
 		if err := os.Rename(staging, repo.CanonicalPath); err != nil {
@@ -184,10 +228,10 @@ func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Reposit
 	if err := s.importLocalRepositoryRefs(ctx, repo); err != nil {
 		return Repository{}, err
 	}
-	if _, err := runGit(ctx, repo.CanonicalPath, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
+	if _, err := runRepositoryGit(ctx, 5*time.Minute, repo.CanonicalPath, "fetch", "--prune", "origin", "+refs/heads/*:refs/remotes/origin/*"); err != nil {
 		return Repository{}, fmt.Errorf("fetch repository failed; check remote access on this daemon: %w", err)
 	}
-	output, err := runGit(ctx, repo.CanonicalPath, "ls-remote", "--symref", "origin", "HEAD")
+	output, err := runRepositoryGit(ctx, time.Minute, repo.CanonicalPath, "ls-remote", "--symref", "origin", "HEAD")
 	if err != nil {
 		return Repository{}, fmt.Errorf("detect remote default branch: %w", err)
 	}
@@ -210,8 +254,6 @@ func (s *Store) refreshRepository(ctx context.Context, repo Repository) (Reposit
 }
 
 func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID string) (Source, error) {
-	s.operationMu.Lock()
-	defer s.operationMu.Unlock()
 	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return Source{}, err
 	}
@@ -221,6 +263,11 @@ func (s *Store) AddRepositorySource(ctx context.Context, projectID, repositoryID
 	}
 	repo, err = s.refreshRepository(ctx, repo)
 	if err != nil {
+		return Source{}, err
+	}
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
+	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return Source{}, err
 	}
 	inspection, err := InspectSource(ctx, repo.CanonicalPath)
@@ -277,7 +324,7 @@ func (s *Store) importLocalRepositoryRefs(ctx context.Context, repo Repository) 
 			return err
 		}
 		prefix := "refs/zotigo/imported/" + seed.id + "/"
-		if _, err := runGit(ctx, repo.CanonicalPath, "fetch", "--no-tags", "--", seed.path, "+refs/heads/*:"+prefix+"heads/*", "+refs/tags/*:"+prefix+"tags/*"); err != nil {
+		if _, err := runRepositoryGit(ctx, 5*time.Minute, repo.CanonicalPath, "fetch", "--no-tags", "--", seed.path, "+refs/heads/*:"+prefix+"heads/*", "+refs/tags/*:"+prefix+"tags/*"); err != nil {
 			return fmt.Errorf("preserve original local refs: %w", err)
 		}
 		if _, err := s.db.ExecContext(ctx, `UPDATE source_repositories SET imported=1 WHERE source_id=?`, seed.id); err != nil {
@@ -330,7 +377,12 @@ func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string
 	if err != nil {
 		return selection, err
 	}
-	repo, err = s.refreshRepository(ctx, repo)
+	unlock, err := s.lockRepository(ctx, repo.ID)
+	if err != nil {
+		return selection, err
+	}
+	defer unlock()
+	repo, err = s.refreshRepositoryLocked(ctx, repo)
 	if err != nil {
 		return selection, err
 	}
@@ -343,14 +395,27 @@ func (s *Store) prepareRepositorySelection(ctx context.Context, projectID string
 	}
 	if strings.HasPrefix(ref, "refs/zotigo/imported/") {
 		selection.BaseRef = ref
-		return selection, nil
+	} else {
+		if strings.HasPrefix(ref, "refs/remotes/origin/") {
+			ref = strings.TrimPrefix(ref, "refs/remotes/origin/")
+		} else if strings.HasPrefix(ref, "refs/heads/") {
+			ref = strings.TrimPrefix(ref, "refs/heads/")
+		} else if strings.HasPrefix(ref, "origin/") {
+			// Prefer an actual branch named origin/foo to the shorthand for foo.
+			if _, err := runGit(ctx, repo.CanonicalPath, "show-ref", "--verify", "refs/remotes/origin/"+ref); err != nil {
+				ref = strings.TrimPrefix(ref, "origin/")
+			}
+		}
+		if _, err := runGit(ctx, repo.CanonicalPath, "check-ref-format", "refs/heads/"+ref); err != nil {
+			return selection, fmt.Errorf("%w: invalid base branch", ErrInvalid)
+		}
+		selection.BaseRef = "refs/remotes/origin/" + ref
 	}
-	ref = strings.TrimPrefix(strings.TrimPrefix(ref, "refs/remotes/origin/"), "origin/")
-	ref = strings.TrimPrefix(ref, "refs/heads/")
-	if _, err := runGit(ctx, repo.CanonicalPath, "check-ref-format", "refs/heads/"+ref); err != nil {
-		return selection, fmt.Errorf("%w: invalid base branch", ErrInvalid)
+	commit, err := runGit(ctx, repo.CanonicalPath, "rev-parse", "--verify", selection.BaseRef+"^{commit}")
+	if err != nil {
+		return selection, fmt.Errorf("%w: base ref is unavailable", ErrConflict)
 	}
-	selection.BaseRef = "refs/remotes/origin/" + ref
+	selection.resolvedBaseCommit = strings.TrimSpace(commit)
 	return selection, nil
 }
 
