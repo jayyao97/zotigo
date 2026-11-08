@@ -49,6 +49,9 @@ type Project struct {
 }
 
 type Source struct {
+	RepositoryID    string     `json:"repository_id,omitempty"`
+	RemoteURL       string     `json:"remote_url,omitempty"`
+	DefaultBranch   string     `json:"default_branch,omitempty"`
 	ID              string     `json:"id"`
 	ProjectID       string     `json:"project_id"`
 	Kind            SourceKind `json:"kind"`

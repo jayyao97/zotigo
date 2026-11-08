@@ -1098,6 +1098,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	mux.HandleFunc("/files/list", handler.handleDirectoryList)
 	mux.HandleFunc("/sources/directories", handler.handleDirectoryList)
 	mux.HandleFunc("/projects", handler.handleProjects)
+	mux.HandleFunc("/repositories", handler.handleRepositories)
 	mux.HandleFunc("/projects/{$}", handler.handleProjectNotFound)
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}", withPathValue("project_id", handler.handleProject))
 	handleOptionalTrailingSlash(mux, "/projects/{project_id}/archive-preview", withPathValue("project_id", handler.handleProjectArchivePreview))

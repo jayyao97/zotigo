@@ -130,6 +130,8 @@ func (s *Store) listProjects(ctx context.Context, status *ProjectStatus) ([]Proj
 }
 
 func (s *Store) AddSource(ctx context.Context, projectID string, input SourceInput) (Source, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	if err := validateSourceInput(input); err != nil {
 		return Source{}, err
 	}
@@ -172,15 +174,43 @@ func (s *Store) AddSource(ctx context.Context, projectID string, input SourceInp
 		}
 		return Source{}, fmt.Errorf("add source: %w", err)
 	}
-	return source, nil
+	if source.Kind == SourceKindGit {
+		if err := s.migrateRepositorySources(ctx); err != nil {
+			return Source{}, err
+		}
+		var replacement sql.NullString
+		err := s.db.QueryRowContext(ctx, `SELECT replacement_source_id FROM source_repositories WHERE source_id=?`, source.ID).Scan(&replacement)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return Source{}, err
+		}
+		if replacement.Valid {
+			tx, err := s.db.BeginTx(ctx, nil)
+			if err != nil {
+				return Source{}, err
+			}
+			defer func() { _ = tx.Rollback() }()
+			if _, err := tx.ExecContext(ctx, `UPDATE sources SET registered=CASE WHEN id=? THEN 1 ELSE 0 END WHERE id IN (?,?)`, replacement.String, replacement.String, source.ID); err != nil {
+				return Source{}, err
+			}
+			if err := tx.Commit(); err != nil {
+				return Source{}, err
+			}
+			return s.GetSource(ctx, projectID, replacement.String)
+		}
+	}
+	return s.sourceRepository(ctx, source)
 }
 
 func (s *Store) GetSource(ctx context.Context, projectID string, sourceID string) (Source, error) {
-	return scanSource(s.db.QueryRowContext(ctx, `
+	source, err := scanSource(s.db.QueryRowContext(ctx, `
 		SELECT id, project_id, kind, canonical_path, git_common_dir,
 		       git_object_format, folder_mode, source_key, created_at, updated_at
 		FROM sources WHERE id = ? AND project_id = ?
 	`, sourceID, projectID))
+	if err != nil {
+		return Source{}, err
+	}
+	return s.sourceRepository(ctx, source)
 }
 
 func (s *Store) ListSources(ctx context.Context, projectID string) ([]Source, error) {
@@ -205,10 +235,20 @@ func (s *Store) ListSources(ctx context.Context, projectID string) ([]Source, er
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("list sources: %w", err)
 	}
+	_ = rows.Close()
+	for index := range sources {
+		source, err := s.sourceRepository(ctx, sources[index])
+		if err != nil {
+			return nil, err
+		}
+		sources[index] = source
+	}
 	return sources, nil
 }
 
 func (s *Store) DeleteSource(ctx context.Context, projectID string, sourceID string) error {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	if err := s.requireActiveProject(ctx, projectID); err != nil {
 		return err
 	}
@@ -260,6 +300,8 @@ func (s *Store) RenameWorkspace(ctx context.Context, id string, title string) (W
 }
 
 func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title string, selections []WorkspaceSourceInput) (Workspace, error) {
+	s.operationMu.Lock()
+	defer s.operationMu.Unlock()
 	title = strings.TrimSpace(title)
 	if title == "" || len(title) > 200 {
 		return Workspace{}, ErrInvalid
@@ -271,6 +313,17 @@ func (s *Store) CreateWorkspacePlan(ctx context.Context, projectID string, title
 	if project.Status != ProjectStatusActive {
 		return Workspace{}, fmt.Errorf("%w: project is %s", ErrConflict, project.Status)
 	}
+	if err := s.migrateRepositorySources(ctx); err != nil {
+		return Workspace{}, err
+	}
+	prepared := make([]WorkspaceSourceInput, len(selections))
+	for index, selection := range selections {
+		prepared[index], err = s.prepareRepositorySelection(ctx, projectID, selection)
+		if err != nil {
+			return Workspace{}, err
+		}
+	}
+	selections = prepared
 	id := "workspace_" + uuid.NewString()
 	storageName := workspaceStorageName(title, id)
 	rootPath := filepath.Join(s.rootDir, "projects", project.storageName, "workspaces", storageName)

@@ -162,7 +162,7 @@ Catalog schema 8 adds project/workspace position and pin columns plus a one-time
 }
 ```
 
-For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when omitted, zotigod generates a stable `zotigo/<workspace-slug>-<short-id>` branch when the Workspace is created. Later display-name changes do not rename it. Folder Sources require an explicit `mode` of `direct`, `reference`, or `copy`.
+For Git Sources, `base_ref` defaults to `HEAD`. `branch_name` is optional; when omitted, zotigod generates a stable `feat/<workspace-slug>-<short-id>` branch when the Workspace is created. Adding a Git Source to an existing Workspace reuses its branch name if all existing checkouts share one; otherwise it generates the default name. Explicit branch names take precedence. Previously created branches are unchanged; later Workspace display-name changes do not rename branches. Folder Sources require an explicit `mode` of `direct`, `reference`, or `copy`.
 
 The Source must be currently registered in the Workspace's Project. A Source registered under another Project is rejected with `400`; register that path as a new Source under the target Project before binding it. Duplicate bindings and Workspaces that are not `ready` return `409`. Failures before Zotigo creates any owned Git ref or folder target roll back the planned binding, so the request can be corrected and submitted again. Failures after owned state exists remain visible on the binding and can be retried through `POST /workspaces/{id}/retry`.
 
@@ -1400,10 +1400,74 @@ running an older binary, stop all workers and use the newer binary's offline
 revokes pending triggers and removes callback queue entries; ordinary inputs and
 session history are preserved.
 
-This release uses `data_epoch: 2`. Existing epoch-1 updaters cannot safely roll
+The callback release uses `data_epoch: 2`. Existing epoch-1 updaters cannot safely roll
 back a schema-16 catalog by restoring only the previous binary, so they reject
 this release for application updates. Install it during a maintenance window:
 stop the daemon and all session workers, back up the complete state directory,
 and run the installer for the chosen release; startup performs the migration.
 Use the explicit offline downgrade or the consistent backup for rollback. An
 automatic upgrade path requires a migration-aware updater shipped beforehand.
+
+## Managed repositories
+
+Repository identities and Git caches belong to the selected daemon. Desktop and
+Web never clone on a different machine on its behalf. All routes require the
+ordinary daemon authentication token.
+
+- `GET /repositories`: `{ "repositories": [...] }` within the standard `data`
+  envelope. Each repository has `id`, `name`, `remote_url`, `canonical_path`,
+  `default_branch`, `created_at`, and `updated_at`. An empty `default_branch`
+  means it has not been fetched or the remote did not advertise a default.
+- `POST /repositories`: `{ "remote_url": "git@host:org/repo.git", "name": "optional" }`.
+  Returns the repository after cloning/fetching. Repeating the same exact remote
+  URL reuses its identity and retries preparation. Failed preparation retains a
+  retryable catalog entry. No network fetch occurs while listing repositories.
+- `POST /projects/{id}/sources`: accepts `{ "repository_id": "repo_..." }` as an
+  alternative to the existing local `{ "path": "...", "folder_mode": "..." }`.
+  Remote registration and project association are distinct; several projects
+  share one cache. Source responses add `repository_id`, `remote_url`, and
+  `default_branch` where applicable.
+
+When creating a workspace or adding a repository to it, omit `base_ref` for the
+remote's current default branch, detected using its advertised HEAD after fetch.
+An explicit branch name, `origin/name`, `refs/heads/name`, or
+`refs/remotes/origin/name` selects that remote branch. Missing remote HEAD requires
+an explicit choice; no `main`/`master` guess is made. Every new binding fetches
+first and fails explicitly if the remote is unavailable. The plan pins the fetched
+commit, so a later fetch cannot move its starting point. Workspace branch names
+continue to be generated unless explicitly supplied. Existing workspaces are
+never automatically pulled, rebased, or reset.
+
+Remote credentials belong in the daemon machine's normal SSH/Git credential
+configuration. Embedded HTTP credentials, URL queries/fragments and external
+remote-helper syntax are rejected. Remote identity uses exact trimmed strings;
+different SSH aliases, accounts, forks, or transport URLs are not guessed to be
+equivalent. Clone/fetch preparation is bounded to two minutes and does not prompt
+on stdin. Absolute local remote paths are supported.
+
+Schema 17 automatically associates existing registered Git sources having one
+unambiguous, supported remote with a managed repository. This metadata migration
+does not access the network. Sources without a remote, with multiple remotes, or
+with unsupported credential-bearing URLs remain local. A project receives a
+managed replacement source; the original source identity remains available to
+existing workspaces for archive, restore and deletion. Old client source IDs are
+translated when creating new bindings. Worktree paths, indexes, uncommitted
+changes, session working directories, and original Git metadata remain unchanged.
+This intentionally does not reparent existing linked worktrees: they still depend
+on their original Git common directory, which must not be deleted while in use.
+
+On first managed preparation, local heads/tags from each original source are
+imported into `refs/zotigo/imported/<source-id>/heads/*` and `.../tags/*`, once per
+source, preserving unpublished refs without colliding with remote branches.
+Explicit `base_ref` may select an imported ref. Original worktree refs/files are
+not removed. If an original directory was already moved/deleted, remote creation
+can proceed but unavailable local-only objects cannot be recovered automatically.
+Subsequent managed workspaces do not depend on the original directory.
+
+This release uses `data_epoch: 3`: stop daemon/workers and back up the full state
+directory for the cross-epoch installer upgrade. Binary-only rollback is unsafe.
+An explicit offline downgrade to schema 16 drops repository catalog metadata.
+Replacements with no workspace bindings restore their original local source
+registrations, including metadata-only migrations whose caches were never cloned.
+Already-bound managed caches remain ordinary local sources. All workspaces,
+branches, and original source rows survive; no Git directories are deleted.

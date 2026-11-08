@@ -68,6 +68,10 @@ func Open(rootDir string) (*Store, error) {
 		_ = store.Close()
 		return nil, err
 	}
+	if err := store.migrateRepositorySources(context.Background()); err != nil {
+		_ = store.Close()
+		return nil, fmt.Errorf("migrate repository sources: %w", err)
+	}
 	return store, nil
 }
 

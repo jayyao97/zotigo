@@ -51,11 +51,21 @@ func (s *Store) planWorkspaceSource(ctx context.Context, db workspaceSourcePlanD
 			return fmt.Errorf("%w: expected base commit changed", ErrConflict)
 		}
 		branchName := strings.TrimSpace(selection.BranchName)
+		if branchName == "" && workspace.Status == WorkspaceStatusReady {
+			// Reuse a workspace's shared branch when adding another repository,
+			// but do not pick arbitrarily if its repositories use different branches.
+			if err := db.QueryRowContext(ctx, `
+				SELECT CASE WHEN COUNT(DISTINCT branch_name) = 1 THEN MIN(branch_name) ELSE '' END
+				FROM workspace_checkouts WHERE workspace_id = ? AND branch_name <> ''
+			`, workspace.ID).Scan(&branchName); err != nil {
+				return fmt.Errorf("inspect workspace branch: %w", err)
+			}
+		}
 		if branchName == "" {
 			if workspace.storageName == workspace.ID {
-				branchName = "zotigo/" + workspace.ID + "/" + source.SourceKey
+				branchName = "feat/" + workspace.ID + "/" + source.SourceKey
 			} else {
-				branchName = "zotigo/" + workspace.storageName
+				branchName = "feat/" + workspace.storageName
 			}
 		}
 		if _, err := runGitMutation(ctx, source.CanonicalPath, "check-ref-format", "--branch", branchName); err != nil {
@@ -186,6 +196,20 @@ func (s *Store) AddWorkspaceSource(ctx context.Context, workspaceID string, sele
 	}
 	if err := validateOwnerMarker(workspace.RootPath, workspace.ProjectID, workspace.ID, nonce); err != nil {
 		return WorkspaceSource{}, err
+	}
+	if err := s.migrateRepositorySources(ctx); err != nil {
+		return WorkspaceSource{}, err
+	}
+	selection, err = s.prepareRepositorySelection(ctx, workspace.ProjectID, selection)
+	if err != nil {
+		return WorkspaceSource{}, err
+	}
+	var duplicate bool
+	if err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM workspace_checkouts c JOIN source_repositories bound ON bound.source_id=c.source_id JOIN source_repositories selected ON selected.repository_id=bound.repository_id WHERE c.workspace_id=? AND selected.source_id=?)`, workspace.ID, selection.SourceID).Scan(&duplicate); err != nil {
+		return WorkspaceSource{}, err
+	}
+	if duplicate {
+		return WorkspaceSource{}, fmt.Errorf("%w: repository is already bound to this workspace", ErrConflict)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

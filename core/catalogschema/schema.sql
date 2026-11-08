@@ -219,3 +219,19 @@ CREATE INDEX idx_session_input_queue ON session_input_queue(session_id, state, s
 
 CREATE TABLE completion_triggers (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','fired','cancelled')));
 CREATE INDEX completion_triggers_session ON completion_triggers(session_id,state,expires_at);
+
+CREATE TABLE repositories (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  remote_url TEXT NOT NULL UNIQUE,
+  canonical_path TEXT NOT NULL UNIQUE,
+  default_branch TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+CREATE TABLE source_repositories (
+  source_id TEXT PRIMARY KEY REFERENCES sources(id) ON DELETE CASCADE,
+  repository_id TEXT NOT NULL REFERENCES repositories(id) ON DELETE RESTRICT,
+  replacement_source_id TEXT REFERENCES sources(id) ON DELETE RESTRICT,
+  imported INTEGER NOT NULL DEFAULT 0 CHECK(imported IN (0,1))
+);
