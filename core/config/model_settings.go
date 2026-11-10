@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -72,22 +73,6 @@ func readModelDocument(path string) (*yaml.Node, []byte, error) {
 	if len(document.Content) != 1 || document.Content[0].Kind != yaml.MappingNode {
 		return nil, nil, errors.New("configuration must be a YAML mapping")
 	}
-	// Editing aliases/merge keys can mutate shared values or shadow inherited secrets.
-	var check func(*yaml.Node) error
-	check = func(n *yaml.Node) error {
-		if n.Kind == yaml.AliasNode || n.Anchor != "" || n.Tag == "!!merge" {
-			return errors.New("configuration uses YAML anchors or merges; edit this file directly")
-		}
-		for _, c := range n.Content {
-			if err := check(c); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	if err := check(&document); err != nil {
-		return nil, nil, err
-	}
 	var cfg Config
 	if err := document.Decode(&cfg); err != nil {
 		return nil, nil, errors.New("invalid configuration field types")
@@ -116,6 +101,125 @@ func setModelNode(node *yaml.Node, key string, value any) error {
 		*old = encoded
 	} else {
 		node.Content = append(node.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &encoded)
+	}
+	return nil
+}
+
+func inheritedModelNode(node *yaml.Node, key string) *yaml.Node {
+	if node.Kind == yaml.AliasNode {
+		return inheritedModelNode(node.Alias, key)
+	}
+	if node.Kind == yaml.SequenceNode {
+		for _, child := range node.Content {
+			if value := inheritedModelNode(child, key); value != nil {
+				return value
+			}
+		}
+		return nil
+	}
+	if value := modelNode(node, key); value != nil {
+		return value
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Tag == "!!merge" {
+			return inheritedModelNode(node.Content[i+1], key)
+		}
+	}
+	return nil
+}
+
+// Local overrides must not mutate shared nodes or freeze inherited values. Use
+// merge references when possible; do not silently copy an inherited mapping.
+func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
+	node := modelNode(parent, key)
+	if node == nil {
+		inherited := inheritedModelNode(parent, key)
+		if inherited != nil && inherited.Tag != "!!null" {
+			if inherited.Kind == yaml.AliasNode {
+				copy := *inherited
+				node = &copy
+			} else if inherited.Anchor != "" {
+				node = &yaml.Node{Kind: yaml.AliasNode, Value: inherited.Anchor, Alias: inherited}
+			} else {
+				return nil, fmt.Errorf("%s is inherited from a YAML merge without its own anchor; edit the shared definition in the configuration file", key)
+			}
+			parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, node)
+		} else if err := setModelNode(parent, key, map[string]any{}); err != nil {
+			return nil, err
+		}
+		node = modelNode(parent, key)
+	}
+	if node.Kind == yaml.AliasNode {
+		alias := *node
+		*node = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map", Content: []*yaml.Node{
+			{Kind: yaml.ScalarNode, Tag: "!!merge", Value: "<<"}, &alias,
+		}}
+	}
+	if node.Tag == "!!null" {
+		*node = yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"}
+	}
+	if node.Kind != yaml.MappingNode {
+		return nil, fmt.Errorf("%s must be a mapping", key)
+	}
+	return node, nil
+}
+
+// A shared anchor may be used outside the profile, including in unknown fields.
+// Compare the resolved whole document before publishing so such edits cannot
+// silently change other consumers, and reparse to catch dangling anchor references.
+func validateModelEdit(before, after []byte, change ModelSettingsChange) error {
+	name := change.Profile.Name
+	var original, updated map[string]any
+	if len(before) == 0 {
+		original = map[string]any{}
+	} else if err := yaml.Unmarshal(before, &original); err != nil {
+		return errors.New("cannot safely edit shared YAML configuration")
+	}
+	if err := yaml.Unmarshal(after, &updated); err != nil {
+		return errors.New("this edit would break a YAML anchor reference; edit the shared definition in the configuration file")
+	}
+	strip := func(doc map[string]any) {
+		delete(doc, "default_profile")
+		if profiles, ok := doc["profiles"].(map[string]any); ok {
+			switch change.Action {
+			case "save":
+				if profile, ok := profiles[name].(map[string]any); ok {
+					for _, key := range []string{"provider", "model", "base_url", "thinking_level", "context_window", "max_output_tokens"} {
+						delete(profile, key)
+					}
+					if change.APIKey != nil {
+						delete(profile, "api_key")
+					}
+					if params, ok := profile["params"].(map[string]any); ok {
+						delete(params, "mode")
+						if len(params) == 0 {
+							delete(profile, "params")
+						}
+					} else if profile["params"] == nil {
+						delete(profile, "params")
+					}
+				}
+			case "create", "delete":
+				delete(profiles, name)
+			}
+			if len(profiles) == 0 {
+				delete(doc, "profiles")
+			}
+		} else if doc["profiles"] == nil {
+			delete(doc, "profiles")
+		}
+	}
+	if change.Action == "delete" {
+		if profiles, ok := updated["profiles"].(map[string]any); ok {
+			if _, exists := profiles[name]; exists {
+				return errors.New("this profile is inherited from a YAML merge; remove it from the shared definition in the configuration file")
+			}
+		}
+	}
+	strip(original)
+	strip(updated)
+	if !reflect.DeepEqual(original, updated) {
+		return errors.New("this edit would change other configuration through a shared YAML anchor; edit the shared definition in the configuration file")
 	}
 	return nil
 }
@@ -255,26 +359,20 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 		return ModelSettings{}, ErrModelSettingsConflict
 	}
 	root := doc.Content[0]
-	profiles := modelNode(root, "profiles")
-	if profiles == nil || profiles.Tag == "!!null" {
-		if err = setModelNode(root, "profiles", map[string]any{}); err != nil {
-			return ModelSettings{}, err
-		}
-		profiles = modelNode(root, "profiles")
-	}
-	if profiles.Kind != yaml.MappingNode {
-		return ModelSettings{}, errors.New("profiles must be a mapping")
+	profiles, err := localModelMapping(root, "profiles")
+	if err != nil {
+		return ModelSettings{}, err
 	}
 	name := change.Profile.Name
-	old := modelNode(profiles, name)
 	var cfg Config
 	_ = doc.Decode(&cfg)
+	_, exists := cfg.Profiles[name]
 	switch change.Action {
 	case "save", "create":
-		if change.Action == "create" && old != nil {
+		if change.Action == "create" && exists {
 			return ModelSettings{}, errors.New("profile already exists; choose another name")
 		}
-		if change.Action == "save" && old == nil {
+		if change.Action == "save" && !exists {
 			return ModelSettings{}, errors.New("profile no longer exists; reload before saving")
 		}
 		if err = ValidateModelSettingsProfile(change.Profile); err != nil {
@@ -285,38 +383,35 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 				return ModelSettings{}, errors.New("profile name conflicts with existing configuration")
 			}
 		}
-		if old == nil {
-			if err = setModelNode(profiles, name, map[string]any{}); err != nil {
-				return ModelSettings{}, err
-			}
-			old = modelNode(profiles, name)
-		}
-		if old.Kind != yaml.MappingNode {
-			return ModelSettings{}, errors.New("profile must be a mapping")
+		old, err := localModelMapping(profiles, name)
+		if err != nil {
+			return ModelSettings{}, err
 		}
 		p := change.Profile
+		previous := cfg.Profiles[name]
+		previousValues := map[string]any{"provider": previous.Provider, "model": previous.Model, "base_url": previous.BaseURL, "thinking_level": previous.ThinkingLevel, "context_window": previous.ContextWindow, "max_output_tokens": previous.MaxOutputTokens}
 		for key, value := range map[string]any{"provider": p.Provider, "model": p.Model, "base_url": p.BaseURL, "thinking_level": p.ThinkingLevel, "context_window": p.ContextWindow, "max_output_tokens": p.MaxOutputTokens} {
+			if reflect.DeepEqual(previousValues[key], value) {
+				continue
+			}
 			if err = setModelNode(old, key, value); err != nil {
 				return ModelSettings{}, err
 			}
 		}
-		if change.APIKey != nil {
+		if change.APIKey != nil && *change.APIKey != previous.APIKey {
 			if err = setModelNode(old, "api_key", *change.APIKey); err != nil {
 				return ModelSettings{}, err
 			}
 		}
-		params := modelNode(old, "params")
-		if params == nil || params.Tag == "!!null" {
-			if err = setModelNode(old, "params", map[string]any{}); err != nil {
+		previousMode, _ := previous.Params["mode"].(string)
+		if p.Mode != previousMode {
+			params, err := localModelMapping(old, "params")
+			if err != nil {
 				return ModelSettings{}, err
 			}
-			params = modelNode(old, "params")
-		}
-		if params.Kind != yaml.MappingNode {
-			return ModelSettings{}, errors.New("profile params must be a mapping")
-		}
-		if err = setModelNode(params, "mode", p.Mode); err != nil {
-			return ModelSettings{}, err
+			if err = setModelNode(params, "mode", p.Mode); err != nil {
+				return ModelSettings{}, err
+			}
 		}
 		if len(cfg.Profiles) == 0 && cfg.DefaultProfile == "" {
 			if err = setModelNode(root, "default_profile", name); err != nil {
@@ -324,7 +419,7 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 			}
 		}
 	case "delete":
-		if old == nil {
+		if !exists {
 			return ModelSettings{}, errors.New("profile does not exist")
 		}
 		if cfg.DefaultProfile == name && len(cfg.Profiles) > 1 {
@@ -347,7 +442,7 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 			}
 		}
 	case "default":
-		if old == nil {
+		if !exists {
 			return ModelSettings{}, errors.New("profile does not exist")
 		}
 		if err = setModelNode(root, "default_profile", name); err != nil {
@@ -358,6 +453,9 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 	}
 	updated, err := yaml.Marshal(doc)
 	if err != nil {
+		return ModelSettings{}, err
+	}
+	if err := validateModelEdit(data, updated, change); err != nil {
 		return ModelSettings{}, err
 	}
 	// Recheck external edits before publishing; editors do not use our advisory lock.

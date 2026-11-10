@@ -1534,3 +1534,19 @@ Replacements with no workspace bindings restore their original local source
 registrations. Pending preparations have never replaced their local registration.
 Already-bound managed caches remain ordinary local sources. All workspaces,
 branches, and original source rows survive; no Git directories are deleted.
+
+### Catalog snapshot
+
+`GET /catalog/snapshot` returns the sidebar catalog in one authenticated request:
+`projects` (active project details including registered sources), `workspaces`
+(non-archived workspaces belonging to those projects), `navigation` (the same
+ordering and pins as `/catalog/navigation`), and `sessions` (the same visible
+projections as `/catalog/sessions`). Empty collections are arrays. Responses use
+`Cache-Control: no-store`.
+
+This is a read projection over the existing stores, not a cross-store transaction.
+Concurrent mutations may become visible on the next refresh. It does not fetch
+repositories, synchronize Codex sessions, import legacy navigation order, or store
+client selection. Explicit runtime synchronization remains on the existing API.
+Older clients can continue using the individual endpoints. New clients fall back
+to those endpoints only when the snapshot route returns 404 or 405.
