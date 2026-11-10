@@ -220,3 +220,262 @@ func TestModelSettingsReportsRuntimeDefaults(t *testing.T) {
 		}
 	}
 }
+
+func TestModelSettingsYAMLAliases(t *testing.T) {
+	for _, profile := range []string{"main: *defaults", "main:\n    <<: *defaults", "<<: {main: *defaults}"} {
+		t.Run(profile, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			m := NewManager()
+			path, _ := m.GetConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			original := `# keep shared values
+common: &defaults
+  provider: openai
+  model: original
+  api_key: private-test-key
+  params:
+    temperature: 0.3
+profiles:
+  ` + profile + `
+  other: *defaults
+default_profile: main
+`
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := m.ReadModelSettings()
+			if err != nil {
+				t.Fatal(err)
+			}
+			encoded, _ := json.Marshal(snapshot)
+			if strings.Contains(string(encoded), "private-test-key") {
+				t.Fatal("secret leaked")
+			}
+			p := snapshot.Profiles[0]
+			p.Model = "updated"
+			next, err := m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "save", Profile: p})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if next.Profiles[1].Model != "original" {
+				t.Fatal("modified other profile")
+			}
+			data, _ := os.ReadFile(path)
+			if !strings.Contains(string(data), "&defaults") || !strings.Contains(string(data), "other: *defaults") {
+				t.Fatal("lost shared references")
+			}
+			resolved, err := m.ModelTestProfile(ModelSettingsChange{Revision: next.Revision, Profile: p})
+			if err != nil || resolved.APIKey != "private-test-key" || resolved.Params["temperature"] != 0.3 {
+				t.Fatalf("lost inherited values: %v", err)
+			}
+			empty := ""
+			next, err = m.UpdateModelSettings(ModelSettingsChange{Revision: next.Revision, Action: "save", Profile: p, APIKey: &empty})
+			if err != nil || next.Profiles[0].HasAPIKey || !next.Profiles[1].HasAPIKey {
+				t.Fatalf("clear did not remain local: %v", err)
+			}
+			if _, err := m.LoadForDir(""); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+func TestModelSettingsRejectsSharedAnchorMutationWithoutWriting(t *testing.T) {
+	for _, action := range []string{"save", "delete"} {
+		t.Run(action, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			m := NewManager()
+			path, _ := m.GetConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			const original = `profiles:
+  main: &shared
+    provider: openai
+    model: original
+custom: *shared
+`
+			if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := m.ReadModelSettings()
+			if err != nil {
+				t.Fatal(err)
+			}
+			p := snapshot.Profiles[0]
+			p.Model = "updated"
+			_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: action, Profile: p})
+			if err == nil || !strings.Contains(err.Error(), "YAML anchor") {
+				t.Fatalf("missing specific failure: %v", err)
+			}
+			data, _ := os.ReadFile(path)
+			if string(data) != original {
+				t.Fatal("failed edit changed file")
+			}
+		})
+	}
+}
+
+func TestModelSettingsRejectsAnchorMutationWithinProfile(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const original = `profiles:
+  main:
+    provider: openai
+    model: original
+    params: &params
+      mode: chat
+    custom: *params
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := snapshot.Profiles[0]
+	p.Mode = "response"
+	_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "save", Profile: p})
+	if err == nil || !strings.Contains(err.Error(), "YAML anchor") {
+		t.Fatalf("unexpected result: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != original {
+		t.Fatal("failed edit changed file")
+	}
+}
+
+func TestModelSettingsCreateWithNullProfiles(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("profiles: null\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "create", Profile: ModelSettingsProfile{Name: "main", Provider: "openai", Model: "test"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestModelSettingsSharedMappingsAndInheritedDelete(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const original = `params: &params
+  mode: chat
+  temperature: 0.4
+shared: &profiles
+  main: &main
+    provider: openai
+    model: original
+    params: *params
+profiles: *profiles
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "delete", Profile: snapshot.Profiles[0]})
+	if err == nil || !strings.Contains(err.Error(), "inherited") {
+		t.Fatalf("inherited deletion: %v", err)
+	}
+	data, _ := os.ReadFile(path)
+	if string(data) != original {
+		t.Fatal("failed deletion changed file")
+	}
+	snapshot, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "default", Profile: snapshot.Profiles[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := snapshot.Profiles[0]
+	p.Mode = "response"
+	next, err := m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "save", Profile: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := m.ModelTestProfile(ModelSettingsChange{Revision: next.Revision, Profile: p})
+	if err != nil || resolved.Params["temperature"] != 0.4 {
+		t.Fatalf("lost parameters: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if !strings.Contains(string(data), "&params") || !strings.Contains(string(data), "&profiles") {
+		t.Fatal("lost shared anchors")
+	}
+}
+
+func TestModelSettingsKeepsFutureInheritedChanges(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	const original = `common: &common
+  provider: openai
+  model: original
+  base_url: https://example.com
+  params:
+    temperature: 0.3
+profiles:
+  main:
+    <<: *common
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := snapshot.Profiles[0]
+	p.Model = "updated"
+	_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "save", Profile: p})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data, _ := os.ReadFile(path)
+	updated := strings.ReplaceAll(string(data), "temperature: 0.3", "temperature: 0.9")
+	updated = strings.ReplaceAll(updated, "https://example.com", "https://other.example.com")
+	if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p = snapshot.Profiles[0]
+	resolved, err := m.ModelTestProfile(ModelSettingsChange{Revision: snapshot.Revision, Profile: p})
+	if err != nil || resolved.Params["temperature"] != 0.9 || p.BaseURL != "https://other.example.com" {
+		t.Fatalf("inheritance was detached: %v", err)
+	}
+	p.Mode = "response"
+	_, err = m.UpdateModelSettings(ModelSettingsChange{Revision: snapshot.Revision, Action: "save", Profile: p})
+	if err == nil || !strings.Contains(err.Error(), "inherited") {
+		t.Fatalf("unsafe inherited params edit: %v", err)
+	}
+	data, _ = os.ReadFile(path)
+	if string(data) != updated {
+		t.Fatal("failed edit changed file")
+	}
+}
