@@ -1130,6 +1130,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/retry", withPathValue("workspace_id", handler.handleWorkspaceRetry))
 	mux.HandleFunc("/workspaces/{workspace_id}/{route...}", handler.handleWorkspaceRouteNotFound)
 	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
+	mux.HandleFunc("/catalog/snapshot", handler.handleCatalogSnapshot)
 	mux.HandleFunc("/catalog/navigation", handler.handleNavigation)
 	mux.HandleFunc("/catalog/navigation/import", handler.handleNavigationImport)
 	mux.HandleFunc("/catalog/navigation/order", handler.handleNavigationOrder)
