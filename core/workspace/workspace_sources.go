@@ -164,13 +164,32 @@ func (s *Store) ListWorkspaceSources(ctx context.Context, workspaceID string) ([
 		return nil, err
 	}
 	items := make([]WorkspaceSource, 0, len(checkouts)+len(folders))
+	repositoryIDs := make(map[string]string)
+	rows, err := s.db.QueryContext(ctx, `SELECT c.source_id, sr.repository_id FROM workspace_checkouts c JOIN source_repositories sr ON sr.source_id=c.source_id WHERE c.workspace_id=?`, workspaceID)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var sourceID, repositoryID string
+		if err := rows.Scan(&sourceID, &repositoryID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		repositoryIDs[sourceID] = repositoryID
+	}
+	err = rows.Err()
+	_ = rows.Close()
+	if err != nil {
+		return nil, err
+	}
 	for _, checkout := range checkouts {
 		source, err := s.GetSource(ctx, workspace.ProjectID, checkout.SourceID)
 		if err != nil {
 			return nil, err
 		}
 		items = append(items, WorkspaceSource{
-			Source: source, TargetPath: checkout.WorktreePath, WorktreePath: checkout.WorktreePath,
+			RepositoryID: repositoryIDs[checkout.SourceID],
+			Source:       source, TargetPath: checkout.WorktreePath, WorktreePath: checkout.WorktreePath,
 			BaseRef: checkout.BaseRef, BaseCommit: checkout.BaseCommit, BranchName: checkout.BranchName,
 			Status: checkout.Status, Error: checkout.Error, UsedCachedBase: checkout.UsedCachedBase, BaseSyncedAt: checkout.BaseSyncedAt,
 		})

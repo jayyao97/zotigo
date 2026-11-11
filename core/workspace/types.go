@@ -103,6 +103,9 @@ type WorkspaceSourceInput struct {
 }
 
 type WorkspaceSource struct {
+	// RepositoryID also identifies migrated local checkouts without changing
+	// their source path or treating them as managed checkouts.
+	RepositoryID   string     `json:"repository_id,omitempty"`
 	UsedCachedBase bool       `json:"used_cached_base,omitempty"`
 	BaseSyncedAt   *time.Time `json:"base_synced_at,omitempty"`
 	Source         Source     `json:"source"`
