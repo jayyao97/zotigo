@@ -186,6 +186,9 @@ func TestManagedRepositoryMigrationPreservesLegacyWorktree(t *testing.T) {
 	if bindings[0].Source.CanonicalPath != oldSource.CanonicalPath || bindings[0].TargetPath != worktree {
 		t.Fatal("legacy source or path changed")
 	}
+	if bindings[0].RepositoryID != sources[0].RepositoryID || bindings[0].Source.RepositoryID != "" {
+		t.Fatalf("legacy checkout must expose repository identity without becoming managed: %+v", bindings[0])
+	}
 	if _, err := store.ProvisionWorkspace(ctx, legacy.ID); err != nil {
 		t.Fatalf("legacy reprovision: %v", err)
 	}

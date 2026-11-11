@@ -152,6 +152,8 @@ Catalog schema 8 adds project/workspace position and pin columns plus a one-time
 
 `GET /workspaces/{id}/sources` returns the Sources currently bound to a Workspace together with their binding mode, target path, status, and Git checkout configuration when applicable.
 
+Git bindings also expose an optional top-level `repository_id` for repository identity. It is retained for pre-migration local checkouts even when `source.repository_id` is absent; clients should use it to exclude already-bound managed repositories. It does not change the existing checkout path or make the local Source managed.
+
 `POST /workspaces/{id}/sources` adds one Source to an existing `ready` Workspace. The request uses the same Source selection shape as Workspace creation:
 
 ```json
