@@ -770,3 +770,20 @@ func (s *Store) PruneMessages(ctx context.Context, now time.Time) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM channel_messages WHERE created_at<?`, now.UTC().Add(-7*24*time.Hour).Format(time.RFC3339Nano))
 	return err
 }
+
+func (s *Store) BoundSessionIDs(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT session_id FROM channel_conversations WHERE session_id IS NOT NULL AND session_id<>''`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	ids := []string{}
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
