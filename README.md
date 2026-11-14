@@ -233,4 +233,3 @@ approval modes.
 
 Note:
 - `go install github.com/jayyao97/zotigo/cmd/zotigo@latest` and `go run ./cmd/zotigo` start the same interactive CLI.
-- `go run ./cli` remains available as an alternate entrypoint for local development.

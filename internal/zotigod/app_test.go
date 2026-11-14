@@ -434,7 +434,7 @@ func TestHealth(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	newTestHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d", http.StatusOK, rec.Code)
@@ -534,7 +534,7 @@ profiles:
 
 	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
@@ -592,7 +592,7 @@ func TestProfilesReturnsEmptyWhenNoProfilesConfigured(t *testing.T) {
 
 	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
@@ -608,7 +608,7 @@ func TestProfilesReturnsEmptyWhenNoProfilesConfigured(t *testing.T) {
 
 func TestProfilesRejectsRelativeWorkingDirectory(t *testing.T) {
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles?working_directory=relative", nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles?working_directory=relative", nil))
 
 	assertAPIError(t, rec, http.StatusBadRequest, "invalid_request", "working_directory must be an absolute path")
 }
@@ -622,7 +622,7 @@ func TestProfilesRejectsMissingDefaultProfile(t *testing.T) {
 
 	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
 	assertAPIError(t, rec, http.StatusInternalServerError, "internal_error", `default profile "missing" not found`)
 }
@@ -637,7 +637,7 @@ func TestProfilesReturnsCanonicalDefaultProfileName(t *testing.T) {
 
 	path := "/config/profiles?working_directory=" + url.QueryEscape(projectDir)
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
 
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
@@ -653,7 +653,7 @@ func TestProfilesReturnsCanonicalDefaultProfileName(t *testing.T) {
 
 func TestProfilesRejectsUnsupportedMethod(t *testing.T) {
 	rec := httptest.NewRecorder()
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/config/profiles", nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/config/profiles", nil))
 
 	assertAPIError(t, rec, http.StatusMethodNotAllowed, "method_not_allowed", "method not allowed")
 	if got := rec.Header().Get("Allow"); got != http.MethodGet {
@@ -1182,7 +1182,7 @@ func TestSessionsCreateAndList(t *testing.T) {
 }
 
 func TestAPIErrorEnvelopeContract(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 
 	tests := []struct {
 		name            string
@@ -1399,7 +1399,7 @@ func TestSessionsCreateRejectsUnknownProfile(t *testing.T) {
 }
 
 func TestSessionsCreateRejectsInvalidWorkingDirectory(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(`{"working_directory":"/path/that/does/not/exist"}`))
@@ -1441,7 +1441,7 @@ func TestDefaultHandlerRejectsCreateWhenStoreInitializationFails(t *testing.T) {
 		t.Fatalf("write home file: %v", err)
 	}
 	t.Setenv("HOME", homeFile)
-	handler := NewHandler()
+	handler := newTestHandler()
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", nil))
@@ -1457,7 +1457,7 @@ func TestDefaultHandlerRejectsCreateWhenStoreInitializationFails(t *testing.T) {
 }
 
 func TestSessionsGetByID(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	getRec := httptest.NewRecorder()
@@ -2026,7 +2026,7 @@ func TestStoredDisplayItemSourceReadsDisplayLog(t *testing.T) {
 }
 
 func TestSessionStartTransitionsToStarting(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -2887,7 +2887,7 @@ func TestWaitForRunningWorkerReturnsWhenReadyConnectionIsGone(t *testing.T) {
 }
 
 func TestWorkerAttachTransitionsToRunning(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	created := createSession(t, handler)
@@ -4542,7 +4542,7 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 }
 
 func TestWorkerConnectRejectsNonLiveSession(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -7161,7 +7161,7 @@ func TestWorkerCommandsOffsetScansInBatches(t *testing.T) {
 }
 
 func TestSessionControlsRejectInvalidRequests(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -7936,7 +7936,7 @@ func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
 }
 
 func TestWorkerFinishTransitionsToEnded(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	attachWorker(t, handler, created.ID)
@@ -7985,7 +7985,7 @@ func TestWorkerFinishClosesRegisteredWorker(t *testing.T) {
 }
 
 func TestWorkerFinishWithErrorTransitionsToFailed(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 
@@ -8009,7 +8009,7 @@ func TestWorkerFinishWithErrorTransitionsToFailed(t *testing.T) {
 }
 
 func TestWorkerFinishRejectsCreatedSession(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	tests := []struct {
@@ -8034,7 +8034,7 @@ func TestWorkerFinishRejectsCreatedSession(t *testing.T) {
 }
 
 func TestSessionStartRejectsInvalidTransition(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 
@@ -8047,7 +8047,7 @@ func TestSessionStartRejectsInvalidTransition(t *testing.T) {
 }
 
 func TestWorkerAttachRejectsCreatedSession(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -8059,7 +8059,7 @@ func TestWorkerAttachRejectsCreatedSession(t *testing.T) {
 }
 
 func TestPublicSessionRouteRejectsWorkerActions(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -8071,7 +8071,7 @@ func TestPublicSessionRouteRejectsWorkerActions(t *testing.T) {
 }
 
 func TestSessionTransitionEndpointsRejectMissingSession(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 
 	tests := []struct {
 		name string
@@ -8099,7 +8099,7 @@ func TestSessionTransitionEndpointsRejectMissingSession(t *testing.T) {
 }
 
 func TestSessionRejectsUnknownAction(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -8122,7 +8122,7 @@ func TestSessionRouteRejectsEscapedSlashInID(t *testing.T) {
 }
 
 func TestWorkerFinishRejectsBadJSON(t *testing.T) {
-	handler := NewHandler()
+	handler := newTestHandler()
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 
@@ -8138,7 +8138,7 @@ func TestWorkerFinishRejectsBadJSON(t *testing.T) {
 func TestSessionsGetByIDNotFound(t *testing.T) {
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/missing", nil))
+	newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/missing", nil))
 
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("expected status %d, got %d", http.StatusNotFound, rec.Code)
@@ -8335,7 +8335,7 @@ func TestSessionsRejectsUnsupportedMethod(t *testing.T) {
 	req := httptest.NewRequest(http.MethodDelete, "/sessions", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	newTestHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
@@ -8349,7 +8349,7 @@ func TestSessionRejectsUnsupportedMethod(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-1", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	newTestHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
@@ -8363,7 +8363,7 @@ func TestSessionStartRejectsUnsupportedMethod(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "/sessions/sess-1/start", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	newTestHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
@@ -8377,7 +8377,7 @@ func TestHealthRejectsNonGET(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/health", nil)
 	rec := httptest.NewRecorder()
 
-	NewHandler().ServeHTTP(rec, req)
+	newTestHandler().ServeHTTP(rec, req)
 
 	if rec.Code != http.StatusMethodNotAllowed {
 		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)

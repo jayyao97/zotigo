@@ -161,7 +161,7 @@ func TestE2E_LargeToolOutputCompression(t *testing.T) {
 	}
 
 	originalLen := len(msgs[3].Content[0].ToolResult.Text)
-	truncated := c.TruncateToolResults(msgs, 100)
+	truncated := c.ProjectPrompt(msgs, 100)
 	truncatedLen := len(truncated[3].Content[0].ToolResult.Text)
 
 	t.Logf("Tool output: %d -> %d chars (%.1f%% reduction)",

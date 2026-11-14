@@ -818,10 +818,6 @@ func compatibleZotigodAt(ctx context.Context, addr string) (bool, error) {
 	return true, nil
 }
 
-func NewHandler() http.Handler {
-	return newDefaultHandler(handlerOptions{})
-}
-
 type handlerOptions struct {
 	callbackBaseURL      string
 	updater              *update.Manager

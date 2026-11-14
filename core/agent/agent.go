@@ -352,18 +352,6 @@ func (a *Agent) Describe() Description {
 	return d
 }
 
-// AuditTurns returns a copy of persisted turn audit records.
-func (a *Agent) AuditTurns() []TurnAudit {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	turns := make([]TurnAudit, len(a.turns))
-	for index := range a.turns {
-		turns[index] = cloneTurnAudit(a.turns[index])
-	}
-	return turns
-}
-
 // GetContextStats returns statistics about the current context.
 func (a *Agent) GetContextStats() map[string]int {
 	a.mu.RLock()

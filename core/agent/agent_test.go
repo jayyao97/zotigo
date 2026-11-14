@@ -288,7 +288,7 @@ func TestAgentSnapshotDeepCopiesAuditRequestContext(t *testing.T) {
 
 	snapshot := ag.Snapshot()
 	snapshot.Turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role = "owner"
-	if got := ag.AuditTurns()[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role; got != "member" {
+	if got := ag.Snapshot().Turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role; got != "member" {
 		t.Fatalf("agent audit role=%q after snapshot mutation, want member", got)
 	}
 }
@@ -2874,7 +2874,7 @@ func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
 		t.Fatal("Expected classifier allow to auto-execute when configured")
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 		t.Fatal("Expected safety events")
 	}
@@ -3018,7 +3018,7 @@ func TestAgent_ClassifierEnabledWithoutImplementationFallsBackToApproval(t *test
 		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 		t.Fatal("Expected safety event")
 	}
@@ -3132,7 +3132,7 @@ func TestAgent_FirstProtectedActionCreatesSingleSnapshot(t *testing.T) {
 		t.Fatalf("Expected exactly one snapshot call, got %d", exec.snapshotCalls)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) != 1 {
 		t.Fatalf("Expected one turn, got %d", len(turns))
 	}
@@ -3179,7 +3179,7 @@ func TestAgent_SnapshotFailureStopsExecution(t *testing.T) {
 		t.Fatal("Expected snapshot failure to stop execution")
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if turns[0].SnapshotStatus != agent.SnapshotStatusFailed {
 		t.Fatalf("Expected failed snapshot status, got %s", turns[0].SnapshotStatus)
 	}
@@ -3226,7 +3226,7 @@ func TestAgent_NonGitWorkspaceDoesNotSnapshot(t *testing.T) {
 		t.Fatalf("Expected no snapshot calls in non-git workspace, got %d", exec.snapshotCalls)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if turns[0].SnapshotStatus != agent.SnapshotStatusMissingGitRepo {
 		t.Fatalf("Expected missing_git_repo snapshot status, got %s", turns[0].SnapshotStatus)
 	}
@@ -3285,7 +3285,7 @@ func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
 			t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
 		}
 
-		turns := ag.AuditTurns()
+		turns := ag.Snapshot().Turns
 		if len(turns) == 0 {
 			t.Fatal("Expected at least one turn")
 		}
@@ -3381,7 +3381,7 @@ func TestAgent_SnapshotNotInstalled_LocalExecutor(t *testing.T) {
 	}
 
 	// Audit should show the distinct "not installed" status, not generic "failed".
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 {
 		t.Fatal("Expected at least one turn")
 	}
@@ -3440,7 +3440,7 @@ func TestAgent_CaptureRawAuditContext(t *testing.T) {
 		for range events {
 		}
 
-		turns := ag.AuditTurns()
+		turns := ag.Snapshot().Turns
 		if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 			t.Fatal("Expected safety events")
 		}
@@ -3521,7 +3521,7 @@ func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
 		t.Fatalf("SubmitToolOutputs error: %v", err)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	found := false
 	for _, ev := range turns[0].SafetyEvents {
 		if ev.DecisionSource == agent.SafetyDecisionSourceUserApproval &&

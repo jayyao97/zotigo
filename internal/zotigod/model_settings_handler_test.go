@@ -20,7 +20,7 @@ import (
 
 func TestModelSettingsAPI(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
-	h := NewHandler()
+	h := newTestHandler()
 	get := httptest.NewRecorder()
 	h.ServeHTTP(get, httptest.NewRequest("GET", "/config/models", nil))
 	if get.Code != 200 {
@@ -75,7 +75,7 @@ func TestModelConnectionTestDoesNotSaveOrLeakProviderBody(t *testing.T) {
 	change := config.ModelSettingsChange{Revision: snapshot.Revision, Action: "create", Profile: config.ModelSettingsProfile{Name: "test", Provider: "openai", Model: "example", BaseURL: server.URL, Mode: "chat"}, APIKey: &key}
 	body, _ := json.Marshal(change)
 	recorder := httptest.NewRecorder()
-	NewHandler().ServeHTTP(recorder, httptest.NewRequest("POST", "/config/models/test", bytes.NewReader(body)))
+	newTestHandler().ServeHTTP(recorder, httptest.NewRequest("POST", "/config/models/test", bytes.NewReader(body)))
 	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"authentication"`) || strings.Contains(recorder.Body.String(), "secret-in-error") {
 		t.Fatalf("unexpected test response: %d %s", recorder.Code, recorder.Body.String())
 	}

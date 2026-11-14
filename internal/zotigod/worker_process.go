@@ -47,12 +47,6 @@ func (l *processWorkerLauncher) StartCodex(ctx context.Context, spec zotigorunti
 	return nil
 }
 
-type workerLauncherFunc func(ctx context.Context, sessionID string, workingDirectory string) error
-
-func (fn workerLauncherFunc) Start(ctx context.Context, sessionID string, workingDirectory string) error {
-	return fn(ctx, sessionID, workingDirectory)
-}
-
 type processWorkerLauncher struct {
 	executable string
 	// argsPrefix selects worker mode in host binaries that embed the service

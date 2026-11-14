@@ -373,7 +373,7 @@ func TestCompressor_NoCompressionNeeded(t *testing.T) {
 	}
 }
 
-func TestCompressor_TruncateToolResults(t *testing.T) {
+func TestCompressor_ProjectPromptTruncatesToolResults(t *testing.T) {
 	c := NewCompressor(DefaultCompressorConfig())
 
 	longResult := strings.Repeat("line\n", 1000) // Very long result
@@ -394,7 +394,7 @@ func TestCompressor_TruncateToolResults(t *testing.T) {
 		},
 	}
 
-	truncated := c.TruncateToolResults(msgs, 100) // Max 100 tokens
+	truncated := c.ProjectPrompt(msgs, 100) // Max 100 tokens
 
 	if len(truncated) != 1 {
 		t.Error("Should have same number of messages")
@@ -1094,7 +1094,7 @@ func TestCompressor_LargeToolOutput(t *testing.T) {
 		},
 	}
 
-	truncated := c.TruncateToolResults(msgs, 50)
+	truncated := c.ProjectPrompt(msgs, 50)
 
 	resultText := truncated[0].Content[0].ToolResult.Text
 	if len(resultText) >= len(largeOutput) {

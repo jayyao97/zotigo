@@ -92,7 +92,7 @@ func TestSessionsCreateRejectsUnsupportedApprovalPolicy(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
-	handler := NewHandler()
+	handler := newTestHandler()
 	for _, policy := range []string{"never", "unknown"} {
 		rec := httptest.NewRecorder()
 		body := fmt.Sprintf(`{"working_directory":%q,"approval_policy":%q}`, workDir, policy)

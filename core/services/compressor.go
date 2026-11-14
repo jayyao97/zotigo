@@ -402,13 +402,6 @@ func (c *Compressor) findSafePartitionPoint(messages []protocol.Message, preserv
 	return roughIdx
 }
 
-// TruncateToolResults is a simpler version that just truncates without LLM
-func (c *Compressor) TruncateToolResults(messages []protocol.Message, maxResultTokens int) []protocol.Message {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.truncateToolResults(messages, maxResultTokens)
-}
-
 // ProjectPrompt applies the same bounded representation used immediately
 // before provider dispatch. Media stays structured while inline data URLs are
 // replaced with a marker and oversized textual tool output is truncated.
