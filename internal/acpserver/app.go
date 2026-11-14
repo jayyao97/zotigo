@@ -16,7 +16,7 @@
 //
 // Tools run in the session runtime on the service host, not through the
 // client's fs/* and terminal/* methods, so they work with clients that do
-// not implement those methods. core/acp.RemoteExecutor remains available to
+// not implement those methods. core/acp/embed.RemoteExecutor remains available to
 // library users who embed an agent directly.
 package acpserver
 
@@ -33,6 +33,7 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/acp"
+	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"github.com/jayyao97/zotigo/internal/zotigod"
 	"github.com/jayyao97/zotigo/internal/zotigodclient"
 )
@@ -118,6 +119,7 @@ func newAdapter(ctx context.Context, client *zotigodclient.Client, embedded bool
 
 func (a *adapter) newServer(rwc io.ReadWriteCloser) *acp.Server {
 	a.server = acp.NewServer(rwc,
+		acp.WithAgentVersion(buildinfo.Version),
 		acp.OnInitialized(func(caps acp.ClientCapabilities) {
 			a.logger.Printf("Client connected, fs.read=%v, fs.write=%v, terminal=%v (tools run in the session runtime)",
 				caps.FS.ReadTextFile, caps.FS.WriteTextFile, caps.Terminal)

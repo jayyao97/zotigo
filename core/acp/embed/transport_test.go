@@ -1,13 +1,15 @@
-package acp_test
+package embed_test
 
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/acp"
+	"github.com/jayyao97/zotigo/core/acp/embed"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/transport"
 	"go.lsp.dev/jsonrpc2"
@@ -66,7 +68,7 @@ func (c *notificationCollector) get() []json.RawMessage {
 }
 
 func TestTransport_SendTextDelta(t *testing.T) {
-	serverSide, clientSide := newPipePair()
+	serverSide, clientSide := net.Pipe()
 	srv := acp.NewServer(serverSide)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -79,7 +81,7 @@ func TestTransport_SendTextDelta(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	tr := acp.NewTransport(srv, "session-1")
+	tr := embed.NewTransport(srv, "session-1")
 
 	// Send a text delta event
 	err := tr.Send(ctx, protocol.Event{
@@ -121,7 +123,7 @@ func TestTransport_SendTextDelta(t *testing.T) {
 }
 
 func TestTransport_SendReasoningDelta(t *testing.T) {
-	serverSide, clientSide := newPipePair()
+	serverSide, clientSide := net.Pipe()
 	srv := acp.NewServer(serverSide)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -134,7 +136,7 @@ func TestTransport_SendReasoningDelta(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	tr := acp.NewTransport(srv, "session-1")
+	tr := embed.NewTransport(srv, "session-1")
 
 	// Send a reasoning delta
 	err := tr.Send(ctx, protocol.Event{
@@ -169,7 +171,7 @@ func TestTransport_SendReasoningDelta(t *testing.T) {
 }
 
 func TestTransport_ToolCallStatusFlow(t *testing.T) {
-	serverSide, clientSide := newPipePair()
+	serverSide, clientSide := net.Pipe()
 	srv := acp.NewServer(serverSide)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -182,7 +184,7 @@ func TestTransport_ToolCallStatusFlow(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	tr := acp.NewTransport(srv, "session-1")
+	tr := embed.NewTransport(srv, "session-1")
 
 	// Step 1: Tool call proposed → should be "pending"
 	err := tr.Send(ctx, protocol.Event{
@@ -262,7 +264,7 @@ func TestTransport_ToolCallStatusFlow(t *testing.T) {
 }
 
 func TestTransport_ClosePreventsSubsequentSend(t *testing.T) {
-	serverSide, clientSide := newPipePair()
+	serverSide, clientSide := net.Pipe()
 	srv := acp.NewServer(serverSide)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -275,7 +277,7 @@ func TestTransport_ClosePreventsSubsequentSend(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 
-	tr := acp.NewTransport(srv, "session-1")
+	tr := embed.NewTransport(srv, "session-1")
 	_ = tr.Close()
 
 	err := tr.Send(ctx, protocol.Event{
@@ -291,7 +293,7 @@ func TestTransport_ClosePreventsSubsequentSend(t *testing.T) {
 }
 
 func TestTransport_EnqueueAndReceive(t *testing.T) {
-	serverSide, clientSide := newPipePair()
+	serverSide, clientSide := net.Pipe()
 	srv := acp.NewServer(serverSide)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -302,7 +304,7 @@ func TestTransport_EnqueueAndReceive(t *testing.T) {
 	client, _ := collectingClient(clientSide, ctx)
 	defer client.Close()
 
-	tr := acp.NewTransport(srv, "session-1")
+	tr := embed.NewTransport(srv, "session-1")
 	defer tr.Close()
 
 	tr.EnqueueInput(transport.UserInput{

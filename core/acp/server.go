@@ -8,7 +8,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"go.lsp.dev/jsonrpc2"
 )
 
@@ -35,6 +34,8 @@ type Server struct {
 
 	// serverCtx is the long-lived context for the server's lifetime.
 	serverCtx context.Context
+
+	agentVersion string
 
 	// callbacks
 	onSessionNew    func(ctx context.Context, params SessionNewParams) (string, error)
@@ -97,6 +98,11 @@ func OnSessionModes(state func(ctx context.Context, sessionID string) *SessionMo
 // OnInitialized sets the callback invoked after initialize handshake.
 func OnInitialized(fn func(caps ClientCapabilities)) ServerOption {
 	return func(s *Server) { s.onInitialized = fn }
+}
+
+// WithAgentVersion sets the version reported to the client in initialize.
+func WithAgentVersion(version string) ServerOption {
+	return func(s *Server) { s.agentVersion = version }
 }
 
 // NewServer creates a new ACP server over the given reader/writer (typically stdin/stdout).
@@ -365,7 +371,7 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 		ProtocolVersion: ProtocolVersion,
 		AgentInfo: &Implementation{
 			Name:    agentName,
-			Version: buildinfo.Version,
+			Version: s.agentVersion,
 		},
 		AgentCapabilities: AgentCapabilities{
 			LoadSession: s.onSessionLoad != nil,

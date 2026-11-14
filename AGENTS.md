@@ -52,7 +52,7 @@ Inside `core/`:
 - `middleware/` — agent‑level tool‑call middleware (observability, etc.)
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
 - `transport/` — IO abstraction (channel, ACP, stdio)
-- `executor/` — filesystem + shell abstraction; `LocalExecutor` (and ACP `RemoteExecutor` lives in `core/acp/`)
+- `executor/` — filesystem + shell abstraction; `LocalExecutor` (and ACP `RemoteExecutor` lives in `core/acp/embed/`)
 - `services/` — loop detector, context compressor, tokenizer
 - `skills/` — skill discovery and prompt injection
 - `protocol/` — internal message + event types

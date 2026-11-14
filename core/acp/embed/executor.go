@@ -1,4 +1,4 @@
-package acp
+package embed
 
 import (
 	"context"
@@ -9,20 +9,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/acp"
 	"github.com/jayyao97/zotigo/core/executor"
 )
 
 // RemoteExecutor implements executor.Executor by delegating operations
 // to the editor client via ACP's fs/* and terminal/* JSON-RPC methods.
 type RemoteExecutor struct {
-	server    *Server
+	server    *acp.Server
 	sessionID string
 	workDir   string
 	platform  string
 }
 
 // NewRemoteExecutor creates an executor that delegates to the ACP client.
-func NewRemoteExecutor(server *Server, sessionID, workDir string) *RemoteExecutor {
+func NewRemoteExecutor(server *acp.Server, sessionID, workDir string) *RemoteExecutor {
 	return &RemoteExecutor{
 		server:    server,
 		sessionID: sessionID,
@@ -108,9 +109,9 @@ func (e *RemoteExecutor) Exec(ctx context.Context, cmd string, opts executor.Exe
 		cwd = e.workDir
 	}
 
-	var env []EnvVariable
+	var env []acp.EnvVariable
 	for k, v := range opts.Env {
-		env = append(env, EnvVariable{Name: k, Value: v})
+		env = append(env, acp.EnvVariable{Name: k, Value: v})
 	}
 
 	if opts.Timeout > 0 {

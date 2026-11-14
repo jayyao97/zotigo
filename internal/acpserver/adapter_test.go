@@ -14,6 +14,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/acp"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"github.com/jayyao97/zotigo/internal/testutil/servicetest"
 	"github.com/jayyao97/zotigo/internal/zotigod"
 	"github.com/jayyao97/zotigo/internal/zotigodclient"
@@ -162,6 +163,9 @@ func startACPClient(t *testing.T, client *zotigodclient.Client, workspaceID stri
 	}
 	if !init.AgentCapabilities.LoadSession {
 		t.Fatal("adapter must advertise session/load")
+	}
+	if init.AgentInfo == nil || init.AgentInfo.Version != buildinfo.Version {
+		t.Fatalf("adapter must report the build version, got %+v", init.AgentInfo)
 	}
 	return editor
 }

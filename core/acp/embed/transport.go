@@ -1,10 +1,19 @@
-package acp
+// Package embed adapts an ACP server to the agent's own interfaces, for a
+// host that runs the agent in the same process as the ACP connection:
+// Transport streams agent events to the editor, RemoteExecutor runs file and
+// terminal operations on the editor's side.
+//
+// The zotigo binary does not use this package. `zotigo acp` is a client of
+// the session daemon (internal/acpserver), and tools run in the session
+// runtime. This package is kept for library users.
+package embed
 
 import (
 	"context"
 	"fmt"
 	"sync"
 
+	"github.com/jayyao97/zotigo/core/acp"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/transport"
 )
@@ -12,7 +21,7 @@ import (
 // Transport adapts an ACP Server into the zotigo Transport interface.
 // It bridges the ACP JSON-RPC protocol with the internal agent event system.
 type Transport struct {
-	server    *Server
+	server    *acp.Server
 	sessionID string
 
 	inputCh  chan transport.UserInput
@@ -23,7 +32,7 @@ type Transport struct {
 }
 
 // NewTransport creates a Transport backed by an ACP server for a specific session.
-func NewTransport(server *Server, sessionID string) *Transport {
+func NewTransport(server *acp.Server, sessionID string) *Transport {
 	return &Transport{
 		server:    server,
 		sessionID: sessionID,
@@ -57,22 +66,22 @@ func (t *Transport) Send(ctx context.Context, event protocol.Event) error {
 				event.ToolCall.ID,
 				event.ToolCall.Name,
 				"other",
-				ToolCallStatusPending,
+				acp.ToolCallStatusPending,
 			)
 		}
 
 	case protocol.EventTypeToolResultDone:
 		if event.ToolResult != nil {
-			status := ToolCallStatusCompleted
+			status := acp.ToolCallStatusCompleted
 			if event.ToolResult.IsError {
-				status = ToolCallStatusFailed
+				status = acp.ToolCallStatusFailed
 			}
 			return t.server.SendToolCallUpdate(ctx, t.sessionID, event.ToolResult.ToolCallID, map[string]any{
 				"title":  event.ToolResult.ToolName,
 				"status": status,
-				"content": []ToolCallContent{{
+				"content": []acp.ToolCallContent{{
 					Type: "content",
-					ContentBlock: &ContentBlock{
+					ContentBlock: &acp.ContentBlock{
 						Type: "text",
 						Text: event.ToolResult.Text,
 					},
@@ -107,15 +116,15 @@ func (t *Transport) RequestApproval(ctx context.Context, pending []transport.Pen
 	results := make([]transport.ApprovalResult, 0, len(pending))
 
 	for _, p := range pending {
-		toolCall := ToolCallData{
+		toolCall := acp.ToolCallData{
 			ToolCallID: p.ID,
 			Title:      fmt.Sprintf("%s: %s", p.Name, p.Description),
 			Kind:       "other",
-			Status:     ToolCallStatusPending,
+			Status:     acp.ToolCallStatusPending,
 			RawInput:   p.Arguments,
 		}
 
-		options := []PermissionOption{
+		options := []acp.PermissionOption{
 			{OptionID: "allow_once", Name: "Allow once", Kind: "allow_once"},
 			{OptionID: "allow_always", Name: "Allow always", Kind: "allow_always"},
 			{OptionID: "reject_once", Name: "Reject once", Kind: "reject_once"},
@@ -135,7 +144,7 @@ func (t *Transport) RequestApproval(ctx context.Context, pending []transport.Pen
 		// sees pending → in_progress → completed/failed without regression.
 		if approved {
 			_ = t.server.SendToolCallUpdate(ctx, t.sessionID, p.ID, map[string]any{
-				"status": ToolCallStatusInProgress,
+				"status": acp.ToolCallStatusInProgress,
 			})
 		}
 

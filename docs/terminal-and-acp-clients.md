@@ -2,7 +2,7 @@
 
 `zotigo` (TUI) and `zotigo-acp` (Agent Client Protocol over stdio) are clients of the zotigod session service. Session creation, the agent loop, tools, approvals, persistence, recovery and the event stream all run in the service, so the TUI, ACP editors, Desktop and Channels share one implementation and can attach to the same sessions. Both entrypoints speak the public HTTP API in [zotigod-api.md](zotigod-api.md) through `internal/zotigodclient`.
 
-`core/` stays independent of the service: library users can still build an `agent.Agent` (and `core/acp.RemoteExecutor`) directly or write their own loop on `providers`/`protocol`/`tools`. Only the product entrypoints go through zotigod.
+`core/` stays independent of the service: library users can still build an `agent.Agent` (and `core/acp/embed.RemoteExecutor`) directly or write their own loop on `providers`/`protocol`/`tools`. Only the product entrypoints go through zotigod.
 
 ## Deployment modes
 

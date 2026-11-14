@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/acp"
-	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"go.lsp.dev/jsonrpc2"
 )
 
@@ -62,6 +61,7 @@ func TestServer_Initialize(t *testing.T) {
 
 	var gotCaps acp.ClientCapabilities
 	srv := acp.NewServer(serverSide,
+		acp.WithAgentVersion("1.2.3"),
 		acp.OnInitialized(func(caps acp.ClientCapabilities) {
 			gotCaps = caps
 		}),
@@ -94,8 +94,8 @@ func TestServer_Initialize(t *testing.T) {
 	if result.AgentInfo == nil || result.AgentInfo.Name != "zotigo" {
 		t.Errorf("expected agentInfo.name=zotigo, got %+v", result.AgentInfo)
 	}
-	if result.AgentInfo == nil || result.AgentInfo.Version != buildinfo.Version {
-		t.Errorf("expected agentInfo.version=%s, got %+v", buildinfo.Version, result.AgentInfo)
+	if result.AgentInfo == nil || result.AgentInfo.Version != "1.2.3" {
+		t.Errorf("expected agentInfo.version=1.2.3, got %+v", result.AgentInfo)
 	}
 	if gotCaps.FS.ReadTextFile != true {
 		t.Error("expected client fs.readTextFile=true")
