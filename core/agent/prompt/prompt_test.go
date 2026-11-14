@@ -235,7 +235,7 @@ func TestUserContextBuilderLazyContext(t *testing.T) {
 
 func TestUserContextBuilderAttributedSection(t *testing.T) {
 	w := NewUserContextBuilder(
-		WithAttributedContext("project_instructions", `source="AGENTS.md"`, func(_ PromptContext) string {
+		WithKeyedAttributedContext("project_instructions:AGENTS.md", "project_instructions", `source="AGENTS.md"`, func(_ PromptContext) string {
 			return "project rules"
 		}),
 	)

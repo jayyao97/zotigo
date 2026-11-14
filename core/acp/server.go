@@ -45,8 +45,6 @@ type Server struct {
 	onInitialized   func(caps ClientCapabilities)
 	sessionModes    func(ctx context.Context, sessionID string) *SessionModeState
 	onSetMode       func(ctx context.Context, sessionID string, modeID string) error
-
-	clientCaps ClientCapabilities
 }
 
 // ServerOption configures the Server.
@@ -113,18 +111,6 @@ func NewServer(rwc io.ReadWriteCloser, opts ...ServerOption) *Server {
 	stream := jsonrpc2.NewRawStream(rwc)
 	s.conn = jsonrpc2.NewConn(stream)
 	return s
-}
-
-// Conn returns the underlying JSON-RPC connection for direct calls.
-func (s *Server) Conn() jsonrpc2.Conn {
-	return s.conn
-}
-
-// ClientCaps returns the negotiated client capabilities.
-func (s *Server) ClientCaps() ClientCapabilities {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.clientCaps
 }
 
 // Run starts the JSON-RPC message loop. Blocks until the connection is closed.
@@ -370,10 +356,6 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 	if err := json.Unmarshal(req.Params(), &params); err != nil {
 		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
 	}
-
-	s.mu.Lock()
-	s.clientCaps = params.ClientCapabilities
-	s.mu.Unlock()
 
 	if s.onInitialized != nil {
 		s.onInitialized(params.ClientCapabilities)

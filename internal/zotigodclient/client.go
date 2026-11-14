@@ -250,12 +250,6 @@ func (c *Client) GetWorkspace(ctx context.Context, id string) (Workspace, error)
 	return found, err
 }
 
-func (c *Client) StartSession(ctx context.Context, id string) (Session, error) {
-	var started Session
-	err := c.do(ctx, http.MethodPost, "/sessions/"+url.PathEscape(id)+"/start", nil, &started)
-	return started, err
-}
-
 // Items returns one page of durable display items. after=0 means "most recent
 // page" when before is also 0.
 func (c *Client) Items(ctx context.Context, id string, after uint64, before uint64, limit int) (ItemsPage, error) {

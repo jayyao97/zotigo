@@ -101,14 +101,6 @@ func WithSection(tag string, provider func(PromptContext) string) DynamicOption 
 	}
 }
 
-// WithAttributedSection appends a lazy context section whose opening tag carries
-// pre-rendered attributes, for example `<project_instructions source="AGENTS.md">`.
-func WithAttributedSection(tag, attributes string, provider func(PromptContext) string) DynamicOption {
-	return func(dc *DynamicContext) {
-		dc.Sections = append(dc.Sections, ContextSection{Tag: tag, Attributes: attributes, Provider: provider})
-	}
-}
-
 // NewDynamicContext creates a DynamicContext with the given options.
 func NewDynamicContext(opts ...DynamicOption) *DynamicContext {
 	dc := &DynamicContext{}
@@ -195,18 +187,6 @@ func WithContext(tag string, provider func(PromptContext) string) UserContextOpt
 	}
 }
 
-// WithAttributedContext appends a lazy user-context section with attributes on
-// the opening tag.
-func WithAttributedContext(tag, attributes string, provider func(PromptContext) string) UserContextOption {
-	return func(w *UserContextBuilder) {
-		w.ContextSections = append(w.ContextSections, ContextSection{
-			Tag:        tag,
-			Attributes: attributes,
-			Provider:   provider,
-		})
-	}
-}
-
 // WithKeyedContext appends a lazy user-context section with a stable diff key.
 func WithKeyedContext(key, tag string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
@@ -248,33 +228,6 @@ func (w *UserContextBuilder) Build(ctx PromptContext) string {
 		return ""
 	}
 	return renderContextSections(ctx, w.ContextSections)
-}
-
-// UserPromptWrapper is kept as a compatibility alias for callers that still use
-// the old name. Agent request assembly treats it as a user-context builder and
-// no longer mutates the real user message that is persisted in history.
-type UserPromptWrapper = UserContextBuilder
-
-// UserPromptOption is kept for compatibility with NewUserPromptWrapper.
-type UserPromptOption = UserContextOption
-
-// NewUserPromptWrapper creates a user-context builder with the given options.
-func NewUserPromptWrapper(opts ...UserPromptOption) *UserPromptWrapper {
-	return NewUserContextBuilder(opts...)
-}
-
-// Wrap is retained for legacy direct callers. New agent code should use Build
-// and persist the result as a separate contextual user message.
-func (w *UserContextBuilder) Wrap(rawInput string, ctx PromptContext) string {
-	context := w.Build(ctx)
-	if context == "" {
-		return rawInput
-	}
-	var b strings.Builder
-	b.WriteString(context)
-	b.WriteString("\n\n")
-	b.WriteString(rawInput)
-	return b.String()
 }
 
 // BuildMetaUserContext wraps the rendered sections in a single marker so the

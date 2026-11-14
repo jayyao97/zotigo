@@ -99,7 +99,6 @@ type Model struct {
 	width              int
 	height             int
 	initialPrinted     bool
-	kittyChecked       bool
 
 	// Streaming state for the current assistant block.
 	currentAsstMsg     string
@@ -376,9 +375,6 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyboardEnhancementsMsg:
-		if !m.kittyChecked {
-			m.kittyChecked = true
-		}
 		return m, nil
 
 	case tea.PasteMsg:

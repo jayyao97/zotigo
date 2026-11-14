@@ -13,7 +13,6 @@ type SkillManager struct {
 	diagnostics []Diagnostic
 	projectDir  string
 	userDir     string
-	extraDirs   []string
 	loaded      bool
 }
 
@@ -21,15 +20,6 @@ type SkillManagerOption func(*SkillManager)
 
 func WithUserDir(dir string) SkillManagerOption {
 	return func(m *SkillManager) { m.userDir = dir }
-}
-
-// WithAgentsDir is retained as an alias for WithUserDir.
-func WithAgentsDir(dir string) SkillManagerOption {
-	return WithUserDir(dir)
-}
-
-func WithExtraDirs(dirs ...string) SkillManagerOption {
-	return func(m *SkillManager) { m.extraDirs = append(m.extraDirs, dirs...) }
 }
 
 func NewSkillManager(projectDir string, opts ...SkillManagerOption) *SkillManager {
@@ -56,11 +46,6 @@ func (m *SkillManager) Load() error {
 	}
 	if err := m.loadDir(m.userDir, SkillSourceUser); err != nil {
 		m.diagnostics = append(m.diagnostics, Diagnostic{Code: "scan_failed", Message: err.Error(), Scope: SkillSourceUser.String()})
-	}
-	for _, dir := range m.extraDirs {
-		if err := m.loadDir(dir, SkillSourceUser); err != nil {
-			m.diagnostics = append(m.diagnostics, Diagnostic{Code: "scan_failed", Message: err.Error(), Scope: SkillSourceUser.String()})
-		}
 	}
 	if m.projectDir != "" {
 		if err := m.loadDir(GetProjectSkillsDir(m.projectDir), SkillSourceWorkspace); err != nil {
@@ -166,17 +151,11 @@ func (m *SkillManager) Dirs() []string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	var dirs []string
-	for _, dir := range append([]string{m.userDir, m.projectSkillsDir()}, m.extraDirs...) {
-		if dir != "" {
-			dirs = append(dirs, dir)
-		}
+	if m.userDir != "" {
+		dirs = append(dirs, m.userDir)
+	}
+	if m.projectDir != "" {
+		dirs = append(dirs, GetProjectSkillsDir(m.projectDir))
 	}
 	return dirs
-}
-
-func (m *SkillManager) projectSkillsDir() string {
-	if m.projectDir == "" {
-		return ""
-	}
-	return GetProjectSkillsDir(m.projectDir)
 }

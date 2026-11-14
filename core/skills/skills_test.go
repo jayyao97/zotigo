@@ -696,7 +696,7 @@ func containsHelper(s, substr string) bool {
 }
 
 func TestGetAgentsUserSkillsDir_Exists(t *testing.T) {
-	// Use a temp dir injected via WithAgentsDir — mirrors ReloadAgentsDir
+	// Use a temp dir injected via WithUserDir — mirrors ReloadAgentsDir
 	// but is simpler since we don't need the reload scenario.
 	// Avoids writing to the user's real ~/.agents/skills/.
 	tmpDir := t.TempDir()
@@ -707,7 +707,7 @@ func TestGetAgentsUserSkillsDir_Exists(t *testing.T) {
 	os.WriteFile(filepath.Join(agentsDir, "test-agents-skill", "SKILL.md"), []byte(content), 0644)
 
 	// Create manager pointing at the temp agents dir
-	sm := NewSkillManager("", WithAgentsDir(agentsDir))
+	sm := NewSkillManager("", WithUserDir(agentsDir))
 	sm.Load()
 
 	// Should find the skill we just wrote
@@ -726,7 +726,7 @@ func TestSkillManager_ReloadAgentsDir(t *testing.T) {
 	projectDir := filepath.Join(tmpDir, "project")
 
 	// Create manager with empty agentsDir — simulates ~/.agents/skills/ not existing
-	sm := NewSkillManager(projectDir, WithAgentsDir(""))
+	sm := NewSkillManager(projectDir, WithUserDir(""))
 	if err := sm.Load(); err != nil {
 		t.Fatalf("Initial Load failed: %v", err)
 	}

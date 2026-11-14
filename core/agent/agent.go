@@ -107,12 +107,6 @@ func WithSystemPromptBuilder(pb *prompt.SystemPromptBuilder) AgentOption {
 	return func(a *Agent) { a.promptBuilder = pb }
 }
 
-// WithUserPromptWrapper sets the builder used to add contextual user messages.
-// Deprecated: use WithUserContextBuilder.
-func WithUserPromptWrapper(uw *prompt.UserPromptWrapper) AgentOption {
-	return func(a *Agent) { a.userContext = uw }
-}
-
 // WithUserContextBuilder sets the builder used to persist contextual user
 // messages before real user turns.
 func WithUserContextBuilder(uc *prompt.UserContextBuilder) AgentOption {
@@ -268,11 +262,11 @@ func (a *Agent) SetApprovalPolicy(p ApprovalPolicy) {
 	a.refreshApprovalPolicy()
 }
 
-// RequestedApprovalPolicy returns the policy selected by the host or user.
-// The effective policy may be stricter when the active profile forces manual
-// approval, but it can never be more permissive than this value.
-// RequestedApprovalPolicyForInput checks admission policy without waiting for
-// a remote compaction request. Hosts must not block their stop/control loop.
+// RequestedApprovalPolicyForInput returns the policy selected by the host or
+// user. The effective policy may be stricter when the active profile forces
+// manual approval, but it can never be more permissive than this value.
+// It does not wait for a remote compaction request: hosts must not block
+// their stop/control loop.
 func (a *Agent) RequestedApprovalPolicyForInput() (ApprovalPolicy, error) {
 	if err := a.lockForInput(); err != nil {
 		return "", err
@@ -295,12 +289,6 @@ func (a *Agent) lockForInput() error {
 	}
 }
 
-func (a *Agent) RequestedApprovalPolicy() ApprovalPolicy {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.requestedPolicy
-}
-
 // SetProfileApprovalFallback forces manual approval without overwriting the
 // policy selected by the host or user.
 func (a *Agent) SetProfileApprovalFallback(forceManual bool) {
@@ -315,11 +303,6 @@ func (a *Agent) refreshApprovalPolicy() {
 	if a.profileForcesManual && a.requestedPolicy != ApprovalPolicyBypass {
 		a.policy = ApprovalPolicyManual
 	}
-}
-
-// Executor returns the agent's executor.
-func (a *Agent) Executor() executor.Executor {
-	return a.executor
 }
 
 // Description is a user-facing snapshot of the resolved runtime

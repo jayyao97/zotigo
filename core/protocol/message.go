@@ -384,8 +384,3 @@ func (m Message) DisplayString() string {
 	}
 	return m.String()
 }
-
-func (m Message) JSONString() string {
-	b, _ := json.Marshal(m)
-	return string(b)
-}
