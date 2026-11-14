@@ -6,15 +6,15 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 )
 
 func calibratedTestAgent() *Agent {
 	a := &Agent{
 		cfg:          config.ProfileConfig{Provider: "anthropic", Model: "test", ContextWindow: 512000},
-		compressor:   services.NewCompressor(services.CompressorConfig{ContextWindowSize: 512000}),
+		compressor:   compaction.NewCompressor(compaction.CompressorConfig{ContextWindowSize: 512000}),
 		conversation: newConversationState(),
 	}
 	for range 20 {
@@ -24,7 +24,7 @@ func calibratedTestAgent() *Agent {
 	}
 	index := len(a.conversation.history) - 1
 	anchor := a.contextPromptLocked()
-	anchor.HistoryDigest = services.ContextDigest(a.projectPromptHistory(a.conversation.history[:index]))
+	anchor.HistoryDigest = compaction.ContextDigest(a.projectPromptHistory(a.conversation.history[:index]))
 	a.conversation.history[index].Metadata = &protocol.MessageMetadata{
 		Usage:        &protocol.Usage{InputTokens: 2, CacheCreationInputTokens: 835, CacheReadInputTokens: 526326},
 		ContextInput: &anchor,
@@ -90,7 +90,7 @@ func TestBuildContextCompressesLargePrefixWithoutRemovingMessages(t *testing.T) 
 		protocol.NewUserMessage(strings.Repeat("old task details ", 10000)),
 		protocol.NewUserMessage("Continue with the latest task"),
 	}
-	a.compressor = services.NewCompressor(services.CompressorConfig{ContextWindowSize: 10000})
+	a.compressor = compaction.NewCompressor(compaction.CompressorConfig{ContextWindowSize: 10000})
 	_, _, compact, err := a.buildContext(context.Background())
 	if err != nil || compact == nil {
 		t.Fatalf("large prefix not compacted: %+v %v", compact, err)
@@ -115,7 +115,7 @@ func TestAutomaticCompactionPreservesCalibrationWithLargeToolOutput(t *testing.T
 			protocol.NewAssistantMessage("latest answer"))
 		index = len(a.conversation.history) - 1
 		anchor := a.contextPromptLocked()
-		anchor.HistoryDigest = services.ContextDigest(a.projectPromptHistory(a.conversation.history[:index]))
+		anchor.HistoryDigest = compaction.ContextDigest(a.projectPromptHistory(a.conversation.history[:index]))
 		a.conversation.history[index].Metadata = &protocol.MessageMetadata{Usage: &protocol.Usage{InputTokens: 576000}, ContextInput: &anchor}
 		if restore {
 			snapshot := a.Snapshot()
@@ -133,7 +133,7 @@ func TestAutomaticCompactionPreservesCalibrationWithLargeToolOutput(t *testing.T
 			t.Fatalf("restore=%v: lost measured input: %d", restore, before)
 		}
 		provider := &compactionProvider{}
-		a.compressor.SetSummarizer(services.NewProviderSummarizer(provider))
+		a.compressor.SetSummarizer(compaction.NewProviderSummarizer(provider))
 		_, _, compact, err := a.buildContext(context.Background())
 		if err != nil || compact == nil {
 			t.Fatalf("restore=%v: no auto compaction: %+v %v", restore, compact, err)

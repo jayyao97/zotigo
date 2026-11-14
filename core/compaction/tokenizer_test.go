@@ -1,4 +1,4 @@
-package services
+package compaction
 
 import (
 	"testing"

@@ -6,9 +6,9 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -18,7 +18,7 @@ func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
 	prompt := protocol.ContextInput{PromptKey: "prompt", ProfileKey: "profile", PrefixTokens: 10}
 	first, _ := h.nativeContextTokens("session", history, prompt)
 	anchor := prompt
-	anchor.HistoryDigest = services.ContextDigest(history)
+	anchor.HistoryDigest = compaction.ContextDigest(history)
 	answer := protocol.NewAssistantMessage("answer")
 	answer.Metadata = &protocol.MessageMetadata{ContextInput: &anchor, Usage: &protocol.Usage{InputTokens: 1000}}
 	history = append(history, answer)
@@ -53,11 +53,11 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := services.NewCompressor(services.CompressorConfig{ContextWindowSize: profile.ContextWindow})
+	c := compaction.NewCompressor(compaction.CompressorConfig{ContextWindowSize: profile.ContextWindow})
 	history := []protocol.Message{protocol.NewUserMessage("question")}
 	anchor := protocol.ContextInput{
-		HistoryDigest: services.ContextDigest(history), PromptKey: "system-tools",
-		ProfileKey: services.ContextProfileKey(profile), PrefixTokens: 40,
+		HistoryDigest: compaction.ContextDigest(history), PromptKey: "system-tools",
+		ProfileKey: compaction.ContextProfileKey(profile), PrefixTokens: 40,
 	}
 	answer := protocol.NewAssistantMessage("answer")
 	answer.Metadata = &protocol.MessageMetadata{
@@ -124,7 +124,7 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}
-	progress := &protocol.ContextUsage{Tokens: 527163, Window: window, Source: "provider_estimate", ProfileKey: services.ContextProfileKey(profile)}
+	progress := &protocol.ContextUsage{Tokens: 527163, Window: window, Source: "provider_estimate", ProfileKey: compaction.ContextProfileKey(profile)}
 	if err := display.HandleEvent(ctx, protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: progress}); err != nil {
 		t.Fatal(err)
 	}

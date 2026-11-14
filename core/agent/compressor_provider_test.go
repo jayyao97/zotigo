@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent/prompt"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -86,13 +86,13 @@ func TestAgentDefaultCompactionUsesLLMAndTracksProfile(t *testing.T) {
 	second.fail = true
 	for _, manual := range []bool{false, true} {
 		ag.conversation.history = append([]protocol.Message(nil), seed...)
-		before := services.ContextDigest(ag.conversation.history)
+		before := compaction.ContextDigest(ag.conversation.history)
 		if manual {
 			_, err = ag.ForceCompress(context.Background())
 		} else {
 			_, _, _, err = ag.buildContext(context.Background())
 		}
-		if err == nil || services.ContextDigest(ag.conversation.history) != before {
+		if err == nil || compaction.ContextDigest(ag.conversation.history) != before {
 			t.Fatalf("failed summary changed history or succeeded: %v", err)
 		}
 	}
@@ -128,7 +128,7 @@ func TestCompactionPreservesMainPromptPrefix(t *testing.T) {
 				t.Fatal(err)
 			}
 			a.compressor.SetContextWindow(1000)
-			before := services.ContextDigest(a.conversation.history)
+			before := compaction.ContextDigest(a.conversation.history)
 			switch mode {
 			case "automatic":
 				_, _, _, err = a.buildContext(context.Background())
@@ -141,7 +141,7 @@ func TestCompactionPreservesMainPromptPrefix(t *testing.T) {
 				_, err = a.ForceCompress(context.Background())
 			}
 			if mode == "tool-call" {
-				if err == nil || services.ContextDigest(a.conversation.history) != before {
+				if err == nil || compaction.ContextDigest(a.conversation.history) != before {
 					t.Fatal("tool call must reject summary and preserve history")
 				}
 			} else if err != nil {
@@ -198,7 +198,7 @@ func TestCompactionAdmissionAndCancellation(t *testing.T) {
 			a.state = StateRunning
 			p := &blockedCompactionProvider{started: make(chan struct{})}
 			a.provider = p
-			a.compressor.SetSummarizer(services.NewProviderSummarizer(p))
+			a.compressor.SetSummarizer(compaction.NewProviderSummarizer(p))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			done := make(chan struct{})

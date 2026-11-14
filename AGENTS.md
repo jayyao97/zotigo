@@ -53,7 +53,7 @@ Inside `core/`:
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
 - `transport/` — IO abstraction (channel, ACP, stdio)
 - `executor/` — filesystem + shell abstraction; `LocalExecutor` (and ACP `RemoteExecutor` lives in `core/acp/embed/`)
-- `services/` — loop detector, context compressor, tokenizer
+- `compaction/` — context compressor, tokenizer, summarizer; `agent/loopguard/` — loop detector; `textassist/` — one-shot title and translation calls
 - `skills/` — skill discovery and prompt injection
 - `protocol/` — internal message + event types
 - `session/` — on‑disk session persistence
@@ -112,7 +112,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - `reasoning_content` from llama.cpp / DeepSeek / OpenRouter is surfaced through the Chat Completions path so the agent sees thinking blocks regardless of provider.
 
 ## Loop Detection
-- `core/services/loop_detector.go` flags identical **consecutive** tool calls. Defaults: warn at 5 in a row, window 15. Iterative workflows (`go test → edit → go test → edit → go test`) intentionally do NOT trigger because any intervening different call resets the streak.
+- `core/agent/loopguard/loop_detector.go` flags identical **consecutive** tool calls. Defaults: warn at 5 in a row, window 15. Iterative workflows (`go test → edit → go test → edit → go test`) intentionally do NOT trigger because any intervening different call resets the streak.
 - When triggered, the warning is **prefixed** into the next tool result text wrapped in `<system-reminder>`. It is NOT a separate `ToolResult` (OpenAI Chat Completions rejects duplicate `tool_call_id` in one tool‑role message).
 
 ## Code Style

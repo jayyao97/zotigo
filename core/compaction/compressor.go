@@ -1,4 +1,7 @@
-package services
+// Package compaction keeps a conversation inside the model's context window:
+// it estimates prompt size, bounds oversized tool output in the projection sent
+// to the provider, and summarizes old history when the window fills up.
+package compaction
 
 import (
 	"context"

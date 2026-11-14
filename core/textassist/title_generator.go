@@ -1,4 +1,6 @@
-package services
+// Package textassist holds small one-shot model calls that are not part of an
+// agent turn: session titles and text translation.
+package textassist
 
 import (
 	"context"

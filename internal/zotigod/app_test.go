@@ -23,12 +23,12 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/runner"
-	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
@@ -8924,7 +8924,7 @@ func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
-	compressor := services.NewCompressor(services.CompressorConfig{
+	compressor := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize: 100_000, TriggerRatio: 0.7, PreserveRatio: 0.3,
 		TokenCounter: func(text string) int { return (len(text) + 3) / 4 },
 	})
@@ -8959,7 +8959,7 @@ func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 	assertUsage := func(handler *handler, saved *zotigosession.Session) {
 		t.Helper()
 		got := handler.decorateSession(context.Background(), sessionFromMetadata(saved.Metadata, SessionStateOffline, false), saved).ContextUsage
-		want := services.NewCompressor(services.CompressorConfig{}).CountTokens(compressed)
+		want := compaction.NewCompressor(compaction.CompressorConfig{}).CountTokens(compressed)
 		if got == nil || got.Status != "available" || got.Source != "estimate" || got.Tokens != want || got.Tokens >= 80_000 {
 			t.Fatalf("context usage after compaction = %#v", got)
 		}

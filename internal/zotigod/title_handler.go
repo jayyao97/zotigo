@@ -12,8 +12,8 @@ import (
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/core/textassist"
 )
 
 const defaultTitleSuggestionTimeout = 15 * time.Second
@@ -27,7 +27,7 @@ func generateTitleSuggestion(ctx context.Context, profile config.ProfileConfig, 
 	if err != nil {
 		return "", fmt.Errorf("create title provider: %w", err)
 	}
-	return services.GenerateTitle(ctx, provider, userMessage, assistantMessage)
+	return textassist.GenerateTitle(ctx, provider, userMessage, assistantMessage)
 }
 
 func (h *handler) handleSessionTitleSuggestion(w http.ResponseWriter, r *http.Request, id string) {

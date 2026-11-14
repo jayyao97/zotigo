@@ -1,4 +1,6 @@
-package services
+// Package loopguard detects an agent repeating the same tool call so the
+// agent can warn the model. It is an agent-internal policy with no other user.
+package loopguard
 
 import (
 	"crypto/sha256"

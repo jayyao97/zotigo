@@ -20,9 +20,9 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
@@ -2013,7 +2013,7 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 		contextWindow = config.DefaultContextWindow
 	}
 	updatedAt := session.UpdatedAt
-	prompt := protocol.ContextInput{ProfileKey: services.ContextProfileKey(profile)}
+	prompt := protocol.ContextInput{ProfileKey: compaction.ContextProfileKey(profile)}
 	// A running worker persists small progress records after each model call.
 	// The full snapshot is only checkpointed at turn/pause boundaries.
 	if session.Working {
@@ -2063,8 +2063,8 @@ func unavailableSessionContextUsage() *SessionContextUsage {
 
 // Read-only counting is shared across sessions; constructing a tokenizer for
 // every session on every sidebar refresh rebuilds the BPE tables.
-var nativeContextEstimator = sync.OnceValue(func() *services.Compressor {
-	return services.NewCompressor(services.CompressorConfig{})
+var nativeContextEstimator = sync.OnceValue(func() *compaction.Compressor {
+	return compaction.NewCompressor(compaction.CompressorConfig{})
 })
 
 func activeToolName(items []zotigosession.DisplayItem) string {

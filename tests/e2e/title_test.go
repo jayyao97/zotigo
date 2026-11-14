@@ -11,8 +11,8 @@ import (
 	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/testutil"
+	"github.com/jayyao97/zotigo/core/textassist"
 )
 
 // TestE2E_DeepSeekTitleProviderSmoke verifies the isolated title request against
@@ -43,7 +43,7 @@ func TestE2E_DeepSeekTitleProviderSmoke(t *testing.T) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	title, err := services.GenerateTitle(
+	title, err := textassist.GenerateTitle(
 		ctx,
 		provider,
 		"帮我看看这个配置为什么启动失败",

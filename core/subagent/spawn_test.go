@@ -12,11 +12,11 @@ import (
 	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/core/transport"
@@ -212,7 +212,7 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 			if err != nil || string(data) != report {
 				t.Fatalf("report not preserved: %v", err)
 			}
-			compressor := services.NewCompressor(services.DefaultCompressorConfig())
+			compressor := compaction.NewCompressor(compaction.DefaultCompressorConfig())
 			history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: "spawn", Type: protocol.ToolResultTypeText, Text: output}}}}}
 			projected := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
 			if !strings.Contains(projected, path) {

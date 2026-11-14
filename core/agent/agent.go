@@ -11,14 +11,15 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent/loopguard"
 	"github.com/jayyao97/zotigo/core/agent/prompt"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/debug"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/observability"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -43,9 +44,9 @@ type Agent struct {
 	reminderBuilder *prompt.ReminderBuilder
 
 	// Services
-	loopDetector                *services.LoopDetector
-	compressor                  *services.Compressor
-	compressorSummarizer        services.Summarizer
+	loopDetector                *loopguard.LoopDetector
+	compressor                  *compaction.Compressor
+	compressorSummarizer        compaction.Summarizer
 	classifier                  SafetyClassifier
 	classifierProfileName       string
 	classifierProfile           config.ProfileConfig
@@ -122,7 +123,7 @@ func WithApprovalPolicy(p ApprovalPolicy) AgentOption {
 }
 
 // WithCompressorSummarizer sets the LLM summarizer for high-quality summaries.
-func WithCompressorSummarizer(s services.Summarizer) AgentOption {
+func WithCompressorSummarizer(s compaction.Summarizer) AgentOption {
 	return func(a *Agent) {
 		a.compressorSummarizer = s
 		if a.compressor != nil {
@@ -206,7 +207,7 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 	// default already falls back to config.DefaultContextWindow,
 	// so omitting `context_window` doesn't desync this from the TUI
 	// status display.
-	compressorCfg := services.DefaultCompressorConfig()
+	compressorCfg := compaction.DefaultCompressorConfig()
 	if cfg.ContextWindow > 0 {
 		compressorCfg.ContextWindowSize = cfg.ContextWindow
 	}
@@ -223,8 +224,8 @@ func New(cfg config.ProfileConfig, exec executor.Executor, opts ...AgentOption) 
 		state:           StateIdle,
 		conversation:    newConversationState(),
 		turns:           make([]TurnAudit, 0),
-		loopDetector:    services.NewLoopDetector(services.DefaultLoopDetectorConfig()),
-		compressor:      services.NewCompressor(compressorCfg),
+		loopDetector:    loopguard.NewLoopDetector(loopguard.DefaultLoopDetectorConfig()),
+		compressor:      compaction.NewCompressor(compressorCfg),
 		observer:        observability.Noop{},
 		runtimeIdle:     runtimeIdle,
 	}
@@ -242,7 +243,7 @@ func (a *Agent) configureCompressorSummarizer() {
 	}
 	summarizer := a.compressorSummarizer
 	if summarizer == nil {
-		summarizer = services.NewProviderSummarizer(a.provider, services.WithSummarizerObserver(a.observer, a.cfg.Model))
+		summarizer = compaction.NewProviderSummarizer(a.provider, compaction.WithSummarizerObserver(a.observer, a.cfg.Model))
 	}
 	a.compressor.SetSummarizer(summarizer)
 }
@@ -373,7 +374,7 @@ func (a *Agent) GetContextStats() map[string]int {
 
 // ForceCompress manually triggers context compression.
 // Returns the compression result with statistics.
-func (a *Agent) ForceCompress(ctx context.Context) (*services.CompressionResult, error) {
+func (a *Agent) ForceCompress(ctx context.Context) (*compaction.CompressionResult, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -694,7 +695,7 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				return
 			}
 			a.mu.Lock()
-			msgs, contextInput, compaction, err := a.buildContext(ctx)
+			msgs, contextInput, compacted, err := a.buildContext(ctx)
 			provider := a.provider
 			model := a.cfg.Model
 			profileName := a.profileName
@@ -705,8 +706,8 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 				outCh <- withUsage(protocol.NewErrorEvent(turnErr))
 				return
 			}
-			if compaction != nil {
-				outCh <- protocol.Event{Type: protocol.EventTypeContextCompacted, ContextCompaction: compaction}
+			if compacted != nil {
+				outCh <- protocol.Event{Type: protocol.EventTypeContextCompacted, ContextCompaction: compacted}
 			}
 			outCh <- protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: contextUsage}
 			// Prepare tools list (sorted by name for deterministic ordering,
@@ -2376,7 +2377,7 @@ func isZeroUsage(usage protocol.Usage) bool {
 func (a *Agent) buildContext(ctx context.Context) ([]protocol.Message, protocol.ContextInput, *protocol.ContextCompaction, error) {
 	msgs := a.systemPromptMessages()
 	contextInput := a.contextPromptFor(msgs)
-	var compaction *protocol.ContextCompaction
+	var compacted *protocol.ContextCompaction
 	history := a.projectPromptHistory(a.conversation.history)
 
 	// The compression path owns the single calibrated threshold check; an outer
@@ -2388,7 +2389,7 @@ func (a *Agent) buildContext(ctx context.Context) ([]protocol.Message, protocol.
 		}
 		if err == nil && result.Compressed {
 			history = a.projectPromptHistory(a.conversation.history)
-			compaction = &protocol.ContextCompaction{
+			compacted = &protocol.ContextCompaction{
 				OriginalTokens:   result.OriginalTokens,
 				CompressedTokens: result.CompressedTokens,
 				MessagesBefore:   result.MessagesBefore,
@@ -2398,8 +2399,8 @@ func (a *Agent) buildContext(ctx context.Context) ([]protocol.Message, protocol.
 	}
 
 	msgs = append(msgs, history...)
-	contextInput.HistoryDigest = services.ContextDigest(history)
-	return msgs, contextInput, compaction, nil
+	contextInput.HistoryDigest = compaction.ContextDigest(history)
+	return msgs, contextInput, compacted, nil
 }
 
 func (a *Agent) systemPromptMessages() []protocol.Message {
@@ -2543,7 +2544,7 @@ func (a *Agent) promptContext() prompt.PromptContext {
 func (a *Agent) compressHistoryLocked(
 	ctx context.Context,
 	force bool,
-) (services.CompressionResult, error) {
+) (compaction.CompressionResult, error) {
 	system := a.systemPromptMessages()
 	return a.compressHistoryWithPromptLocked(ctx, force, false, a.contextPromptFor(system), system)
 }
@@ -2563,12 +2564,12 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	reactive bool,
 	prompt protocol.ContextInput,
 	system []protocol.Message,
-) (services.CompressionResult, error) {
+) (compaction.CompressionResult, error) {
 	// Match the UI usage path: ContextTokens owns prompt projection.
 	tokens, _ := a.compressor.ContextTokens(a.conversation.history, prompt)
 	history := a.projectPromptHistory(a.conversation.history)
 	if !force && !a.compressor.NeedsCompressionTokens(tokens) {
-		return services.CompressionResult{
+		return compaction.CompressionResult{
 			OriginalTokens: tokens, CompressedTokens: tokens,
 			MessagesBefore: len(history), MessagesAfter: len(history),
 		}, nil
@@ -2576,7 +2577,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 
 	var (
 		compressed []protocol.Message
-		result     services.CompressionResult
+		result     compaction.CompressionResult
 		err        error
 	)
 	a.compacting.Store(true)
@@ -2584,7 +2585,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	if !reactive && a.provider != nil && a.compressorSummarizer == nil {
 		messages := append(append([]protocol.Message(nil), system...), history...)
 		toolList := sortedToolList(a.tools)
-		summarizer := services.NewProviderSummarizer(a.provider, services.WithSummarizerObserver(a.observer, a.cfg.Model))
+		summarizer := compaction.NewProviderSummarizer(a.provider, compaction.WithSummarizerObserver(a.observer, a.cfg.Model))
 		compressed, result, err = a.compressor.ForceCompressWithSummary(ctx, history, func(ctx context.Context) (string, error) {
 			return summarizer.SummarizePrompt(ctx, messages, toolList)
 		})
@@ -2604,7 +2605,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 
 	rebased, state, err := a.rebaseUserContext(compressed)
 	if err != nil {
-		return services.CompressionResult{}, err
+		return compaction.CompressionResult{}, err
 	}
 	result.MessagesAfter = len(rebased)
 	result.CompressedTokens, _ = a.compressor.ContextTokens(rebased, prompt)
@@ -2617,7 +2618,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 		return result, nil
 	}
 	if err := a.conversation.replace(rebased, state); err != nil {
-		return services.CompressionResult{}, fmt.Errorf("record compressed history: %w", err)
+		return compaction.CompressionResult{}, fmt.Errorf("record compressed history: %w", err)
 	}
 	return result, nil
 }
