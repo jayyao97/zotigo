@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestSkillsAPIListsUserAndSessionWorkspaceSkills(t *testing.T) {
@@ -187,7 +188,7 @@ func TestNativeRuntimeInjectsCompleteSelectedSkill(t *testing.T) {
 	root := filepath.Join(t.TempDir(), "skills")
 	path := writeDaemonTestSkill(t, root, "review-taste", "review", "review carefully")
 	manager := skills.NewSkillManager("", skills.WithUserDir(root))
-	message, err := messageFromCommandWithSkills("command-1", &messageCommandPayload{
+	message, err := messageFromCommandWithSkills("command-1", &wire.MessageCommandPayload{
 		Text: "review this", Skills: []string{"review-taste"},
 	}, manager)
 	if err != nil {

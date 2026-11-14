@@ -26,6 +26,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type sessionListResponse struct {
@@ -557,7 +558,7 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 			conn, resp, _ := websocket.DefaultDialer.Dial(url, nil)
 			generation := ""
 			if resp != nil {
-				generation = resp.Header.Get(workerGenerationHeader)
+				generation = resp.Header.Get(wire.GenerationHeader)
 			}
 			connections <- connectedWorker{conn: conn, generation: generation}
 		}()
@@ -614,7 +615,7 @@ func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) 
 		messageDone <- rec
 	}()
 	input := readWorkerMessage(t, worker)
-	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+	if input.Type != wire.MessageInputRequest || input.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", input)
 	}
 	cancel()
@@ -638,7 +639,7 @@ func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: input.InputRequest.RequestID, Command: &accepted,
 	}}); err != nil {
 		t.Fatal(err)
@@ -708,7 +709,7 @@ func getSession(t *testing.T, handler http.Handler, id string) Session {
 	return session
 }
 
-func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source displayItemSource, id string) approvalRequestResponse {
+func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source displayItemSource, id string) wire.ApprovalRequest {
 	t.Helper()
 	approval := approvalRequest{
 		ID:        newZotigodID("apr"),
@@ -750,15 +751,15 @@ func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, sourc
 	return publicApprovalRequest(approval)
 }
 
-func respondToApprovalDecision(conn *websocket.Conn, source displayItemSource, sessionID string, approval approvalRequestResponse) <-chan error {
+func respondToApprovalDecision(conn *websocket.Conn, source displayItemSource, sessionID string, approval wire.ApprovalRequest) <-chan error {
 	done := make(chan error, 1)
 	go func() {
-		var msg workerMessage
+		var msg wire.Message
 		if err := conn.ReadJSON(&msg); err != nil {
 			done <- err
 			return
 		}
-		if msg.Type != workerMessageApprovalDecision || msg.ApprovalDecision == nil {
+		if msg.Type != wire.MessageApprovalDecision || msg.ApprovalDecision == nil {
 			done <- fmt.Errorf("unexpected worker message: %#v", msg)
 			return
 		}
@@ -780,9 +781,9 @@ func respondToApprovalDecision(conn *websocket.Conn, source displayItemSource, s
 		resolved.Status = approvalStatusResolved
 		resolved.Decisions = publicDisplayApprovalDecisions(decision.Decisions)
 		resolved.ResolvedAt = &resolvedAt
-		if err := conn.WriteJSON(workerMessage{
-			Type: workerMessageApprovalResult,
-			ApprovalResult: &workerApprovalResult{
+		if err := conn.WriteJSON(wire.Message{
+			Type: wire.MessageApprovalResult,
+			ApprovalResult: &wire.ApprovalResult{
 				RequestID: decision.RequestID,
 				Approval:  &resolved,
 			},
@@ -808,7 +809,7 @@ func connectReadyWorker(server *httptest.Server, sessionID string) (*websocket.C
 	if err != nil {
 		return nil, err
 	}
-	generation := resp.Header.Get(workerGenerationHeader)
+	generation := resp.Header.Get(wire.GenerationHeader)
 
 	resp, err = postWorkerReady(server, sessionID, generation)
 	if err != nil {
@@ -838,7 +839,7 @@ func connectWorkerForActivation(t *testing.T, server *httptest.Server, sessionID
 	if err != nil {
 		t.Fatalf("dial worker websocket: %v", err)
 	}
-	generation := resp.Header.Get(workerGenerationHeader)
+	generation := resp.Header.Get(wire.GenerationHeader)
 	if generation == "" {
 		_ = conn.Close()
 		t.Fatal("worker websocket response missing generation")
@@ -859,7 +860,7 @@ func markWorkerReady(t *testing.T, server *httptest.Server, sessionID string, ge
 }
 
 func postWorkerReady(server *httptest.Server, sessionID string, generation string) (*http.Response, error) {
-	body, err := sonic.Marshal(workerReadyRequest{Generation: generation})
+	body, err := sonic.Marshal(wire.ReadyRequest{Generation: generation})
 	if err != nil {
 		return nil, err
 	}
@@ -867,43 +868,43 @@ func postWorkerReady(server *httptest.Server, sessionID string, generation strin
 }
 
 func workerReadyBody(generation string) io.Reader {
-	body, _ := sonic.Marshal(workerReadyRequest{Generation: generation})
+	body, _ := sonic.Marshal(wire.ReadyRequest{Generation: generation})
 	return bytes.NewReader(body)
 }
 
-func readWorkerMessage(t *testing.T, conn *websocket.Conn) workerMessage {
+func readWorkerMessage(t *testing.T, conn *websocket.Conn) wire.Message {
 	t.Helper()
 
 	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
 		t.Fatalf("set read deadline: %v", err)
 	}
-	var msg workerMessage
+	var msg wire.Message
 	if err := conn.ReadJSON(&msg); err != nil {
 		t.Fatalf("read worker message: %v", err)
 	}
 	return msg
 }
 
-func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayItemSource, sessionID string) <-chan workerInputRequest {
+func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayItemSource, sessionID string) <-chan wire.InputRequest {
 	t.Helper()
-	requests := make(chan workerInputRequest, 8)
+	requests := make(chan wire.InputRequest, 8)
 	go func() {
 		defer close(requests)
 		for {
-			var message workerMessage
+			var message wire.Message
 			if err := conn.ReadJSON(&message); err != nil {
 				return
 			}
-			if message.Type != workerMessageInputRequest || message.InputRequest == nil {
+			if message.Type != wire.MessageInputRequest || message.InputRequest == nil {
 				continue
 			}
 			request := *message.InputRequest
 			requests <- request
-			result := workerInputResult{RequestID: request.RequestID}
+			result := wire.InputResult{RequestID: request.RequestID}
 			existing, found, err := findExistingSessionInput(context.Background(), source, sessionID, request.Command, "")
 			if err == nil && found {
 				result.Command = &existing
-				if err := conn.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &result}); err != nil {
+				if err := conn.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &result}); err != nil {
 					return
 				}
 				continue
@@ -921,7 +922,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayIte
 					err = errNoActiveTurn
 				case turnID != "":
 					command := steeringCommandForRequest(request, turnID)
-					var stored commandResponse
+					var stored wire.Command
 					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
@@ -930,7 +931,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayIte
 					err = errSessionBusy
 				default:
 					command := messageCommandForRequest(request)
-					var stored commandResponse
+					var stored wire.Command
 					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
@@ -943,7 +944,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayIte
 					result.ErrorCode = "command_pending"
 				}
 			}
-			if err := conn.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &result}); err != nil {
+			if err := conn.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &result}); err != nil {
 				return
 			}
 		}
@@ -958,11 +959,11 @@ func serveTestWorkerConnectionInputs(connection *workerConnection, source displa
 			case <-connection.doneCh:
 				return
 			case message := <-connection.sendCh:
-				if message.Type != workerMessageInputRequest || message.InputRequest == nil {
+				if message.Type != wire.MessageInputRequest || message.InputRequest == nil {
 					continue
 				}
 				request := *message.InputRequest
-				result := workerInputResult{RequestID: request.RequestID}
+				result := wire.InputResult{RequestID: request.RequestID}
 				items, _, err := source.LoadItems(context.Background(), sessionID)
 				if err == nil {
 					turnID := lastOpenTurnID(items)
@@ -970,7 +971,7 @@ func serveTestWorkerConnectionInputs(connection *workerConnection, source displa
 					if turnID != "" {
 						command = steeringCommandForRequest(request, turnID)
 					}
-					var stored commandResponse
+					var stored wire.Command
 					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
@@ -1049,7 +1050,7 @@ func appendPendingApprovalTurn(t *testing.T, source *fakeDisplayItemSource, sess
 	}
 }
 
-func getCommands(t *testing.T, handler http.Handler, path string) commandsResponse {
+func getCommands(t *testing.T, handler http.Handler, path string) wire.CommandsPage {
 	t.Helper()
 
 	rec := httptest.NewRecorder()
@@ -1057,7 +1058,7 @@ func getCommands(t *testing.T, handler http.Handler, path string) commandsRespon
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	var resp commandsResponse
+	var resp wire.CommandsPage
 	if err := sonic.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode commands response: %v", err)
 	}

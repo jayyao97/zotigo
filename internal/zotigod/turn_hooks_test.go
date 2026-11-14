@@ -15,6 +15,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type channelHookDispatcher struct {
@@ -98,7 +99,7 @@ func TestWorkerRuntimeDispatchesTurnHooksWithUsage(t *testing.T) {
 		hooks: dispatcher, hookModel: "model-test",
 	}
 
-	if err := runtime.startMessageTurn(context.Background(), "message-1", 1, &messageCommandPayload{Text: "hello"}); err != nil {
+	if err := runtime.startMessageTurn(context.Background(), "message-1", 1, &wire.MessageCommandPayload{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	runtime.profileMu.Lock()
@@ -173,7 +174,7 @@ func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {
 		hooks: dispatcher, hookModel: "model-test",
 	}
 
-	if err := runtime.startMessageTurn(context.Background(), "message-1", 1, &messageCommandPayload{Text: "hello"}); err != nil {
+	if err := runtime.startMessageTurn(context.Background(), "message-1", 1, &wire.MessageCommandPayload{Text: "hello"}); err != nil {
 		t.Fatal(err)
 	}
 	var end hooks.Event

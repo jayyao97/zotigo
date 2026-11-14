@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type changeApprovalPolicyRequest struct {
@@ -175,7 +176,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 	item, err := h.items.AppendItemIf(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:           sessionCommandApprovalPolicy,
+			Type:           wire.CommandApprovalPolicy,
 			ApprovalPolicy: string(target),
 		},
 	}, requireIdleSession)
@@ -209,7 +210,7 @@ func pendingApprovalPolicyIntent(items []zotigosession.DisplayItem) (agent.Appro
 	var commandID string
 	var sequence uint64
 	for _, item := range items {
-		if item.Command == nil || item.Command.Type != sessionCommandApprovalPolicy || completed[item.ID] || item.Sequence < sequence {
+		if item.Command == nil || item.Command.Type != wire.CommandApprovalPolicy || completed[item.ID] || item.Sequence < sequence {
 			continue
 		}
 		policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)

@@ -17,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type failingApprovalPolicyStore struct {
@@ -149,7 +150,7 @@ func TestSessionApprovalPolicyChangeQueuesRunningWorkerCommand(t *testing.T) {
 		t.Fatalf("change status = %d: %s", rec.Code, rec.Body.String())
 	}
 	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Type != sessionCommandApprovalPolicy || msg.Command.ApprovalPolicy == nil || msg.Command.ApprovalPolicy.Policy != agent.ApprovalPolicyBypass {
+	if msg.Command == nil || msg.Command.Type != wire.CommandApprovalPolicy || msg.Command.ApprovalPolicy == nil || msg.Command.ApprovalPolicy.Policy != agent.ApprovalPolicyBypass {
 		t.Fatalf("unexpected worker command: %#v", msg)
 	}
 	var first changeApprovalPolicyResponse
@@ -190,7 +191,7 @@ func TestSessionApprovalPolicyChangeQueuesRunningWorkerCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load commands after opposite request: %v", err)
 	}
-	commands, err := buildCommandsResponse(items, commandQuery{Limit: maxCommandsLimit}, "")
+	commands, err := buildCommandsResponse(items, commandQuery{Limit: wire.MaxCommandsLimit}, "")
 	if err != nil {
 		t.Fatalf("build durable commands: %v", err)
 	}
@@ -253,7 +254,7 @@ func TestSessionApprovalPolicyChangeQueuesRunningCodexWorkerCommands(t *testing.
 			t.Fatalf("change to %q status = %d: %s", policy, rec.Code, rec.Body.String())
 		}
 		msg := readWorkerMessage(t, worker)
-		if msg.Command == nil || msg.Command.Type != sessionCommandApprovalPolicy || msg.Command.ApprovalPolicy == nil || msg.Command.ApprovalPolicy.Policy != policy {
+		if msg.Command == nil || msg.Command.Type != wire.CommandApprovalPolicy || msg.Command.ApprovalPolicy == nil || msg.Command.ApprovalPolicy.Policy != policy {
 			t.Fatalf("unexpected Codex worker command for %q: %#v", policy, msg)
 		}
 	}
@@ -351,33 +352,33 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	}
 	commandItem, err := store.AppendDisplayItem(context.Background(), "sess-runtime-policy", zotigosession.DisplayItem{
 		Type:    zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyAuto)},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyAuto)},
 	})
 	if err != nil {
 		t.Fatalf("append policy command: %v", err)
 	}
-	command := commandResponse{
+	command := wire.Command{
 		ID:             commandItem.ID,
 		Sequence:       commandItem.Sequence,
-		Type:           sessionCommandApprovalPolicy,
-		ApprovalPolicy: &approvalPolicyCommandPayload{Policy: agent.ApprovalPolicyAuto},
+		Type:           wire.CommandApprovalPolicy,
+		ApprovalPolicy: &wire.ApprovalPolicyCommandPayload{Policy: agent.ApprovalPolicyAuto},
 	}
 	oppositeItem, err := store.AppendDisplayItem(context.Background(), "sess-runtime-policy", zotigosession.DisplayItem{
 		Type:    zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyBypass)},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyBypass)},
 	})
 	if err != nil {
 		t.Fatalf("append opposite policy command: %v", err)
 	}
-	oppositeCommand := commandResponse{
+	oppositeCommand := wire.Command{
 		ID:             oppositeItem.ID,
 		Sequence:       oppositeItem.Sequence,
-		Type:           sessionCommandApprovalPolicy,
-		ApprovalPolicy: &approvalPolicyCommandPayload{Policy: agent.ApprovalPolicyBypass},
+		Type:           wire.CommandApprovalPolicy,
+		ApprovalPolicy: &wire.ApprovalPolicyCommandPayload{Policy: agent.ApprovalPolicyBypass},
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, commandsResponse{
-			Commands:   []commandResponse{command, oppositeCommand},
+		writeJSON(w, http.StatusOK, wire.CommandsPage{
+			Commands:   []wire.Command{command, oppositeCommand},
 			NextCursor: fmt.Sprintf("%d", oppositeCommand.Sequence),
 			NextOffset: 1,
 		})
@@ -514,7 +515,7 @@ func TestWorkerRuntimeApprovalPolicyPersistenceFailureKeepsSaferPolicy(t *testin
 				}
 			}
 
-			err = runtime.setApprovalPolicy(context.Background(), "command-1", &approvalPolicyCommandPayload{Policy: tt.target})
+			err = runtime.setApprovalPolicy(context.Background(), "command-1", &wire.ApprovalPolicyCommandPayload{Policy: tt.target})
 			if err == nil || !strings.Contains(err.Error(), "approval policy persistence unavailable") {
 				t.Fatalf("set policy error = %v", err)
 			}

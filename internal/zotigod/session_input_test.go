@@ -4,12 +4,13 @@ import (
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestInputMessageKeepsCommandIDForSteeringAcknowledgement(t *testing.T) {
-	message, err := inputMessageFromRequest(workerInputRequest{Command: commandResponse{
-		ID: "steering-command", Type: sessionCommandMessage,
-		Message: &messageCommandPayload{Text: "change direction"},
+	message, err := inputMessageFromRequest(wire.InputRequest{Command: wire.Command{
+		ID: "steering-command", Type: wire.CommandMessage,
+		Message: &wire.MessageCommandPayload{Text: "change direction"},
 	}})
 	if err != nil {
 		t.Fatal(err)
@@ -21,8 +22,8 @@ func TestInputMessageKeepsCommandIDForSteeringAcknowledgement(t *testing.T) {
 
 func TestInputMessageAndDisplayItemKeepRequestContext(t *testing.T) {
 	requestContext := &protocol.RequestContext{Source: "feishu", ConversationName: "Shadow Test", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"}}
-	command := commandResponse{ID: "channel-message", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "run", RequestContext: requestContext}}
-	message, err := inputMessageFromRequest(workerInputRequest{Command: command})
+	command := wire.Command{ID: "channel-message", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "run", RequestContext: requestContext}}
+	message, err := inputMessageFromRequest(wire.InputRequest{Command: command})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,14 +42,14 @@ func TestInputMessageAndDisplayItemKeepRequestContext(t *testing.T) {
 
 func TestSteeringPreservesTrustedOriginThroughReplay(t *testing.T) {
 	origin := &protocol.RequestContext{Source: "feishu", ConnectionID: "bot", Actor: protocol.RequestActor{ID: "owner"}}
-	command := commandResponse{ID: "channel:bot:steer", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "continue", RequestContext: origin}}
-	steering := steeringCommandForRequest(workerInputRequest{Command: command}, "turn")
+	command := wire.Command{ID: "channel:bot:steer", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "continue", RequestContext: origin}}
+	steering := steeringCommandForRequest(wire.InputRequest{Command: command}, "turn")
 	item := displayItemForAcceptedInput(steering)
 	restored, err := steeringCommandFromItem(item, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := messageCommandForRequest(workerInputRequest{Command: restored})
+	message := messageCommandForRequest(wire.InputRequest{Command: restored})
 	for _, got := range []*protocol.RequestContext{commandRequestContext(steering), item.Command.RequestContext, commandRequestContext(restored), commandRequestContext(message)} {
 		if !sameRequestContext(origin, got) || got == origin {
 			t.Fatalf("origin lost or aliased: %+v", got)

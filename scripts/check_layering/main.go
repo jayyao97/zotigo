@@ -57,6 +57,11 @@ var rules = []rule{
 		deny: []string{"core/agent", "internal/zotigod", "internal/wiring"},
 		why:  "the TUI is a client of the session service and never runs an agent itself",
 	},
+	{
+		from: []string{"internal/zotigod/wire"},
+		deny: []string{"internal", "cli", "cmd"},
+		why:  "the daemon-worker protocol is data both processes share and must not depend on either side",
+	},
 }
 
 func under(pkg string, roots []string) bool {

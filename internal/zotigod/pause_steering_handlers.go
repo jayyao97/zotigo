@@ -9,6 +9,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func requireIdleSession(items []zotigosession.DisplayItem) error {
@@ -72,45 +73,45 @@ var errPauseInputStopTimeout = errors.New("timed out waiting for in-flight input
 // pauseActiveSession is the shared pause boundary for HTTP and authenticated
 // channel controls. Callers must resolve the live session first so the same
 // agent kind and turn are fenced throughout command creation.
-func (h *handler) pauseActiveSession(ctx context.Context, id string, session Session, requestedTurnID string) (commandResponse, error) {
+func (h *handler) pauseActiveSession(ctx context.Context, id string, session Session, requestedTurnID string) (wire.Command, error) {
 	items, _, err := h.items.LoadItems(ctx, id)
 	if err != nil {
-		return commandResponse{}, fmt.Errorf("load display items: %w", err)
+		return wire.Command{}, fmt.Errorf("load display items: %w", err)
 	}
 	turnID := lastOpenTurnID(items)
 	if turnID == "" {
-		return commandResponse{}, errNoActiveTurn
+		return wire.Command{}, errNoActiveTurn
 	}
 	if requestedTurnID != "" && requestedTurnID != turnID {
-		return commandResponse{}, errTurnMismatch
+		return wire.Command{}, errTurnMismatch
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		return commandResponse{}, errApprovalPending
+		return wire.Command{}, errApprovalPending
 	}
 	if !h.ensureWorkerOnline(ctx, id) {
-		return commandResponse{}, errWorkerOffline
+		return wire.Command{}, errWorkerOffline
 	}
 	items, _, err = h.items.LoadItems(ctx, id)
 	if err != nil {
-		return commandResponse{}, fmt.Errorf("reload display items: %w", err)
+		return wire.Command{}, fmt.Errorf("reload display items: %w", err)
 	}
 	if lastOpenTurnID(items) != turnID {
-		return commandResponse{}, errNoActiveTurn
+		return wire.Command{}, errNoActiveTurn
 	}
 	if hasPendingApprovalForTurn(items, turnID) {
-		return commandResponse{}, errApprovalPending
+		return wire.Command{}, errApprovalPending
 	}
-	var interrupt *workerInterruptTurn
+	var interrupt *wire.InterruptTurn
 	if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
 		stored, loadErr := h.store.Get(ctx, id)
 		if loadErr != nil || stored == nil || stored.ConversationID == "" {
-			return commandResponse{}, errors.New("load Codex conversation for pause")
+			return wire.Command{}, errors.New("load Codex conversation for pause")
 		}
-		interrupt = &workerInterruptTurn{ThreadID: stored.ConversationID, TurnID: turnID}
+		interrupt = &wire.InterruptTurn{ThreadID: stored.ConversationID, TurnID: turnID}
 	}
 	drained, releaseInputStop, err := h.workers.BeginInputStop(id, interrupt)
 	if err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	defer releaseInputStop()
 	waitCtx, cancelWait := context.WithTimeout(ctx, h.inputStopTimeout)
@@ -118,7 +119,7 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 	select {
 	case <-drained:
 	case <-waitCtx.Done():
-		return commandResponse{}, fmt.Errorf("%w: %v", errPauseInputStopTimeout, waitCtx.Err())
+		return wire.Command{}, fmt.Errorf("%w: %v", errPauseInputStopTimeout, waitCtx.Err())
 	}
 
 	item, err := func() (zotigosession.DisplayItem, error) {
@@ -146,7 +147,7 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 		return item, nil
 	}()
 	if err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	command := pauseCommandFromItem(item)
 	h.sendCommand(ctx, id, command)
@@ -157,9 +158,9 @@ func (h *handler) appendPauseCommand(ctx context.Context, id string, turnID stri
 	return h.items.AppendItemIf(ctx, id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:   sessionCommandPause,
+			Type:   wire.CommandPause,
 			TurnID: turnID,
-			Reason: userPauseReason,
+			Reason: wire.UserPauseReason,
 		},
 	}, requireOpenTurnWithoutPendingApproval(turnID))
 }

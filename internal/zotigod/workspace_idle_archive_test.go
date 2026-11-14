@@ -9,6 +9,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkspaceArchiveIdleAndBusySessions(t *testing.T) {
@@ -38,7 +39,7 @@ func TestWorkspaceArchiveIdleAndBusySessions(t *testing.T) {
 					source.items[session.ID] = append(source.items[session.ID], zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "approval"}})
 				}
 			case "pending message", "failed pending message":
-				source.items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "pending"}}}
+				source.items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "pending"}}}
 			case "queued input":
 				if err := catalog.QueueInput(t.Context(), session.ID, "queued", []byte(`{"text":"pending"}`)); err != nil {
 					t.Fatal(err)

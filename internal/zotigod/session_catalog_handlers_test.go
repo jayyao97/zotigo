@@ -11,6 +11,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkspaceDeleteHidesSessionsButPreservesHistoryProjection(t *testing.T) {
@@ -187,7 +188,7 @@ func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
-		if sessionID == session.ID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if sessionID == session.ID && item.Command != nil && item.Command.Type == wire.CommandMessage {
 			close(appendStarted)
 			<-releaseAppend
 		}

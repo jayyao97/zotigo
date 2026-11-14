@@ -16,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T) {
@@ -25,8 +26,8 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
-	notifiedCh := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) {
+	notifiedCh := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) {
 		notifiedCh <- approval
 	})
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
@@ -97,8 +98,8 @@ func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	notified := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
+	notified := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) { notified <- approval })
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
 	go func() {
 		results, _ := transport.RequestSpawnApproval(context.Background(), subagent.SpawnApprovalRequest{
@@ -145,8 +146,8 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}
-	notified := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
+	notified := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) { notified <- approval })
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
 	go func() {
 		results, _ := transport.RequestSpawnApproval(ctx, subagent.SpawnApprovalRequest{
@@ -242,16 +243,16 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 		turnDone:   make(chan struct{}),
 		readyDone:  true,
 	}
-	startOnly := runtime.AcceptInput(context.Background(), workerInputRequest{StartOnly: true, Command: commandResponse{
-		ID: "start-only-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "do not steer"},
+	startOnly := runtime.AcceptInput(context.Background(), wire.InputRequest{StartOnly: true, Command: wire.Command{
+		ID: "start-only-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "do not steer"},
 	}})
 	if startOnly.ErrorCode != "active_turn" || startOnly.Command != nil {
 		t.Fatalf("start-only input = %#v, want active_turn", startOnly)
 	}
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-		ID: "steering-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "skip this tool"},
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+		ID: "steering-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "skip this tool"},
 	}})
-	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != turnID {
+	if result.Error != "" || result.Command == nil || result.Command.Type != wire.CommandSteering || result.Command.Steering.TurnID != turnID {
 		t.Fatalf("accept steering: %#v", result)
 	}
 	results, err := transport.RequestApproval(context.Background(), []zotigotransport.PendingToolCall{{
@@ -282,12 +283,12 @@ func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
-	pendingNotification := make(chan approvalRequestResponse, 1)
-	resolvedNotification := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) {
+	pendingNotification := make(chan wire.ApprovalRequest, 1)
+	resolvedNotification := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) {
 		pendingNotification <- approval
 	})
-	transport.notifyApprovalResolved = func(_ context.Context, approval approvalRequestResponse) {
+	transport.notifyApprovalResolved = func(_ context.Context, approval wire.ApprovalRequest) {
 		resolvedNotification <- approval
 	}
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
@@ -323,8 +324,8 @@ func TestWorkerRuntimeApprovalDecisionIsAppliedOnce(t *testing.T) {
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
-	notifiedCh := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) {
+	notifiedCh := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) {
 		notifiedCh <- approval
 	})
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
@@ -586,8 +587,8 @@ func TestWorkerRuntimeApprovalCannotResolveDuringInitialization(t *testing.T) {
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
-	notifiedCh := make(chan approvalRequestResponse, 1)
-	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) {
+	notifiedCh := make(chan wire.ApprovalRequest, 1)
+	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval wire.ApprovalRequest) {
 		notifiedCh <- approval
 	})
 	requestDone := make(chan error, 1)

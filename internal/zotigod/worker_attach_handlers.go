@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id string) {
@@ -15,7 +16,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
-	var req workerReadyRequest
+	var req wire.ReadyRequest
 	if err := readOptionalJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
@@ -97,10 +98,10 @@ func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session,
 	if err != nil || lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingHumanRequest(items) {
 		return
 	}
-	h.closeWorkerWhenIdle(session.ID, generation, workerIdle{CommandSequence: latestCommandSequence(items)})
+	h.closeWorkerWhenIdle(session.ID, generation, wire.Idle{CommandSequence: latestCommandSequence(items)})
 }
 
-func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle workerIdle) bool {
+func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle wire.Idle) bool {
 	session, ok := h.registry.Get(sessionID)
 	if !ok {
 		return false
@@ -127,7 +128,7 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 			h.logger.Printf("pause queue after worker disconnect: session=%s error=%v", id, err)
 		}
 	}
-	h.events.Retire(id, displayPreviewRetirement{Terminal: true})
+	h.events.Retire(id, wire.PreviewRetirement{Terminal: true})
 	h.events.WakeBarrier(id)
 	if session, ok := h.registry.Get(id); ok {
 		if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
@@ -179,7 +180,7 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 
-	var req finishSessionRequest
+	var req wire.FinishSessionRequest
 	if err := readOptionalJSON(r, &req); err != nil {
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return

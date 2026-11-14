@@ -2,7 +2,6 @@ package zotigod
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"sync"
@@ -10,9 +9,8 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const workerWriteWait = 10 * time.Second
@@ -29,141 +27,12 @@ const (
 	defaultWorkerPongWait     = 45 * time.Second
 )
 
-type workerMessageType string
-
-const (
-	workerMessageCommand                 workerMessageType = "command"
-	workerMessageWorking                 workerMessageType = "working"
-	workerMessageDelta                   workerMessageType = "display_delta"
-	workerMessageDisplayWake             workerMessageType = "display_wake"
-	workerMessageDisplayBarrier          workerMessageType = "display_barrier"
-	workerMessageDisplayBarrierOK        workerMessageType = "display_barrier_ack"
-	workerMessageApprovalRequest         workerMessageType = "approval_request"
-	workerMessageApprovalDecision        workerMessageType = "approval_decision"
-	workerMessageApprovalResult          workerMessageType = "approval_result"
-	workerMessageInteractionRequest      workerMessageType = "interaction_request"
-	workerMessageInteractionResponse     workerMessageType = "interaction_response"
-	workerMessageInteractionResult       workerMessageType = "interaction_result"
-	workerMessageConversationBound       workerMessageType = "conversation_bound"
-	workerMessageConversationBoundResult workerMessageType = "conversation_bound_result"
-	workerMessageInputRequest            workerMessageType = "input_request"
-	workerMessageInputResult             workerMessageType = "input_result"
-	workerMessageInterruptTurn           workerMessageType = "interrupt_turn"
-	workerMessageIdle                    workerMessageType = "idle"
-	workerMessageRuntimeToolRequest      workerMessageType = "runtime_tool_request"
-	workerMessageRuntimeToolResult       workerMessageType = "runtime_tool_result"
-)
-
-type workerMessage struct {
-	Type                    workerMessageType              `json:"type"`
-	Command                 *commandResponse               `json:"command,omitempty"`
-	PreviewRetirement       *displayPreviewRetirement      `json:"preview_retirement,omitempty"`
-	Delta                   *displayDeltaEvent             `json:"delta,omitempty"`
-	DisplayBarrier          *workerDisplayBarrier          `json:"display_barrier,omitempty"`
-	ApprovalRequest         *approvalRequestResponse       `json:"approval_request,omitempty"`
-	ApprovalDecision        *workerApprovalDecision        `json:"approval_decision,omitempty"`
-	ApprovalResult          *workerApprovalResult          `json:"approval_result,omitempty"`
-	InteractionRequest      *interactionRequest            `json:"interaction_request,omitempty"`
-	InteractionResponse     *workerInteractionResponse     `json:"interaction_response,omitempty"`
-	InteractionResult       *workerInteractionResult       `json:"interaction_result,omitempty"`
-	ConversationBound       *workerConversationBound       `json:"conversation_bound,omitempty"`
-	ConversationBoundResult *workerConversationBoundResult `json:"conversation_bound_result,omitempty"`
-	InputRequest            *workerInputRequest            `json:"input_request,omitempty"`
-	InputResult             *workerInputResult             `json:"input_result,omitempty"`
-	InterruptTurn           *workerInterruptTurn           `json:"interrupt_turn,omitempty"`
-	Idle                    *workerIdle                    `json:"idle,omitempty"`
-	RuntimeToolRequest      *workerRuntimeToolRequest      `json:"runtime_tool_request,omitempty"`
-	RuntimeToolResult       *workerRuntimeToolResult       `json:"runtime_tool_result,omitempty"`
-}
-
-type workerRuntimeToolRequest struct {
-	RequestID      string                   `json:"request_id"`
-	Namespace      string                   `json:"namespace,omitempty"`
-	TurnID         string                   `json:"turn_id,omitempty"`
-	CallID         string                   `json:"call_id,omitempty"`
-	Name           string                   `json:"name"`
-	Arguments      json.RawMessage          `json:"arguments,omitempty"`
-	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
-}
-
-type workerRuntimeToolResult struct {
-	RequestID string `json:"request_id"`
-	Text      string `json:"text,omitempty"`
-	Error     string `json:"error,omitempty"`
-}
-
-type workerInterruptTurn struct {
-	ThreadID string `json:"thread_id"`
-	TurnID   string `json:"turn_id"`
-}
-
-type workerInputRequest struct {
-	RequestID              string               `json:"request_id"`
-	Command                commandResponse      `json:"command"`
-	SteeringOnly           bool                 `json:"steering_only,omitempty"`
-	StartOnly              bool                 `json:"start_only,omitempty"`
-	ExpectedTurnID         string               `json:"expected_turn_id,omitempty"`
-	RequiredApprovalPolicy agent.ApprovalPolicy `json:"required_approval_policy,omitempty"`
-	RequiredPromptRevision uint64               `json:"required_prompt_revision,omitempty"`
-	RequirePromptRevision  bool                 `json:"require_prompt_revision,omitempty"`
-}
-
-type workerInputResult struct {
-	RequestID string           `json:"request_id"`
-	Command   *commandResponse `json:"command,omitempty"`
-	ErrorCode string           `json:"error_code,omitempty"`
-	Error     string           `json:"error,omitempty"`
-}
-
-type workerIdle struct {
-	CommandSequence uint64 `json:"command_sequence"`
-}
-
-type workerDisplayBarrier struct {
-	ID string `json:"id"`
-}
-
-type workerApprovalDecision struct {
-	RequestID  string                                  `json:"request_id"`
-	ApprovalID string                                  `json:"approval_id"`
-	Decisions  []zotigosession.DisplayApprovalDecision `json:"decisions"`
-	StopTurn   bool                                    `json:"stop_turn,omitempty"`
-}
-
-type workerApprovalResult struct {
-	RequestID string                   `json:"request_id"`
-	Approval  *approvalRequestResponse `json:"approval,omitempty"`
-	Error     string                   `json:"error,omitempty"`
-}
-
-type workerInteractionResponse struct {
-	RequestID     string              `json:"request_id"`
-	InteractionID string              `json:"interaction_id"`
-	Answers       map[string][]string `json:"answers"`
-}
-
-type workerInteractionResult struct {
-	RequestID   string              `json:"request_id"`
-	Interaction *interactionRequest `json:"interaction,omitempty"`
-	Error       string              `json:"error,omitempty"`
-}
-
-type workerConversationBound struct {
-	ConversationID string `json:"conversation_id"`
-}
-
-type workerConversationBoundResult struct {
-	ConversationID string `json:"conversation_id"`
-	ErrorCode      string `json:"error_code,omitempty"`
-	Error          string `json:"error,omitempty"`
-}
-
 type workerRegistry struct {
 	mu           sync.Mutex
 	workers      map[string]*workerConnection
 	waiters      map[string][]chan struct{}
 	onDisconnect func(string, string)
-	onMessage    func(string, string, workerMessage)
+	onMessage    func(string, string, wire.Message)
 	pingInterval time.Duration
 	pongWait     time.Duration
 	approvalWait time.Duration
@@ -185,7 +54,7 @@ func (r *workerRegistry) SetDisconnectHandler(handler func(string, string)) {
 	r.onDisconnect = handler
 }
 
-func (r *workerRegistry) SetMessageHandler(handler func(string, string, workerMessage)) {
+func (r *workerRegistry) SetMessageHandler(handler func(string, string, wire.Message)) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.onMessage = handler
@@ -246,7 +115,7 @@ func (r *workerRegistry) WaitForMatch(ctxDone <-chan struct{}, sessionID string,
 	}
 }
 
-func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result workerConversationBoundResult) bool {
+func (r *workerRegistry) SendConversationBoundResult(sessionID string, generation string, result wire.ConversationBoundResult) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	available := worker != nil && !worker.closing && worker.generation == generation
@@ -254,10 +123,10 @@ func (r *workerRegistry) SendConversationBoundResult(sessionID string, generatio
 	if !available {
 		return false
 	}
-	return worker.sendMessage(workerMessage{Type: workerMessageConversationBoundResult, ConversationBoundResult: &result})
+	return worker.sendMessage(wire.Message{Type: wire.MessageConversationBoundResult, ConversationBoundResult: &result})
 }
 
-func (r *workerRegistry) SendRuntimeToolResult(sessionID string, generation string, result workerRuntimeToolResult) bool {
+func (r *workerRegistry) SendRuntimeToolResult(sessionID string, generation string, result wire.RuntimeToolResult) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	available := worker != nil && !worker.closing && worker.generation == generation
@@ -265,10 +134,10 @@ func (r *workerRegistry) SendRuntimeToolResult(sessionID string, generation stri
 	if !available {
 		return false
 	}
-	return worker.sendMessage(workerMessage{Type: workerMessageRuntimeToolResult, RuntimeToolResult: &result})
+	return worker.sendMessage(wire.Message{Type: wire.MessageRuntimeToolResult, RuntimeToolResult: &result})
 }
 
-func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
+func (r *workerRegistry) Send(sessionID string, command wire.Command) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	available := worker != nil && !worker.closing
@@ -293,14 +162,14 @@ func (r *workerRegistry) Send(sessionID string, command commandResponse) bool {
 
 // IsCurrentIdle validates an idle notification without scheduling eviction,
 // allowing the handler to drain queued inputs before releasing the worker.
-func (r *workerRegistry) IsCurrentIdle(sessionID string, generation string, idle workerIdle) bool {
+func (r *workerRegistry) IsCurrentIdle(sessionID string, generation string, idle wire.Idle) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	worker := r.workers[sessionID]
 	return worker != nil && !worker.closing && worker.generation == generation && worker.lastCommandSequence <= idle.CommandSequence
 }
 
-func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle workerIdle, timeout time.Duration) bool {
+func (r *workerRegistry) CloseWhenIdle(sessionID string, generation string, idle wire.Idle, timeout time.Duration) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	if worker == nil || worker.closing || worker.generation != generation || worker.lastCommandSequence > idle.CommandSequence {
@@ -353,25 +222,25 @@ func (r *workerRegistry) closeIdleWorker(worker *workerConnection, idleEpoch uin
 	}
 }
 
-func (r *workerRegistry) acknowledgeDisplayBarrier(sessionID string, barrier workerDisplayBarrier) bool {
+func (r *workerRegistry) acknowledgeDisplayBarrier(sessionID string, barrier wire.DisplayBarrier) bool {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	r.mu.Unlock()
 	if worker == nil {
 		return false
 	}
-	return worker.sendMessage(workerMessage{
-		Type:           workerMessageDisplayBarrierOK,
+	return worker.sendMessage(wire.Message{
+		Type:           wire.MessageDisplayBarrierOK,
 		DisplayBarrier: &barrier,
 	})
 }
 
-func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (approvalRequestResponse, error) {
+func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (wire.ApprovalRequest, error) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	r.mu.Unlock()
 	if worker == nil {
-		return approvalRequestResponse{}, fmt.Errorf("approval decision requires an online worker")
+		return wire.ApprovalRequest{}, fmt.Errorf("approval decision requires an online worker")
 	}
 	if r.approvalWait > 0 {
 		var cancel context.CancelFunc
@@ -381,12 +250,12 @@ func (r *workerRegistry) SubmitApproval(ctx context.Context, sessionID string, a
 	return worker.submitApproval(ctx, approvalID, decisions, stopTurn)
 }
 
-func (r *workerRegistry) SubmitInteraction(ctx context.Context, sessionID, interactionID string, answers map[string][]string) (interactionRequest, error) {
+func (r *workerRegistry) SubmitInteraction(ctx context.Context, sessionID, interactionID string, answers map[string][]string) (wire.InteractionRequest, error) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	r.mu.Unlock()
 	if worker == nil {
-		return interactionRequest{}, fmt.Errorf("interaction response requires an online worker")
+		return wire.InteractionRequest{}, fmt.Errorf("interaction response requires an online worker")
 	}
 	if r.approvalWait > 0 {
 		var cancel context.CancelFunc
@@ -519,7 +388,7 @@ func (r *workerRegistry) unregister(sessionID string, worker *workerConnection) 
 	}
 }
 
-func (r *workerRegistry) receive(worker *workerConnection, msg workerMessage) {
+func (r *workerRegistry) receive(worker *workerConnection, msg wire.Message) {
 	r.mu.Lock()
 	active := r.workers[worker.sessionID] == worker
 	handler := r.onMessage
@@ -534,13 +403,13 @@ type workerConnection struct {
 	generation          string
 	conn                *websocket.Conn
 	registry            *workerRegistry
-	sendCh              chan workerMessage
+	sendCh              chan wire.Message
 	doneCh              chan struct{}
 	closeOnce           sync.Once
 	waitersMu           sync.Mutex
-	waiters             map[string]chan workerApprovalResult
-	interactionWaiters  map[string]chan workerInteractionResult
-	inputWaiters        map[string]chan workerInputResult
+	waiters             map[string]chan wire.ApprovalResult
+	interactionWaiters  map[string]chan wire.InteractionResult
+	inputWaiters        map[string]chan wire.InputResult
 	idleTimer           *time.Timer
 	idleEpoch           uint64
 	idleCommandSequence uint64
@@ -559,26 +428,26 @@ func newWorkerConnection(sessionID string, generation string, conn *websocket.Co
 		generation:         generation,
 		conn:               conn,
 		registry:           registry,
-		sendCh:             make(chan workerMessage, 32),
+		sendCh:             make(chan wire.Message, 32),
 		doneCh:             make(chan struct{}),
-		waiters:            make(map[string]chan workerApprovalResult),
-		interactionWaiters: make(map[string]chan workerInteractionResult),
-		inputWaiters:       make(map[string]chan workerInputResult),
+		waiters:            make(map[string]chan wire.ApprovalResult),
+		interactionWaiters: make(map[string]chan wire.InteractionResult),
+		inputWaiters:       make(map[string]chan wire.InputResult),
 		inputRequests:      make(map[string]*workerInputSubmission),
 	}
 }
 
-func (r *workerRegistry) SubmitInput(ctx context.Context, sessionID string, request workerInputRequest) (commandResponse, error) {
+func (r *workerRegistry) SubmitInput(ctx context.Context, sessionID string, request wire.InputRequest) (wire.Command, error) {
 	submission, err := r.BeginInput(sessionID, request)
 	if err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	return submission.Await(ctx)
 }
 
-func (r *workerRegistry) BeginInput(sessionID string, request workerInputRequest) (*workerInputSubmission, error) {
+func (r *workerRegistry) BeginInput(sessionID string, request wire.InputRequest) (*workerInputSubmission, error) {
 	request.RequestID = newZotigodID("input_submit")
-	waiter := make(chan workerInputResult, 1)
+	waiter := make(chan wire.InputResult, 1)
 
 	r.mu.Lock()
 	worker := r.workers[sessionID]
@@ -605,7 +474,7 @@ func (r *workerRegistry) BeginInput(sessionID string, request workerInputRequest
 	worker.waitersMu.Unlock()
 	r.mu.Unlock()
 
-	msg := workerMessage{Type: workerMessageInputRequest, InputRequest: &request}
+	msg := wire.Message{Type: wire.MessageInputRequest, InputRequest: &request}
 	if !worker.trySendMessage(msg) {
 		worker.waitersMu.Lock()
 		delete(worker.inputWaiters, request.RequestID)
@@ -617,7 +486,7 @@ func (r *workerRegistry) BeginInput(sessionID string, request workerInputRequest
 	return submission, nil
 }
 
-func (r *workerRegistry) finishInput(worker *workerConnection, requestID string, command *commandResponse) {
+func (r *workerRegistry) finishInput(worker *workerConnection, requestID string, command *wire.Command) {
 	r.mu.Lock()
 	if r.workers[worker.sessionID] != worker {
 		r.mu.Unlock()
@@ -670,7 +539,7 @@ func (r *workerRegistry) finishInput(worker *workerConnection, requestID string,
 	}
 }
 
-func (r *workerRegistry) BeginInputStop(sessionID string, interrupt *workerInterruptTurn) (<-chan struct{}, func(), error) {
+func (r *workerRegistry) BeginInputStop(sessionID string, interrupt *wire.InterruptTurn) (<-chan struct{}, func(), error) {
 	r.mu.Lock()
 	worker := r.workers[sessionID]
 	if worker == nil || worker.closing {
@@ -701,21 +570,21 @@ func (r *workerRegistry) BeginInputStop(sessionID string, interrupt *workerInter
 		}
 		r.mu.Unlock()
 	}
-	if hasPendingInput && interrupt != nil && !worker.trySendMessage(workerMessage{Type: workerMessageInterruptTurn, InterruptTurn: interrupt}) {
+	if hasPendingInput && interrupt != nil && !worker.trySendMessage(wire.Message{Type: wire.MessageInterruptTurn, InterruptTurn: interrupt}) {
 		release()
 		return nil, nil, errWorkerOffline
 	}
 	return drained, release, nil
 }
 
-func (c *workerConnection) send(command commandResponse) bool {
-	return c.sendMessage(workerMessage{
-		Type:    workerMessageCommand,
+func (c *workerConnection) send(command wire.Command) bool {
+	return c.sendMessage(wire.Message{
+		Type:    wire.MessageCommand,
 		Command: &command,
 	})
 }
 
-func (c *workerConnection) sendMessage(msg workerMessage) bool {
+func (c *workerConnection) sendMessage(msg wire.Message) bool {
 	select {
 	case <-c.doneCh:
 		return false
@@ -727,7 +596,7 @@ func (c *workerConnection) sendMessage(msg workerMessage) bool {
 	}
 }
 
-func (c *workerConnection) trySendMessage(msg workerMessage) bool {
+func (c *workerConnection) trySendMessage(msg wire.Message) bool {
 	select {
 	case <-c.doneCh:
 		return false
@@ -743,9 +612,9 @@ func (c *workerConnection) trySendMessage(msg workerMessage) bool {
 	}
 }
 
-func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (approvalRequestResponse, error) {
+func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (wire.ApprovalRequest, error) {
 	requestID := newZotigodID("approval_submit")
-	waiter := make(chan workerApprovalResult, 1)
+	waiter := make(chan wire.ApprovalResult, 1)
 	c.waitersMu.Lock()
 	c.waiters[requestID] = waiter
 	c.waitersMu.Unlock()
@@ -755,9 +624,9 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 		c.waitersMu.Unlock()
 	}()
 
-	msg := workerMessage{
-		Type: workerMessageApprovalDecision,
-		ApprovalDecision: &workerApprovalDecision{
+	msg := wire.Message{
+		Type: wire.MessageApprovalDecision,
+		ApprovalDecision: &wire.ApprovalDecision{
 			RequestID:  requestID,
 			ApprovalID: approvalID,
 			Decisions:  copyApprovalDecisions(decisions),
@@ -766,31 +635,31 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 	}
 	select {
 	case <-ctx.Done():
-		return approvalRequestResponse{}, ctx.Err()
+		return wire.ApprovalRequest{}, ctx.Err()
 	case <-c.doneCh:
-		return approvalRequestResponse{}, fmt.Errorf("worker disconnected")
+		return wire.ApprovalRequest{}, fmt.Errorf("worker disconnected")
 	case c.sendCh <- msg:
 	}
 
 	select {
 	case <-ctx.Done():
-		return approvalRequestResponse{}, ctx.Err()
+		return wire.ApprovalRequest{}, ctx.Err()
 	case <-c.doneCh:
-		return approvalRequestResponse{}, fmt.Errorf("worker disconnected")
+		return wire.ApprovalRequest{}, fmt.Errorf("worker disconnected")
 	case result := <-waiter:
 		if result.Error != "" {
-			return approvalRequestResponse{}, fmt.Errorf("worker rejected approval decision: %s", result.Error)
+			return wire.ApprovalRequest{}, fmt.Errorf("worker rejected approval decision: %s", result.Error)
 		}
 		if result.Approval == nil {
-			return approvalRequestResponse{}, fmt.Errorf("worker returned an empty approval result")
+			return wire.ApprovalRequest{}, fmt.Errorf("worker returned an empty approval result")
 		}
 		return *result.Approval, nil
 	}
 }
 
-func (c *workerConnection) submitInteraction(ctx context.Context, interactionID string, answers map[string][]string) (interactionRequest, error) {
+func (c *workerConnection) submitInteraction(ctx context.Context, interactionID string, answers map[string][]string) (wire.InteractionRequest, error) {
 	requestID := newZotigodID("interaction_submit")
-	waiter := make(chan workerInteractionResult, 1)
+	waiter := make(chan wire.InteractionResult, 1)
 	c.waitersMu.Lock()
 	c.interactionWaiters[requestID] = waiter
 	c.waitersMu.Unlock()
@@ -799,33 +668,33 @@ func (c *workerConnection) submitInteraction(ctx context.Context, interactionID 
 		delete(c.interactionWaiters, requestID)
 		c.waitersMu.Unlock()
 	}()
-	msg := workerMessage{Type: workerMessageInteractionResponse, InteractionResponse: &workerInteractionResponse{
+	msg := wire.Message{Type: wire.MessageInteractionResponse, InteractionResponse: &wire.InteractionResponse{
 		RequestID: requestID, InteractionID: interactionID, Answers: answers,
 	}}
 	select {
 	case <-ctx.Done():
-		return interactionRequest{}, ctx.Err()
+		return wire.InteractionRequest{}, ctx.Err()
 	case <-c.doneCh:
-		return interactionRequest{}, fmt.Errorf("worker disconnected")
+		return wire.InteractionRequest{}, fmt.Errorf("worker disconnected")
 	case c.sendCh <- msg:
 	}
 	select {
 	case <-ctx.Done():
-		return interactionRequest{}, ctx.Err()
+		return wire.InteractionRequest{}, ctx.Err()
 	case <-c.doneCh:
-		return interactionRequest{}, fmt.Errorf("worker disconnected")
+		return wire.InteractionRequest{}, fmt.Errorf("worker disconnected")
 	case result := <-waiter:
 		if result.Error != "" {
-			return interactionRequest{}, fmt.Errorf("worker rejected interaction response: %s", result.Error)
+			return wire.InteractionRequest{}, fmt.Errorf("worker rejected interaction response: %s", result.Error)
 		}
 		if result.Interaction == nil {
-			return interactionRequest{}, fmt.Errorf("worker returned an empty interaction result")
+			return wire.InteractionRequest{}, fmt.Errorf("worker returned an empty interaction result")
 		}
 		return *result.Interaction, nil
 	}
 }
 
-func (c *workerConnection) resolveApproval(result workerApprovalResult) {
+func (c *workerConnection) resolveApproval(result wire.ApprovalResult) {
 	c.waitersMu.Lock()
 	waiter := c.waiters[result.RequestID]
 	c.waitersMu.Unlock()
@@ -838,7 +707,7 @@ func (c *workerConnection) resolveApproval(result workerApprovalResult) {
 	}
 }
 
-func (c *workerConnection) resolveInteraction(result workerInteractionResult) {
+func (c *workerConnection) resolveInteraction(result wire.InteractionResult) {
 	c.waitersMu.Lock()
 	waiter := c.interactionWaiters[result.RequestID]
 	c.waitersMu.Unlock()
@@ -854,7 +723,7 @@ func (c *workerConnection) resolveInteraction(result workerInteractionResult) {
 type workerInputSubmission struct {
 	worker    *workerConnection
 	requestID string
-	waiter    chan workerInputResult
+	waiter    chan wire.InputResult
 
 	mu       sync.Mutex
 	finished bool
@@ -887,30 +756,30 @@ func (s *workerInputSubmission) finish() {
 	}
 }
 
-func (s *workerInputSubmission) Await(ctx context.Context) (commandResponse, error) {
+func (s *workerInputSubmission) Await(ctx context.Context) (wire.Command, error) {
 	defer func() {
 		s.worker.waitersMu.Lock()
 		delete(s.worker.inputWaiters, s.requestID)
 		s.worker.waitersMu.Unlock()
 	}()
 
-	var result workerInputResult
+	var result wire.InputResult
 	select {
 	case <-ctx.Done():
-		return commandResponse{}, ctx.Err()
+		return wire.Command{}, ctx.Err()
 	case <-s.worker.doneCh:
 		select {
 		case result = <-s.waiter:
 		default:
-			return commandResponse{}, errWorkerOffline
+			return wire.Command{}, errWorkerOffline
 		}
 	case result = <-s.waiter:
 	}
 	if result.ErrorCode != "" || result.Error != "" {
-		return commandResponse{}, &workerInputError{Code: result.ErrorCode, Message: result.Error}
+		return wire.Command{}, &workerInputError{Code: result.ErrorCode, Message: result.Error}
 	}
 	if result.Command == nil {
-		return commandResponse{}, fmt.Errorf("worker returned an empty input result")
+		return wire.Command{}, fmt.Errorf("worker returned an empty input result")
 	}
 	return *result.Command, nil
 }
@@ -946,7 +815,7 @@ func (e *workerInputError) Is(target error) bool {
 	}
 }
 
-func (c *workerConnection) resolveInput(result workerInputResult) {
+func (c *workerConnection) resolveInput(result wire.InputResult) {
 	c.waitersMu.Lock()
 	waiter := c.inputWaiters[result.RequestID]
 	c.waitersMu.Unlock()
@@ -994,21 +863,21 @@ func (c *workerConnection) readLoop() {
 		if messageType != websocket.TextMessage {
 			continue
 		}
-		var msg workerMessage
+		var msg wire.Message
 		if err := sonic.Unmarshal(data, &msg); err != nil {
 			return
 		}
-		if msg.Type == workerMessageApprovalResult && msg.ApprovalResult != nil {
+		if msg.Type == wire.MessageApprovalResult && msg.ApprovalResult != nil {
 			c.registry.receive(c, msg)
 			c.resolveApproval(*msg.ApprovalResult)
 			continue
 		}
-		if msg.Type == workerMessageInteractionResult && msg.InteractionResult != nil {
+		if msg.Type == wire.MessageInteractionResult && msg.InteractionResult != nil {
 			c.registry.receive(c, msg)
 			c.resolveInteraction(*msg.InteractionResult)
 			continue
 		}
-		if msg.Type == workerMessageInputResult && msg.InputResult != nil {
+		if msg.Type == wire.MessageInputResult && msg.InputResult != nil {
 			c.registry.receive(c, msg)
 			c.resolveInput(*msg.InputResult)
 			continue
@@ -1017,7 +886,7 @@ func (c *workerConnection) readLoop() {
 	}
 }
 
-func (c *workerConnection) writeJSON(msg workerMessage) error {
+func (c *workerConnection) writeJSON(msg wire.Message) error {
 	data, err := sonic.Marshal(msg)
 	if err != nil {
 		return err

@@ -53,6 +53,10 @@ func TestLayerRules(t *testing.T) {
 		{"session may import agent", "core/session/x.go", m + "core/agent", 0},
 		{"tui is a client", "cli/tui/x.go", m + "core/agent", 1},
 		{"tui may use the client", "cli/tui/x.go", m + "internal/zotigodclient", 0},
+		{"wire must not import the daemon", "internal/zotigod/wire/x.go", m + "internal/zotigod", 1},
+		{"wire must not import other product packages", "internal/zotigod/wire/x.go", m + "internal/runtime", 1},
+		{"wire may import core", "internal/zotigod/wire/x.go", m + "core/protocol", 0},
+		{"zotigod may import wire", "internal/zotigod/x.go", m + "internal/zotigod/wire", 0},
 		{"tests are exempt", "core/agent/x_test.go", m + "core/session", 0},
 		{"third party ignored", "core/protocol/x.go", "golang.org/x/text", 0},
 	} {

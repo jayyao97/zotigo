@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
@@ -212,8 +213,8 @@ func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *test
 func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	display := newWorkerDisplayLog("sess-tool-progress", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -242,8 +243,8 @@ func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	display := newWorkerDisplayLog("sess-subagent-stream", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -371,8 +372,8 @@ func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
 func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	display := newWorkerDisplayLog("sess-text-stream", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) {
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) {
 		deltas = append(deltas, delta)
 	}
 	ctx := context.Background()
@@ -454,14 +455,14 @@ func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
 	var deliveryOrder []string
-	display.delta = func(delta displayDeltaEvent) {
+	display.delta = func(delta wire.DisplayDelta) {
 		deliveryOrder = append(deliveryOrder, "delta:"+delta.Delta)
 	}
 	display.barrier = func(context.Context) error {
@@ -536,13 +537,13 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	if err := display.HandleEvent(ctx, protocol.NewTextDeltaEvent("old thinking")); err != nil {
 		t.Fatal(err)
 	}
 	for _, inputID := range []string{"steer-1", "steer-2"} {
-		command := commandResponse{ID: inputID, Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: inputID, TurnID: turn}}
+		command := wire.Command{ID: inputID, Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: inputID, TurnID: turn}}
 		display.QueueSteering(command)
 		if _, err := appendAcceptedSessionInput(ctx, source, id, command); err != nil {
 			t.Fatal(err)
@@ -603,14 +604,14 @@ func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	display.barrier = func(context.Context) error { return errors.New("daemon unavailable") }
 	err := display.HandleEvent(ctx, protocol.Event{
 		Type:        protocol.EventTypeSteeringApplied,
@@ -638,16 +639,16 @@ func TestWorkerDisplayLogMutesPreviewAfterReliableSteeringWakeFailure(t *testing
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
 	display.barrier = func(context.Context) error { return nil }
 	display.wakeSync = func(context.Context) error { return errors.New("worker connection closed") }
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	if err := display.HandleEvent(ctx, protocol.Event{
 		Type:        protocol.EventTypeSteeringApplied,
 		SteeringIDs: []string{"steering-command"},

@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
@@ -77,7 +78,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	if err := <-workerDone; err != nil {
 		t.Fatalf("worker approval response: %v", err)
 	}
-	var resolved approvalRequestResponse
+	var resolved wire.ApprovalRequest
 	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
@@ -115,7 +116,7 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
 
-	interaction, err := newUserInputInteraction(created.ID, "turn-1", "item-1", interactionRequester{Agent: "codex", Name: "Subagent"}, []interactionQuestion{{ID: "mode", Question: "Choose", Options: []interactionOption{{Label: "Safe"}}}}, true, nil)
+	interaction, err := newUserInputInteraction(created.ID, "turn-1", "item-1", wire.InteractionRequester{Agent: "codex", Name: "Subagent"}, []wire.InteractionQuestion{{ID: "mode", Question: "Choose", Options: []wire.InteractionOption{{Label: "Safe"}}}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +128,7 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 	}
 	done := make(chan error, 1)
 	go func() {
-		var message workerMessage
+		var message wire.Message
 		if err := worker.ReadJSON(&message); err != nil {
 			done <- err
 			return
@@ -145,7 +146,7 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 			done <- err
 			return
 		}
-		done <- worker.WriteJSON(workerMessage{Type: workerMessageInteractionResult, InteractionResult: &workerInteractionResult{RequestID: message.InteractionResponse.RequestID, Interaction: &resolved}})
+		done <- worker.WriteJSON(wire.Message{Type: wire.MessageInteractionResult, InteractionResult: &wire.InteractionResult{RequestID: message.InteractionResponse.RequestID, Interaction: &resolved}})
 	}()
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/sessions/"+created.ID+"/interactions/"+interaction.ID, strings.NewReader(`{"answers":{"mode":["Safe"]}}`)))
@@ -170,9 +171,9 @@ func TestWorkerApprovalRequestMessagePausesSession(t *testing.T) {
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
 
-	if err := worker.WriteJSON(workerMessage{
-		Type: workerMessageApprovalRequest,
-		ApprovalRequest: &approvalRequestResponse{
+	if err := worker.WriteJSON(wire.Message{
+		Type: wire.MessageApprovalRequest,
+		ApprovalRequest: &wire.ApprovalRequest{
 			ID:     "apr-worker-owned",
 			Status: approvalStatusPending,
 		},
@@ -223,8 +224,8 @@ func TestWorkerApprovalRequestBeforeReadyKeepsSessionPaused(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append turn paused before ready: %v", err)
 	}
-	if err := worker.WriteJSON(workerMessage{
-		Type:            workerMessageApprovalRequest,
+	if err := worker.WriteJSON(wire.Message{
+		Type:            wire.MessageApprovalRequest,
 		ApprovalRequest: &approval,
 	}); err != nil {
 		t.Fatalf("send approval request before ready: %v", err)
@@ -376,11 +377,11 @@ func TestApprovalWaitDoesNotBlockAnotherSessionFinish(t *testing.T) {
 		}`)).WithContext(decisionCtx)
 		handler.ServeHTTP(rec, req)
 	}()
-	var decision workerMessage
+	var decision wire.Message
 	if err := firstWorker.ReadJSON(&decision); err != nil {
 		t.Fatalf("read first session approval decision: %v", err)
 	}
-	if decision.Type != workerMessageApprovalDecision {
+	if decision.Type != wire.MessageApprovalDecision {
 		t.Fatalf("unexpected first worker message: %#v", decision)
 	}
 

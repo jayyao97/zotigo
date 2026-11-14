@@ -18,21 +18,15 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
-	sessionCommandMessage         = "message"
-	sessionCommandPause           = "pause"
-	sessionCommandSteering        = "steering"
-	sessionCommandProfile         = "profile"
-	sessionCommandApprovalPolicy  = "approval_policy"
-	userPauseReason               = "user_pause"
 	controlChannelClosedReason    = "control_channel_closed"
 	workerRestartedReason         = "worker_restarted"
 	approvalWorkerRestartedReason = "worker restarted before approval completed"
 	defaultCommandsLimit          = 200
-	maxCommandsLimit              = 200
-	commandOffsetScanLines        = maxCommandsLimit
+	commandOffsetScanLines        = wire.MaxCommandsLimit
 )
 
 var errCommandImageUnavailable = errors.New("command image payload unavailable")
@@ -68,61 +62,6 @@ type commandQuery struct {
 	Offset    int64
 	Limit     int
 	HasOffset bool
-}
-
-type commandsResponse struct {
-	Commands   []commandResponse `json:"commands"`
-	NextCursor string            `json:"next_cursor"`
-	NextOffset int64             `json:"next_offset,omitempty"`
-}
-
-type commandResponse struct {
-	ID             string                        `json:"id"`
-	Sequence       uint64                        `json:"sequence"`
-	Type           string                        `json:"type"`
-	CreatedAt      time.Time                     `json:"created_at"`
-	Message        *messageCommandPayload        `json:"message,omitempty"`
-	Steering       *steeringCommandPayload       `json:"steering,omitempty"`
-	Pause          *pauseCommandPayload          `json:"pause,omitempty"`
-	Profile        *profileCommandPayload        `json:"profile,omitempty"`
-	ApprovalPolicy *approvalPolicyCommandPayload `json:"approval_policy,omitempty"`
-}
-
-type messageCommandPayload struct {
-	Text           string                   `json:"text"`
-	Images         []commandImageData       `json:"images,omitempty"`
-	Skills         []string                 `json:"skills,omitempty"`
-	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
-}
-
-type steeringCommandPayload struct {
-	Text           string                   `json:"text"`
-	Images         []commandImageData       `json:"images,omitempty"`
-	Skills         []string                 `json:"skills,omitempty"`
-	TurnID         string                   `json:"turn_id,omitempty"`
-	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`
-}
-
-type pauseCommandPayload struct {
-	TurnID string `json:"turn_id,omitempty"`
-	Reason string `json:"reason,omitempty"`
-}
-
-type profileCommandPayload struct {
-	Name string `json:"name"`
-}
-
-type approvalPolicyCommandPayload struct {
-	Policy agent.ApprovalPolicy `json:"policy"`
-}
-
-type commandImageData struct {
-	MimeType   string `json:"mime_type,omitempty"`
-	SizeBytes  int    `json:"size_bytes,omitempty"`
-	Width      int    `json:"width,omitempty"`
-	Height     int    `json:"height,omitempty"`
-	DataBase64 string `json:"data_base64,omitempty"`
-	BlobPath   string `json:"blob_path,omitempty"`
 }
 
 type publicCommandResponse struct {
@@ -203,7 +142,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
 		return
 	}
-	var command commandResponse
+	var command wire.Command
 	var ensureErr error
 	err = h.withRefreshedBoundChannelPrompt(r.Context(), id, func(steeringOnly bool) error {
 		if _, startErr := h.ensureSessionRunning(r.Context(), id); startErr != nil {
@@ -314,37 +253,37 @@ var (
 	errCommandIDConflict = errors.New("client message ID already belongs to different input")
 )
 
-func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, steeringOnly bool) (commandResponse, []messageImage, []zotigosession.ImageRef, error) {
+func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, steeringOnly bool) (wire.Command, []messageImage, []zotigosession.ImageRef, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
-		return commandResponse{}, nil, nil, err
+		return wire.Command{}, nil, nil, err
 	}
 	refs, err := messageImageRefs(id, images)
 	if err != nil {
 		cleanupMessageImageBlobs(images)
-		return commandResponse{}, nil, nil, err
+		return wire.Command{}, nil, nil, err
 	}
 	if err := h.putMessageImageRefs(ctx, refs); err != nil {
 		cleanupMessageImageBlobs(images)
-		return commandResponse{}, nil, nil, err
+		return wire.Command{}, nil, nil, err
 	}
 	if commandID == "" {
 		commandID = "item_" + uuid.NewString()
 	}
-	commandImages := make([]commandImageData, 0, len(images))
+	commandImages := make([]wire.CommandImageData, 0, len(images))
 	for _, image := range images {
-		commandImages = append(commandImages, commandImageData{
+		commandImages = append(commandImages, wire.CommandImageData{
 			MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height,
 			DataBase64: base64.StdEncoding.EncodeToString(image.Data), BlobPath: image.BlobPath,
 		})
 	}
-	command := commandResponse{ID: commandID, CreatedAt: time.Now().UTC()}
+	command := wire.Command{ID: commandID, CreatedAt: time.Now().UTC()}
 	if steeringOnly {
-		command.Type = sessionCommandSteering
-		command.Steering = &steeringCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
+		command.Type = wire.CommandSteering
+		command.Steering = &wire.SteeringCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
 	} else {
-		command.Type = sessionCommandMessage
-		command.Message = &messageCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
+		command.Type = wire.CommandMessage
+		command.Message = &wire.MessageCommandPayload{Text: text, Images: commandImages, Skills: append([]string(nil), selectedSkills...)}
 	}
 	return command, images, refs, nil
 }
@@ -355,16 +294,16 @@ type sessionInputConstraints struct {
 	requestContext *protocol.RequestContext
 }
 
-func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (commandResponse, error) {
+func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (wire.Command, error) {
 	h.updateMu.RLock()
 	defer h.updateMu.RUnlock()
 	if h.updater != nil && h.updater.Draining() {
-		return commandResponse{}, fmt.Errorf("%w: daemon is waiting to apply an update", errSessionUnavailable)
+		return wire.Command{}, fmt.Errorf("%w: daemon is waiting to apply an update", errSessionUnavailable)
 	}
 	if h.workers.InputStopping(id) {
-		return commandResponse{}, errWorkerInputStopping
+		return wire.Command{}, errWorkerInputStopping
 	}
-	var command commandResponse
+	var command wire.Command
 	var storedImages []messageImage
 	var refs []zotigosession.ImageRef
 	var submission *workerInputSubmission
@@ -411,7 +350,7 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		request := workerInputRequest{Command: command, SteeringOnly: steeringOnly, StartOnly: startOnly, ExpectedTurnID: expectedTurnID}
+		request := wire.InputRequest{Command: command, SteeringOnly: steeringOnly, StartOnly: startOnly, ExpectedTurnID: expectedTurnID}
 		if constraints != nil {
 			request.RequiredApprovalPolicy = constraints.approvalPolicy
 			request.RequiredPromptRevision = constraints.promptRevision
@@ -432,7 +371,7 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		}
 		_ = h.deleteMessageImageRefs(cleanupCtx, id, imageRefNames(refs))
 		cleanupMessageImageBlobs(storedImages)
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 
 	accepted, err := submission.Await(ctx)
@@ -442,7 +381,7 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 			_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
 			cleanupMessageImageBlobs(storedImages)
 		}
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	if !sameCommandImagePaths(command, accepted) {
 		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
@@ -493,7 +432,7 @@ func (h *handler) indexLegacyMessageImageRef(ctx context.Context, store imageRef
 
 func referencedMessageImage(items []zotigosession.DisplayItem, blobPath string) (zotigosession.DisplayCommandImage, bool) {
 	for _, item := range items {
-		if item.Command == nil || (item.Command.Type != sessionCommandMessage && item.Command.Type != sessionCommandSteering) {
+		if item.Command == nil || (item.Command.Type != wire.CommandMessage && item.Command.Type != wire.CommandSteering) {
 			continue
 		}
 		for _, img := range item.Command.Images {

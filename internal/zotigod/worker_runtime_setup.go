@@ -27,20 +27,21 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerRuntimeConfig struct {
 	SessionID              string
 	WorkspaceID            string
 	Store                  zotigosession.Store
-	SendDelta              func(displayDeltaEvent)
+	SendDelta              func(wire.DisplayDelta)
 	NotifyDisplayItem      func(zotigosession.DisplayItem)
 	NotifyDisplay          func()
 	SyncDisplay            func(context.Context) error
 	DisplayBarrier         func(context.Context) error
-	NotifyApproval         func(context.Context, approvalRequestResponse)
-	NotifyApprovalResolved func(context.Context, approvalRequestResponse)
-	NotifyIdle             func(context.Context, workerIdle) error
+	NotifyApproval         func(context.Context, wire.ApprovalRequest)
+	NotifyApprovalResolved func(context.Context, wire.ApprovalRequest)
+	NotifyIdle             func(context.Context, wire.Idle) error
 	NotifyWorking          func(context.Context) error
 	HookDispatcher         *hooks.Dispatcher
 	RuntimeTools           *workerRuntimeToolClient
@@ -68,7 +69,7 @@ type workerRuntime struct {
 	fatalCh          chan error
 	fatalMu          sync.Mutex
 	fatalErr         error
-	notifyIdle       func(context.Context, workerIdle) error
+	notifyIdle       func(context.Context, wire.Idle) error
 	notifyWorking    func(context.Context) error
 	hooks            hookEventDispatcher
 	channelTools     *channelRuntimeToolState

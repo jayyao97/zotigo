@@ -10,6 +10,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type codexWorkerRuntime struct {
@@ -39,7 +40,7 @@ type codexWorkerRuntime struct {
 	skillPaths           map[string]string
 	interactions         map[string]codexPendingInteraction
 	approvals            map[string]codexPendingApproval
-	runtimeToolResults   <-chan workerRuntimeToolResult
+	runtimeToolResults   <-chan wire.RuntimeToolResult
 	activeRequestContext *protocol.RequestContext
 }
 
@@ -58,7 +59,7 @@ func (r *codexWorkerRuntime) trackDisplayItem(id, partType string) {
 }
 
 type codexPendingInteraction struct {
-	request interactionRequest
+	request wire.InteractionRequest
 	rpcID   json.RawMessage
 }
 

@@ -12,6 +12,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type publicProfile struct {
@@ -209,7 +210,7 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:    sessionCommandProfile,
+			Type:    wire.CommandProfile,
 			Profile: target,
 		},
 	})
@@ -320,7 +321,7 @@ func hasOfflineProfileIntent(items []zotigosession.DisplayItem, profileName stri
 	var latestIntent uint64
 	var latestIntentProfile string
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type == sessionCommandProfile {
+		if item.Command != nil && item.Command.Type == wire.CommandProfile {
 			latestProfileCommand = item.Sequence
 		}
 		if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil && item.Profile.CommandID == "" {
@@ -348,7 +349,7 @@ func (h *handler) repairPendingProfileCommandsFromItems(ctx context.Context, id 
 	}
 	hadPending := false
 	for _, item := range items {
-		if item.Command == nil || item.Command.Type != sessionCommandProfile || completed[item.ID] {
+		if item.Command == nil || item.Command.Type != wire.CommandProfile || completed[item.ID] {
 			continue
 		}
 		hadPending = true

@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message codexapp.Message) error {
@@ -36,7 +37,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			req.ResolvedAt = &now
 			delete(r.interactions, id)
 			if r.writer != nil {
-				r.writer.SendInteractionResult(ctx, workerInteractionResult{Interaction: &req})
+				r.writer.SendInteractionResult(ctx, wire.InteractionResult{Interaction: &req})
 			}
 			return nil
 		}
@@ -52,7 +53,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 				response := publicApprovalRequest(resolvedApprovalFromDecision(pending.request, []zotigosession.DisplayApprovalDecision{{
 					ToolCallID: pending.request.Pending[0].ToolCallID, Approved: false, Reason: "Codex request was resolved elsewhere",
 				}}, time.Now().UTC()))
-				r.writer.SendApprovalResult(ctx, workerApprovalResult{Approval: &response})
+				r.writer.SendApprovalResult(ctx, wire.ApprovalResult{Approval: &response})
 			}
 			return nil
 		}
@@ -112,7 +113,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}
 		r.trackDisplayItem(delta.ItemID, "text")
 		r.messages[delta.ItemID] += delta.Delta
-		r.writer.SendDelta(displayDeltaEvent{ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: string(protocol.ContentTypeText), Delta: delta.Delta, BeforeInputID: r.displayItems[delta.ItemID].beforeInputID})
+		r.writer.SendDelta(wire.DisplayDelta{ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: string(protocol.ContentTypeText), Delta: delta.Delta, BeforeInputID: r.displayItems[delta.ItemID].beforeInputID})
 	case "item/started":
 		var started codexItemNotification
 		if err := sonic.Unmarshal(message.Params, &started); err != nil {
@@ -172,7 +173,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if !r.matchesActiveItem(delta.ThreadID, delta.TurnID, delta.ItemID) || r.writer == nil {
 			return nil
 		}
-		r.writer.SendDelta(displayDeltaEvent{
+		r.writer.SendDelta(wire.DisplayDelta{
 			ItemID: delta.ItemID, Role: string(protocol.RoleAssistant), PartType: "tool_progress", Delta: delta.Delta,
 			BeforeInputID: r.displayItems[delta.ItemID].beforeInputID,
 			ToolCallID:    delta.ItemID, ToolName: r.toolNames[delta.ItemID],
@@ -316,7 +317,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.toolNativeNames = make(map[string]string)
 		r.toolOrder = nil
 		if r.writer != nil && !r.messagePending {
-			if err := r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence}); err != nil {
+			if err := r.writer.SendIdle(ctx, wire.Idle{CommandSequence: commandSequence}); err != nil {
 				return err
 			}
 		}

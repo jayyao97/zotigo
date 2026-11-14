@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestCompletionTriggerToolAndHTTPDelivery(t *testing.T) {
@@ -21,7 +22,7 @@ func TestCompletionTriggerToolAndHTTPDelivery(t *testing.T) {
 	h.callbackBaseURL = "http://127.0.0.1:8766"
 	h.queueOps = newSessionOperationLocks()
 	ctx := context.Background()
-	request := workerRuntimeToolRequest{Namespace: "zotigo", Name: "create_completion_trigger", CallID: "callback", TurnID: caller.TurnID, Arguments: json.RawMessage(`{"title":"Build","on_fire":"Read build.log"}`)}
+	request := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "create_completion_trigger", CallID: "callback", TurnID: caller.TurnID, Arguments: json.RawMessage(`{"title":"Build","on_fire":"Read build.log"}`)}
 	result, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, request)
 	if err != nil {
 		t.Fatal(err)
@@ -151,7 +152,7 @@ func TestCompletionRejectsPendingApprovalChange(t *testing.T) {
 	if caller.Stored.ApprovalPolicy == target {
 		target = agent.ApprovalPolicyAuto
 	}
-	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "pending-policy", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandApprovalPolicy, ApprovalPolicy: string(target)}}); err != nil {
+	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "pending-policy", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandApprovalPolicy, ApprovalPolicy: string(target)}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.validateCompletionTarget(ctx, value); err != errInputPolicyMismatch {
@@ -164,7 +165,7 @@ func TestCompletionModeValidationAndHumanInputDeferral(t *testing.T) {
 	h.callbackBaseURL = "http://localhost"
 	h.queueOps = newSessionOperationLocks()
 	ctx := context.Background()
-	request := workerRuntimeToolRequest{CallID: "mode", Arguments: json.RawMessage(`{"title":"test","on_fire":"Analyze result","delivery_mode":"invalid"}`)}
+	request := wire.RuntimeToolRequest{CallID: "mode", Arguments: json.RawMessage(`{"title":"test","on_fire":"Analyze result","delivery_mode":"invalid"}`)}
 	if _, err := h.createCompletionTrigger(ctx, caller, request); err == nil {
 		t.Fatal("invalid mode accepted")
 	}
@@ -178,7 +179,7 @@ func TestCompletionModeValidationAndHumanInputDeferral(t *testing.T) {
 	if _, err := h.createCompletionTrigger(ctx, caller, request); err == nil {
 		t.Fatal("creation retry changed mode")
 	}
-	command := commandResponse{ID: "completion:" + id, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "Analyze result"}}
+	command := wire.Command{ID: "completion:" + id, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "Analyze result"}}
 	data, _ := json.Marshal(command)
 	if _, err := h.catalog.FireCompletionTrigger(ctx, id, "", data); err != nil {
 		t.Fatal(err)
@@ -233,14 +234,14 @@ func TestCompletionSteeringPreservesOriginalPrincipal(t *testing.T) {
 	if _, err := h.catalog.FireCompletionTrigger(ctx, trigger.ID, "", []byte(`{}`)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "completion:" + trigger.ID, Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: caller.TurnID, Text: trigger.OnFire, RequestContext: completionOrigin(trigger)}}); err != nil {
+	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "completion:" + trigger.ID, Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandSteering, TurnID: caller.TurnID, Text: trigger.OnFire, RequestContext: completionOrigin(trigger)}}); err != nil {
 		t.Fatal(err)
 	}
 	resolved, err := h.resolveSessionToolCaller(ctx, caller.SessionID, caller.Generation, caller.TurnID)
 	if err != nil || resolved.Origin != nil {
 		t.Fatalf("callback replaced user principal: %+v %v", resolved, err)
 	}
-	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "completion:forged", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: caller.TurnID, Text: trigger.OnFire, RequestContext: completionOrigin(trigger)}}); err != nil {
+	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "completion:forged", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandSteering, TurnID: caller.TurnID, Text: trigger.OnFire, RequestContext: completionOrigin(trigger)}}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h.resolveSessionToolCaller(ctx, caller.SessionID, caller.Generation, caller.TurnID); err == nil {
@@ -263,7 +264,7 @@ func testCompletionCallbackDelivery(t *testing.T, callbackText, mode string, act
 	h.callbackBaseURL = "http://localhost"
 	ctx := context.Background()
 	args, _ := json.Marshal(map[string]string{"title": "Build", "on_fire": "Inspect the finished build", "delivery_mode": mode})
-	result, err := h.createCompletionTrigger(ctx, caller, workerRuntimeToolRequest{CallID: "delivery", Arguments: args})
+	result, err := h.createCompletionTrigger(ctx, caller, wire.RuntimeToolRequest{CallID: "delivery", Arguments: args})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -314,7 +315,7 @@ func testCompletionCallbackDelivery(t *testing.T, callbackText, mode string, act
 	if err := worker.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var input workerMessage
+	var input wire.Message
 	if err := worker.ReadJSON(&input); err != nil {
 		t.Fatal(err)
 	}
@@ -333,7 +334,7 @@ func testCompletionCallbackDelivery(t *testing.T, callbackText, mode string, act
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)

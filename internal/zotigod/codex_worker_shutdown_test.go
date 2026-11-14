@@ -10,6 +10,7 @@ import (
 
 	"github.com/gorilla/websocket"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
@@ -28,7 +29,7 @@ func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	type observation struct {
-		request finishSessionRequest
+		request wire.FinishSessionRequest
 		locked  bool
 		err     error
 	}
@@ -38,7 +39,7 @@ func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/internal/workers/connect":
-			conn, err := upgrader.Upgrade(w, r, http.Header{workerGenerationHeader: []string{"generation"}})
+			conn, err := upgrader.Upgrade(w, r, http.Header{wire.GenerationHeader: []string{"generation"}})
 			if err != nil {
 				t.Errorf("upgrade worker: %v", err)
 				return

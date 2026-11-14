@@ -9,20 +9,21 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/internal/channels"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerRuntimeToolClient struct {
 	writer   *workerClientWriter
-	results  <-chan workerRuntimeToolResult
+	results  <-chan wire.RuntimeToolResult
 	gateOnce sync.Once
 	gate     chan struct{}
 }
 
 func (c *workerRuntimeToolClient) call(ctx context.Context, requestContext *protocol.RequestContext, name, arguments string) (string, error) {
-	return c.request(ctx, workerRuntimeToolRequest{Name: name, Arguments: []byte(arguments), RequestContext: requestContext})
+	return c.request(ctx, wire.RuntimeToolRequest{Name: name, Arguments: []byte(arguments), RequestContext: requestContext})
 }
 
-func (c *workerRuntimeToolClient) request(ctx context.Context, request workerRuntimeToolRequest) (string, error) {
+func (c *workerRuntimeToolClient) request(ctx context.Context, request wire.RuntimeToolRequest) (string, error) {
 	if c == nil || c.writer == nil || c.results == nil {
 		return "", errors.New("channel runtime tool transport is unavailable")
 	}

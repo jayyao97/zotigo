@@ -5,11 +5,12 @@ import (
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestChannelReadMessagesToolUsesActiveRequestContext(t *testing.T) {
-	results := make(chan workerRuntimeToolResult, 1)
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	results := make(chan wire.RuntimeToolResult, 1)
+	writer := &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	state := &channelRuntimeToolState{client: &workerRuntimeToolClient{writer: writer, results: results}}
 	state.setRequestContext(&protocol.RequestContext{
 		Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1", ExternalConversation: "chat-1",
@@ -29,7 +30,7 @@ func TestChannelReadMessagesToolUsesActiveRequestContext(t *testing.T) {
 	if request == nil || request.Name != "read_messages" || request.RequestContext.ConnectionID != "connection-1" || string(request.Arguments) != `{"limit":5}` {
 		t.Fatalf("runtime tool request = %#v", request)
 	}
-	results <- workerRuntimeToolResult{RequestID: request.RequestID, Text: `{"messages":[]}`}
+	results <- wire.RuntimeToolResult{RequestID: request.RequestID, Text: `{"messages":[]}`}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type blockedQueueHistory struct {
@@ -30,7 +31,7 @@ func TestDelayedQueueDrainDoesNotOverwriteNewWorkingState(t *testing.T) {
 	}
 	defer catalog.Close()
 	const sessionID = "idle-order"
-	payload, err := json.Marshal(commandResponse{ID: "queued", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "later"}})
+	payload, err := json.Marshal(wire.Command{ID: "queued", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "later"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +45,7 @@ func TestDelayedQueueDrainDoesNotOverwriteNewWorkingState(t *testing.T) {
 	workers.workers[sessionID] = worker
 	source := &blockedQueueHistory{entered: make(chan struct{}), release: make(chan struct{})}
 	_ = newHandler(registry, source, handlerOptions{catalog: catalog, workers: workers})
-	workers.onMessage(sessionID, "generation", workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: 0}})
+	workers.onMessage(sessionID, "generation", wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{CommandSequence: 0}})
 	// State transitions must retain receive-loop order, even when draining is slow.
 	if session, _ := registry.Get(sessionID); session.Working {
 		t.Error("idle state update was deferred behind asynchronous queue draining")
@@ -54,13 +55,13 @@ func TestDelayedQueueDrainDoesNotOverwriteNewWorkingState(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("queue drain did not start")
 	}
-	submission, err := workers.BeginInput(sessionID, workerInputRequest{Command: commandResponse{ID: "ordinary", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "new input"}}})
+	submission, err := workers.BeginInput(sessionID, wire.InputRequest{Command: wire.Command{ID: "ordinary", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "new input"}}})
 	if err != nil {
 		close(source.release)
 		t.Fatal(err)
 	}
 	// The real worker emits Working from startMessageTurn before its input ack.
-	workers.onMessage(sessionID, "generation", workerMessage{Type: workerMessageWorking})
+	workers.onMessage(sessionID, "generation", wire.Message{Type: wire.MessageWorking})
 	close(source.release)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
@@ -79,5 +80,5 @@ func TestDelayedQueueDrainDoesNotOverwriteNewWorkingState(t *testing.T) {
 		t.Error("old idle notification overwrote the new turn's Working state")
 	}
 	// Acknowledgement advances the sequence and cancels the deferred eviction.
-	workers.finishInput(worker, submission.requestID, &commandResponse{Sequence: 1})
+	workers.finishInput(worker, submission.requestID, &wire.Command{Sequence: 1})
 }

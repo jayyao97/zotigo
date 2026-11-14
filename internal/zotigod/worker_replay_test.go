@@ -13,10 +13,11 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
-	for _, gapType := range []string{sessionCommandPause, sessionCommandSteering} {
+	for _, gapType := range []string{wire.CommandPause, wire.CommandSteering} {
 		t.Run(gapType, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			providerName := "replay-gap-" + gapType
@@ -36,7 +37,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 			ctx := context.Background()
 			for _, item := range []zotigosession.DisplayItem{
 				{ID: "gap", Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: gapType, TurnID: "old-turn"}},
-				{ID: "message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "already executed"}},
+				{ID: "message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "already executed"}},
 				{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "message-turn"}},
 				{Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "message-turn"}},
 			} {
@@ -53,16 +54,16 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer runtime.Close()
-			gap := commandResponse{ID: "gap", Sequence: 1, Type: gapType}
-			if gapType == sessionCommandPause {
-				gap.Pause = &pauseCommandPayload{TurnID: "old-turn", Reason: userPauseReason}
+			gap := wire.Command{ID: "gap", Sequence: 1, Type: gapType}
+			if gapType == wire.CommandPause {
+				gap.Pause = &wire.PauseCommandPayload{TurnID: "old-turn", Reason: wire.UserPauseReason}
 			} else {
-				gap.Steering = &steeringCommandPayload{TurnID: "old-turn", Text: "stale"}
+				gap.Steering = &wire.SteeringCommandPayload{TurnID: "old-turn", Text: "stale"}
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, http.StatusOK, commandsResponse{Commands: []commandResponse{
+				writeJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
 					gap,
-					{ID: "message", Sequence: 2, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "already executed"}},
+					{ID: "message", Sequence: 2, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "already executed"}},
 				}, NextOffset: 1})
 			}))
 			defer server.Close()
@@ -85,16 +86,16 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 
 			pending, err := store.AppendDisplayItem(ctx, sessionID, zotigosession.DisplayItem{
 				ID: "pending", Type: zotigosession.DisplayItemUserMessage,
-				Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "execute once"},
+				Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "execute once"},
 			})
 			if err != nil {
 				t.Fatal(err)
 			}
 			pendingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, http.StatusOK, commandsResponse{Commands: []commandResponse{
+				writeJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
 					gap,
-					{ID: "message", Sequence: 2, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "already executed"}},
-					{ID: pending.ID, Sequence: pending.Sequence, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "execute once"}},
+					{ID: "message", Sequence: 2, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "already executed"}},
+					{ID: pending.ID, Sequence: pending.Sequence, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "execute once"}},
 				}, NextOffset: 2})
 			}))
 			defer pendingServer.Close()

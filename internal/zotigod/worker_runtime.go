@@ -10,13 +10,14 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerRuntimeTransport struct {
 	sessionID              string
 	display                *workerDisplayLog
-	notifyApproval         func(context.Context, approvalRequestResponse)
-	notifyApprovalResolved func(context.Context, approvalRequestResponse)
+	notifyApproval         func(context.Context, wire.ApprovalRequest)
+	notifyApprovalResolved func(context.Context, wire.ApprovalRequest)
 
 	inputCh           chan zotigotransport.UserInput
 	closedCh          chan struct{}
@@ -33,12 +34,12 @@ type workerRuntimeTransport struct {
 }
 
 type workerApprovalResolution struct {
-	approval   approvalRequestResponse
+	approval   wire.ApprovalRequest
 	results    []zotigotransport.ApprovalResult
 	decisionCh chan []zotigotransport.ApprovalResult
 }
 
-func newWorkerRuntimeTransport(sessionID string, display *workerDisplayLog, notifyApproval func(context.Context, approvalRequestResponse)) *workerRuntimeTransport {
+func newWorkerRuntimeTransport(sessionID string, display *workerDisplayLog, notifyApproval func(context.Context, wire.ApprovalRequest)) *workerRuntimeTransport {
 	transport := &workerRuntimeTransport{
 		sessionID:      sessionID,
 		display:        display,
@@ -351,7 +352,7 @@ func (t *workerRuntimeTransport) hasApprovalRegistration() bool {
 	return t.approval != nil
 }
 
-func approvalResultsFromResponse(resp approvalRequestResponse) []zotigotransport.ApprovalResult {
+func approvalResultsFromResponse(resp wire.ApprovalRequest) []zotigotransport.ApprovalResult {
 	results := make([]zotigotransport.ApprovalResult, 0, len(resp.Decisions))
 	for _, decision := range resp.Decisions {
 		results = append(results, zotigotransport.ApprovalResult{

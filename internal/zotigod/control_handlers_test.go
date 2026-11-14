@@ -19,6 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
@@ -47,12 +48,12 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 
 	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
-		msg := workerMessage{
-			Type: workerMessageCommand,
-			Command: &commandResponse{
+		msg := wire.Message{
+			Type: wire.MessageCommand,
+			Command: &wire.Command{
 				ID:       fmt.Sprintf("cmd-%d", idx),
 				Sequence: idx,
-				Type:     sessionCommandPause,
+				Type:     wire.CommandPause,
 			},
 		}
 		if err := serverConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
@@ -95,23 +96,23 @@ func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
 	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode message response: %v", err)
 	}
-	if command.Type != sessionCommandMessage || command.Text != "build the runtime" {
+	if command.Type != wire.CommandMessage || command.Text != "build the runtime" {
 		t.Fatalf("unexpected message command: %#v", command)
 	}
 
 	input := <-requests
-	if input.Command.Type != sessionCommandMessage || input.Command.Message == nil || input.Command.Message.Text != "build the runtime" {
+	if input.Command.Type != wire.CommandMessage || input.Command.Message == nil || input.Command.Message.Text != "build the runtime" {
 		t.Fatalf("unexpected worker input request: %#v", input)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
 	if len(items.Items) != 1 || items.Items[0].Type != string(zotigosession.DisplayItemUserMessage) ||
-		items.Items[0].Command == nil || items.Items[0].Command.Type != sessionCommandMessage {
+		items.Items[0].Command == nil || items.Items[0].Command.Type != wire.CommandMessage {
 		t.Fatalf("expected user message display item, got %#v", items.Items)
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandMessage {
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != wire.CommandMessage {
 		t.Fatalf("expected one message command, got %#v", commands)
 	}
 }
@@ -151,12 +152,12 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 	}()
 
 	input := readWorkerMessage(t, worker)
-	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+	if input.Type != wire.MessageInputRequest || input.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", input)
 	}
-	if err := worker.WriteJSON(workerMessage{
-		Type:              workerMessageConversationBound,
-		ConversationBound: &workerConversationBound{ConversationID: "thread-first"},
+	if err := worker.WriteJSON(wire.Message{
+		Type:              wire.MessageConversationBound,
+		ConversationBound: &wire.ConversationBound{ConversationID: "thread-first"},
 	}); err != nil {
 		t.Fatalf("send conversation binding: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 		t.Fatal(err)
 	}
 	bound := readWorkerMessage(t, worker)
-	if bound.Type != workerMessageConversationBoundResult || bound.ConversationBoundResult == nil || bound.ConversationBoundResult.ErrorCode != "" {
+	if bound.Type != wire.MessageConversationBoundResult || bound.ConversationBoundResult == nil || bound.ConversationBoundResult.ErrorCode != "" {
 		t.Fatalf("expected successful conversation binding, got %#v", bound)
 	}
 	if err := worker.SetReadDeadline(time.Time{}); err != nil {
@@ -175,7 +176,7 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 	if err != nil {
 		t.Fatalf("append accepted input: %v", err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: input.InputRequest.RequestID, Command: &accepted,
 	}}); err != nil {
 		t.Fatalf("send input result: %v", err)
@@ -219,12 +220,12 @@ func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
 		messageDone <- rec
 	}()
 	input := readWorkerMessage(t, worker)
-	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+	if input.Type != wire.MessageInputRequest || input.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", input)
 	}
-	if err := worker.WriteJSON(workerMessage{
-		Type:            workerMessageApprovalRequest,
-		ApprovalRequest: &approvalRequestResponse{ID: "approval-during-input", Status: approvalStatusPending},
+	if err := worker.WriteJSON(wire.Message{
+		Type:            wire.MessageApprovalRequest,
+		ApprovalRequest: &wire.ApprovalRequest{ID: "approval-during-input", Status: approvalStatusPending},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +243,7 @@ func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: input.InputRequest.RequestID, Command: &accepted,
 	}}); err != nil {
 		t.Fatal(err)
@@ -373,7 +374,7 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 		t.Fatalf("expected worker restart interruption, got %#v", items.Items[1])
 	}
 	if items.Items[2].Type != string(zotigosession.DisplayItemUserMessage) ||
-		items.Items[2].Command == nil || items.Items[2].Command.Type != sessionCommandMessage {
+		items.Items[2].Command == nil || items.Items[2].Command.Type != wire.CommandMessage {
 		t.Fatalf("expected accepted message after interruption, got %#v", items.Items[2])
 	}
 }
@@ -590,7 +591,7 @@ func TestSessionImageReadBackfillsLegacyDisplayLogReference(t *testing.T) {
 	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Images: []zotigosession.DisplayCommandImage{{
 				MimeType:  "image/png",
 				SizeBytes: len(imageData),
@@ -781,8 +782,8 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:   sessionCommandPause,
-			Reason: userPauseReason,
+			Type:   wire.CommandPause,
+			Reason: wire.UserPauseReason,
 		},
 	}); err != nil {
 		t.Fatalf("append pause command: %v", err)
@@ -794,11 +795,11 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	var commands commandsResponse
+	var commands wire.CommandsPage
 	if err := sonic.Unmarshal(rec.Body.Bytes(), &commands); err != nil {
 		t.Fatalf("decode commands: %v", err)
 	}
-	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandPause {
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != wire.CommandPause {
 		t.Fatalf("expected missing image command to be skipped, got %#v", commands)
 	}
 }
@@ -932,7 +933,7 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandSteering {
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != wire.CommandSteering {
 		t.Fatalf("steering did not enter the durable command queue: %#v", commands)
 	}
 
@@ -983,8 +984,8 @@ func TestSessionMessageDoesNotReturnAcceptedWhenWorkerDisconnectsBeforeAdmission
 	defer worker.Close()
 
 	go func() {
-		var message workerMessage
-		if worker.ReadJSON(&message) == nil && message.Type == workerMessageInputRequest {
+		var message wire.Message
+		if worker.ReadJSON(&message) == nil && message.Type == wire.MessageInputRequest {
 			_ = worker.Close()
 		}
 	}()
@@ -1045,7 +1046,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		messageDone <- rec
 	}()
 	input := readWorkerMessage(t, worker)
-	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+	if input.Type != wire.MessageInputRequest || input.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", input)
 	}
 
@@ -1056,7 +1057,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		pauseDone <- rec
 	}()
 	interrupt := readWorkerMessage(t, worker)
-	if interrupt.Type != workerMessageInterruptTurn || interrupt.InterruptTurn == nil || interrupt.InterruptTurn.TurnID != "turn-1" {
+	if interrupt.Type != wire.MessageInterruptTurn || interrupt.InterruptTurn == nil || interrupt.InterruptTurn.TurnID != "turn-1" {
 		t.Fatalf("expected urgent turn interrupt, got %#v", interrupt)
 	}
 
@@ -1071,7 +1072,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: input.InputRequest.RequestID, Command: &accepted,
 	}}); err != nil {
 		t.Fatal(err)
@@ -1080,7 +1081,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		t.Fatalf("pending message status = %d: %s", message.Code, message.Body.String())
 	}
 	pauseCommand := readWorkerMessage(t, worker)
-	if pauseCommand.Type != workerMessageCommand || pauseCommand.Command == nil || pauseCommand.Command.Type != sessionCommandPause {
+	if pauseCommand.Type != wire.MessageCommand || pauseCommand.Command == nil || pauseCommand.Command.Type != wire.CommandPause {
 		t.Fatalf("expected durable pause command, got %#v", pauseCommand)
 	}
 	if pause := <-pauseDone; pause.Code != http.StatusAccepted {
@@ -1122,7 +1123,7 @@ func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
 		messageDone <- rec
 	}()
 	input := readWorkerMessage(t, worker)
-	if input.Type != workerMessageInputRequest || input.InputRequest == nil {
+	if input.Type != wire.MessageInputRequest || input.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", input)
 	}
 
@@ -1139,7 +1140,7 @@ func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: input.InputRequest.RequestID, Command: &accepted,
 	}}); err != nil {
 		t.Fatal(err)
@@ -1176,12 +1177,12 @@ func TestSessionMessageSteersActiveTurn(t *testing.T) {
 	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatal(err)
 	}
-	if command.Type != sessionCommandSteering || command.TurnID != "turn-1" {
+	if command.Type != wire.CommandSteering || command.TurnID != "turn-1" {
 		t.Fatalf("message was not routed to steering: %#v", command)
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 2 || items.Items[1].Command == nil || items.Items[1].Command.Type != sessionCommandSteering {
+	if len(items.Items) != 2 || items.Items[1].Command == nil || items.Items[1].Command.Type != wire.CommandSteering {
 		t.Fatalf("expected one steering command, got %#v", items.Items)
 	}
 }
@@ -1214,7 +1215,7 @@ func TestSessionMessageRejectsPendingMessageCommand(t *testing.T) {
 	assertAPIError(t, rec, http.StatusConflict, "command_pending", "already pending")
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != sessionCommandMessage {
+	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != wire.CommandMessage {
 		t.Fatalf("expected only the pending first message command, got %#v", items.Items)
 	}
 }
@@ -1226,7 +1227,7 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 	source := &fakeDisplayItemSource{
 		items: map[string][]zotigosession.DisplayItem{},
 		appendErr: func(_ string, item zotigosession.DisplayItem) error {
-			if item.Command == nil || item.Command.Type != sessionCommandMessage {
+			if item.Command == nil || item.Command.Type != wire.CommandMessage {
 				return nil
 			}
 			if appendCalls.Add(1) == 1 {
@@ -1280,7 +1281,7 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 		t.Fatalf("expected one created and one conflict, got %#v", got)
 	}
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != sessionCommandMessage {
+	if len(items.Items) != 1 || items.Items[0].Command == nil || items.Items[0].Command.Type != wire.CommandMessage {
 		t.Fatalf("expected one message command, got %#v", items.Items)
 	}
 }
@@ -1362,7 +1363,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode pause response: %v", err)
 	}
-	if command.Type != sessionCommandPause || command.TurnID != "turn-1" || command.Reason != userPauseReason {
+	if command.Type != wire.CommandPause || command.TurnID != "turn-1" || command.Reason != wire.UserPauseReason {
 		t.Fatalf("unexpected pause command: %#v", command)
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStatePausing || !got.Working {
@@ -1378,7 +1379,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].Type != sessionCommandPause {
+	if len(commands.Commands) != 1 || commands.Commands[0].Type != wire.CommandPause {
 		t.Fatalf("expected one pause command, got %#v", commands)
 	}
 
@@ -1393,7 +1394,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
-		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Status: "interrupted", Reason: userPauseReason},
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Status: "interrupted", Reason: wire.UserPauseReason},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1431,7 +1432,7 @@ func TestMessageWhileTurnIsStoppingBecomesDurableSteering(t *testing.T) {
 	if err := decodeAPIData(t, message.Body.Bytes(), &command); err != nil {
 		t.Fatal(err)
 	}
-	if command.Type != sessionCommandSteering || command.TurnID != "turn-old" {
+	if command.Type != wire.CommandSteering || command.TurnID != "turn-old" {
 		t.Fatalf("message was not routed to the stopping turn: %#v", command)
 	}
 
@@ -1439,7 +1440,7 @@ func TestMessageWhileTurnIsStoppingBecomesDurableSteering(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 3 || items[2].Command == nil || items[2].Command.Type != sessionCommandSteering || items[2].Command.TurnID != "turn-old" {
+	if len(items) != 3 || items[2].Command == nil || items[2].Command.Type != wire.CommandSteering || items[2].Command.TurnID != "turn-old" {
 		t.Fatalf("steering message is not durable: %#v", items)
 	}
 }
@@ -1448,7 +1449,7 @@ func TestSessionPauseAcceptsTurnCompletedDuringAdmission(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
 	var completed atomic.Bool
 	source.appendErr = func(sessionID string, item zotigosession.DisplayItem) error {
-		if item.Command == nil || item.Command.Type != sessionCommandPause || !completed.CompareAndSwap(false, true) {
+		if item.Command == nil || item.Command.Type != wire.CommandPause || !completed.CompareAndSwap(false, true) {
 			return nil
 		}
 		_, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{
@@ -1474,7 +1475,7 @@ func TestSessionPauseAcceptsTurnCompletedDuringAdmission(t *testing.T) {
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 3 || items.Items[1].Type != string(zotigosession.DisplayItemTurnCompleted) || items.Items[2].Command == nil || items.Items[2].Command.Type != sessionCommandPause {
+	if len(items.Items) != 3 || items.Items[1].Type != string(zotigosession.DisplayItemTurnCompleted) || items.Items[2].Command == nil || items.Items[2].Command.Type != wire.CommandPause {
 		t.Fatalf("expected lifecycle completion followed by an idempotent pause, got %#v", items.Items)
 	}
 }
@@ -1556,7 +1557,7 @@ func TestSessionPauseLaunchesMissingWorker(t *testing.T) {
 	}
 	defer restarted.Close()
 	msg := readWorkerMessage(t, restarted)
-	if msg.Command == nil || msg.Command.Type != sessionCommandPause {
+	if msg.Command == nil || msg.Command.Type != wire.CommandPause {
 		t.Fatalf("expected pause command after worker restart, got %#v", msg)
 	}
 }
@@ -1604,7 +1605,7 @@ func TestWorkerTurnInterruptedConfirmsPauseLifecycle(t *testing.T) {
 	if got.Type != string(zotigosession.DisplayItemTurnInterrupted) || got.Turn == nil {
 		t.Fatalf("expected confirmed turn_interrupted item, got %#v", got)
 	}
-	if got.Turn.ID != "turn-1" || got.Turn.Reason != userPauseReason || got.Turn.DurationMS != 123 {
+	if got.Turn.ID != "turn-1" || got.Turn.Reason != wire.UserPauseReason || got.Turn.DurationMS != 123 {
 		t.Fatalf("unexpected interrupted turn: %#v", got.Turn)
 	}
 
@@ -1670,7 +1671,7 @@ func TestSessionSteeringPersistsAndForwardsCommand(t *testing.T) {
 	if err := decodeAPIData(t, rec.Body.Bytes(), &command); err != nil {
 		t.Fatalf("decode steering response: %v", err)
 	}
-	if command.Type != sessionCommandSteering || command.Text != "use the smaller fix" || command.TurnID != "turn-1" {
+	if command.Type != wire.CommandSteering || command.Text != "use the smaller fix" || command.TurnID != "turn-1" {
 		t.Fatalf("unexpected steering command: %#v", command)
 	}
 	input := <-requests
@@ -1684,7 +1685,7 @@ func TestSessionSteeringPersistsAndForwardsCommand(t *testing.T) {
 	}
 
 	commands := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?after=0")
-	if len(commands.Commands) != 1 || commands.Commands[0].ID != command.ID || commands.Commands[0].Type != sessionCommandSteering {
+	if len(commands.Commands) != 1 || commands.Commands[0].ID != command.ID || commands.Commands[0].Type != wire.CommandSteering {
 		t.Fatalf("steering command was not replayable: %#v", commands)
 	}
 }
@@ -1751,7 +1752,7 @@ func TestSessionMessageSteersPausedApprovalTurn(t *testing.T) {
 	}
 
 	items := getItems(t, handler, "/sessions/"+created.ID+"/items")
-	if len(items.Items) != 4 || items.Items[3].Command == nil || items.Items[3].Command.Type != sessionCommandSteering {
+	if len(items.Items) != 4 || items.Items[3].Command == nil || items.Items[3].Command.Type != wire.CommandSteering {
 		t.Fatalf("expected durable steering after pending approval, got %#v", items.Items)
 	}
 }
@@ -1774,7 +1775,7 @@ func TestWorkerCommandsDoNotReplayAppliedSteeringItems(t *testing.T) {
 		Role:    string(protocol.RoleUser),
 		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "correction"}},
 		Turn:    &zotigosession.DisplayTurn{ID: "turn-1"},
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "correction", TurnID: "turn-1"},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandSteering, Text: "correction", TurnID: "turn-1"},
 	}); err != nil {
 		t.Fatalf("append applied steering: %v", err)
 	}
@@ -1800,7 +1801,7 @@ func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "first",
 		},
 	}); err != nil {
@@ -1809,14 +1810,14 @@ func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandPause,
+			Type: wire.CommandPause,
 		},
 	}); err != nil {
 		t.Fatalf("append second command: %v", err)
 	}
 
 	first := getCommands(t, handler, "/internal/sessions/"+created.ID+"/commands?offset=0&limit=1")
-	if len(first.Commands) != 1 || first.Commands[0].Type != sessionCommandMessage {
+	if len(first.Commands) != 1 || first.Commands[0].Type != wire.CommandMessage {
 		t.Fatalf("expected first command, got %#v", first)
 	}
 	if first.NextOffset <= 0 {
@@ -1824,7 +1825,7 @@ func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
 	}
 
 	second := getCommands(t, handler, fmt.Sprintf("/internal/sessions/%s/commands?offset=%d&limit=1", created.ID, first.NextOffset))
-	if len(second.Commands) != 1 || second.Commands[0].Type != sessionCommandPause {
+	if len(second.Commands) != 1 || second.Commands[0].Type != wire.CommandPause {
 		t.Fatalf("expected second command, got %#v", second)
 	}
 	if second.NextOffset <= first.NextOffset {
@@ -1848,7 +1849,7 @@ func TestWorkerCommandsOffsetScansInBatches(t *testing.T) {
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "batched",
 		},
 	}); err != nil {

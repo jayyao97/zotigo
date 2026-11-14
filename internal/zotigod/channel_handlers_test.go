@@ -24,6 +24,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestChannelMessageImagesUseSessionImageValidation(t *testing.T) {
@@ -752,7 +753,7 @@ func TestChannelBindingRejectsSessionWithPendingMessage(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: session.ID, State: SessionStateRunning, Agent: "zotigo"})
 	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {
-		{ID: "pending-message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "not started yet"}},
+		{ID: "pending-message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "not started yet"}},
 	}}}
 	daemonHandler := &handler{registry: registry, items: items, store: sessionStore}
 	_, err = daemonHandler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: channels.SessionAgentZotigo})
@@ -1215,7 +1216,7 @@ func TestChannelStopKeepsAdmissionClosedUntilDurablePauseIsAccepted(t *testing.T
 			ID: "turn-start", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
 		}}},
 		appendHook: func(_ string, item zotigosession.DisplayItem) {
-			if item.Command != nil && item.Command.Type == sessionCommandPause {
+			if item.Command != nil && item.Command.Type == wire.CommandPause {
 				close(appendStarted)
 				<-releaseAppend
 			}
@@ -1259,7 +1260,7 @@ func TestChannelStopKeepsAdmissionClosedUntilDurablePauseIsAccepted(t *testing.T
 	}
 	select {
 	case message := <-worker.sendCh:
-		if message.Command == nil || message.Command.Type != sessionCommandPause || message.Command.Pause == nil || message.Command.Pause.TurnID != "turn-1" {
+		if message.Command == nil || message.Command.Type != wire.CommandPause || message.Command.Pause == nil || message.Command.Pause.TurnID != "turn-1" {
 			t.Fatalf("worker message=%+v", message)
 		}
 	default:

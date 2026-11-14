@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
@@ -345,28 +346,10 @@ type itemTurnResponse struct {
 }
 
 type itemApprovalResponse struct {
-	ID        string                         `json:"id,omitempty"`
-	TurnID    string                         `json:"turn_id,omitempty"`
-	Pending   []itemPendingApprovalResponse  `json:"pending,omitempty"`
-	Decisions []itemApprovalDecisionResponse `json:"decisions,omitempty"`
-}
-
-type itemPendingApprovalResponse struct {
-	ToolCallID       string `json:"tool_call_id,omitempty"`
-	ToolName         string `json:"tool_name,omitempty"`
-	Arguments        string `json:"arguments,omitempty"`
-	Description      string `json:"description,omitempty"`
-	Reason           string `json:"reason,omitempty"`
-	RiskLevel        string `json:"risk_level,omitempty"`
-	Source           string `json:"source,omitempty"`
-	RequiresSnapshot bool   `json:"requires_snapshot,omitempty"`
-}
-
-type itemApprovalDecisionResponse struct {
-	ToolCallID   string `json:"tool_call_id,omitempty"`
-	Approved     bool   `json:"approved"`
-	Reason       string `json:"reason,omitempty"`
-	ModifiedArgs string `json:"modified_args,omitempty"`
+	ID        string                      `json:"id,omitempty"`
+	TurnID    string                      `json:"turn_id,omitempty"`
+	Pending   []wire.PendingApproval      `json:"pending,omitempty"`
+	Decisions []wire.ApprovalToolDecision `json:"decisions,omitempty"`
 }
 
 type itemCommandResponse struct {
@@ -561,7 +544,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart, commandIma
 }
 
 func displayCommandImagesForContent(command *zotigosession.DisplayCommand) []zotigosession.DisplayCommandImage {
-	if command == nil || (command.Type != sessionCommandMessage && command.Type != sessionCommandSteering) {
+	if command == nil || (command.Type != wire.CommandMessage && command.Type != wire.CommandSteering) {
 		return nil
 	}
 	return command.Images
@@ -798,13 +781,13 @@ func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []it
 	return resp
 }
 
-func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []itemPendingApprovalResponse {
+func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []wire.PendingApproval {
 	if len(pending) == 0 {
 		return nil
 	}
-	resp := make([]itemPendingApprovalResponse, 0, len(pending))
+	resp := make([]wire.PendingApproval, 0, len(pending))
 	for _, item := range pending {
-		resp = append(resp, itemPendingApprovalResponse{
+		resp = append(resp, wire.PendingApproval{
 			ToolCallID:       item.ToolCallID,
 			ToolName:         item.ToolName,
 			Arguments:        item.Arguments,
@@ -818,13 +801,13 @@ func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApprova
 	return resp
 }
 
-func publicDisplayApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []itemApprovalDecisionResponse {
+func publicDisplayApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []wire.ApprovalToolDecision {
 	if len(decisions) == 0 {
 		return nil
 	}
-	resp := make([]itemApprovalDecisionResponse, 0, len(decisions))
+	resp := make([]wire.ApprovalToolDecision, 0, len(decisions))
 	for _, item := range decisions {
-		resp = append(resp, itemApprovalDecisionResponse{
+		resp = append(resp, wire.ApprovalToolDecision{
 			ToolCallID:   item.ToolCallID,
 			Approved:     item.Approved,
 			Reason:       item.Reason,

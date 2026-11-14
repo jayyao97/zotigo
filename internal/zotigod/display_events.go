@@ -12,6 +12,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
@@ -32,31 +33,14 @@ func newDisplayEventBroker() *displayEventBroker {
 	return &displayEventBroker{subscribers: make(map[string]map[chan displayBrokerEvent]struct{}), previews: make(map[string][]*displayPreview)}
 }
 
-type displayDeltaEvent struct {
-	BeforeInputID string                         `json:"before_input_id,omitempty"`
-	ItemID        string                         `json:"item_id"`
-	Role          string                         `json:"role"`
-	PartType      string                         `json:"part_type"`
-	Delta         string                         `json:"delta"`
-	ToolCallID    string                         `json:"tool_call_id,omitempty"`
-	ToolName      string                         `json:"tool_name,omitempty"`
-	Subagent      *zotigosession.DisplaySubagent `json:"subagent,omitempty"`
-}
-
 // Only unfinished blocks are retained. Completed content belongs to the durable log.
 type displayPreview struct {
-	delta displayDeltaEvent
+	delta wire.DisplayDelta
 	text  strings.Builder
 }
 
-type displayPreviewRetirement struct {
-	ItemID      string   `json:"item_id"`
-	ToolCallIDs []string `json:"tool_call_ids,omitempty"`
-	Terminal    bool     `json:"terminal,omitempty"`
-}
-
-func previewRetirement(item zotigosession.DisplayItem) displayPreviewRetirement {
-	retirement := displayPreviewRetirement{ItemID: item.ID}
+func previewRetirement(item zotigosession.DisplayItem) wire.PreviewRetirement {
+	retirement := wire.PreviewRetirement{ItemID: item.ID}
 	retirement.Terminal = item.Subagent == nil && (item.Type == zotigosession.DisplayItemTurnCompleted || item.Type == zotigosession.DisplayItemTurnFailed || item.Type == zotigosession.DisplayItemTurnInterrupted)
 	for _, part := range item.Content {
 		if part.ToolResult != nil {
@@ -66,7 +50,7 @@ func previewRetirement(item zotigosession.DisplayItem) displayPreviewRetirement 
 	return retirement
 }
 
-func (b *displayEventBroker) Retire(sessionID string, retirement displayPreviewRetirement) {
+func (b *displayEventBroker) Retire(sessionID string, retirement wire.PreviewRetirement) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if retirement.Terminal {
@@ -104,7 +88,7 @@ func (b *displayEventBroker) hasPreview(sessionID, itemID string) bool {
 }
 
 type displayBrokerEvent struct {
-	delta *displayDeltaEvent
+	delta *wire.DisplayDelta
 }
 
 func (b *displayEventBroker) Subscribe(sessionID string) (<-chan displayBrokerEvent, func()) {
@@ -114,10 +98,10 @@ func (b *displayEventBroker) Subscribe(sessionID string) (<-chan displayBrokerEv
 
 // Capture the prefix and register for later deltas under the same lock, so
 // switching sessions cannot leave a gap or duplicate the subscription boundary.
-func (b *displayEventBroker) subscribeWithPreviews(sessionID string) (<-chan displayBrokerEvent, []displayDeltaEvent, func()) {
+func (b *displayEventBroker) subscribeWithPreviews(sessionID string) (<-chan displayBrokerEvent, []wire.DisplayDelta, func()) {
 	events := make(chan displayBrokerEvent, displayEventSubscriberQueue)
 	b.mu.Lock()
-	var previews []displayDeltaEvent
+	var previews []wire.DisplayDelta
 	for _, preview := range b.previews[sessionID] {
 		delta := preview.delta
 		delta.Delta = preview.text.String()
@@ -158,7 +142,7 @@ func (b *displayEventBroker) WakeBarrier(sessionID string) {
 	}
 }
 
-func (b *displayEventBroker) PublishDelta(sessionID string, delta displayDeltaEvent) {
+func (b *displayEventBroker) PublishDelta(sessionID string, delta wire.DisplayDelta) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var preview *displayPreview
@@ -389,7 +373,7 @@ func writeDisplayEventItem(w http.ResponseWriter, flusher http.Flusher, item zot
 	return clearDisplayEventWriteDeadline(w)
 }
 
-func writeDisplayEventDelta(w http.ResponseWriter, flusher http.Flusher, delta displayDeltaEvent) error {
+func writeDisplayEventDelta(w http.ResponseWriter, flusher http.Flusher, delta wire.DisplayDelta) error {
 	data, err := sonic.Marshal(delta)
 	if err != nil {
 		return err

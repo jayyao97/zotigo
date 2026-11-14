@@ -4,9 +4,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type submitApprovalDecisionRequest struct {
@@ -23,17 +23,6 @@ type approvalDecisionRequestDTO struct {
 	Approved     *bool  `json:"approved"`
 	Reason       string `json:"reason,omitempty"`
 	ModifiedArgs string `json:"modified_args,omitempty"`
-}
-
-type approvalRequestResponse struct {
-	ID         string                         `json:"id"`
-	SessionID  string                         `json:"session_id"`
-	TurnID     string                         `json:"turn_id"`
-	Status     string                         `json:"status"`
-	Pending    []itemPendingApprovalResponse  `json:"pending"`
-	Decisions  []itemApprovalDecisionResponse `json:"decisions,omitempty"`
-	CreatedAt  time.Time                      `json:"created_at"`
-	ResolvedAt *time.Time                     `json:"resolved_at,omitempty"`
 }
 
 func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request, id string, approvalID string) {
@@ -112,8 +101,8 @@ func approvalDecisionRequests(items []approvalDecisionRequestDTO) ([]zotigosessi
 	return decisions, nil
 }
 
-func publicApprovalRequest(approval approvalRequest) approvalRequestResponse {
-	return approvalRequestResponse{
+func publicApprovalRequest(approval approvalRequest) wire.ApprovalRequest {
+	return wire.ApprovalRequest{
 		ID:         approval.ID,
 		SessionID:  approval.SessionID,
 		TurnID:     approval.TurnID,

@@ -15,9 +15,10 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *profileCommandPayload) (<-chan error, error) {
+func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *wire.ProfileCommandPayload) (<-chan error, error) {
 	completion := make(chan error, 1)
 	predecessor, ordered := r.nextProfileOrder()
 	target := strings.TrimSpace(command.Name)

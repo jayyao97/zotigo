@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestCodexThreadIdentityOnStartAndResume(t *testing.T) {
@@ -49,7 +50,7 @@ func TestWorkerIdentityComesFromCatalog(t *testing.T) {
 			if assigned {
 				want = workspace.ID
 			}
-			if got := response.Header.Get(workerWorkspaceHeader); got != want {
+			if got := response.Header.Get(wire.WorkspaceHeader); got != want {
 				t.Fatalf("workspace = %q, want %q", got, want)
 			}
 		})

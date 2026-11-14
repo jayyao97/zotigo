@@ -11,6 +11,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type failTerminalAppendStore struct {
@@ -27,7 +28,7 @@ func (s *failTerminalAppendStore) AppendDisplayItem(ctx context.Context, id stri
 }
 
 func TestInteractionDisplayRedactsSecretAnswers(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", interactionRequester{Agent: "codex"}, []interactionQuestion{
+	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{Agent: "codex"}, []wire.InteractionQuestion{
 		{ID: "visible", Question: "Visible?"},
 		{ID: "secret", Question: "Secret?", IsSecret: true},
 	}, true, nil)
@@ -48,7 +49,7 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-question", rpc)
 	runtime.interactions = make(map[string]codexPendingInteraction)
-	runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	request := codexapp.Message{
 		ID: json.RawMessage(`41`), Method: "item/tool/requestUserInput",
 		Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"item-1","isBlocking":true,"questions":[{"id":"choice","header":"Mode","question":"Choose","isOther":false,"isSecret":false,"options":[{"label":"Safe","description":"Recommended"}]}]}`),
@@ -56,7 +57,7 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
 	message := <-runtime.writer.sendCh
-	if message.Type == workerMessageDisplayWake {
+	if message.Type == wire.MessageDisplayWake {
 		message = <-runtime.writer.sendCh
 	}
 	if err := <-errCh; err != nil {
@@ -65,7 +66,7 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 	if message.InteractionRequest == nil || message.InteractionRequest.Requester.Name != "Subagent" || len(message.InteractionRequest.Questions) != 1 || message.InteractionRequest.Questions[0].Options[0].Label != "Safe" {
 		t.Fatalf("interaction request = %#v", message.InteractionRequest)
 	}
-	result, fatalErr := runtime.resolveInteraction(workerInteractionResponse{
+	result, fatalErr := runtime.resolveInteraction(wire.InteractionResponse{
 		RequestID: "submit-1", InteractionID: message.InteractionRequest.ID,
 		Answers: map[string][]string{"choice": {"Safe"}},
 	})
@@ -83,8 +84,8 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 }
 
 func TestInteractionAnswersRejectUnknownChoice(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", interactionRequester{}, []interactionQuestion{{
-		ID: "choice", Question: "Choose", Options: []interactionOption{{Label: "A"}},
+	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{}, []wire.InteractionQuestion{{
+		ID: "choice", Question: "Choose", Options: []wire.InteractionOption{{Label: "A"}},
 	}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -95,8 +96,8 @@ func TestInteractionAnswersRejectUnknownChoice(t *testing.T) {
 }
 
 func TestInteractionAnswersAcceptExactlyOneOptionOrUserNote(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", interactionRequester{}, []interactionQuestion{{
-		ID: "choice", Question: "Choose", IsOther: true, Options: []interactionOption{{Label: "A"}},
+	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{}, []wire.InteractionQuestion{{
+		ID: "choice", Question: "Choose", IsOther: true, Options: []wire.InteractionOption{{Label: "A"}},
 	}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -185,7 +186,7 @@ func TestCodexSubagentApprovalRoundTrip(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-approval", rpc)
 	runtime.approvals = make(map[string]codexPendingApproval)
-	runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	request := codexapp.Message{
 		ID: json.RawMessage(`52`), Method: "item/commandExecution/requestApproval",
 		Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"call-1","reason":"writes files","command":"touch file","cwd":"/tmp"}`),
@@ -193,7 +194,7 @@ func TestCodexSubagentApprovalRoundTrip(t *testing.T) {
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
 	message := <-runtime.writer.sendCh
-	if message.Type == workerMessageDisplayWake {
+	if message.Type == wire.MessageDisplayWake {
 		message = <-runtime.writer.sendCh
 	}
 	if err := <-errCh; err != nil {
@@ -202,7 +203,7 @@ func TestCodexSubagentApprovalRoundTrip(t *testing.T) {
 	if message.ApprovalRequest == nil || message.ApprovalRequest.Pending[0].Source != "codex_subagent:child-thread" {
 		t.Fatalf("approval request = %#v", message.ApprovalRequest)
 	}
-	result, fatalErr := runtime.resolveCodexApproval(workerApprovalDecision{
+	result, fatalErr := runtime.resolveCodexApproval(wire.ApprovalDecision{
 		RequestID: "submit-2", ApprovalID: message.ApprovalRequest.ID,
 		Decisions: []zotigosession.DisplayApprovalDecision{{ToolCallID: "call-1", Approved: false, Reason: "not needed"}},
 	})
@@ -219,7 +220,7 @@ func TestCodexCommandApprovalPreservesAuthorityAndHonorsOfferedDecision(t *testi
 	rpc := &codexWorkerRPC{}
 	runtime, _ := newCodexInputTestRuntime(t, "session-network-approval", rpc)
 	runtime.approvals = make(map[string]codexPendingApproval)
-	runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	request := codexapp.Message{
 		ID: json.RawMessage(`53`), Method: "item/commandExecution/requestApproval",
 		Params: json.RawMessage(`{
@@ -232,7 +233,7 @@ func TestCodexCommandApprovalPreservesAuthorityAndHonorsOfferedDecision(t *testi
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
 	message := <-runtime.writer.sendCh
-	if message.Type == workerMessageDisplayWake {
+	if message.Type == wire.MessageDisplayWake {
 		message = <-runtime.writer.sendCh
 	}
 	if err := <-errCh; err != nil {
@@ -248,7 +249,7 @@ func TestCodexCommandApprovalPreservesAuthorityAndHonorsOfferedDecision(t *testi
 			t.Fatalf("displayed authority omitted %s: %s", field, pending.Arguments)
 		}
 	}
-	result, fatalErr := runtime.resolveCodexApproval(workerApprovalDecision{
+	result, fatalErr := runtime.resolveCodexApproval(wire.ApprovalDecision{
 		RequestID: "submit-network", ApprovalID: message.ApprovalRequest.ID,
 		Decisions: []zotigosession.DisplayApprovalDecision{{ToolCallID: "call-network", Approved: false}},
 	})
@@ -263,7 +264,7 @@ func TestCodexPermissionApprovalRoundTrip(t *testing.T) {
 			rpc := &codexWorkerRPC{}
 			runtime, _ := newCodexInputTestRuntime(t, "session-permissions", rpc)
 			runtime.approvals = make(map[string]codexPendingApproval)
-			runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+			runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 			request := codexapp.Message{
 				ID: json.RawMessage(`61`), Method: "item/permissions/requestApproval",
 				Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"call-1","cwd":"/workspace","reason":"write shared files","permissions":{"network":null,"fileSystem":{"write":["/workspace/shared"]}}}`),
@@ -271,13 +272,13 @@ func TestCodexPermissionApprovalRoundTrip(t *testing.T) {
 			errCh := make(chan error, 1)
 			go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
 			message := <-runtime.writer.sendCh
-			if message.Type == workerMessageDisplayWake {
+			if message.Type == wire.MessageDisplayWake {
 				message = <-runtime.writer.sendCh
 			}
 			if err := <-errCh; err != nil {
 				t.Fatal(err)
 			}
-			result, fatalErr := runtime.resolveCodexApproval(workerApprovalDecision{
+			result, fatalErr := runtime.resolveCodexApproval(wire.ApprovalDecision{
 				RequestID: "submit", ApprovalID: message.ApprovalRequest.ID,
 				Decisions: []zotigosession.DisplayApprovalDecision{{ToolCallID: "call-1", Approved: approved}},
 			})
@@ -310,7 +311,7 @@ func TestCodexRequestDeliveryFailureRecordsTerminalState(t *testing.T) {
 			runtime.approvals = make(map[string]codexPendingApproval)
 			done := make(chan struct{})
 			close(done)
-			runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage), done: done}
+			runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message), done: done}
 			params := `{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","command":"touch file","cwd":"/tmp"}`
 			if method == "item/tool/requestUserInput" {
 				params = `{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q","question":"Answer?"}]}`
@@ -338,7 +339,7 @@ func TestCodexRequestDeliveryAndTerminalFailureIsFatal(t *testing.T) {
 		runtime.approvals = make(map[string]codexPendingApproval)
 		done := make(chan struct{})
 		close(done)
-		runtime.writer = &workerClientWriter{sendCh: make(chan workerMessage), done: done}
+		runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message), done: done}
 		err := runtime.handleServerRequest(context.Background(), request)
 		var fatal *codexRequestFatalError
 		if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "append terminal state") {
@@ -351,13 +352,13 @@ func TestCodexResolvedRequestPersistenceFailureCannotBeAnsweredTwice(t *testing.
 	rpc := &codexWorkerRPC{}
 	runtime, _ := newCodexInputTestRuntime(t, "session-resolve-fatal", rpc)
 	runtime.interactions = make(map[string]codexPendingInteraction)
-	req, err := newUserInputInteraction("session-resolve-fatal", "turn", "item", interactionRequester{Agent: "codex"}, []interactionQuestion{{ID: "q", Question: "Answer?"}}, true, nil)
+	req, err := newUserInputInteraction("session-resolve-fatal", "turn", "item", wire.InteractionRequester{Agent: "codex"}, []wire.InteractionQuestion{{ID: "q", Question: "Answer?"}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	runtime.interactions[req.ID] = codexPendingInteraction{request: req, rpcID: json.RawMessage(`9`)}
 	runtime.store = &failTerminalAppendStore{Store: runtime.store, appends: 1}
-	response := workerInteractionResponse{RequestID: "submit", InteractionID: req.ID, Answers: map[string][]string{"q": {"user_note: yes"}}}
+	response := wire.InteractionResponse{RequestID: "submit", InteractionID: req.ID, Answers: map[string][]string{"q": {"user_note: yes"}}}
 	result, fatalErr := runtime.resolveInteraction(response)
 	if fatalErr == nil || result.Error == "" || rpc.responseCalls != 1 {
 		t.Fatalf("first resolution result=%#v fatal=%v calls=%d", result, fatalErr, rpc.responseCalls)

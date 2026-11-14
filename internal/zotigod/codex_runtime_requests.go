@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	channelruntime "github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func respondCodexRequestError(app any, message codexapp.Message, code int, reason string) {
@@ -75,12 +76,12 @@ func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, messag
 		return &codexRequestFatalError{err: errors.New("channel runtime tool transport is unavailable")}
 	}
 	requestContext := r.activeRequestContext.Clone()
-	if err := r.writer.SendRuntimeToolRequest(ctx, workerRuntimeToolRequest{
+	if err := r.writer.SendRuntimeToolRequest(ctx, wire.RuntimeToolRequest{
 		RequestID: params.CallID, Namespace: *params.Namespace, TurnID: params.TurnID, CallID: params.CallID, Name: params.Tool, Arguments: params.Arguments, RequestContext: requestContext,
 	}); err != nil {
 		return &codexRequestFatalError{err: fmt.Errorf("send Channel runtime tool request: %w", err)}
 	}
-	var result workerRuntimeToolResult
+	var result wire.RuntimeToolResult
 	for {
 		select {
 		case <-ctx.Done():
@@ -118,12 +119,12 @@ func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, messag
 
 func (r *codexWorkerRuntime) registerCodexUserInput(ctx context.Context, message codexapp.Message) error {
 	type question struct {
-		ID       string              `json:"id"`
-		Header   string              `json:"header"`
-		Question string              `json:"question"`
-		IsOther  bool                `json:"isOther"`
-		IsSecret bool                `json:"isSecret"`
-		Options  []interactionOption `json:"options"`
+		ID       string                   `json:"id"`
+		Header   string                   `json:"header"`
+		Question string                   `json:"question"`
+		IsOther  bool                     `json:"isOther"`
+		IsSecret bool                     `json:"isSecret"`
+		Options  []wire.InteractionOption `json:"options"`
 	}
 	var params struct {
 		ThreadID         string     `json:"threadId"`
@@ -140,13 +141,13 @@ func (r *codexWorkerRuntime) registerCodexUserInput(ctx context.Context, message
 	if params.IsBlocking != nil {
 		blocking = *params.IsBlocking
 	}
-	requester := interactionRequester{Agent: "codex", ThreadID: params.ThreadID}
+	requester := wire.InteractionRequester{Agent: "codex", ThreadID: params.ThreadID}
 	if params.ThreadID != "" && params.ThreadID != r.threadID {
 		requester.Name = "Subagent"
 	}
-	questions := make([]interactionQuestion, 0, len(params.Questions))
+	questions := make([]wire.InteractionQuestion, 0, len(params.Questions))
 	for _, item := range params.Questions {
-		questions = append(questions, interactionQuestion(item))
+		questions = append(questions, wire.InteractionQuestion(item))
 	}
 	req, err := newUserInputInteraction(r.cfg.SessionID, params.TurnID, params.ItemID, requester, questions, blocking, params.AutoResolutionMS)
 	if err != nil {
@@ -163,19 +164,19 @@ func (r *codexWorkerRuntime) registerCodexUserInput(ctx context.Context, message
 	return nil
 }
 
-func (r *codexWorkerRuntime) resolveInteraction(response workerInteractionResponse) (workerInteractionResult, error) {
+func (r *codexWorkerRuntime) resolveInteraction(response wire.InteractionResponse) (wire.InteractionResult, error) {
 	pending, ok := r.interactions[response.InteractionID]
 	if !ok {
-		return workerInteractionResult{RequestID: response.RequestID, Error: "interaction is not pending"}, nil
+		return wire.InteractionResult{RequestID: response.RequestID, Error: "interaction is not pending"}, nil
 	}
 	if err := validateInteractionAnswers(pending.request, response.Answers); err != nil {
-		return workerInteractionResult{RequestID: response.RequestID, Error: err.Error()}, nil
+		return wire.InteractionResult{RequestID: response.RequestID, Error: err.Error()}, nil
 	}
 	responder, ok := r.app.(interface {
 		RespondResult(json.RawMessage, any) error
 	})
 	if !ok {
-		return workerInteractionResult{RequestID: response.RequestID, Error: "Codex client cannot answer server requests"}, nil
+		return wire.InteractionResult{RequestID: response.RequestID, Error: "Codex client cannot answer server requests"}, nil
 	}
 	result := map[string]any{"answers": map[string]any{}}
 	answers := result["answers"].(map[string]any)
@@ -183,7 +184,7 @@ func (r *codexWorkerRuntime) resolveInteraction(response workerInteractionRespon
 		answers[questionID] = map[string]any{"answers": values}
 	}
 	if err := responder.RespondResult(pending.rpcID, result); err != nil {
-		return workerInteractionResult{RequestID: response.RequestID, Error: err.Error()}, nil
+		return wire.InteractionResult{RequestID: response.RequestID, Error: err.Error()}, nil
 	}
 	resolvedAt := time.Now().UTC()
 	delete(r.interactions, response.InteractionID)
@@ -192,11 +193,11 @@ func (r *codexWorkerRuntime) resolveInteraction(response workerInteractionRespon
 	req.Answers = response.Answers
 	req.ResolvedAt = &resolvedAt
 	if err := r.append(interactionDisplayItem(req, true)); err != nil {
-		result := workerInteractionResult{RequestID: response.RequestID, Error: fmt.Sprintf("record interaction response: %v", err)}
+		result := wire.InteractionResult{RequestID: response.RequestID, Error: fmt.Sprintf("record interaction response: %v", err)}
 		return result, fmt.Errorf("codex interaction resolved but could not be recorded: %w", err)
 	}
 	req.Answers = displayInteractionAnswers(req)
-	return workerInteractionResult{RequestID: response.RequestID, Interaction: &req}, nil
+	return wire.InteractionResult{RequestID: response.RequestID, Interaction: &req}, nil
 }
 
 func (r *codexWorkerRuntime) registerCodexApproval(ctx context.Context, message codexapp.Message) error {
@@ -258,20 +259,20 @@ func (r *codexWorkerRuntime) registerCodexApproval(ctx context.Context, message 
 	return nil
 }
 
-func (r *codexWorkerRuntime) resolveCodexApproval(decision workerApprovalDecision) (workerApprovalResult, error) {
+func (r *codexWorkerRuntime) resolveCodexApproval(decision wire.ApprovalDecision) (wire.ApprovalResult, error) {
 	pending, ok := r.approvals[decision.ApprovalID]
 	if !ok {
-		return workerApprovalResult{RequestID: decision.RequestID, Error: "approval is not pending"}, nil
+		return wire.ApprovalResult{RequestID: decision.RequestID, Error: "approval is not pending"}, nil
 	}
 	if err := validateApprovalDecisions(pending.request.Pending, decision.Decisions); err != nil {
-		return workerApprovalResult{RequestID: decision.RequestID, Error: err.Error()}, nil
+		return wire.ApprovalResult{RequestID: decision.RequestID, Error: err.Error()}, nil
 	}
 	approved := decision.Decisions[0].Approved
 	responder, ok := r.app.(interface {
 		RespondResult(json.RawMessage, any) error
 	})
 	if !ok {
-		return workerApprovalResult{RequestID: decision.RequestID, Error: "Codex client cannot answer server requests"}, nil
+		return wire.ApprovalResult{RequestID: decision.RequestID, Error: "Codex client cannot answer server requests"}, nil
 	}
 	var answer any
 	if pending.kind == codexApprovalPermissions {
@@ -286,22 +287,22 @@ func (r *codexWorkerRuntime) resolveCodexApproval(decision workerApprovalDecisio
 			answerDecision = pending.approve
 		}
 		if answerDecision == "" {
-			return workerApprovalResult{RequestID: decision.RequestID, Error: "Codex did not offer a compatible approval decision"}, nil
+			return wire.ApprovalResult{RequestID: decision.RequestID, Error: "Codex did not offer a compatible approval decision"}, nil
 		}
 		answer = map[string]any{"decision": answerDecision}
 	}
 	if err := responder.RespondResult(pending.rpcID, answer); err != nil {
-		return workerApprovalResult{RequestID: decision.RequestID, Error: err.Error()}, nil
+		return wire.ApprovalResult{RequestID: decision.RequestID, Error: err.Error()}, nil
 	}
 	resolvedAt := time.Now().UTC()
 	delete(r.approvals, decision.ApprovalID)
 	req := resolvedApprovalFromDecision(pending.request, decision.Decisions, resolvedAt)
 	if err := r.append(zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalDecision, Turn: &zotigosession.DisplayTurn{ID: req.TurnID}, Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Decisions: copyApprovalDecisions(req.Decisions)}}); err != nil {
-		result := workerApprovalResult{RequestID: decision.RequestID, Error: fmt.Sprintf("record approval decision: %v", err)}
+		result := wire.ApprovalResult{RequestID: decision.RequestID, Error: fmt.Sprintf("record approval decision: %v", err)}
 		return result, fmt.Errorf("codex approval resolved but could not be recorded: %w", err)
 	}
 	response := publicApprovalRequest(req)
-	return workerApprovalResult{RequestID: decision.RequestID, Approval: &response}, nil
+	return wire.ApprovalResult{RequestID: decision.RequestID, Approval: &response}, nil
 }
 
 func codexCommandApprovalArguments(params codexApprovalRequestParams) (string, error) {
@@ -347,7 +348,7 @@ func codexSimpleApprovalDecisions(method string, available []json.RawMessage) (s
 	return approve, deny
 }
 
-func (r *codexWorkerRuntime) expireInteraction(req interactionRequest) error {
+func (r *codexWorkerRuntime) expireInteraction(req wire.InteractionRequest) error {
 	now := time.Now().UTC()
 	req.Status = interactionStatusExpired
 	req.ResolvedAt = &now

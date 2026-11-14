@@ -103,6 +103,7 @@ Notes on specific packages:
 | Package | What it is | Why it is separate |
 | --- | --- | --- |
 | `zotigod` | The session service: HTTP handlers, session registry, worker supervision, display log, input queue, approvals, channels dispatch, and both worker runtimes. | See Processes. |
+| `zotigod/wire` | The daemon↔worker protocol as data: the WebSocket frame and its payloads, the commands delivered to workers, and the bodies and headers of the worker's `/internal/*` calls. It imports only `core`. | The two sides are different processes and can be different builds during an update, so what they exchange should be a compile-time fact with a pinned format (`wire_test.go`). It is the first step of separating daemon and worker. |
 | `zotigodclient` | Go client for the public API plus daemon discovery and start. | The TUI and ACP need exactly the same attach, resubmit and stop logic. |
 | `wiring` | Builds an agent the way the product wants it: prompt builders, tool set, observer, classifier. | One place decides "what a Zotigo agent is" so the worker and any future host do not diverge. |
 | `sessionadapter` | Maps `agent.Snapshot` to and from `session.Session`. | Keeps persistence mapping out of both the agent and the store. |
@@ -147,6 +148,7 @@ scans the imports of every production Go file against a small rule table:
    `transport`, `workspace`, `skills` or `acp`.
 5. `cli` must not import `agent`, `internal/zotigod` or `internal/wiring`.
 6. `internal/testutil` is importable only from tests.
+7. `internal/zotigod/wire` must not import `internal`, `cli` or `cmd`.
 
 Tests are exempt: a test may import upward to build a fixture. When adding a
 package, decide its level and add it to the table.
@@ -216,12 +218,14 @@ Changing any of these needs a migration or a version check, not a refactor:
 
 ## Known debt
 
-- `internal/zotigod` is still a single package. A split into sub-packages
-  (wire types, session log, daemon, native worker, Codex worker) would make
-  the daemon/worker boundary a compile-time fact. It was not done with the
-  file-level split because about forty unexported symbols are shared across
-  that boundary and the white-box tests would have to move with them; it
-  should be done one boundary at a time.
+- `internal/zotigod` still holds the daemon and both worker runtimes in one
+  package. The protocol data they exchange is now separate
+  (`internal/zotigod/wire`), but the logic is not: a split into session log,
+  daemon, native worker and Codex worker would make the daemon/worker boundary
+  a compile-time fact. It was not done with the wire move because the two
+  sides still share unexported helpers with logic (for example
+  `workerInputErrorDetails`) and the white-box tests would have to move with
+  them; it should be done one boundary at a time.
 - `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
 - `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
   writes a "user approved action" audit event that the production path

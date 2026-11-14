@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerDisplayLog struct {
@@ -18,7 +19,7 @@ type workerDisplayLog struct {
 	wake      func(context.Context)
 	wakeSync  func(context.Context) error
 	barrier   func(context.Context) error
-	delta     func(displayDeltaEvent)
+	delta     func(wire.DisplayDelta)
 
 	mu            sync.Mutex
 	turnID        string
@@ -31,7 +32,7 @@ type workerDisplayLog struct {
 	subagents     map[string]*workerSubagentBlock
 	toolCalls     map[string]chan struct{}
 	toolCallErr   map[string]error
-	steering      map[string]commandResponse
+	steering      map[string]wire.Command
 	steeringOrder []string
 	deltaMuted    bool
 }
@@ -73,7 +74,7 @@ func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession
 	l.subagents = make(map[string]*workerSubagentBlock)
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
-	l.steering = make(map[string]commandResponse)
+	l.steering = make(map[string]wire.Command)
 	l.steeringOrder = nil
 	l.deltaMuted = false
 	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
@@ -95,11 +96,11 @@ func (l *workerDisplayLog) TerminalStatus(turnID string) (string, bool) {
 	return l.terminal, turnID != "" && l.terminalID == turnID
 }
 
-func (l *workerDisplayLog) QueueSteering(command commandResponse) {
+func (l *workerDisplayLog) QueueSteering(command wire.Command) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.steering == nil {
-		l.steering = make(map[string]commandResponse)
+		l.steering = make(map[string]wire.Command)
 	}
 	if _, exists := l.steering[command.ID]; !exists {
 		l.steeringOrder = append(l.steeringOrder, command.ID)
@@ -107,7 +108,7 @@ func (l *workerDisplayLog) QueueSteering(command commandResponse) {
 	l.steering[command.ID] = command
 	// The current block may not emit another delta before it finishes.
 	if l.block != nil && l.delta != nil && !l.deltaMuted {
-		l.delta(displayDeltaEvent{
+		l.delta(wire.DisplayDelta{
 			ItemID: l.block.id, Role: string(protocol.RoleAssistant),
 			PartType: l.block.partType, BeforeInputID: l.beforeInputIDLocked(),
 		})
@@ -315,7 +316,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	}
 	l.block = nil
 	if reason == "" {
-		reason = userPauseReason
+		reason = wire.UserPauseReason
 	}
 	turnID := l.turnID
 	usage := l.turnUsage.Add(l.runUsage).Normalized()
@@ -369,7 +370,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		}
 		l.block.text += event.ContentPartDelta.Text
 		if l.delta != nil && !l.deltaMuted {
-			l.delta(displayDeltaEvent{
+			l.delta(wire.DisplayDelta{
 				BeforeInputID: l.beforeInputIDLocked(),
 				ItemID:        l.block.id,
 				Role:          string(protocol.RoleAssistant),
@@ -430,7 +431,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		}
 	case protocol.EventTypeToolProgress:
 		if event.ToolResult != nil && event.ToolResult.ToolCallID != "" && event.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
-			l.delta(displayDeltaEvent{
+			l.delta(wire.DisplayDelta{
 				BeforeInputID: l.beforeInputIDLocked(),
 				ItemID:        "tool-progress:" + event.ToolResult.ToolCallID,
 				Role:          string(protocol.RoleAssistant),
@@ -492,7 +493,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			item.CreatedAt = command.CreatedAt
 			item.Turn = &zotigosession.DisplayTurn{ID: l.turnID}
 			item.Command = &zotigosession.DisplayCommand{
-				Type:   sessionCommandSteering,
+				Type:   wire.CommandSteering,
 				Text:   command.Steering.Text,
 				Images: displayCommandImages(images),
 				TurnID: l.turnID,
@@ -632,7 +633,7 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 		}
 		current.block.text += child.ContentPartDelta.Text
 		if l.delta != nil && !l.deltaMuted {
-			l.delta(displayDeltaEvent{
+			l.delta(wire.DisplayDelta{
 				ItemID: current.block.id, Role: string(protocol.RoleAssistant), PartType: partType,
 				Delta: child.ContentPartDelta.Text, Subagent: &current.info,
 			})
@@ -676,7 +677,7 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 		}}, "")
 	case protocol.EventTypeToolProgress:
 		if child.ToolResult != nil && child.ToolResult.ToolCallID != "" && child.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
-			l.delta(displayDeltaEvent{
+			l.delta(wire.DisplayDelta{
 				ItemID: "subagent-tool-progress:" + subagent.ToolCallID + ":" + child.ToolResult.ToolCallID,
 				Role:   string(protocol.RoleAssistant), PartType: "tool_progress", Delta: child.ToolResult.Text,
 				ToolCallID: child.ToolResult.ToolCallID, ToolName: child.ToolResult.ToolName, Subagent: &info,

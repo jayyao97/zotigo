@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
@@ -393,7 +394,7 @@ func TestWorkerAttachRejectsStaleGeneration(t *testing.T) {
 	if session, _ := registry.Get(created.ID); session.State != SessionStateStarting {
 		t.Fatalf("session state after stale ready = %q, want %q", session.State, SessionStateStarting)
 	}
-	finishBody, err := sonic.Marshal(finishSessionRequest{Generation: staleGeneration, Error: "old worker failed"})
+	finishBody, err := sonic.Marshal(wire.FinishSessionRequest{Generation: staleGeneration, Error: "old worker failed"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -566,7 +567,7 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
-		if sessionID == created.ID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if sessionID == created.ID && item.Command != nil && item.Command.Type == wire.CommandMessage {
 			close(appendStarted)
 			<-releaseAppend
 		}

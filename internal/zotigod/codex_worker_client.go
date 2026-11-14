@@ -13,6 +13,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type codexWorkerConfig struct {
@@ -34,13 +35,13 @@ type codexWorkerConfig struct {
 }
 
 type codexWorkerChannels struct {
-	commands     <-chan commandResponse
-	inputs       <-chan workerInputRequest
-	approvals    <-chan workerApprovalDecision
-	interactions <-chan workerInteractionResponse
-	boundResults <-chan workerConversationBoundResult
-	interrupts   <-chan workerInterruptTurn
-	runtimeTools <-chan workerRuntimeToolResult
+	commands     <-chan wire.Command
+	inputs       <-chan wire.InputRequest
+	approvals    <-chan wire.ApprovalDecision
+	interactions <-chan wire.InteractionResponse
+	boundResults <-chan wire.ConversationBoundResult
+	interrupts   <-chan wire.InterruptTurn
+	runtimeTools <-chan wire.RuntimeToolResult
 	errors       <-chan error
 }
 
@@ -128,12 +129,12 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		return fmt.Errorf("connect codex worker websocket: %w", workerWebSocketDialError(err, response))
 	}
 	if response != nil {
-		generation = strings.TrimSpace(response.Header.Get(workerGenerationHeader))
+		generation = strings.TrimSpace(response.Header.Get(wire.GenerationHeader))
 	}
 	if generation == "" {
 		return fmt.Errorf("connect codex worker websocket: missing worker generation")
 	}
-	cfg.WorkspaceID = response.Header.Get(workerWorkspaceHeader)
+	cfg.WorkspaceID = response.Header.Get(wire.WorkspaceHeader)
 	writer = newWorkerClientWriter(workerConn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
 	channels := readCodexWorkerMessages(workerConn)
 
@@ -205,7 +206,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 			pendingCommands = pendingCommands[1:]
 			continue
 		}
-		runtime.messagePending = len(pendingCommands) > 0 && pendingCommands[0].Type == sessionCommandMessage
+		runtime.messagePending = len(pendingCommands) > 0 && pendingCommands[0].Type == wire.CommandMessage
 		select {
 		case err := <-channels.errors:
 			runErr = err
@@ -282,8 +283,8 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	}
 }
 
-func loadCodexPendingCommands(ctx context.Context, client *http.Client, daemonURL, sessionID string, appliedSequence uint64) ([]commandResponse, error) {
-	pending := make([]commandResponse, 0)
+func loadCodexPendingCommands(ctx context.Context, client *http.Client, daemonURL, sessionID string, appliedSequence uint64) ([]wire.Command, error) {
+	pending := make([]wire.Command, 0)
 	cursor := workerCommandCursor{}
 	for {
 		previousOffset := cursor.Offset
@@ -295,13 +296,13 @@ func loadCodexPendingCommands(ctx context.Context, client *http.Client, daemonUR
 			pending = enqueueCodexCommand(pending, appliedSequence, command)
 		}
 		cursor.Offset = commands.NextOffset
-		if commands.NextOffset == previousOffset || len(commands.Commands) < maxCommandsLimit {
+		if commands.NextOffset == previousOffset || len(commands.Commands) < wire.MaxCommandsLimit {
 			return pending, nil
 		}
 	}
 }
 
-func enqueueCodexCommand(pending []commandResponse, appliedSequence uint64, command commandResponse) []commandResponse {
+func enqueueCodexCommand(pending []wire.Command, appliedSequence uint64, command wire.Command) []wire.Command {
 	if command.Sequence > 0 && command.Sequence <= appliedSequence {
 		return pending
 	}
@@ -328,13 +329,13 @@ func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerCon
 }
 
 func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
-	commands := make(chan commandResponse, workerCommandBufferSize)
-	inputs := make(chan workerInputRequest, workerCommandBufferSize)
-	approvals := make(chan workerApprovalDecision, workerCommandBufferSize)
-	interactions := make(chan workerInteractionResponse, workerCommandBufferSize)
-	boundResults := make(chan workerConversationBoundResult, 1)
-	interrupts := make(chan workerInterruptTurn, 1)
-	runtimeTools := make(chan workerRuntimeToolResult, workerCommandBufferSize)
+	commands := make(chan wire.Command, workerCommandBufferSize)
+	inputs := make(chan wire.InputRequest, workerCommandBufferSize)
+	approvals := make(chan wire.ApprovalDecision, workerCommandBufferSize)
+	interactions := make(chan wire.InteractionResponse, workerCommandBufferSize)
+	boundResults := make(chan wire.ConversationBoundResult, 1)
+	interrupts := make(chan wire.InterruptTurn, 1)
+	runtimeTools := make(chan wire.RuntimeToolResult, workerCommandBufferSize)
 	errorsCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
@@ -350,33 +351,33 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 				errorsCh <- err
 				return
 			}
-			var message workerMessage
+			var message wire.Message
 			if err := sonic.Unmarshal(data, &message); err != nil {
 				errorsCh <- err
 				return
 			}
 			switch message.Type {
-			case workerMessageCommand:
+			case wire.MessageCommand:
 				if message.Command != nil {
 					commands <- *message.Command
 				}
-			case workerMessageInputRequest:
+			case wire.MessageInputRequest:
 				if message.InputRequest != nil {
 					inputs <- *message.InputRequest
 				}
-			case workerMessageApprovalDecision:
+			case wire.MessageApprovalDecision:
 				if message.ApprovalDecision != nil {
 					approvals <- *message.ApprovalDecision
 				}
-			case workerMessageInteractionResponse:
+			case wire.MessageInteractionResponse:
 				if message.InteractionResponse != nil {
 					interactions <- *message.InteractionResponse
 				}
-			case workerMessageConversationBoundResult:
+			case wire.MessageConversationBoundResult:
 				if message.ConversationBoundResult != nil {
 					boundResults <- *message.ConversationBoundResult
 				}
-			case workerMessageInterruptTurn:
+			case wire.MessageInterruptTurn:
 				if message.InterruptTurn != nil {
 					select {
 					case interrupts <- *message.InterruptTurn:
@@ -385,7 +386,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 						return
 					}
 				}
-			case workerMessageRuntimeToolResult:
+			case wire.MessageRuntimeToolResult:
 				if message.RuntimeToolResult != nil {
 					runtimeTools <- *message.RuntimeToolResult
 				}
@@ -395,7 +396,7 @@ func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
 	return codexWorkerChannels{commands: commands, inputs: inputs, approvals: approvals, interactions: interactions, boundResults: boundResults, interrupts: interrupts, runtimeTools: runtimeTools, errors: errorsCh}
 }
 
-func serveCodexWorkerInterrupts(ctx context.Context, app codexapp.RPC, interrupts <-chan workerInterruptTurn) {
+func serveCodexWorkerInterrupts(ctx context.Context, app codexapp.RPC, interrupts <-chan wire.InterruptTurn) {
 	for {
 		select {
 		case <-ctx.Done():

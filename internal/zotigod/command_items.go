@@ -13,10 +13,11 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery, rootDir string) (commandsResponse, error) {
-	resp := commandsResponse{Commands: make([]commandResponse, 0)}
+func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery, rootDir string) (wire.CommandsPage, error) {
+	resp := wire.CommandsPage{Commands: make([]wire.Command, 0)}
 	lastScanned := query.After
 
 	for _, item := range items {
@@ -28,17 +29,17 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 		if item.Command != nil {
 			appended := false
 			switch item.Command.Type {
-			case sessionCommandMessage:
+			case wire.CommandMessage:
 				command, err := messageCommandFromItem(item, rootDir)
 				if err != nil {
 					if errors.Is(err, errCommandImageUnavailable) {
 						continue
 					}
-					return commandsResponse{}, err
+					return wire.CommandsPage{}, err
 				}
 				resp.Commands = append(resp.Commands, command)
 				appended = true
-			case sessionCommandSteering:
+			case wire.CommandSteering:
 				if item.Type != zotigosession.DisplayItemSessionCommand {
 					break
 				}
@@ -47,17 +48,17 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 					if errors.Is(err, errCommandImageUnavailable) {
 						continue
 					}
-					return commandsResponse{}, err
+					return wire.CommandsPage{}, err
 				}
 				resp.Commands = append(resp.Commands, command)
 				appended = true
-			case sessionCommandPause:
+			case wire.CommandPause:
 				resp.Commands = append(resp.Commands, pauseCommandFromItem(item))
 				appended = true
-			case sessionCommandProfile:
+			case wire.CommandProfile:
 				resp.Commands = append(resp.Commands, profileCommandFromItem(item))
 				appended = true
-			case sessionCommandApprovalPolicy:
+			case wire.CommandApprovalPolicy:
 				resp.Commands = append(resp.Commands, approvalPolicyCommandFromItem(item))
 				appended = true
 			}
@@ -78,27 +79,27 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 	return resp, nil
 }
 
-func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSource, sessionID string, query commandQuery, rootDir string) (commandsResponse, error) {
+func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSource, sessionID string, query commandQuery, rootDir string) (wire.CommandsPage, error) {
 	offsetSource, ok := source.(offsetDisplayItemSource)
 	if !ok {
 		items, _, err := source.LoadItems(ctx, sessionID)
 		if err != nil {
-			return commandsResponse{}, err
+			return wire.CommandsPage{}, err
 		}
 		resp, err := buildCommandsResponse(items, commandQuery{Limit: query.Limit}, rootDir)
 		if err != nil {
-			return commandsResponse{}, err
+			return wire.CommandsPage{}, err
 		}
 		return resp, nil
 	}
 
-	resp := commandsResponse{Commands: make([]commandResponse, 0)}
+	resp := wire.CommandsPage{Commands: make([]wire.Command, 0)}
 	offset := query.Offset
 	for len(resp.Commands) < query.Limit {
 		previousOffset := offset
 		items, _, nextOffset, err := offsetSource.LoadItemsFromOffset(ctx, sessionID, offset, commandOffsetScanLines)
 		if err != nil {
-			return commandsResponse{}, err
+			return wire.CommandsPage{}, err
 		}
 		for _, item := range items {
 			command, ok, err := commandFromDisplayItem(item, rootDir)
@@ -106,7 +107,7 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 				if errors.Is(err, errCommandImageUnavailable) {
 					continue
 				}
-				return commandsResponse{}, err
+				return wire.CommandsPage{}, err
 			}
 			if ok {
 				resp.Commands = append(resp.Commands, command)
@@ -135,22 +136,22 @@ func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSour
 	return resp, nil
 }
 
-func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, bool, error) {
+func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, bool, error) {
 	if item.Command == nil {
-		return commandResponse{}, false, nil
+		return wire.Command{}, false, nil
 	}
 	switch item.Command.Type {
-	case sessionCommandMessage:
+	case wire.CommandMessage:
 		command, err := messageCommandFromItem(item, rootDir)
 		return command, err == nil, err
-	case sessionCommandPause:
+	case wire.CommandPause:
 		return pauseCommandFromItem(item), true, nil
-	case sessionCommandProfile:
+	case wire.CommandProfile:
 		return profileCommandFromItem(item), true, nil
-	case sessionCommandApprovalPolicy:
+	case wire.CommandApprovalPolicy:
 		return approvalPolicyCommandFromItem(item), true, nil
 	default:
-		return commandResponse{}, false, nil
+		return wire.Command{}, false, nil
 	}
 }
 
@@ -198,13 +199,13 @@ func displayCommandImages(images []messageImage) []zotigosession.DisplayCommandI
 	return resp
 }
 
-func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
-	command := commandResponse{
+func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
+	command := wire.Command{
 		ID:        item.ID,
 		Sequence:  item.Sequence,
-		Type:      sessionCommandMessage,
+		Type:      wire.CommandMessage,
 		CreatedAt: item.CreatedAt,
-		Message:   &messageCommandPayload{},
+		Message:   &wire.MessageCommandPayload{},
 	}
 	if item.Command != nil {
 		command.Message.Text = item.Command.Text
@@ -212,27 +213,27 @@ func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (com
 		command.Message.RequestContext = item.Command.RequestContext.Clone()
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
 		if err != nil {
-			return commandResponse{}, err
+			return wire.Command{}, err
 		}
 		command.Message.Images = images
 	}
 	return command, nil
 }
 
-func sessionInputCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
-	if item.Command != nil && item.Command.Type == sessionCommandSteering {
+func sessionInputCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
+	if item.Command != nil && item.Command.Type == wire.CommandSteering {
 		return steeringCommandFromItem(item, rootDir)
 	}
 	return messageCommandFromItem(item, rootDir)
 }
 
-func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (commandResponse, error) {
-	command := commandResponse{
+func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
+	command := wire.Command{
 		ID:        item.ID,
 		Sequence:  item.Sequence,
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: item.CreatedAt,
-		Steering:  &steeringCommandPayload{},
+		Steering:  &wire.SteeringCommandPayload{},
 	}
 	if item.Command != nil {
 		command.Steering.Text = item.Command.Text
@@ -241,20 +242,20 @@ func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (co
 		command.Steering.Skills = append([]string(nil), item.Command.Skills...)
 		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
 		if err != nil {
-			return commandResponse{}, err
+			return wire.Command{}, err
 		}
 		command.Steering.Images = images
 	}
 	return command, nil
 }
 
-func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDir string) ([]commandImageData, error) {
+func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDir string) ([]wire.CommandImageData, error) {
 	if len(images) == 0 {
 		return nil, nil
 	}
-	resp := make([]commandImageData, 0, len(images))
+	resp := make([]wire.CommandImageData, 0, len(images))
 	for idx, img := range images {
-		part := commandImageData{
+		part := wire.CommandImageData{
 			MimeType:  img.MimeType,
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
@@ -281,7 +282,7 @@ func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDi
 	return resp, nil
 }
 
-func publicCommandFromCommand(command commandResponse) publicCommandResponse {
+func publicCommandFromCommand(command wire.Command) publicCommandResponse {
 	resp := publicCommandResponse{
 		ID:        command.ID,
 		Sequence:  command.Sequence,
@@ -289,28 +290,28 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 		CreatedAt: command.CreatedAt,
 	}
 	switch command.Type {
-	case sessionCommandMessage:
+	case wire.CommandMessage:
 		if command.Message != nil {
 			resp.Text = command.Message.Text
 			resp.Skills = append([]string(nil), command.Message.Skills...)
 			resp.Images = publicCommandImages(command.Message.Images)
 		}
-	case sessionCommandSteering:
+	case wire.CommandSteering:
 		if command.Steering != nil {
 			resp.Text = command.Steering.Text
 			resp.Images = publicCommandImages(command.Steering.Images)
 			resp.TurnID = command.Steering.TurnID
 		}
-	case sessionCommandPause:
+	case wire.CommandPause:
 		if command.Pause != nil {
 			resp.TurnID = command.Pause.TurnID
 			resp.Reason = command.Pause.Reason
 		}
-	case sessionCommandProfile:
+	case wire.CommandProfile:
 		if command.Profile != nil {
 			resp.Profile = command.Profile.Name
 		}
-	case sessionCommandApprovalPolicy:
+	case wire.CommandApprovalPolicy:
 		if command.ApprovalPolicy != nil {
 			resp.ApprovalPolicy = command.ApprovalPolicy.Policy
 		}
@@ -318,7 +319,7 @@ func publicCommandFromCommand(command commandResponse) publicCommandResponse {
 	return resp
 }
 
-func publicCommandImages(images []commandImageData) []publicCommandImageResponse {
+func publicCommandImages(images []wire.CommandImageData) []publicCommandImageResponse {
 	if len(images) == 0 {
 		return nil
 	}
@@ -335,13 +336,13 @@ func publicCommandImages(images []commandImageData) []publicCommandImageResponse
 	return resp
 }
 
-func pauseCommandFromItem(item zotigosession.DisplayItem) commandResponse {
-	command := commandResponse{
+func pauseCommandFromItem(item zotigosession.DisplayItem) wire.Command {
+	command := wire.Command{
 		ID:        item.ID,
 		Sequence:  item.Sequence,
-		Type:      sessionCommandPause,
+		Type:      wire.CommandPause,
 		CreatedAt: item.CreatedAt,
-		Pause:     &pauseCommandPayload{},
+		Pause:     &wire.PauseCommandPayload{},
 	}
 	if item.Command != nil {
 		command.Pause.TurnID = item.Command.TurnID
@@ -350,13 +351,13 @@ func pauseCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	return command
 }
 
-func profileCommandFromItem(item zotigosession.DisplayItem) commandResponse {
-	command := commandResponse{
+func profileCommandFromItem(item zotigosession.DisplayItem) wire.Command {
+	command := wire.Command{
 		ID:        item.ID,
 		Sequence:  item.Sequence,
-		Type:      sessionCommandProfile,
+		Type:      wire.CommandProfile,
 		CreatedAt: item.CreatedAt,
-		Profile:   &profileCommandPayload{},
+		Profile:   &wire.ProfileCommandPayload{},
 	}
 	if item.Command != nil {
 		command.Profile.Name = item.Command.Profile
@@ -364,13 +365,13 @@ func profileCommandFromItem(item zotigosession.DisplayItem) commandResponse {
 	return command
 }
 
-func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) commandResponse {
-	command := commandResponse{
+func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) wire.Command {
+	command := wire.Command{
 		ID:             item.ID,
 		Sequence:       item.Sequence,
-		Type:           sessionCommandApprovalPolicy,
+		Type:           wire.CommandApprovalPolicy,
 		CreatedAt:      item.CreatedAt,
-		ApprovalPolicy: &approvalPolicyCommandPayload{},
+		ApprovalPolicy: &wire.ApprovalPolicyCommandPayload{},
 	}
 	if item.Command != nil {
 		command.ApprovalPolicy.Policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
@@ -434,7 +435,7 @@ func hasPendingApprovalForTurn(items []zotigosession.DisplayItem, turnID string)
 func hasPendingMessageCommand(items []zotigosession.DisplayItem) bool {
 	pending := false
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if item.Command != nil && item.Command.Type == wire.CommandMessage {
 			pending = true
 		}
 		switch item.Type {

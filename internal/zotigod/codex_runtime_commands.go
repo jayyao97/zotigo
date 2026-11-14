@@ -7,11 +7,12 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandResponse, boundResults <-chan workerConversationBoundResult) error {
+func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) error {
 	switch command.Type {
-	case sessionCommandMessage:
+	case wire.CommandMessage:
 		client := &workerRuntimeToolClient{writer: r.writer, results: r.runtimeToolResults}
 		if err := authorizeRuntimeToolReplay(ctx, client, command.ID); err != nil {
 			return err
@@ -24,7 +25,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 			return err
 		}
 		return r.recordTurnStarted(ctx, command, turnID, runtime)
-	case sessionCommandPause:
+	case wire.CommandPause:
 		if r.activeTurnID == "" {
 			r.acknowledgeCommand(command.Sequence)
 			return r.sendIdleAfterPause(ctx, command.Sequence)
@@ -48,7 +49,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		}
 		r.acknowledgeCommand(command.Sequence)
 		return nil
-	case sessionCommandSteering:
+	case wire.CommandSteering:
 		if r.activeTurnID == "" || command.Steering == nil {
 			return fmt.Errorf("codex steering requires an active turn")
 		}
@@ -64,7 +65,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command commandR
 		}
 		r.acknowledgeCommand(command.Sequence)
 		return nil
-	case sessionCommandApprovalPolicy:
+	case wire.CommandApprovalPolicy:
 		if command.ApprovalPolicy == nil {
 			return fmt.Errorf("codex approval policy payload is missing")
 		}
@@ -100,10 +101,10 @@ func (r *codexWorkerRuntime) sendIdleAfterPause(ctx context.Context, commandSequ
 	if r.writer == nil || r.messagePending {
 		return nil
 	}
-	return r.writer.SendIdle(ctx, workerIdle{CommandSequence: commandSequence})
+	return r.writer.SendIdle(ctx, wire.Idle{CommandSequence: commandSequence})
 }
 
-func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *approvalPolicyCommandPayload) error {
+func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
 	target, err := normalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err
@@ -139,8 +140,8 @@ func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID st
 	return nil
 }
 
-func (r *codexWorkerRuntime) canApplyCommand(command commandResponse) bool {
-	return command.Type != sessionCommandMessage || r.activeTurnID == ""
+func (r *codexWorkerRuntime) canApplyCommand(command wire.Command) bool {
+	return command.Type != wire.CommandMessage || r.activeTurnID == ""
 }
 
 func (r *codexWorkerRuntime) acknowledgeCommand(sequence uint64) {

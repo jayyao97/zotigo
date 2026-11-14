@@ -15,13 +15,14 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type receivedDisplayEvent struct {
 	id        string
 	eventType string
 	item      itemResponse
-	delta     displayDeltaEvent
+	delta     wire.DisplayDelta
 }
 
 type deadlineResponseWriter struct {
@@ -87,7 +88,7 @@ func TestSessionEventsStreamsVolatileDeltaWithoutDurableCursor(t *testing.T) {
 	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
 	defer resp.Body.Close()
 
-	broker.PublishDelta(sessionID, displayDeltaEvent{
+	broker.PublishDelta(sessionID, wire.DisplayDelta{
 		ItemID:   "item-volatile",
 		Role:     "assistant",
 		PartType: "text",
@@ -121,7 +122,7 @@ func TestDisplayBarrierDropsQueuedPreviewsAndCannotBeOvertakenByLaterDelta(t *te
 	events, unsubscribe := broker.Subscribe("session-order")
 	defer unsubscribe()
 	for i := 0; i < cap(events); i++ {
-		broker.PublishDelta("session-order", displayDeltaEvent{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
+		broker.PublishDelta("session-order", wire.DisplayDelta{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
 	}
 
 	broker.WakeBarrier("session-order")
@@ -131,7 +132,7 @@ func TestDisplayBarrierDropsQueuedPreviewsAndCannotBeOvertakenByLaterDelta(t *te
 	if len(events) != 0 {
 		t.Fatalf("queued previews remained behind barrier: %d", len(events))
 	}
-	broker.PublishDelta("session-order", displayDeltaEvent{ItemID: "new-generation", Delta: "new"})
+	broker.PublishDelta("session-order", wire.DisplayDelta{ItemID: "new-generation", Delta: "new"})
 	if event := <-events; event.delta == nil || event.delta.ItemID != "new-generation" {
 		t.Fatalf("new generation delta was not queued after barrier: %#v", event)
 	}
@@ -142,7 +143,7 @@ func TestDisplayBarrierCoalescesExistingWakeAndFollowingPreview(t *testing.T) {
 	events, unsubscribe := broker.Subscribe("session-existing-wake")
 	defer unsubscribe()
 	broker.Wake("session-existing-wake")
-	broker.PublishDelta("session-existing-wake", displayDeltaEvent{ItemID: "old-generation", Delta: "old"})
+	broker.PublishDelta("session-existing-wake", wire.DisplayDelta{ItemID: "old-generation", Delta: "old"})
 	broker.WakeBarrier("session-existing-wake")
 	if event := <-events; event.delta != nil {
 		t.Fatalf("barrier event = %#v", event)
@@ -157,14 +158,14 @@ func TestOrderedDisplayWakeDoesNotAffectOtherSubscribers(t *testing.T) {
 	full, unsubscribeFull := broker.Subscribe("full-session")
 	other, unsubscribeOther := broker.Subscribe("other-session")
 	for i := 0; i < cap(full); i++ {
-		broker.PublishDelta("full-session", displayDeltaEvent{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
+		broker.PublishDelta("full-session", wire.DisplayDelta{ItemID: fmt.Sprintf("old-%d", i), Delta: "old"})
 	}
 	second, unsubscribeSecond := broker.Subscribe("full-session")
 	broker.WakeBarrier("full-session")
 	if event := <-second; event.delta != nil {
 		t.Fatalf("second subscriber did not receive ordered wake: %#v", event)
 	}
-	broker.PublishDelta("other-session", displayDeltaEvent{ItemID: "other", Delta: "ready"})
+	broker.PublishDelta("other-session", wire.DisplayDelta{ItemID: "other", Delta: "ready"})
 	if event := <-other; event.delta == nil || event.delta.ItemID != "other" {
 		t.Fatalf("unrelated subscriber was stalled: %#v", event)
 	}
@@ -250,12 +251,12 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
 	defer resp.Body.Close()
 
-	writer.SendDelta(displayDeltaEvent{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", Delta: "thinking"})
+	writer.SendDelta(wire.DisplayDelta{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", Delta: "thinking"})
 	event := readDisplayEvent(t, reader)
 	if event.eventType != "delta" || event.id != "" || event.delta.ItemID != "item-from-worker" || event.delta.Delta != "thinking" {
 		t.Fatalf("worker delta event = %#v", event)
 	}
-	writer.SendDelta(displayDeltaEvent{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", BeforeInputID: "steering-input"})
+	writer.SendDelta(wire.DisplayDelta{ItemID: "item-from-worker", Role: "assistant", PartType: "reasoning", BeforeInputID: "steering-input"})
 	boundary := readDisplayEvent(t, reader)
 	if boundary.eventType != "delta" || boundary.delta.BeforeInputID != "steering-input" || boundary.delta.Delta != "" {
 		t.Fatalf("metadata-only ordering delta lost: %#v", boundary)
@@ -293,12 +294,12 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	defer unsubscribe()
 	writer := &workerClientWriter{
 		conn:   workerConn,
-		sendCh: make(chan workerMessage, workerDeltaBufferSize),
+		sendCh: make(chan wire.Message, workerDeltaBufferSize),
 		done:   make(chan struct{}),
 	}
 	barrierClient := newWorkerDisplayBarrierClient(writer)
 	_, _, _, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
-	writer.SendDelta(displayDeltaEvent{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
+	writer.SendDelta(wire.DisplayDelta{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
 	writer.SendDisplayWake()
 	barrierResult := make(chan error, 1)
 	barrierCtx, cancelBarrier := context.WithTimeout(context.Background(), time.Second)
@@ -316,7 +317,7 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	if err := <-barrierResult; err != nil {
 		t.Fatalf("wait for display barrier acknowledgement: %v", err)
 	}
-	writer.SendDelta(displayDeltaEvent{ItemID: "new", Role: "assistant", PartType: "text", Delta: "new"})
+	writer.SendDelta(wire.DisplayDelta{ItemID: "new", Role: "assistant", PartType: "text", Delta: "new"})
 
 	sawWake := false
 	eventDeadline := time.After(time.Second)
@@ -346,11 +347,11 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 
 func TestReliableDisplayWakeWaitsForQueueSpace(t *testing.T) {
 	writer := &workerClientWriter{
-		sendCh: make(chan workerMessage, 2),
+		sendCh: make(chan wire.Message, 2),
 		done:   make(chan struct{}),
 	}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
 	result := make(chan error, 1)
 	go func() {
 		result <- writer.SendDisplayWakeReliable(context.Background())
@@ -370,7 +371,7 @@ func TestReliableDisplayWakeWaitsForQueueSpace(t *testing.T) {
 		t.Fatal("reliable wake did not use released queue space")
 	}
 	<-writer.sendCh
-	if message := <-writer.sendCh; message.Type != workerMessageDisplayWake {
+	if message := <-writer.sendCh; message.Type != wire.MessageDisplayWake {
 		t.Fatalf("last queued message = %q, want reliable wake", message.Type)
 	}
 }
@@ -378,10 +379,10 @@ func TestReliableDisplayWakeWaitsForQueueSpace(t *testing.T) {
 func TestReliableDisplayWakeTimesOutWhileQueueIsFull(t *testing.T) {
 	writer := &workerClientWriter{
 		displayControlTimeout: 20 * time.Millisecond,
-		sendCh:                make(chan workerMessage, 1),
+		sendCh:                make(chan wire.Message, 1),
 		done:                  make(chan struct{}),
 	}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
 	err := writer.SendDisplayWakeReliable(context.Background())
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("reliable wake error = %v, want deadline exceeded", err)
@@ -393,10 +394,10 @@ func TestReliableDisplayWakeTimesOutWhileQueueIsFull(t *testing.T) {
 
 func TestDisplayBarrierQueueWaitStopsOnCancel(t *testing.T) {
 	writer := &workerClientWriter{
-		sendCh: make(chan workerMessage, 1),
+		sendCh: make(chan wire.Message, 1),
 		done:   make(chan struct{}),
 	}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
 	barrier := newWorkerDisplayBarrierClient(writer)
 	ctx, cancel := context.WithCancel(context.Background())
 	result := make(chan error, 1)
@@ -425,7 +426,7 @@ func TestDisplayBarrierQueueWaitStopsOnCancel(t *testing.T) {
 
 func TestDisplayBarrierWaitTimesOutWithoutAcknowledgement(t *testing.T) {
 	writer := &workerClientWriter{
-		sendCh: make(chan workerMessage, 1),
+		sendCh: make(chan wire.Message, 1),
 		done:   make(chan struct{}),
 	}
 	barrier := newWorkerDisplayBarrierClient(writer)
@@ -448,10 +449,10 @@ func TestDisplayBarrierWaitTimesOutWithoutAcknowledgement(t *testing.T) {
 
 func TestDisplayBarrierWaitTimesOutWhileQueueIsFull(t *testing.T) {
 	writer := &workerClientWriter{
-		sendCh: make(chan workerMessage, 1),
+		sendCh: make(chan wire.Message, 1),
 		done:   make(chan struct{}),
 	}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
 	barrier := newWorkerDisplayBarrierClient(writer)
 	barrier.timeout = 20 * time.Millisecond
 	err := barrier.Wait(context.Background())
@@ -665,7 +666,7 @@ func TestSessionEventsRestoresUnfinishedPrefixAfterSwitch(t *testing.T) {
 	started := appendDisplayEventTestItem(t, store, sessionID, zotigosession.DisplayItemTurnStarted)
 	path := fmt.Sprintf("/sessions/%s/events?after=%d", sessionID, started.Sequence)
 	first, reader := openDisplayEventStream(t, server, path, "")
-	delta := displayDeltaEvent{ItemID: "streaming-body", Role: "assistant", PartType: "text", Delta: "前半段 **"}
+	delta := wire.DisplayDelta{ItemID: "streaming-body", Role: "assistant", PartType: "text", Delta: "前半段 **"}
 	broker.PublishDelta(sessionID, delta)
 	if got := readDisplayEvent(t, reader); got.delta.Delta != delta.Delta {
 		t.Fatalf("first delta = %#v", got)
@@ -674,7 +675,7 @@ func TestSessionEventsRestoresUnfinishedPrefixAfterSwitch(t *testing.T) {
 	waitForDisplayEventSubscribers(t, broker, sessionID, 0)
 	delta.Delta = "重点**，切走时继续输出。"
 	broker.PublishDelta(sessionID, delta)
-	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: delta.ItemID, Role: "assistant", PartType: "text", BeforeInputID: "steering-1"})
+	broker.PublishDelta(sessionID, wire.DisplayDelta{ItemID: delta.ItemID, Role: "assistant", PartType: "text", BeforeInputID: "steering-1"})
 	second, reader := openDisplayEventStream(t, server, path, "")
 	defer second.Body.Close()
 	replay := readDisplayEvent(t, reader)
@@ -706,12 +707,12 @@ func TestSessionEventsRestoresUnfinishedPrefixAfterSwitch(t *testing.T) {
 func TestDisplayPrefixSubscriptionBoundaryAndRetirement(t *testing.T) {
 	broker := newDisplayEventBroker()
 	prefix := strings.Repeat("正文🙂", 5000)
-	broker.PublishDelta("one", displayDeltaEvent{ItemID: "body", Role: "assistant", PartType: "text", Delta: prefix})
-	broker.PublishDelta("one", displayDeltaEvent{ItemID: "child", Role: "assistant", PartType: "reasoning", Delta: "child prefix", Subagent: &zotigosession.DisplaySubagent{ToolCallID: "spawn-1"}})
-	broker.PublishDelta("two", displayDeltaEvent{ItemID: "other", Role: "assistant", PartType: "text", Delta: "private"})
+	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "body", Role: "assistant", PartType: "text", Delta: prefix})
+	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "child", Role: "assistant", PartType: "reasoning", Delta: "child prefix", Subagent: &zotigosession.DisplaySubagent{ToolCallID: "spawn-1"}})
+	broker.PublishDelta("two", wire.DisplayDelta{ItemID: "other", Role: "assistant", PartType: "text", Delta: "private"})
 	events, snapshot, cancel := broker.subscribeWithPreviews("one")
 	defer cancel()
-	broker.PublishDelta("one", displayDeltaEvent{ItemID: "body", Role: "assistant", PartType: "text", Delta: "tail"})
+	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "body", Role: "assistant", PartType: "text", Delta: "tail"})
 	if len(snapshot) != 2 || snapshot[0].Delta != prefix || snapshot[1].Delta != "child prefix" {
 		t.Fatal("snapshot is incomplete or contaminated by another session/later delta")
 	}
@@ -722,7 +723,7 @@ func TestDisplayPrefixSubscriptionBoundaryAndRetirement(t *testing.T) {
 	if broker.hasPreview("one", "child") || !broker.hasPreview("one", "body") {
 		t.Fatal("tool retirement removed wrong blocks")
 	}
-	broker.Retire("one", displayPreviewRetirement{Terminal: true})
+	broker.Retire("one", wire.PreviewRetirement{Terminal: true})
 	if broker.hasPreview("one", "body") || !broker.hasPreview("two", "other") {
 		t.Fatal("terminal retirement leaked across sessions")
 	}
@@ -730,7 +731,7 @@ func TestDisplayPrefixSubscriptionBoundaryAndRetirement(t *testing.T) {
 
 func TestSessionEventsDoesNotReplayAlreadyDurablePrefix(t *testing.T) {
 	store, broker, server, sessionID := newDisplayEventTestServer(t)
-	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "completed", Role: "assistant", PartType: "text", Delta: "already saved"})
+	broker.PublishDelta(sessionID, wire.DisplayDelta{ItemID: "completed", Role: "assistant", PartType: "text", Delta: "already saved"})
 	stored, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{ID: "completed", Type: zotigosession.DisplayItemAssistantMessage})
 	if err != nil {
 		t.Fatal(err)
@@ -739,7 +740,7 @@ func TestSessionEventsDoesNotReplayAlreadyDurablePrefix(t *testing.T) {
 	// prefix when the durable item is at/before the client's existing cursor.
 	response, reader := openDisplayEventStream(t, server, fmt.Sprintf("/sessions/%s/events?after=%d", sessionID, stored.Sequence), "")
 	defer response.Body.Close()
-	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "next", Role: "assistant", PartType: "text", Delta: "new block"})
+	broker.PublishDelta(sessionID, wire.DisplayDelta{ItemID: "next", Role: "assistant", PartType: "text", Delta: "new block"})
 	event := readDisplayEvent(t, reader)
 	if event.delta.ItemID != "next" {
 		t.Fatalf("replayed completed preview: %#v", event)
@@ -750,7 +751,7 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 	for _, kind := range []string{"native", "codex"} {
 		t.Run(kind, func(t *testing.T) {
 			store, _, _, sessionID := newDisplayEventTestServer(t)
-			writer := &workerClientWriter{sendCh: make(chan workerMessage, 4), done: make(chan struct{})}
+			writer := &workerClientWriter{sendCh: make(chan wire.Message, 4), done: make(chan struct{})}
 			item := zotigosession.DisplayItem{ID: "finished-block", Type: zotigosession.DisplayItemAssistantMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "body"}}}
 			if kind == "native" {
 				log := newWorkerDisplayLog(sessionID, storedDisplayItemSource{store: store})
@@ -766,7 +767,7 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 			}
 			select {
 			case message := <-writer.sendCh:
-				if message.Type != workerMessageDisplayWake || message.PreviewRetirement == nil || message.PreviewRetirement.ItemID != item.ID {
+				if message.Type != wire.MessageDisplayWake || message.PreviewRetirement == nil || message.PreviewRetirement.ItemID != item.ID {
 					t.Fatalf("completion notification = %#v", message)
 				}
 				items, _, err := store.ListDisplayItems(context.Background(), sessionID)
@@ -790,9 +791,9 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 	defer server.Close()
 	conn, _ := connectWorker(t, server, sessionID)
 	defer conn.Close()
-	writer := &workerClientWriter{conn: conn, sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	writer := &workerClientWriter{conn: conn, sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	defer writer.Close()
-	broker.PublishDelta(sessionID, displayDeltaEvent{ItemID: "finished", Role: "assistant", PartType: "text", Delta: "completed body"})
+	broker.PublishDelta(sessionID, wire.DisplayDelta{ItemID: "finished", Role: "assistant", PartType: "text", Delta: "completed body"})
 	stored, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{ID: "finished", Type: zotigosession.DisplayItemAssistantMessage})
 	if err != nil {
 		t.Fatal(err)
@@ -822,7 +823,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 }
 
 func TestDisplayRetirementWaitStopsWhenWriterCloses(t *testing.T) {
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
+	writer := &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
 	defer writer.Close()
 	writer.SendDisplayWake()
 	sent := make(chan struct{})

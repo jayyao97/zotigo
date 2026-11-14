@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestCompactingInputRejectionIsStructured(t *testing.T) {
@@ -41,7 +42,7 @@ func TestCompactingInputRejectionIsStructured(t *testing.T) {
 			if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 				t.Fatal(err)
 			}
-			var input workerMessage
+			var input wire.Message
 			if err := worker.ReadJSON(&input); err != nil {
 				t.Fatal(err)
 			}
@@ -49,7 +50,7 @@ func TestCompactingInputRejectionIsStructured(t *testing.T) {
 				t.Fatal("missing input request")
 			}
 			code, message := workerInputErrorDetails(fmt.Errorf("%w: context compaction is in progress", errActiveTurn))
-			if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+			if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 				RequestID: input.InputRequest.RequestID, ErrorCode: code, Error: message,
 			}}); err != nil {
 				t.Fatal(err)
@@ -118,8 +119,8 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	request := workerInputRequest{Command: commandResponse{
-		ID: "compact-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "/compact"},
+	request := wire.InputRequest{Command: wire.Command{
+		ID: "compact-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "/compact"},
 	}}
 	if _, err := runtime.acceptInput(ctx, request); err != nil {
 		t.Fatal(err)
@@ -197,7 +198,7 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 	runtime.mu.Lock()
 	runtime.turnCompacting = true
 	runtime.mu.Unlock()
-	request.Command = commandResponse{ID: "during-compact", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "please continue"}}
+	request.Command = wire.Command{ID: "during-compact", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "please continue"}}
 	request.RequiredApprovalPolicy = "auto"
 	if _, err := runtime.acceptInput(ctx, request); !errors.Is(err, errActiveTurn) {
 		t.Fatalf("input during compact: %v", err)
@@ -215,14 +216,14 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 
 func TestCompactCommandOnlyMatchesBareLocalInput(t *testing.T) {
 	for _, text := range []string{"/compact", " /compress\n"} {
-		if !isCompactCommand(&messageCommandPayload{Text: text}) {
+		if !isCompactCommand(&wire.MessageCommandPayload{Text: text}) {
 			t.Fatalf("not recognized: %q", text)
 		}
 	}
-	for _, command := range []*messageCommandPayload{
+	for _, command := range []*wire.MessageCommandPayload{
 		nil,
 		{Text: "/compact this paragraph"},
-		{Text: "/compact", Images: []commandImageData{{MimeType: "image/png"}}},
+		{Text: "/compact", Images: []wire.CommandImageData{{MimeType: "image/png"}}},
 		{Text: "/compact", Skills: []string{"review"}},
 		{Text: "/compact", RequestContext: &protocol.RequestContext{Source: "feishu"}},
 	} {
@@ -271,7 +272,7 @@ func TestAutomaticCompactRejectsSteeringAndAllowsStop(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { runtime.cancelCurrentTurn(); runtime.Close() }()
-	request := workerInputRequest{Command: commandResponse{ID: "start", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "continue"}}}
+	request := wire.InputRequest{Command: wire.Command{ID: "start", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "continue"}}}
 	if _, err = runtime.acceptInput(ctx, request); err != nil {
 		t.Fatal(err)
 	}
@@ -297,7 +298,7 @@ func TestAutomaticCompactRejectsSteeringAndAllowsStop(t *testing.T) {
 	runtime.mu.Lock()
 	done := runtime.turnDone
 	runtime.mu.Unlock()
-	if err := runtime.pauseTurn(ctx, &pauseCommandPayload{TurnID: runtime.display.CurrentTurnID(), Reason: "user stop"}); err != nil {
+	if err := runtime.pauseTurn(ctx, &wire.PauseCommandPayload{TurnID: runtime.display.CurrentTurnID(), Reason: "user stop"}); err != nil {
 		t.Fatal(err)
 	}
 	select {

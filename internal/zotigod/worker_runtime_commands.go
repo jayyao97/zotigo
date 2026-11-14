@@ -12,15 +12,16 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func (r *workerRuntime) HandleCommand(ctx context.Context, command commandResponse) error {
+func (r *workerRuntime) HandleCommand(ctx context.Context, command wire.Command) error {
 	_, err := r.handleCommand(ctx, command)
 	return err
 }
 
-func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequest) workerInputResult {
-	result := workerInputResult{RequestID: request.RequestID}
+func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputRequest) wire.InputResult {
+	result := wire.InputResult{RequestID: request.RequestID}
 	command, err := r.acceptInput(ctx, request)
 	if err != nil {
 		result.ErrorCode, result.Error = workerInputErrorDetails(err)
@@ -30,18 +31,18 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request workerInputRequ
 	return result
 }
 
-func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequest) (commandResponse, error) {
+func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputRequest) (wire.Command, error) {
 	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	} else if found {
-		if request.SteeringOnly && existing.Type != sessionCommandSteering {
-			return commandResponse{}, errCommandIDConflict
+		if request.SteeringOnly && existing.Type != wire.CommandSteering {
+			return wire.Command{}, errCommandIDConflict
 		}
-		if request.StartOnly && existing.Type != sessionCommandMessage {
-			return commandResponse{}, errCommandIDConflict
+		if request.StartOnly && existing.Type != wire.CommandMessage {
+			return wire.Command{}, errCommandIDConflict
 		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
-			return commandResponse{}, errCommandIDConflict
+			return wire.Command{}, errCommandIDConflict
 		}
 		return existing, nil
 	}
@@ -50,7 +51,7 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 	compacting := r.turnCompacting
 	r.mu.Unlock()
 	if compacting {
-		return commandResponse{}, fmt.Errorf("%w: context compaction is in progress", errActiveTurn)
+		return wire.Command{}, fmt.Errorf("%w: context compaction is in progress", errActiveTurn)
 	}
 	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
 		r.mu.Lock()
@@ -59,17 +60,17 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		if request.RequiredApprovalPolicy != "" {
 			policy, err := r.agent.RequestedApprovalPolicyForInput()
 			if errors.Is(err, agent.ErrCompacting) {
-				return commandResponse{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+				return wire.Command{}, fmt.Errorf("%w: %v", errActiveTurn, err)
 			}
 			if err != nil {
-				return commandResponse{}, err
+				return wire.Command{}, err
 			}
 			if policy != request.RequiredApprovalPolicy {
-				return commandResponse{}, errInputPolicyMismatch
+				return wire.Command{}, errInputPolicyMismatch
 			}
 		}
 		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
-			return commandResponse{}, errInputPolicyMismatch
+			return wire.Command{}, errInputPolicyMismatch
 		}
 	}
 	turnID := r.display.CurrentTurnID()
@@ -78,31 +79,31 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		turnActive := r.turnActive
 		r.mu.Unlock()
 		if turnID != "" || turnActive {
-			return commandResponse{}, errActiveTurn
+			return wire.Command{}, errActiveTurn
 		}
 	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID {
-		return commandResponse{}, errTurnMismatch
+		return wire.Command{}, errTurnMismatch
 	}
 	if request.SteeringOnly && turnID == "" {
-		return commandResponse{}, errNoActiveTurn
+		return wire.Command{}, errNoActiveTurn
 	}
 	if isCompactCommand(messageCommandForRequest(request).Message) && turnID != "" {
-		return commandResponse{}, fmt.Errorf("%w: wait for the current turn to finish before /compact", errActiveTurn)
+		return wire.Command{}, fmt.Errorf("%w: wait for the current turn to finish before /compact", errActiveTurn)
 	}
 
 	message, err := inputMessageFromRequest(request)
 	if err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	if turnID != "" {
 		ready, err := r.waitForTurnAdmission(ctx, turnID)
 		if err != nil {
-			return commandResponse{}, err
+			return wire.Command{}, err
 		}
 		if !ready {
 			if request.SteeringOnly {
-				return commandResponse{}, errNoActiveTurn
+				return wire.Command{}, errNoActiveTurn
 			}
 			turnID = ""
 		}
@@ -123,29 +124,29 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request workerInputRequ
 		if err == nil {
 			r.noteTurnCommandSequence(steering.Sequence)
 			if err := r.afterTurnUserInputQueued(ctx, turnID, steering.Steering.Text); err != nil {
-				return commandResponse{}, err
+				return wire.Command{}, err
 			}
 			return steering, nil
 		}
 		r.display.DiscardSteering(steering.ID)
 		if errors.Is(err, agent.ErrCompacting) {
-			return commandResponse{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+			return wire.Command{}, fmt.Errorf("%w: %v", errActiveTurn, err)
 		}
 		if request.SteeringOnly || !isStaleTurnUserInputError(err) {
 			if isStaleTurnUserInputError(err) {
-				return commandResponse{}, errNoActiveTurn
+				return wire.Command{}, errNoActiveTurn
 			}
-			return commandResponse{}, err
+			return wire.Command{}, err
 		}
 	}
 
 	messageCommand := messageCommandForRequest(request)
 	stored, err := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, messageCommand)
 	if err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	if err := r.startMessageTurn(ctx, stored.ID, stored.Sequence, stored.Message); err != nil {
-		return commandResponse{}, err
+		return wire.Command{}, err
 	}
 	return stored, nil
 }
@@ -169,8 +170,8 @@ func (r *workerRuntime) waitForTurnAdmission(ctx context.Context, turnID string)
 	}
 }
 
-func (r *workerRuntime) resolveApproval(ctx context.Context, decision workerApprovalDecision) (workerApprovalResult, *workerApprovalResolution) {
-	result := workerApprovalResult{RequestID: decision.RequestID}
+func (r *workerRuntime) resolveApproval(ctx context.Context, decision wire.ApprovalDecision) (wire.ApprovalResult, *workerApprovalResolution) {
+	result := wire.ApprovalResult{RequestID: decision.RequestID}
 	if r.transport == nil {
 		result.Error = "approval transport is not configured"
 		return result, nil
@@ -196,7 +197,7 @@ func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerAp
 	return r.transport.releaseApproval(ctx, resolution)
 }
 
-func (r *workerRuntime) handleCommand(ctx context.Context, command commandResponse) (<-chan error, error) {
+func (r *workerRuntime) handleCommand(ctx context.Context, command wire.Command) (<-chan error, error) {
 	if err := r.currentFatalError(); err != nil {
 		return nil, err
 	}
@@ -204,27 +205,27 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command commandRespon
 		return nil, err
 	}
 	switch command.Type {
-	case sessionCommandMessage:
+	case wire.CommandMessage:
 		if err := authorizeRuntimeToolReplay(ctx, r.runtimeTools, command.ID); err != nil {
 			return nil, err
 		}
 		return nil, r.startMessageTurn(ctx, command.ID, command.Sequence, command.Message)
-	case sessionCommandPause:
+	case wire.CommandPause:
 		r.noteTurnCommandSequence(command.Sequence)
 		return nil, r.pauseTurn(ctx, command.Pause)
-	case sessionCommandSteering:
+	case wire.CommandSteering:
 		r.noteTurnCommandSequence(command.Sequence)
 		return nil, r.queueTurnUserInput(ctx, command)
-	case sessionCommandProfile:
+	case wire.CommandProfile:
 		return r.switchProfile(ctx, command.ID, command.Profile)
-	case sessionCommandApprovalPolicy:
+	case wire.CommandApprovalPolicy:
 		return nil, r.setApprovalPolicy(ctx, command.ID, command.ApprovalPolicy)
 	default:
 		return nil, nil
 	}
 }
 
-func validateWorkerCommand(command commandResponse) error {
+func validateWorkerCommand(command wire.Command) error {
 	payloads := 0
 	if command.Message != nil {
 		payloads++
@@ -242,23 +243,23 @@ func validateWorkerCommand(command commandResponse) error {
 		payloads++
 	}
 	switch command.Type {
-	case sessionCommandMessage:
+	case wire.CommandMessage:
 		if command.Message == nil || payloads != 1 {
 			return fmt.Errorf("invalid message command payload")
 		}
-	case sessionCommandPause:
+	case wire.CommandPause:
 		if command.Pause == nil || payloads != 1 {
 			return fmt.Errorf("invalid pause command payload")
 		}
-	case sessionCommandSteering:
+	case wire.CommandSteering:
 		if command.Steering == nil || payloads != 1 {
 			return fmt.Errorf("invalid steering command payload")
 		}
-	case sessionCommandProfile:
+	case wire.CommandProfile:
 		if command.Profile == nil || strings.TrimSpace(command.Profile.Name) == "" || payloads != 1 {
 			return fmt.Errorf("invalid profile command payload")
 		}
-	case sessionCommandApprovalPolicy:
+	case wire.CommandApprovalPolicy:
 		if command.ApprovalPolicy == nil || payloads != 1 {
 			return fmt.Errorf("invalid approval policy command payload")
 		}
@@ -271,7 +272,7 @@ func validateWorkerCommand(command commandResponse) error {
 	return nil
 }
 
-func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *approvalPolicyCommandPayload) error {
+func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
 	target, err := normalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err

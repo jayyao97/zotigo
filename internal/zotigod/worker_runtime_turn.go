@@ -18,9 +18,10 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayload) error {
+func (r *workerRuntime) pauseTurn(ctx context.Context, command *wire.PauseCommandPayload) error {
 	currentTurnID := r.display.CurrentTurnID()
 	if currentTurnID == "" {
 		return nil
@@ -42,7 +43,7 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *pauseCommandPayl
 	return err
 }
 
-func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command commandResponse) error {
+func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command wire.Command) error {
 	payload := command.Steering
 	msg, err := userMessageFromCommand(payload.Text, payload.Images, "steering")
 	if err != nil {
@@ -106,7 +107,7 @@ func (r *workerRuntime) afterTurnUserInputQueued(ctx context.Context, turnID str
 	return nil
 }
 
-func staleSteeringResult(commandResponse) error {
+func staleSteeringResult(wire.Command) error {
 	return nil
 }
 
@@ -114,7 +115,7 @@ func isStaleTurnUserInputError(err error) bool {
 	return errors.Is(err, agent.ErrNotRunning)
 }
 
-func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *messageCommandPayload) error {
+func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *wire.MessageCommandPayload) error {
 	msg, err := messageFromCommandWithSkills(commandID, command, r.skills)
 	if err != nil {
 		return err
@@ -201,7 +202,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		sequence := r.turnSequence()
 		r.finishTurn()
 		if saveErr == nil && snapshot.State != agent.StatePaused && r.notifyIdle != nil {
-			_ = r.notifyIdle(context.Background(), workerIdle{CommandSequence: sequence})
+			_ = r.notifyIdle(context.Background(), wire.Idle{CommandSequence: sequence})
 		}
 	}()
 	return nil
@@ -209,7 +210,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 
 // Only bare, local commands are interpreted; text with attachments, skills or
 // channel provenance remains normal model input.
-func isCompactCommand(command *messageCommandPayload) bool {
+func isCompactCommand(command *wire.MessageCommandPayload) bool {
 	if command == nil || len(command.Images) != 0 || len(command.Skills) != 0 || command.RequestContext != nil {
 		return false
 	}
@@ -244,7 +245,7 @@ func (r *workerRuntime) compactTurn(ctx context.Context) error {
 	return r.display.HandleEvent(ctx, protocol.NewFinishEvent(protocol.FinishReasonStop))
 }
 
-func messageFromCommandWithSkills(commandID string, command *messageCommandPayload, manager *skills.SkillManager) (protocol.Message, error) {
+func messageFromCommandWithSkills(commandID string, command *wire.MessageCommandPayload, manager *skills.SkillManager) (protocol.Message, error) {
 	if len(command.Skills) == 0 {
 		return messageFromCommand(commandID, command)
 	}
@@ -296,7 +297,7 @@ func (r *workerRuntime) NotifyIdleIfIdle(ctx context.Context, commandSequence ui
 	if active || r.notifyIdle == nil || r.agent.Snapshot().State == agent.StatePaused {
 		return nil
 	}
-	return r.notifyIdle(ctx, workerIdle{CommandSequence: commandSequence})
+	return r.notifyIdle(ctx, wire.Idle{CommandSequence: commandSequence})
 }
 
 func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
@@ -311,7 +312,7 @@ func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
 	return snapshot
 }
 
-func messageFromCommand(commandID string, command *messageCommandPayload) (protocol.Message, error) {
+func messageFromCommand(commandID string, command *wire.MessageCommandPayload) (protocol.Message, error) {
 	message, err := userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
 	if err != nil {
 		return protocol.Message{}, err
@@ -325,7 +326,7 @@ func messageFromCommand(commandID string, command *messageCommandPayload) (proto
 	return message, nil
 }
 
-func userMessageFromCommand(text string, images []commandImageData, label string) (protocol.Message, error) {
+func userMessageFromCommand(text string, images []wire.CommandImageData, label string) (protocol.Message, error) {
 	msg := protocol.Message{
 		Role:      protocol.RoleUser,
 		Content:   make([]protocol.ContentPart, 0, 1+len(images)),

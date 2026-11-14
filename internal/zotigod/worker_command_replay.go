@@ -17,6 +17,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerCommandCursor struct {
@@ -69,7 +70,7 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 				cursor.Sequence = command.Sequence
 				continue
 			}
-			if command.Type != sessionCommandProfile {
+			if command.Type != wire.CommandProfile {
 				if err := flushProfiles(); err != nil {
 					return cursor, err
 				}
@@ -91,7 +92,7 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 		if err := saveWorkerCommandCursor(sessionID, cursor); err != nil {
 			return cursor, err
 		}
-		if commands.NextOffset == previousOffset || len(commands.Commands) < maxCommandsLimit {
+		if commands.NextOffset == previousOffset || len(commands.Commands) < wire.MaxCommandsLimit {
 			return cursor, nil
 		}
 	}
@@ -108,23 +109,23 @@ func loadAppliedWorkerCommandSequences(ctx context.Context, runtime *workerRunti
 	return appliedWorkerCommandSequences(items), nil
 }
 
-func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, cursor workerCommandCursor) (commandsResponse, error) {
-	endpoint := strings.TrimRight(daemonURL, "/") + "/internal/sessions/" + url.PathEscape(sessionID) + "/commands?offset=" + strconv.FormatInt(cursor.Offset, 10) + "&limit=" + strconv.Itoa(maxCommandsLimit)
+func fetchWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, cursor workerCommandCursor) (wire.CommandsPage, error) {
+	endpoint := strings.TrimRight(daemonURL, "/") + "/internal/sessions/" + url.PathEscape(sessionID) + "/commands?offset=" + strconv.FormatInt(cursor.Offset, 10) + "&limit=" + strconv.Itoa(wire.MaxCommandsLimit)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		return commandsResponse{}, err
+		return wire.CommandsPage{}, err
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return commandsResponse{}, err
+		return wire.CommandsPage{}, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
-		return commandsResponse{}, fmt.Errorf("fetch worker commands failed: %s", resp.Status)
+		return wire.CommandsPage{}, fmt.Errorf("fetch worker commands failed: %s", resp.Status)
 	}
-	var body commandsResponse
+	var body wire.CommandsPage
 	if err := sonic.ConfigDefault.NewDecoder(resp.Body).Decode(&body); err != nil {
-		return commandsResponse{}, err
+		return wire.CommandsPage{}, err
 	}
 	return body, nil
 }
@@ -190,7 +191,7 @@ func latestCommandSequence(items []zotigosession.DisplayItem) uint64 {
 }
 
 func isDurableCommandItem(item zotigosession.DisplayItem) bool {
-	return item.Command != nil && item.Command.Type != "" && (item.Command.Type != sessionCommandSteering || item.Type == zotigosession.DisplayItemSessionCommand)
+	return item.Command != nil && item.Command.Type != "" && (item.Command.Type != wire.CommandSteering || item.Type == zotigosession.DisplayItemSessionCommand)
 }
 
 func recoverWorkerCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string) (workerCommandCursor, error) {
@@ -230,17 +231,17 @@ func appliedWorkerCommandSequences(items []zotigosession.DisplayItem) map[uint64
 	for _, item := range items {
 		if isDurableCommandItem(item) {
 			switch item.Command.Type {
-			case sessionCommandMessage:
+			case wire.CommandMessage:
 				pendingMessages = append(pendingMessages, item.Sequence)
-			case sessionCommandPause:
+			case wire.CommandPause:
 				if item.Command.TurnID != "" {
 					pendingByTurn[item.Command.TurnID] = append(pendingByTurn[item.Command.TurnID], item.Sequence)
 				}
-			case sessionCommandSteering:
+			case wire.CommandSteering:
 				pendingSteering[item.ID] = item.Sequence
-			case sessionCommandProfile:
+			case wire.CommandProfile:
 				pendingProfiles[item.ID] = item.Sequence
-			case sessionCommandApprovalPolicy:
+			case wire.CommandApprovalPolicy:
 				pendingApprovalPolicies[item.ID] = item.Sequence
 			default:
 				safe[item.Sequence] = true

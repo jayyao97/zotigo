@@ -19,6 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
@@ -370,19 +371,19 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 		ID:       "profile-command-a",
 		Sequence: 1,
 		Type:     zotigosession.DisplayItemSessionCommand,
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-a"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-a"},
 	}
 	pause := zotigosession.DisplayItem{
 		ID:       "pause-command",
 		Sequence: 2,
 		Type:     zotigosession.DisplayItemSessionCommand,
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandPause, TurnID: "turn-pending"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandPause, TurnID: "turn-pending"},
 	}
 	commandB := zotigosession.DisplayItem{
 		ID:       "profile-command-b",
 		Sequence: 3,
 		Type:     zotigosession.DisplayItemSessionCommand,
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-b"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-b"},
 	}
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
 		"sess-repair-different-profile": {commandA, pause, commandB},
@@ -424,8 +425,8 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 		display:   newWorkerDisplayLog("sess-repair-different-profile", source),
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		writeJSON(w, http.StatusOK, commandsResponse{
-			Commands:   []commandResponse{profileCommandFromItem(commandA), pauseCommandFromItem(pause), profileCommandFromItem(commandB)},
+		writeJSON(w, http.StatusOK, wire.CommandsPage{
+			Commands:   []wire.Command{profileCommandFromItem(commandA), pauseCommandFromItem(pause), profileCommandFromItem(commandB)},
 			NextOffset: 1,
 		})
 	}))
@@ -460,8 +461,8 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	if err := store.Put(context.Background(), stored); err != nil {
 		t.Fatalf("save uncertain profile metadata: %v", err)
 	}
-	commandA := zotigosession.DisplayItem{ID: "profile-a", Sequence: 1, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-a"}}
-	commandC := zotigosession.DisplayItem{ID: "profile-c", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "profile-c"}}
+	commandA := zotigosession.DisplayItem{ID: "profile-a", Sequence: 1, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-a"}}
+	commandC := zotigosession.DisplayItem{ID: "profile-c", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-c"}}
 	var failCOnce atomic.Bool
 	source := &fakeDisplayItemSource{
 		items: map[string][]zotigosession.DisplayItem{"sess-partial-profile-repair": {commandA, commandC}},
@@ -567,7 +568,7 @@ func TestSessionProfileChangeQueuesCommandForRunningWorker(t *testing.T) {
 		t.Fatalf("unexpected profile response: %#v", response)
 	}
 	msg := readWorkerMessage(t, worker)
-	if msg.Command == nil || msg.Command.Type != sessionCommandProfile || msg.Command.Profile == nil || msg.Command.Profile.Name != "new" {
+	if msg.Command == nil || msg.Command.Type != wire.CommandProfile || msg.Command.Profile == nil || msg.Command.Profile.Name != "new" {
 		t.Fatalf("unexpected worker profile command: %#v", msg)
 	}
 	if response.CommandID == "" || response.CommandID != msg.Command.ID {

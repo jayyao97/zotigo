@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/update"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const defaultAddr = "127.0.0.1:8766"
@@ -71,16 +72,6 @@ type createSessionRequest struct {
 	Agent            string               `json:"agent,omitempty"`
 	Model            string               `json:"model,omitempty"`
 	ReasoningEffort  string               `json:"reasoning_effort,omitempty"`
-}
-
-type finishSessionRequest struct {
-	Error      string `json:"error,omitempty"`
-	ErrorCode  string `json:"error_code,omitempty"`
-	Generation string `json:"generation,omitempty"`
-}
-
-type workerReadyRequest struct {
-	Generation string `json:"generation"`
 }
 
 type handlerOptions struct {
@@ -263,9 +254,9 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		handler.codexSync = newCodexSessionSyncer(options.codexHost, options.store, items, options.catalog, registry, options.sessionOps)
 	}
 	handler.workers.SetDisconnectHandler(handler.handleWorkerDisconnect)
-	handler.workers.SetMessageHandler(func(sessionID string, generation string, msg workerMessage) {
+	handler.workers.SetMessageHandler(func(sessionID string, generation string, msg wire.Message) {
 		switch msg.Type {
-		case workerMessageDelta:
+		case wire.MessageDelta:
 			if msg.Delta == nil || msg.Delta.ItemID == "" || (msg.Delta.Delta == "" && msg.Delta.BeforeInputID == "") {
 				return
 			}
@@ -274,49 +265,49 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 				handler.registry.MarkWorking(sessionID, msg.Delta.ToolName)
 				handler.events.PublishDelta(sessionID, *msg.Delta)
 			}
-		case workerMessageDisplayWake:
+		case wire.MessageDisplayWake:
 			if msg.PreviewRetirement != nil {
 				handler.events.Retire(sessionID, *msg.PreviewRetirement)
 			}
 			handler.events.Wake(sessionID)
-		case workerMessageWorking:
+		case wire.MessageWorking:
 			if session, ok := handler.registry.Get(sessionID); ok && session.State == SessionStatePausing {
 				_, _ = handler.registry.FinishStopping(sessionID)
 			} else {
 				handler.registry.MarkWorking(sessionID, "")
 			}
-		case workerMessageDisplayBarrier:
+		case wire.MessageDisplayBarrier:
 			if msg.DisplayBarrier != nil && msg.DisplayBarrier.ID != "" {
 				handler.events.WakeBarrier(sessionID)
 				handler.workers.acknowledgeDisplayBarrier(sessionID, *msg.DisplayBarrier)
 			}
-		case workerMessageApprovalRequest:
+		case wire.MessageApprovalRequest:
 			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == approvalStatusPending {
 				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.Pause(sessionID)
 				unlock()
 			}
-		case workerMessageApprovalResult:
+		case wire.MessageApprovalResult:
 			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == approvalStatusResolved {
 				handler.reconcileHumanRequestState(sessionID)
 			}
-		case workerMessageInteractionRequest:
+		case wire.MessageInteractionRequest:
 			if msg.InteractionRequest != nil && msg.InteractionRequest.Status == interactionStatusPending && msg.InteractionRequest.IsBlocking {
 				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.Pause(sessionID)
 				unlock()
 			}
-		case workerMessageInteractionResult:
+		case wire.MessageInteractionResult:
 			if msg.InteractionResult != nil && msg.InteractionResult.Error == "" && msg.InteractionResult.Interaction != nil && msg.InteractionResult.Interaction.Status != interactionStatusPending && msg.InteractionResult.Interaction.IsBlocking {
 				handler.reconcileHumanRequestState(sessionID)
 			}
-		case workerMessageConversationBound:
+		case wire.MessageConversationBound:
 			handler.handleConversationBound(sessionID, generation, msg.ConversationBound)
-		case workerMessageRuntimeToolRequest:
+		case wire.MessageRuntimeToolRequest:
 			if msg.RuntimeToolRequest != nil {
 				request := *msg.RuntimeToolRequest
 				go func() {
-					result := workerRuntimeToolResult{RequestID: request.RequestID}
+					result := wire.RuntimeToolResult{RequestID: request.RequestID}
 					toolCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					value, err := handler.executeRuntimeTool(toolCtx, sessionID, generation, request)
 					cancel()
@@ -328,7 +319,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 					handler.workers.SendRuntimeToolResult(sessionID, generation, result)
 				}()
 			}
-		case workerMessageIdle:
+		case wire.MessageIdle:
 			if msg.Idle != nil {
 				idle := *msg.Idle
 				if !handler.workers.IsCurrentIdle(sessionID, generation, idle) {
@@ -336,7 +327,7 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 				}
 				// Keep Working state changes in worker event order, even while
 				// queue preparation runs asynchronously.
-				handler.events.Retire(sessionID, displayPreviewRetirement{Terminal: true})
+				handler.events.Retire(sessionID, wire.PreviewRetirement{Terminal: true})
 				handler.registry.MarkIdle(sessionID)
 				go func() {
 					// Drain before scheduling idle eviction. Admission advances the

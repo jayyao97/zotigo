@@ -21,6 +21,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type codexWorkerRPC struct {
@@ -96,11 +97,11 @@ func TestCodexAcceptInputUsesTurnStartForAtomicStartOrSteer(t *testing.T) {
 	rpc := &codexWorkerRPC{turnID: "turn-active"}
 	runtime, store := newCodexInputTestRuntime(t, "session-input-steer", rpc)
 	runtime.activeTurnID = "turn-active"
-	request := workerInputRequest{Command: commandResponse{
-		ID: "client-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "change direction"},
+	request := wire.InputRequest{Command: wire.Command{
+		ID: "client-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "change direction"},
 	}}
 	result := runtime.AcceptInput(context.Background(), request, nil, nil)
-	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != "turn-active" {
+	if result.Error != "" || result.Command == nil || result.Command.Type != wire.CommandSteering || result.Command.Steering.TurnID != "turn-active" {
 		t.Fatalf("input result = %#v", result)
 	}
 	result = runtime.AcceptInput(context.Background(), request, nil, nil)
@@ -111,7 +112,7 @@ func TestCodexAcceptInputUsesTurnStartForAtomicStartOrSteer(t *testing.T) {
 		t.Fatalf("RPC methods = %s", got)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-input-steer")
-	if err != nil || len(items) != 2 || items[0].Command == nil || items[0].Command.Type != sessionCommandSteering || items[1].Type != zotigosession.DisplayItemSteeringMessage {
+	if err != nil || len(items) != 2 || items[0].Command == nil || items[0].Command.Type != wire.CommandSteering || items[1].Type != zotigosession.DisplayItemSteeringMessage {
 		t.Fatalf("accepted steering items = %#v, err=%v", items, err)
 	}
 }
@@ -121,10 +122,10 @@ func TestCodexStartOnlyRejectsActiveTurnWithoutRPCOrPersistence(t *testing.T) {
 	rpc := &codexWorkerRPC{turnID: "turn-active"}
 	runtime, store := newCodexInputTestRuntime(t, "session-input-start-only", rpc)
 	runtime.activeTurnID = "turn-active"
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{
 		StartOnly: true,
-		Command: commandResponse{
-			ID: "client-start-only", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "new task"},
+		Command: wire.Command{
+			ID: "client-start-only", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "new task"},
 		},
 	}, nil, nil)
 	if result.ErrorCode != "active_turn" || result.Command != nil {
@@ -151,7 +152,7 @@ func TestCodexCompletionSteerDefersPendingApproval(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{ID: "completion:cb", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "task completed"}}}, nil, nil)
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{ID: "completion:cb", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "task completed"}}}, nil, nil)
 	if result.ErrorCode != "active_turn" || len(rpc.methods) != 0 {
 		t.Fatalf("callback bypassed approval: %+v calls=%v", result, rpc.methods)
 	}
@@ -171,7 +172,7 @@ func TestCodexInputRejectsChangedRequiredPolicy(t *testing.T) {
 			if err := store.Put(context.Background(), stored); err != nil {
 				t.Fatal(err)
 			}
-			request := workerInputRequest{StartOnly: true, RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequirePromptRevision: true, RequiredPromptRevision: 2, Command: commandResponse{ID: "callback", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "Analyze result"}}}
+			request := wire.InputRequest{StartOnly: true, RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequirePromptRevision: true, RequiredPromptRevision: 2, Command: wire.Command{ID: "callback", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "Analyze result"}}}
 			switch mismatch {
 			case "approval":
 				request.RequiredApprovalPolicy = agent.ApprovalPolicyManual
@@ -209,10 +210,10 @@ func TestCodexUrgentInterruptUnblocksAtomicStartOrSteer(t *testing.T) {
 	runtime, store := newCodexInputTestRuntime(t, "session-input-stop", nil)
 	runtime.app = rpc
 	runtime.activeTurnID = "turn-active"
-	resultCh := make(chan workerInputResult, 1)
+	resultCh := make(chan wire.InputResult, 1)
 	go func() {
-		resultCh <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-			ID: "client-stop", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "one last steer"},
+		resultCh <- runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+			ID: "client-stop", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "one last steer"},
 		}}, nil, nil)
 	}()
 	select {
@@ -221,19 +222,19 @@ func TestCodexUrgentInterruptUnblocksAtomicStartOrSteer(t *testing.T) {
 		t.Fatal("turn/start was not called")
 	}
 
-	interrupts := make(chan workerInterruptTurn, 1)
+	interrupts := make(chan wire.InterruptTurn, 1)
 	interruptCtx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	go serveCodexWorkerInterrupts(interruptCtx, rpc, interrupts)
-	interrupts <- workerInterruptTurn{ThreadID: "thread-1", TurnID: "turn-active"}
+	interrupts <- wire.InterruptTurn{ThreadID: "thread-1", TurnID: "turn-active"}
 
-	var result workerInputResult
+	var result wire.InputResult
 	select {
 	case result = <-resultCh:
 	case <-time.After(time.Second):
 		t.Fatal("atomic turn/start did not settle after urgent interrupt")
 	}
-	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering {
+	if result.Error != "" || result.Command == nil || result.Command.Type != wire.CommandSteering {
 		t.Fatalf("input result = %#v", result)
 	}
 	rpc.mu.Lock()
@@ -256,10 +257,10 @@ func TestCodexAcceptInputStartsMessageAfterConcurrentCompletion(t *testing.T) {
 	runtime.turnStarted = time.Now().UTC()
 	notifications := make(chan codexapp.Message, 1)
 	notifications <- codexapp.Message{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-old","status":"completed"}}`)}
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-		ID: "client-2", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "next work"},
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+		ID: "client-2", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "next work"},
 	}}, nil, notifications)
-	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandMessage || runtime.activeTurnID != "turn-new" {
+	if result.Error != "" || result.Command == nil || result.Command.Type != wire.CommandMessage || runtime.activeTurnID != "turn-new" {
 		t.Fatalf("input result = %#v, active=%q", result, runtime.activeTurnID)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-input-start")
@@ -268,7 +269,7 @@ func TestCodexAcceptInputStartsMessageAfterConcurrentCompletion(t *testing.T) {
 	}
 	messageCount := 0
 	for _, item := range items {
-		if item.ID == "client-2" && item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if item.ID == "client-2" && item.Command != nil && item.Command.Type == wire.CommandMessage {
 			messageCount++
 		}
 	}
@@ -282,8 +283,8 @@ func TestCodexExplicitSteeringChecksExpectedTurnBeforeDelivery(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-input-mismatch", rpc)
 	runtime.activeTurnID = "turn-current"
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{
-		Command:      commandResponse{ID: "client-3", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "wrong"}},
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{
+		Command:      wire.Command{ID: "client-3", Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: "wrong"}},
 		SteeringOnly: true, ExpectedTurnID: "turn-old",
 	}, nil, nil)
 	if result.ErrorCode != "turn_mismatch" || len(rpc.methods) != 0 {
@@ -302,8 +303,8 @@ func TestCodexExplicitSteeringReportsCompletionRaceStructurally(t *testing.T) {
 	}}
 	runtime, store := newCodexInputTestRuntime(t, "session-input-race", rpc)
 	runtime.activeTurnID = "turn-current"
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{
-		Command:      commandResponse{ID: "client-4", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "too late"}},
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{
+		Command:      wire.Command{ID: "client-4", Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: "too late"}},
 		SteeringOnly: true, ExpectedTurnID: "turn-current",
 	}, nil, nil)
 	if result.ErrorCode != "no_active_turn" || fmt.Sprint(rpc.methods) != "[turn/steer thread/turns/list]" {
@@ -704,13 +705,13 @@ func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing
 		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
 		store: store, app: &codexWorkerRPC{}, threadID: "thread-1", messages: make(map[string]string), hooks: hookDispatcher,
 	}
-	if err := runtime.handleCommand(context.Background(), commandResponse{
-		ID: "message-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "first"},
+	if err := runtime.handleCommand(context.Background(), wire.Command{
+		ID: "message-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "first"},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.handleCommand(context.Background(), commandResponse{
-		ID: "steering-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "correction"},
+	if err := runtime.handleCommand(context.Background(), wire.Command{
+		ID: "steering-1", Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: "correction"},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -746,9 +747,9 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-steering"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
 	}
-	command := commandResponse{
-		ID: "steering-1", Type: sessionCommandSteering, CreatedAt: now,
-		Steering: &steeringCommandPayload{Text: "use lite_downgrade", TurnID: "turn-1"},
+	command := wire.Command{
+		ID: "steering-1", Type: wire.CommandSteering, CreatedAt: now,
+		Steering: &wire.SteeringCommandPayload{Text: "use lite_downgrade", TurnID: "turn-1"},
 	}
 	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
 		t.Fatal(err)
@@ -767,7 +768,7 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 	if item.Turn == nil || item.Turn.ID != "turn-1" || len(item.Content) != 1 || item.Content[0].Text != "use lite_downgrade" {
 		t.Fatalf("steering content = %#v", item)
 	}
-	if item.Command == nil || item.Command.Type != sessionCommandSteering || item.Command.Text != "use lite_downgrade" {
+	if item.Command == nil || item.Command.Type != wire.CommandSteering || item.Command.Text != "use lite_downgrade" {
 		t.Fatalf("steering command = %#v", item.Command)
 	}
 	if got := fmt.Sprint(rpc.methods); got != "[turn/steer]" {
@@ -784,7 +785,7 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	defer store.Close()
 	const sessionID = "codex-steering-order"
 	putStoredSession(t, store, sessionID, t.TempDir())
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 32), done: make(chan struct{})}
+	writer := &workerClientWriter{sendCh: make(chan wire.Message, 32), done: make(chan struct{})}
 	runtime := &codexWorkerRuntime{
 		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", writer: writer, messages: make(map[string]string),
@@ -801,8 +802,8 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	notify("item/started", `{"id":"answer","type":"agentMessage"}`)
 	notify("item/started", `{"id":"shell","type":"commandExecution","command":"echo hello","cwd":"/tmp"}`)
 	for _, id := range []string{"steer-1", "steer-2"} {
-		if err := runtime.persistSteering(commandResponse{
-			ID: id, Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: id},
+		if err := runtime.persistSteering(wire.Command{
+			ID: id, Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: id},
 		}, "turn-1"); err != nil {
 			t.Fatal(err)
 		}
@@ -869,7 +870,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 16), done: make(chan struct{})}
+	writer := &workerClientWriter{sendCh: make(chan wire.Message, 16), done: make(chan struct{})}
 	hookDispatcher := &capturingHookDispatcher{}
 	runtime := &codexWorkerRuntime{
 		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-items"}}, store: store, writer: writer,
@@ -946,7 +947,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	}
 }
 
-func nextWorkerDelta(t *testing.T, messages <-chan workerMessage) workerMessage {
+func nextWorkerDelta(t *testing.T, messages <-chan wire.Message) wire.Message {
 	t.Helper()
 	for {
 		select {
@@ -1123,7 +1124,7 @@ func TestCodexPauseAcknowledgesAlreadyInterruptedTurn(t *testing.T) {
 	}
 	runtime, _ := newCodexInputTestRuntime(t, "session-pause-terminal", rpc)
 	runtime.activeTurnID = "turn-old"
-	command := commandResponse{ID: "pause-1", Sequence: 7, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}}
+	command := wire.Command{ID: "pause-1", Sequence: 7, Type: wire.CommandPause, Pause: &wire.PauseCommandPayload{TurnID: "turn-old"}}
 	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
 		t.Fatalf("idempotent pause failed: %v", err)
 	}
@@ -1155,11 +1156,11 @@ func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testin
 		messages: make(map[string]string), toolNames: make(map[string]string), toolArguments: make(map[string]string),
 		toolNativeNames: make(map[string]string),
 	}
-	pause := commandResponse{ID: "pause", Sequence: 2, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}}
+	pause := wire.Command{ID: "pause", Sequence: 2, Type: wire.CommandPause, Pause: &wire.PauseCommandPayload{TurnID: "turn-old"}}
 	if err := runtime.handleCommand(context.Background(), pause, nil); err != nil {
 		t.Fatal(err)
 	}
-	message := commandResponse{ID: "message", Sequence: 3, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "continue"}}
+	message := wire.Command{ID: "message", Sequence: 3, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "continue"}}
 	if runtime.canApplyCommand(message) || runtime.commandSequence != pause.Sequence {
 		t.Fatalf("message applied before turn barrier: runtime=%#v", runtime)
 	}
@@ -1200,17 +1201,17 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 	}
 	for _, item := range []zotigosession.DisplayItem{
 		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-old"}, CreatedAt: now},
-		{ID: "pause", Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandPause, TurnID: "turn-old"}},
-		{ID: "message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "replay me"}},
+		{ID: "pause", Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandPause, TurnID: "turn-old"}},
+		{ID: "message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "replay me"}},
 	} {
 		if _, err := store.AppendDisplayItem(context.Background(), "session-replay", item); err != nil {
 			t.Fatal(err)
 		}
 	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_ = sonic.ConfigDefault.NewEncoder(w).Encode(commandsResponse{Commands: []commandResponse{
-			{ID: "pause", Sequence: 2, Type: sessionCommandPause, Pause: &pauseCommandPayload{TurnID: "turn-old"}},
-			{ID: "message", Sequence: 3, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "replay me"}},
+		_ = sonic.ConfigDefault.NewEncoder(w).Encode(wire.CommandsPage{Commands: []wire.Command{
+			{ID: "pause", Sequence: 2, Type: wire.CommandPause, Pause: &wire.PauseCommandPayload{TurnID: "turn-old"}},
+			{ID: "message", Sequence: 3, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "replay me"}},
 		}})
 	}))
 	defer server.Close()
@@ -1444,10 +1445,10 @@ func TestCodexThreadInstallsChannelToolsOnlyOnStart(t *testing.T) {
 func TestCodexChannelToolCallUsesWorkerRPC(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{}
-	results := make(chan workerRuntimeToolResult, 1)
+	results := make(chan wire.RuntimeToolResult, 1)
 	runtime := &codexWorkerRuntime{
 		cfg: codexWorkerConfig{ChannelToolsVersion: 1}, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
-		writer:               &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})},
+		writer:               &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})},
 		runtimeToolResults:   results,
 		activeRequestContext: &protocol.RequestContext{Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1"},
 	}
@@ -1458,7 +1459,7 @@ func TestCodexChannelToolCallUsesWorkerRPC(t *testing.T) {
 	if message.RuntimeToolRequest == nil || message.RuntimeToolRequest.Name != "read_messages" || message.RuntimeToolRequest.RequestContext.ConnectionID != "connection-1" {
 		t.Fatalf("runtime tool request = %#v", message.RuntimeToolRequest)
 	}
-	results <- workerRuntimeToolResult{RequestID: "call-1", Text: `{"messages":[]}`}
+	results <- wire.RuntimeToolResult{RequestID: "call-1", Text: `{"messages":[]}`}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
 	}
@@ -1477,8 +1478,8 @@ func TestCodexTurnStartCarriesRequestContextAsApplicationContext(t *testing.T) {
 		Channel: &protocol.RequestIdentity{ID: "ou_bot", DisplayName: "Shadow Yao"}, ExternalConversationName: "Shadow Test",
 		Actor: protocol.RequestActor{ID: "ou_owner", DisplayName: "Owner name", Role: "owner"},
 	}
-	turnID, _, err := runtime.callTurnStart(context.Background(), commandResponse{
-		ID: "message-context", Message: &messageCommandPayload{Text: "hello", RequestContext: requestContext},
+	turnID, _, err := runtime.callTurnStart(context.Background(), wire.Command{
+		ID: "message-context", Message: &wire.MessageCommandPayload{Text: "hello", RequestContext: requestContext},
 	}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1510,8 +1511,8 @@ func TestCodexTurnStartOmitsAdditionalContextForLocalInput(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{turnID: "turn-local"}
 	runtime, _ := newCodexInputTestRuntime(t, "session-local", rpc)
-	if _, _, err := runtime.callTurnStart(context.Background(), commandResponse{
-		ID: "message-local", Message: &messageCommandPayload{Text: "hello"},
+	if _, _, err := runtime.callTurnStart(context.Background(), wire.Command{
+		ID: "message-local", Message: &wire.MessageCommandPayload{Text: "hello"},
 	}, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -1556,7 +1557,7 @@ func TestCodexTurnRuntimeUsesStoredPerTurnSettings(t *testing.T) {
 	if err := store.Put(context.Background(), stored); err != nil {
 		t.Fatal(err)
 	}
-	command := commandResponse{ID: "message-runtime", Message: &messageCommandPayload{Text: "hello"}}
+	command := wire.Command{ID: "message-runtime", Message: &wire.MessageCommandPayload{Text: "hello"}}
 	turnID, turnRuntime, err := runtime.callTurnStart(context.Background(), command, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -1606,14 +1607,14 @@ func TestCodexApprovalPolicyCommandPersistsAndCompletesBeforeNextTurn(t *testing
 	runtime.cfg.ApprovalPolicy = string(agent.ApprovalPolicyBypass)
 	commandItem, err := store.AppendDisplayItem(context.Background(), "session-codex-policy", zotigosession.DisplayItem{
 		ID: "policy-command", Type: zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyAuto)},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandApprovalPolicy, ApprovalPolicy: string(agent.ApprovalPolicyAuto)},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	command := commandResponse{
-		ID: "policy-command", Sequence: commandItem.Sequence, Type: sessionCommandApprovalPolicy,
-		ApprovalPolicy: &approvalPolicyCommandPayload{Policy: agent.ApprovalPolicyAuto},
+	command := wire.Command{
+		ID: "policy-command", Sequence: commandItem.Sequence, Type: wire.CommandApprovalPolicy,
+		ApprovalPolicy: &wire.ApprovalPolicyCommandPayload{Policy: agent.ApprovalPolicyAuto},
 	}
 	if err := runtime.handleCommand(context.Background(), command, nil); err != nil {
 		t.Fatal(err)
@@ -1630,8 +1631,8 @@ func TestCodexApprovalPolicyCommandPersistsAndCompletesBeforeNextTurn(t *testing
 	if err != nil || cursor.Sequence != commandItem.Sequence {
 		t.Fatalf("recovered cursor=%#v err=%v, want %d", cursor, err, commandItem.Sequence)
 	}
-	_, _, err = runtime.callTurnStart(context.Background(), commandResponse{
-		ID: "message", Message: &messageCommandPayload{Text: "continue"},
+	_, _, err = runtime.callTurnStart(context.Background(), wire.Command{
+		ID: "message", Message: &wire.MessageCommandPayload{Text: "continue"},
 	}, nil)
 	if err != nil || rpc.turnApproval != "on-request" {
 		t.Fatalf("next turn approval=%q err=%v", rpc.turnApproval, err)

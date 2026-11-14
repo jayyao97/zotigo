@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 // Live admission already holds the source Channel configuration fence. Only
@@ -21,7 +23,7 @@ func authorizeRuntimeToolReplay(ctx context.Context, client *workerRuntimeToolCl
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	arguments, _ := json.Marshal(map[string]string{"command_id": commandID})
-	_, err := client.request(ctx, workerRuntimeToolRequest{Namespace: "host", Name: "authorize_input", Arguments: arguments})
+	_, err := client.request(ctx, wire.RuntimeToolRequest{Namespace: "host", Name: "authorize_input", Arguments: arguments})
 	return err
 }
 
@@ -41,7 +43,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if err != nil {
 			return "", err
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, commandResponse{ID: input.CommandID, Message: &messageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
+		_, found, err := findExistingSessionInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
 		if err != nil {
 			return "", err
 		}
@@ -103,7 +105,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if operation.Name == "create_session" {
 			text = operation.Input.InitialMessage
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, commandResponse{ID: input.CommandID, Message: &messageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
+		_, found, err := findExistingSessionInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
 		if err != nil {
 			return err
 		}

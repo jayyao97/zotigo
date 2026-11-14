@@ -25,6 +25,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
@@ -81,18 +82,18 @@ func TestWorkerClientWriterFailureClosesDoneAndUnblocksApproval(t *testing.T) {
 	if err := clientConn.Close(); err != nil {
 		t.Fatalf("close worker websocket: %v", err)
 	}
-	writer.sendCh <- workerMessage{Type: workerMessageDelta, Delta: &displayDeltaEvent{}}
+	writer.sendCh <- wire.Message{Type: wire.MessageDelta, Delta: &wire.DisplayDelta{}}
 	select {
 	case <-writer.done:
 	case <-time.After(time.Second):
 		t.Fatal("writer failure did not close done")
 	}
 	for len(writer.sendCh) < cap(writer.sendCh) {
-		writer.sendCh <- workerMessage{Type: workerMessageDelta, Delta: &displayDeltaEvent{}}
+		writer.sendCh <- wire.Message{Type: wire.MessageDelta, Delta: &wire.DisplayDelta{}}
 	}
 	notified := make(chan struct{})
 	go func() {
-		writer.SendApprovalRequest(context.Background(), approvalRequestResponse{})
+		writer.SendApprovalRequest(context.Background(), wire.ApprovalRequest{})
 		close(notified)
 	}()
 	select {
@@ -107,34 +108,34 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.URL.Query().Get("limit"); got != strconv.Itoa(maxCommandsLimit) {
-			t.Fatalf("expected limit %d, got %q", maxCommandsLimit, got)
+		if got := r.URL.Query().Get("limit"); got != strconv.Itoa(wire.MaxCommandsLimit) {
+			t.Fatalf("expected limit %d, got %q", wire.MaxCommandsLimit, got)
 		}
 		offset := r.URL.Query().Get("offset")
 		requests++
 		switch offset {
 		case "0":
-			commands := make([]commandResponse, 0, maxCommandsLimit)
-			for sequence := uint64(1); sequence <= maxCommandsLimit; sequence++ {
-				commands = append(commands, commandResponse{
+			commands := make([]wire.Command, 0, wire.MaxCommandsLimit)
+			for sequence := uint64(1); sequence <= wire.MaxCommandsLimit; sequence++ {
+				commands = append(commands, wire.Command{
 					ID:       fmt.Sprintf("cmd-%d", sequence),
 					Sequence: sequence,
 					Type:     "noop",
 				})
 			}
-			writeJSON(w, http.StatusOK, commandsResponse{
+			writeJSON(w, http.StatusOK, wire.CommandsPage{
 				Commands:   commands,
-				NextCursor: strconv.Itoa(maxCommandsLimit),
+				NextCursor: strconv.Itoa(wire.MaxCommandsLimit),
 				NextOffset: 1,
 			})
 		case "1":
-			writeJSON(w, http.StatusOK, commandsResponse{
-				Commands: []commandResponse{{
+			writeJSON(w, http.StatusOK, wire.CommandsPage{
+				Commands: []wire.Command{{
 					ID:       "cmd-201",
-					Sequence: uint64(maxCommandsLimit + 1),
+					Sequence: uint64(wire.MaxCommandsLimit + 1),
 					Type:     "noop",
 				}},
-				NextCursor: strconv.Itoa(maxCommandsLimit + 1),
+				NextCursor: strconv.Itoa(wire.MaxCommandsLimit + 1),
 				NextOffset: 2,
 			})
 		default:
@@ -150,7 +151,7 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 	if requests != 2 {
 		t.Fatalf("expected 2 command fetches, got %d", requests)
 	}
-	if cursor.Sequence != uint64(maxCommandsLimit+1) || cursor.Offset != 2 {
+	if cursor.Sequence != uint64(wire.MaxCommandsLimit+1) || cursor.Offset != 2 {
 		t.Fatalf("unexpected cursor after replay: %#v", cursor)
 	}
 
@@ -165,19 +166,19 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 
 func TestWorkerRuntimeRejectsMalformedTypedCommand(t *testing.T) {
 	runtime := &workerRuntime{}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:       "cmd-1",
 		Sequence: 1,
-		Type:     sessionCommandMessage,
+		Type:     wire.CommandMessage,
 	}); err == nil || !strings.Contains(err.Error(), "invalid message command payload") {
 		t.Fatalf("expected invalid message payload error, got %v", err)
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:       "cmd-2",
 		Sequence: 2,
-		Type:     sessionCommandPause,
-		Message:  &messageCommandPayload{Text: "wrong"},
-		Pause:    &pauseCommandPayload{Reason: userPauseReason},
+		Type:     wire.CommandPause,
+		Message:  &wire.MessageCommandPayload{Text: "wrong"},
+		Pause:    &wire.PauseCommandPayload{Reason: wire.UserPauseReason},
 	}); err == nil || !strings.Contains(err.Error(), "invalid pause command payload") {
 		t.Fatalf("expected invalid pause payload error, got %v", err)
 	}
@@ -187,11 +188,11 @@ func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, commandsResponse{
-			Commands: []commandResponse{{
+		writeJSON(w, http.StatusOK, wire.CommandsPage{
+			Commands: []wire.Command{{
 				ID:       "cmd-1",
 				Sequence: 1,
-				Type:     sessionCommandMessage,
+				Type:     wire.CommandMessage,
 			}},
 			NextCursor: "1",
 			NextOffset: 1,
@@ -236,7 +237,7 @@ func TestLoadWorkerCommandCursorDoesNotSkipPendingMessage(t *testing.T) {
 	item, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "already applied",
 		},
 	})
@@ -281,7 +282,7 @@ func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 	item, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "already applied",
 		},
 	})
@@ -343,7 +344,7 @@ func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 		}},
 		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
 		Command: &zotigosession.DisplayCommand{
-			Type:   sessionCommandSteering,
+			Type:   wire.CommandSteering,
 			Text:   "still pending",
 			TurnID: "turn-1",
 		},
@@ -369,14 +370,14 @@ func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 func TestRecoverWorkerCommandCursorTracksDurableSteeringApplication(t *testing.T) {
 	items := []zotigosession.DisplayItem{
 		{Sequence: 1, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
-		{ID: "steer-1", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "change", TurnID: "turn-1"}},
+		{ID: "steer-1", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandSteering, Text: "change", TurnID: "turn-1"}},
 	}
 	if got := recoverAppliedCommandSequence(items); got != 0 {
 		t.Fatalf("pending steering advanced cursor to %d", got)
 	}
 	items = append(items, zotigosession.DisplayItem{
 		ID: "steer-1", Sequence: 3, Type: zotigosession.DisplayItemSteeringMessage,
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandSteering, Text: "change", TurnID: "turn-1"},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandSteering, Text: "change", TurnID: "turn-1"},
 	})
 	if got := recoverAppliedCommandSequence(items); got != 2 {
 		t.Fatalf("applied steering cursor = %d, want 2", got)
@@ -421,7 +422,7 @@ func TestLoadWorkerCommandCursorDoesNotTreatAppliedImageSteeringAsCommand(t *tes
 		}},
 		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandSteering,
+			Type: wire.CommandSteering,
 			Images: []zotigosession.DisplayCommandImage{{
 				MimeType:  "image/png",
 				SizeBytes: 1,
@@ -477,7 +478,7 @@ func TestLoadWorkerCommandCursorDowngradesUnsafeSequence(t *testing.T) {
 	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "pending",
 		},
 	}); err != nil {
@@ -520,7 +521,7 @@ func TestLoadWorkerCommandCursorDowngradesInvalidOffset(t *testing.T) {
 	item, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "applied",
 		},
 	})
@@ -570,7 +571,7 @@ func TestLoadWorkerCommandCursorDowngradesOffsetBeforePendingCommand(t *testing.
 	if _, err := store.AppendDisplayItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemUserMessage,
 		Command: &zotigosession.DisplayCommand{
-			Type: sessionCommandMessage,
+			Type: wire.CommandMessage,
 			Text: "pending",
 		},
 	}); err != nil {
@@ -613,7 +614,7 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 		switch {
 		case r.URL.Path == "/internal/workers/connect":
 			responseHeader := http.Header{}
-			responseHeader.Set(workerGenerationHeader, "test-generation")
+			responseHeader.Set(wire.GenerationHeader, "test-generation")
 			conn, err := workerUpgrader.Upgrade(w, r, responseHeader)
 			if err != nil {
 				return
@@ -795,7 +796,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	commandItem, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:    sessionCommandProfile,
+			Type:    wire.CommandProfile,
 			Profile: "new",
 		},
 	})
@@ -836,7 +837,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	}
 	newerCommand, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
 		Type:    zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "newer"},
+		Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "newer"},
 	})
 	if err != nil {
 		t.Fatalf("append newer profile command: %v", err)
@@ -895,7 +896,7 @@ func TestRecoverAppliedCommandSequenceWaitsForProfileResult(t *testing.T) {
 		ID:       "item-profile",
 		Sequence: 1,
 		Type:     zotigosession.DisplayItemSessionCommand,
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "new"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "new"},
 	}
 	if cursor := recoverAppliedCommandSequence([]zotigosession.DisplayItem{command}); cursor != 0 {
 		t.Fatalf("expected pending profile command cursor 0, got %d", cursor)
@@ -938,10 +939,10 @@ func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 		agent:     ag,
 		display:   newWorkerDisplayLog("sess-profile-failure", source),
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "new"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "new"},
 	}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
@@ -1006,10 +1007,10 @@ func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 		agent:     ag,
 		display:   newWorkerDisplayLog("sess-profile-build-failure", source),
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "broken"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "broken"},
 	}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
@@ -1052,7 +1053,7 @@ func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
 		return nil
 	}}
 	runtime := &workerRuntime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: newWorkerDisplayLog("sess-marker-failure", source)}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{ID: "profile-command", Type: sessionCommandProfile, Profile: &profileCommandPayload{Name: "broken"}}); err != nil {
+	if err := runtime.HandleCommand(context.Background(), wire.Command{ID: "profile-command", Type: wire.CommandProfile, Profile: &wire.ProfileCommandPayload{Name: "broken"}}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
 	fatalErr := runtime.currentFatalError()
@@ -1153,17 +1154,17 @@ func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) 
 		t.Fatalf("run agent: %v", err)
 	}
 	<-oldProvider.started
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-a",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "new"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "new"},
 	}); err != nil {
 		t.Fatalf("queue valid profile: %v", err)
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-b",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "broken"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "broken"},
 	}); err != nil {
 		t.Fatalf("handle broken latest profile: %v", err)
 	}
@@ -1257,10 +1258,10 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 		agent:     ag,
 		display:   newWorkerDisplayLog("sess-profile-linear", storedDisplayItemSource{store: store}),
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-a",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "new"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "new"},
 	}); err != nil {
 		t.Fatalf("handle profile A: %v", err)
 	}
@@ -1268,10 +1269,10 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 
 	secondDone := make(chan error, 1)
 	go func() {
-		secondDone <- runtime.HandleCommand(context.Background(), commandResponse{
+		secondDone <- runtime.HandleCommand(context.Background(), wire.Command{
 			ID:      "profile-b",
-			Type:    sessionCommandProfile,
-			Profile: &profileCommandPayload{Name: "broken"},
+			Type:    wire.CommandProfile,
+			Profile: &wire.ProfileCommandPayload{Name: "broken"},
 		})
 	}()
 	select {
@@ -1334,7 +1335,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		ID:       "profile-command",
 		Sequence: 1,
 		Type:     zotigosession.DisplayItemSessionCommand,
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandProfile, Profile: "new"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "new"},
 	}
 	messageCommand := zotigosession.DisplayItem{
 		ID:       "message-command",
@@ -1342,7 +1343,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		Type:     zotigosession.DisplayItemUserMessage,
 		Role:     string(protocol.RoleUser),
 		Content:  []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "must not run"}},
-		Command:  &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "must not run"},
+		Command:  &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "must not run"},
 	}
 	var markerAttempts atomic.Int32
 	source := &fakeDisplayItemSource{
@@ -1377,8 +1378,8 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		t.Fatalf("build message command: %v", err)
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		data, marshalErr := sonic.Marshal(commandsResponse{
-			Commands:   []commandResponse{profileCommandFromItem(command), messageResponse},
+		data, marshalErr := sonic.Marshal(wire.CommandsPage{
+			Commands:   []wire.Command{profileCommandFromItem(command), messageResponse},
 			NextOffset: 2,
 		})
 		if marshalErr != nil {
@@ -1505,10 +1506,10 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 		agent:     ag,
 		display:   newWorkerDisplayLog("sess-profile-append-failure", source),
 	}
-	if err := runtime.HandleCommand(context.Background(), commandResponse{
+	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
-		Type:    sessionCommandProfile,
-		Profile: &profileCommandPayload{Name: "new"},
+		Type:    wire.CommandProfile,
+		Profile: &wire.ProfileCommandPayload{Name: "new"},
 	}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
@@ -1540,9 +1541,9 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 }
 
 func TestMessageFromCommandIncludesImages(t *testing.T) {
-	msg, err := messageFromCommand("item_1", &messageCommandPayload{
+	msg, err := messageFromCommand("item_1", &wire.MessageCommandPayload{
 		Text: "describe this",
-		Images: []commandImageData{{
+		Images: []wire.CommandImageData{{
 			MimeType:   "image/png",
 			DataBase64: tinyPNGBase64(),
 		}},
@@ -1560,9 +1561,9 @@ func TestMessageFromCommandIncludesImages(t *testing.T) {
 }
 
 func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
-	_, err := messageFromCommand("item_1", &messageCommandPayload{
+	_, err := messageFromCommand("item_1", &wire.MessageCommandPayload{
 		Text: "describe this",
-		Images: []commandImageData{{
+		Images: []wire.CommandImageData{{
 			MimeType: "image/png",
 		}},
 	})
@@ -1709,7 +1710,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 		display:   newWorkerDisplayLog("sess-close-stream", source),
 	}
 	runtime.runner = runner.New(ag, transport)
-	if err := runtime.startMessageTurn(context.Background(), "message-command", 1, &messageCommandPayload{Text: "wait"}); err != nil {
+	if err := runtime.startMessageTurn(context.Background(), "message-command", 1, &wire.MessageCommandPayload{Text: "wait"}); err != nil {
 		t.Fatalf("start message turn: %v", err)
 	}
 	<-provider.started
@@ -1771,10 +1772,10 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		result <- runtime.queueTurnUserInput(context.Background(), commandResponse{
+		result <- runtime.queueTurnUserInput(context.Background(), wire.Command{
 			ID:   "steering-1",
-			Type: sessionCommandSteering,
-			Steering: &steeringCommandPayload{
+			Type: wire.CommandSteering,
+			Steering: &wire.SteeringCommandPayload{
 				TurnID: turnID,
 				Text:   "use the smaller fix",
 			},
@@ -1834,14 +1835,14 @@ func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
 		sessionID: "sess-paused-input", agent: ag, display: display,
 		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true,
 	}
-	result := runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-		ID: "paused-steering", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "change direction"},
+	result := runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+		ID: "paused-steering", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "change direction"},
 	}})
-	if result.Error != "" || result.Command == nil || result.Command.Type != sessionCommandSteering || result.Command.Steering.TurnID != turnID {
+	if result.Error != "" || result.Command == nil || result.Command.Type != wire.CommandSteering || result.Command.Steering.TurnID != turnID {
 		t.Fatalf("input result = %#v", result)
 	}
 	items, _, err := source.LoadItems(context.Background(), "sess-paused-input")
-	if err != nil || len(items) != 2 || items[1].ID != "paused-steering" || items[1].Command == nil || items[1].Command.Type != sessionCommandSteering {
+	if err != nil || len(items) != 2 || items[1].ID != "paused-steering" || items[1].Command == nil || items[1].Command.Type != wire.CommandSteering {
 		t.Fatalf("durable paused steering = %#v, err=%v", items, err)
 	}
 }
@@ -1869,10 +1870,10 @@ func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 		sessionID: "sess-starting-input", agent: ag, display: display,
 		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}),
 	}
-	result := make(chan workerInputResult, 1)
+	result := make(chan wire.InputResult, 1)
 	go func() {
-		result <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-			ID: "starting-steering", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "add this"},
+		result <- runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+			ID: "starting-steering", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "add this"},
 		}})
 	}()
 	select {
@@ -1882,11 +1883,11 @@ func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 	}
 	runtime.markTurnReady()
 	got := <-result
-	if got.Error != "" || got.Command == nil || got.Command.Type != sessionCommandSteering || got.Command.Steering.TurnID != turnID {
+	if got.Error != "" || got.Command == nil || got.Command.Type != wire.CommandSteering || got.Command.Steering.TurnID != turnID {
 		t.Fatalf("input result = %#v", got)
 	}
 	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
-	if err != nil || len(items) != 2 || items[1].ID != "starting-steering" || items[1].Command.Type != sessionCommandSteering {
+	if err != nil || len(items) != 2 || items[1].ID != "starting-steering" || items[1].Command.Type != wire.CommandSteering {
 		t.Fatalf("accepted input = %#v, err=%v", items, err)
 	}
 }
@@ -1926,10 +1927,10 @@ func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T)
 		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true, fatalCh: make(chan error, 1),
 	}
 	runtime.runner = runner.New(ag, transport)
-	result := make(chan workerInputResult, 1)
+	result := make(chan wire.InputResult, 1)
 	go func() {
-		result <- runtime.AcceptInput(context.Background(), workerInputRequest{Command: commandResponse{
-			ID: "boundary-message", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "next turn"},
+		result <- runtime.AcceptInput(context.Background(), wire.InputRequest{Command: wire.Command{
+			ID: "boundary-message", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "next turn"},
 		}})
 	}()
 	deadline := time.Now().Add(time.Second)
@@ -1951,7 +1952,7 @@ func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T)
 	}
 	runtime.finishTurn()
 	got := <-result
-	if got.Error != "" || got.Command == nil || got.Command.Type != sessionCommandMessage || got.Command.ID != "boundary-message" {
+	if got.Error != "" || got.Command == nil || got.Command.Type != wire.CommandMessage || got.Command.ID != "boundary-message" {
 		t.Fatalf("input result = %#v", got)
 	}
 	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
@@ -2000,11 +2001,11 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		readyDone:  true,
 	}
 
-	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
+	err = runtime.queueTurnUserInput(context.Background(), wire.Command{
 		ID:       "steering-durable",
 		Sequence: 2,
-		Type:     sessionCommandSteering,
-		Steering: &steeringCommandPayload{
+		Type:     wire.CommandSteering,
+		Steering: &wire.SteeringCommandPayload{
 			TurnID: turnID,
 			Text:   "must remain pending",
 		},
@@ -2013,10 +2014,10 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		t.Fatalf("accepted durable steering should not poison replay: %v", err)
 	}
 
-	err = runtime.queueTurnUserInput(context.Background(), commandResponse{
+	err = runtime.queueTurnUserInput(context.Background(), wire.Command{
 		ID:   "steering-1",
-		Type: sessionCommandSteering,
-		Steering: &steeringCommandPayload{
+		Type: wire.CommandSteering,
+		Steering: &wire.SteeringCommandPayload{
 			TurnID: turnID,
 			Text:   "too late",
 		},
@@ -2028,7 +2029,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 
 func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
 	runtime := &workerRuntime{turnActive: true, turnDone: make(chan struct{})}
-	err := runtime.startMessageTurn(context.Background(), "message", 1, &messageCommandPayload{Text: "queued"})
+	err := runtime.startMessageTurn(context.Background(), "message", 1, &wire.MessageCommandPayload{Text: "queued"})
 	if !errors.Is(err, errActiveTurn) {
 		t.Fatalf("start message error = %v, want active_turn", err)
 	}
@@ -2072,7 +2073,7 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	defer runtime.Close()
 	done := make(chan error, 1)
 	go func() {
-		done <- runtime.startMessageTurn(context.Background(), "message-pending", 2, &messageCommandPayload{Text: "run next"})
+		done <- runtime.startMessageTurn(context.Background(), "message-pending", 2, &wire.MessageCommandPayload{Text: "run next"})
 	}()
 	select {
 	case err := <-done:

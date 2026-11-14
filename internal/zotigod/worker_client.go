@@ -23,6 +23,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const workerHTTPTimeout = 10 * time.Second
@@ -116,7 +117,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		return fmt.Errorf("connect worker websocket: %w", workerWebSocketDialError(err, resp))
 	}
 	if resp != nil {
-		generation = strings.TrimSpace(resp.Header.Get(workerGenerationHeader))
+		generation = strings.TrimSpace(resp.Header.Get(wire.GenerationHeader))
 	}
 	if generation == "" {
 		return fmt.Errorf("connect worker websocket: missing worker generation")
@@ -131,18 +132,18 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:         cfg.SessionID,
-		WorkspaceID:       resp.Header.Get(workerWorkspaceHeader),
+		WorkspaceID:       resp.Header.Get(wire.WorkspaceHeader),
 		Store:             store,
 		SendDelta:         clientWriter.SendDelta,
 		NotifyDisplay:     clientWriter.SendDisplayWake,
 		NotifyDisplayItem: clientWriter.SendDisplayItem,
 		SyncDisplay:       clientWriter.SendDisplayWakeReliable,
 		DisplayBarrier:    displayBarrier.Wait,
-		NotifyApproval: func(ctx context.Context, approval approvalRequestResponse) {
+		NotifyApproval: func(ctx context.Context, approval wire.ApprovalRequest) {
 			_ = clientWriter.SendApprovalRequest(ctx, approval)
 		},
-		NotifyApprovalResolved: func(ctx context.Context, approval approvalRequestResponse) {
-			_ = clientWriter.SendApprovalResult(ctx, workerApprovalResult{Approval: &approval})
+		NotifyApprovalResolved: func(ctx context.Context, approval wire.ApprovalRequest) {
+			_ = clientWriter.SendApprovalResult(ctx, wire.ApprovalResult{Approval: &approval})
 		},
 		NotifyIdle:    clientWriter.SendIdle,
 		NotifyWorking: clientWriter.SendWorking,
@@ -193,7 +194,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = <-readErrCh
 				return runErr
 			}
-			if command.Type == sessionCommandSteering && command.Sequence == 0 {
+			if command.Type == wire.CommandSteering && command.Sequence == 0 {
 				if err := runtime.HandleCommand(ctx, command); err != nil {
 					runErr = err
 					return err
@@ -255,7 +256,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 					// Interrupt in the same worker step that released the
 					// denials, before any further command is processed, so
 					// the agent's next model call is cancelled.
-					if err := runtime.pauseTurn(ctx, &pauseCommandPayload{TurnID: resolution.approval.TurnID, Reason: userPauseReason}); err != nil {
+					if err := runtime.pauseTurn(ctx, &wire.PauseCommandPayload{TurnID: resolution.approval.TurnID, Reason: wire.UserPauseReason}); err != nil {
 						runErr = fmt.Errorf("stop turn after denial: %w", err)
 						return runErr
 					}
@@ -265,11 +266,11 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	}
 }
 
-func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan commandResponse, <-chan workerInputRequest, <-chan workerApprovalDecision, <-chan workerRuntimeToolResult, <-chan error) {
-	commandCh := make(chan commandResponse, workerCommandBufferSize)
-	inputCh := make(chan workerInputRequest, workerCommandBufferSize)
-	approvalCh := make(chan workerApprovalDecision, workerCommandBufferSize)
-	runtimeToolResults := make(chan workerRuntimeToolResult, workerCommandBufferSize)
+func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan wire.Command, <-chan wire.InputRequest, <-chan wire.ApprovalDecision, <-chan wire.RuntimeToolResult, <-chan error) {
+	commandCh := make(chan wire.Command, workerCommandBufferSize)
+	inputCh := make(chan wire.InputRequest, workerCommandBufferSize)
+	approvalCh := make(chan wire.ApprovalDecision, workerCommandBufferSize)
+	runtimeToolResults := make(chan wire.RuntimeToolResult, workerCommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
@@ -282,13 +283,13 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 				errCh <- err
 				return
 			}
-			var msg workerMessage
+			var msg wire.Message
 			if err := sonic.Unmarshal(data, &msg); err != nil {
 				errCh <- fmt.Errorf("decode worker message: %w", err)
 				return
 			}
 			switch msg.Type {
-			case workerMessageCommand:
+			case wire.MessageCommand:
 				if msg.Command == nil {
 					continue
 				}
@@ -299,7 +300,7 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 					_ = conn.Close()
 					return
 				}
-			case workerMessageApprovalDecision:
+			case wire.MessageApprovalDecision:
 				if msg.ApprovalDecision == nil {
 					continue
 				}
@@ -310,7 +311,7 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 					_ = conn.Close()
 					return
 				}
-			case workerMessageInputRequest:
+			case wire.MessageInputRequest:
 				if msg.InputRequest == nil {
 					continue
 				}
@@ -321,14 +322,14 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 					_ = conn.Close()
 					return
 				}
-			case workerMessageDisplayBarrierOK:
+			case wire.MessageDisplayBarrierOK:
 				if msg.DisplayBarrier == nil || msg.DisplayBarrier.ID == "" {
 					continue
 				}
 				if acknowledgeDisplayBarrier != nil {
 					acknowledgeDisplayBarrier(msg.DisplayBarrier.ID)
 				}
-			case workerMessageRuntimeToolResult:
+			case wire.MessageRuntimeToolResult:
 				if msg.RuntimeToolResult != nil {
 					runtimeToolResults <- *msg.RuntimeToolResult
 				}
@@ -391,7 +392,7 @@ func postWorkerJSON(ctx context.Context, client *http.Client, daemonURL string, 
 }
 
 func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string, err error) error {
-	body := finishSessionRequest{Generation: generation}
+	body := wire.FinishSessionRequest{Generation: generation}
 	if err != nil && !isExpectedWorkerClose(err) {
 		body.Error = err.Error()
 		if errors.Is(err, errRuntimeOccupied) {
@@ -403,7 +404,7 @@ func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL stri
 }
 
 func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
-	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", workerReadyRequest{Generation: generation})
+	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", wire.ReadyRequest{Generation: generation})
 }
 
 func workerWebSocketDialError(dialErr error, resp *http.Response) error {

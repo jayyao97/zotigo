@@ -8,6 +8,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
@@ -19,44 +20,8 @@ const (
 
 var errInvalidInteraction = errors.New("invalid interaction")
 
-type interactionRequester struct {
-	Agent    string `json:"agent,omitempty"`
-	ThreadID string `json:"thread_id,omitempty"`
-	Name     string `json:"name,omitempty"`
-}
-
-type interactionOption struct {
-	Label       string `json:"label"`
-	Description string `json:"description,omitempty"`
-}
-
-type interactionQuestion struct {
-	ID       string              `json:"id"`
-	Header   string              `json:"header,omitempty"`
-	Question string              `json:"question"`
-	IsOther  bool                `json:"is_other,omitempty"`
-	IsSecret bool                `json:"is_secret,omitempty"`
-	Options  []interactionOption `json:"options,omitempty"`
-}
-
-type interactionRequest struct {
-	ID            string                `json:"id"`
-	SessionID     string                `json:"session_id"`
-	TurnID        string                `json:"turn_id"`
-	ItemID        string                `json:"item_id,omitempty"`
-	Kind          string                `json:"kind"`
-	Status        string                `json:"status"`
-	Requester     interactionRequester  `json:"requester"`
-	Questions     []interactionQuestion `json:"questions,omitempty"`
-	Answers       map[string][]string   `json:"answers,omitempty"`
-	IsBlocking    bool                  `json:"is_blocking,omitempty"`
-	AutoResolveMS *uint64               `json:"auto_resolve_ms,omitempty"`
-	CreatedAt     time.Time             `json:"created_at"`
-	ResolvedAt    *time.Time            `json:"resolved_at,omitempty"`
-}
-
-func newUserInputInteraction(sessionID, turnID, itemID string, requester interactionRequester, questions []interactionQuestion, blocking bool, autoResolveMS *uint64) (interactionRequest, error) {
-	req := interactionRequest{
+func newUserInputInteraction(sessionID, turnID, itemID string, requester wire.InteractionRequester, questions []wire.InteractionQuestion, blocking bool, autoResolveMS *uint64) (wire.InteractionRequest, error) {
+	req := wire.InteractionRequest{
 		ID: newZotigodID("interaction"), SessionID: strings.TrimSpace(sessionID),
 		TurnID: strings.TrimSpace(turnID), ItemID: strings.TrimSpace(itemID),
 		Kind: interactionKindUserInput, Status: interactionStatusPending,
@@ -64,12 +29,12 @@ func newUserInputInteraction(sessionID, turnID, itemID string, requester interac
 		AutoResolveMS: autoResolveMS, CreatedAt: time.Now().UTC(),
 	}
 	if err := validateInteraction(req); err != nil {
-		return interactionRequest{}, err
+		return wire.InteractionRequest{}, err
 	}
 	return req, nil
 }
 
-func validateInteraction(req interactionRequest) error {
+func validateInteraction(req wire.InteractionRequest) error {
 	if req.SessionID == "" || req.TurnID == "" || req.ID == "" {
 		return fmt.Errorf("%w: id, session_id, and turn_id are required", errInvalidInteraction)
 	}
@@ -89,7 +54,7 @@ func validateInteraction(req interactionRequest) error {
 	return nil
 }
 
-func validateInteractionAnswers(req interactionRequest, answers map[string][]string) error {
+func validateInteractionAnswers(req wire.InteractionRequest, answers map[string][]string) error {
 	if len(answers) != len(req.Questions) {
 		return fmt.Errorf("%w: every question requires an answer", errInvalidInteraction)
 	}
@@ -134,7 +99,7 @@ func validInteractionUserNote(answer string) bool {
 	return strings.HasPrefix(answer, prefix) && strings.TrimSpace(strings.TrimPrefix(answer, prefix)) != ""
 }
 
-func hasInteractionOption(options []interactionOption, answer string) bool {
+func hasInteractionOption(options []wire.InteractionOption, answer string) bool {
 	for _, option := range options {
 		if option.Label == answer {
 			return true
@@ -143,7 +108,7 @@ func hasInteractionOption(options []interactionOption, answer string) bool {
 	return false
 }
 
-func interactionDisplayItem(req interactionRequest, resolved bool) zotigosession.DisplayItem {
+func interactionDisplayItem(req wire.InteractionRequest, resolved bool) zotigosession.DisplayItem {
 	itemType := zotigosession.DisplayItemInteractionRequest
 	if resolved {
 		itemType = zotigosession.DisplayItemInteractionResponse
@@ -170,7 +135,7 @@ func interactionDisplayItem(req interactionRequest, resolved bool) zotigosession
 	}
 }
 
-func displayInteractionAnswers(req interactionRequest) map[string][]string {
+func displayInteractionAnswers(req wire.InteractionRequest) map[string][]string {
 	if len(req.Answers) == 0 {
 		return nil
 	}
@@ -189,8 +154,8 @@ func displayInteractionAnswers(req interactionRequest) map[string][]string {
 	return answers
 }
 
-func interactionFromDisplayItems(sessionID, interactionID string, items []zotigosession.DisplayItem) (interactionRequest, bool) {
-	var req interactionRequest
+func interactionFromDisplayItems(sessionID, interactionID string, items []zotigosession.DisplayItem) (wire.InteractionRequest, bool) {
+	var req wire.InteractionRequest
 	for _, item := range items {
 		value := item.Interaction
 		if value == nil || value.ID != interactionID {
@@ -212,21 +177,21 @@ func interactionFromDisplayItems(sessionID, interactionID string, items []zotigo
 	return req, req.ID != ""
 }
 
-func interactionRequestFromDisplay(sessionID string, item zotigosession.DisplayItem) interactionRequest {
+func interactionRequestFromDisplay(sessionID string, item zotigosession.DisplayItem) wire.InteractionRequest {
 	value := item.Interaction
-	questions := make([]interactionQuestion, 0, len(value.Questions))
+	questions := make([]wire.InteractionQuestion, 0, len(value.Questions))
 	for _, question := range value.Questions {
-		options := make([]interactionOption, 0, len(question.Options))
+		options := make([]wire.InteractionOption, 0, len(question.Options))
 		for _, option := range question.Options {
-			options = append(options, interactionOption{Label: option.Label, Description: option.Description})
+			options = append(options, wire.InteractionOption{Label: option.Label, Description: option.Description})
 		}
-		questions = append(questions, interactionQuestion{ID: question.ID, Header: question.Header, Question: question.Question, IsOther: question.IsOther, IsSecret: question.IsSecret, Options: options})
+		questions = append(questions, wire.InteractionQuestion{ID: question.ID, Header: question.Header, Question: question.Question, IsOther: question.IsOther, IsSecret: question.IsSecret, Options: options})
 	}
-	requester := interactionRequester{}
+	requester := wire.InteractionRequester{}
 	if value.Requester != nil {
-		requester = interactionRequester{Agent: value.Requester.Agent, ThreadID: value.Requester.ThreadID, Name: value.Requester.Name}
+		requester = wire.InteractionRequester{Agent: value.Requester.Agent, ThreadID: value.Requester.ThreadID, Name: value.Requester.Name}
 	}
-	return interactionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, Kind: value.Kind, Status: interactionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
+	return wire.InteractionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, Kind: value.Kind, Status: interactionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
 }
 
 func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID string) error {
@@ -235,7 +200,7 @@ func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID
 		return err
 	}
 	pendingApprovals := make(map[string]approvalRequest)
-	pendingInteractions := make(map[string]interactionRequest)
+	pendingInteractions := make(map[string]wire.InteractionRequest)
 	for _, item := range items {
 		if item.Approval != nil && item.Approval.ID != "" {
 			switch item.Type {

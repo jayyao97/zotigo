@@ -8,6 +8,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zotigoruntime.WorkerLaunchSpec, error) {
@@ -82,11 +83,11 @@ type backendBindingStore interface {
 
 var _ backendBindingStore = (*zotigosession.FileStore)(nil)
 
-func (h *handler) handleConversationBound(sessionID string, generation string, request *workerConversationBound) {
+func (h *handler) handleConversationBound(sessionID string, generation string, request *wire.ConversationBound) {
 	if request == nil || request.ConversationID == "" {
 		return
 	}
-	result := workerConversationBoundResult{ConversationID: request.ConversationID}
+	result := wire.ConversationBoundResult{ConversationID: request.ConversationID}
 	func() {
 		unlock := h.sessionOps.lockWorkerCallback(sessionID)
 		defer unlock()

@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
 	workspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type sessionToolCaller struct {
@@ -59,7 +60,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	started := false
 	for index := range items {
 		item := &items[index]
-		if item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if item.Command != nil && item.Command.Type == wire.CommandMessage {
 			pending = item
 		}
 		if item.Type == session.DisplayItemTurnStarted && item.Turn != nil && item.Turn.ID == turnID {
@@ -68,7 +69,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 		}
 		// Steering from the same principal preserves the turn's authority. Do
 		// not let a different sender borrow the initiating input's grants.
-		if sessionScope && started && item.Command != nil && item.Command.Type == sessionCommandSteering {
+		if sessionScope && started && item.Command != nil && item.Command.Type == wire.CommandSteering {
 			// Host-created callback feedback contributes data, not a new principal.
 			// Preserve the initiating user's authority only for a verified receipt;
 			// callback-initiated turns still hit the delegation fence below.
@@ -126,7 +127,7 @@ func sameSessionToolPrincipal(left, right *protocol.RequestContext) bool {
 		left.Actor.ID != "" && left.Actor.ID == right.Actor.ID
 }
 
-func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string, request workerRuntimeToolRequest) (string, error) {
+func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string, request wire.RuntimeToolRequest) (string, error) {
 	if !h.workers.Matches(id, generation) {
 		return "", errors.New("stale runtime tool worker")
 	}
@@ -469,7 +470,7 @@ func toolDigest(values ...string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller, request workerRuntimeToolRequest) (any, error) {
+func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller, request wire.RuntimeToolRequest) (any, error) {
 	var input sessionToolWriteInput
 	if err := decodeSessionToolArguments(request.Arguments, &input); err != nil {
 		return nil, err
@@ -572,7 +573,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 		return nil, errSessionNotFound
 	}
 	commandID := "session_tool:" + turnKey + ":" + callKey
-	previous, found, err := findExistingSessionInput(ctx, h.items, operation.TargetID, commandResponse{ID: commandID, Message: &messageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
+	previous, found, err := findExistingSessionInput(ctx, h.items, operation.TargetID, wire.Command{ID: commandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
 	if err != nil {
 		return nil, err
 	}

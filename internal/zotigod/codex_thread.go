@@ -14,9 +14,10 @@ import (
 	channelruntime "github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-chan workerConversationBoundResult) error {
+func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-chan wire.ConversationBoundResult) error {
 	threadID, err := startCodexThread(ctx, r.app, r.cfg)
 	if err != nil {
 		return err

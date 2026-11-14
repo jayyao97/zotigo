@@ -7,6 +7,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type runtimeToolSpec struct {
@@ -57,7 +58,7 @@ func (t *sessionRuntimeTool) Execute(ctx context.Context, _ executor.Executor, a
 	}
 	ctx, cancel := context.WithTimeout(ctx, 35*time.Second)
 	defer cancel()
-	return t.client.request(ctx, workerRuntimeToolRequest{Namespace: t.spec.Namespace, Name: t.spec.Name, TurnID: t.turnID(), CallID: call.ID, Arguments: []byte(arguments)})
+	return t.client.request(ctx, wire.RuntimeToolRequest{Namespace: t.spec.Namespace, Name: t.spec.Name, TurnID: t.turnID(), CallID: call.ID, Arguments: []byte(arguments)})
 }
 
 func codexSessionToolNamespace() any {

@@ -12,6 +12,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func completeForkFixture(t *testing.T) (*handler, sessionToolCaller) {
@@ -136,7 +137,7 @@ func TestSessionForkHTTPAndLatestCompleted(t *testing.T) {
 func TestSessionToolForkCannotReadOtherChannelSession(t *testing.T) {
 	h, caller := completeForkFixture(t)
 	caller.Origin = &protocol.RequestContext{Source: "channel"}
-	req := workerRuntimeToolRequest{Name: "create_session", CallID: "fork", Arguments: json.RawMessage(`{"workspace_id":"` + caller.WorkspaceID + `","initial_message":"hello","fork_from":{"session_id":"other","through_turn_id":"turn"}}`)}
+	req := wire.RuntimeToolRequest{Name: "create_session", CallID: "fork", Arguments: json.RawMessage(`{"workspace_id":"` + caller.WorkspaceID + `","initial_message":"hello","fork_from":{"session_id":"other","through_turn_id":"turn"}}`)}
 	if _, err := h.writeToolSession(context.Background(), caller, req); err == nil || !strings.Contains(err.Error(), "bound session") {
 		t.Fatalf("channel fork: %v", err)
 	}

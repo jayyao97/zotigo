@@ -13,13 +13,14 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerClientWriter struct {
 	conn                  *websocket.Conn
 	pingEvery             time.Duration
 	displayControlTimeout time.Duration
-	sendCh                chan workerMessage
+	sendCh                chan wire.Message
 	done                  chan struct{}
 	closeOnce             sync.Once
 }
@@ -42,7 +43,7 @@ func newWorkerDisplayBarrierClient(writer *workerClientWriter) *workerDisplayBar
 func (b *workerDisplayBarrierClient) Wait(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
-	barrier := workerDisplayBarrier{ID: newZotigodID("display_barrier")}
+	barrier := wire.DisplayBarrier{ID: newZotigodID("display_barrier")}
 	acknowledged := make(chan struct{})
 	b.mu.Lock()
 	b.waiters[barrier.ID] = acknowledged
@@ -95,15 +96,15 @@ func newWorkerClientWriter(conn *websocket.Conn, pingInterval time.Duration, pon
 		conn:                  conn,
 		pingEvery:             pingInterval,
 		displayControlTimeout: workerHTTPTimeout,
-		sendCh:                make(chan workerMessage, workerDeltaBufferSize),
+		sendCh:                make(chan wire.Message, workerDeltaBufferSize),
 		done:                  make(chan struct{}),
 	}
 	go writer.run()
 	return writer
 }
 
-func (w *workerClientWriter) SendDelta(delta displayDeltaEvent) {
-	msg := workerMessage{Type: workerMessageDelta, Delta: &delta}
+func (w *workerClientWriter) SendDelta(delta wire.DisplayDelta) {
+	msg := wire.Message{Type: wire.MessageDelta, Delta: &delta}
 	select {
 	case <-w.done:
 		return
@@ -126,16 +127,16 @@ func (w *workerClientWriter) SendDisplayItem(item zotigosession.DisplayItem) {
 	// Writer shutdown (including a WebSocket write failure) releases this wait;
 	// the daemon then clears that worker's remaining previews on disconnect.
 	select {
-	case w.sendCh <- workerMessage{Type: workerMessageDisplayWake, PreviewRetirement: &retirement}:
+	case w.sendCh <- wire.Message{Type: wire.MessageDisplayWake, PreviewRetirement: &retirement}:
 	case <-w.done:
 	}
 }
 
 func (w *workerClientWriter) SendDisplayWake() {
-	w.sendDisplayWake(workerMessage{Type: workerMessageDisplayWake})
+	w.sendDisplayWake(wire.Message{Type: wire.MessageDisplayWake})
 }
 
-func (w *workerClientWriter) sendDisplayWake(msg workerMessage) {
+func (w *workerClientWriter) sendDisplayWake(msg wire.Message) {
 	select {
 	case <-w.done:
 		return
@@ -156,7 +157,7 @@ func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error 
 	}
 	wakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	msg := workerMessage{Type: workerMessageDisplayWake}
+	msg := wire.Message{Type: wire.MessageDisplayWake}
 	select {
 	case <-wakeCtx.Done():
 		return wakeCtx.Err()
@@ -167,10 +168,10 @@ func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error 
 	}
 }
 
-func (w *workerClientWriter) SendIdle(ctx context.Context, idle workerIdle) error {
+func (w *workerClientWriter) SendIdle(ctx context.Context, idle wire.Idle) error {
 	idleCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
 	defer cancel()
-	msg := workerMessage{Type: workerMessageIdle, Idle: &idle}
+	msg := wire.Message{Type: wire.MessageIdle, Idle: &idle}
 	select {
 	case <-idleCtx.Done():
 		return idleCtx.Err()
@@ -184,7 +185,7 @@ func (w *workerClientWriter) SendIdle(ctx context.Context, idle workerIdle) erro
 func (w *workerClientWriter) SendWorking(ctx context.Context) error {
 	workingCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
 	defer cancel()
-	msg := workerMessage{Type: workerMessageWorking}
+	msg := wire.Message{Type: wire.MessageWorking}
 	select {
 	case <-workingCtx.Done():
 		return workingCtx.Err()
@@ -195,8 +196,8 @@ func (w *workerClientWriter) SendWorking(ctx context.Context) error {
 	}
 }
 
-func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier workerDisplayBarrier) error {
-	msg := workerMessage{Type: workerMessageDisplayBarrier, DisplayBarrier: &barrier}
+func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier wire.DisplayBarrier) error {
+	msg := wire.Message{Type: wire.MessageDisplayBarrier, DisplayBarrier: &barrier}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -207,8 +208,8 @@ func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier wor
 	}
 }
 
-func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result workerApprovalResult) bool {
-	msg := workerMessage{Type: workerMessageApprovalResult, ApprovalResult: &result}
+func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result wire.ApprovalResult) bool {
+	msg := wire.Message{Type: wire.MessageApprovalResult, ApprovalResult: &result}
 	select {
 	case <-ctx.Done():
 		return false
@@ -219,8 +220,8 @@ func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result work
 	}
 }
 
-func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result workerInteractionResult) bool {
-	msg := workerMessage{Type: workerMessageInteractionResult, InteractionResult: &result}
+func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result wire.InteractionResult) bool {
+	msg := wire.Message{Type: wire.MessageInteractionResult, InteractionResult: &result}
 	select {
 	case <-ctx.Done():
 		return false
@@ -231,8 +232,8 @@ func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result w
 	}
 }
 
-func (w *workerClientWriter) SendInputResult(ctx context.Context, result workerInputResult) bool {
-	msg := workerMessage{Type: workerMessageInputResult, InputResult: &result}
+func (w *workerClientWriter) SendInputResult(ctx context.Context, result wire.InputResult) bool {
+	msg := wire.Message{Type: wire.MessageInputResult, InputResult: &result}
 	select {
 	case <-ctx.Done():
 		return false
@@ -243,8 +244,8 @@ func (w *workerClientWriter) SendInputResult(ctx context.Context, result workerI
 	}
 }
 
-func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval approvalRequestResponse) error {
-	msg := workerMessage{Type: workerMessageApprovalRequest, ApprovalRequest: &approval}
+func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval wire.ApprovalRequest) error {
+	msg := wire.Message{Type: wire.MessageApprovalRequest, ApprovalRequest: &approval}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -255,8 +256,8 @@ func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval a
 	}
 }
 
-func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interaction interactionRequest) error {
-	msg := workerMessage{Type: workerMessageInteractionRequest, InteractionRequest: &interaction}
+func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interaction wire.InteractionRequest) error {
+	msg := wire.Message{Type: wire.MessageInteractionRequest, InteractionRequest: &interaction}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
@@ -268,9 +269,9 @@ func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interac
 }
 
 func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversationID string) error {
-	msg := workerMessage{
-		Type:              workerMessageConversationBound,
-		ConversationBound: &workerConversationBound{ConversationID: conversationID},
+	msg := wire.Message{
+		Type:              wire.MessageConversationBound,
+		ConversationBound: &wire.ConversationBound{ConversationID: conversationID},
 	}
 	select {
 	case <-ctx.Done():
@@ -282,8 +283,8 @@ func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversa
 	}
 }
 
-func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request workerRuntimeToolRequest) error {
-	msg := workerMessage{Type: workerMessageRuntimeToolRequest, RuntimeToolRequest: &request}
+func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request wire.RuntimeToolRequest) error {
+	msg := wire.Message{Type: wire.MessageRuntimeToolRequest, RuntimeToolRequest: &request}
 	select {
 	case <-ctx.Done():
 		return ctx.Err()
