@@ -166,7 +166,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - **Add a provider**: implement under `core/providers/<name>/`, satisfy `providers.Provider`, register the factory in `init()`. Map provider events into `protocol.Event` (text deltas → `ContentDelta`, tool calls → `ToolCallDelta` + `ToolCallEnd`, finish → `NewFinishEvent`).
 - **Add a middleware**: write `func(next agent.Next) agent.Next`. Place under `core/middleware/`, register via `agent.WithMiddleware(...)`.
 - **Add a runner listener**: extend `runner.Listeners` only if you genuinely need a new turn‑level milestone; otherwise just provide one of the existing four callbacks at construction.
-- **Conversation logic**: change `core/agent/agent.go` carefully. Loop = provider stream → assemble assistant message → execute tool calls (with classifier + middleware) → append tool results → repeat until `FinishReason == stop` or `need_approval`.
+- **Conversation logic**: change `core/agent/turn_loop.go` (the loop) and `tool_execution.go` (running tool calls) carefully. Loop = provider stream → assemble assistant message → execute tool calls (with classifier + middleware) → append tool results → repeat until `FinishReason == stop` or `need_approval`.
 
 ## Quick Troubleshooting
 - Provider not selected: check `~/.zotigo/config.yaml` `default_profile` and the profile's `provider / model / api_key`.
