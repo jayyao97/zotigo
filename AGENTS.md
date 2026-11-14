@@ -170,7 +170,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 
 ## Quick Troubleshooting
 - Provider not selected: check `~/.zotigo/config.yaml` `default_profile` and the profile's `provider / model / api_key`.
-- Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in the session worker (`internal/zotigod/worker_client.go`); `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
+- Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in the session worker (`internal/zotigod/worker_runtime_setup.go`); `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
 - Classifier silent‑failing: look for `provider classifier timeout` in debug logs. Default is 20s; lower `safety.classifier.timeout_ms` only after confirming the underlying model is fast enough.
 - Empty output / loop: `ZOTIGO_DEBUG=true`; check for the loop‑guard `<system-reminder>` in the latest tool result. The runner ends a turn on `FinishReason == stop`.
 - gofmt pre‑commit failure: run `gofmt -w` on the listed files, re‑stage, retry the commit.
