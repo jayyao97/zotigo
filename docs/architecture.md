@@ -219,13 +219,19 @@ Changing any of these needs a migration or a version check, not a refactor:
 ## Known debt
 
 - `internal/zotigod` still holds the daemon and both worker runtimes in one
-  package. The protocol data they exchange is now separate
-  (`internal/zotigod/wire`), but the logic is not: a split into session log,
-  daemon, native worker and Codex worker would make the daemon/worker boundary
-  a compile-time fact. It was not done with the wire move because the two
-  sides still share unexported helpers with logic (for example
-  `workerInputErrorDetails`) and the white-box tests would have to move with
-  them; it should be done one boundary at a time.
+  package. The protocol data they exchange is separate
+  (`internal/zotigod/wire`); the logic is not, and the reason is measurable.
+  After the wire move, the native worker files still use 37 package-level
+  symbols defined in daemon-side files and the daemon uses 31 defined in
+  worker files; for the Codex worker the numbers are 79 and 16. Almost all of
+  it is one shared layer that both processes run: writing the durable display
+  log, accepting and deduplicating session input, building and validating
+  approval requests, image blobs, and hooks. Moving a worker into its own
+  package today would mean exporting that whole layer from `zotigod` with no
+  other consumer. The next step is therefore to give that shared layer its own
+  package first (display log + command items + input acceptance + approvals);
+  after that each worker depends on `wire` and that package only, and can move
+  with its white-box tests.
 - `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
 - `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
   writes a "user approved action" audit event that the production path
