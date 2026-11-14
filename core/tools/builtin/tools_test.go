@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/core/tools"
 )
 
 func TestShellTool(t *testing.T) {
@@ -76,7 +76,7 @@ func TestShellToolSchemaDescribesWorkspaceRootWorkDir(t *testing.T) {
 
 func TestShellProgressReporterFlushesThrottledOutput(t *testing.T) {
 	var events []protocol.Event
-	reporter := newShellProgressReporter(agent.ToolEventSink(func(event protocol.Event) {
+	reporter := newShellProgressReporter(tools.EventSink(func(event protocol.Event) {
 		events = append(events, event)
 	}), "call-1")
 	reporter.lastEmit = time.Now()

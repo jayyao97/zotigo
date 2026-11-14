@@ -1451,7 +1451,7 @@ func (a *Agent) ResolvePendingActions(ctx context.Context, decisions map[string]
 	return a.executeResolvedPendingActions(ctx, orderedActions(append(deferred, approved...)), true)
 }
 
-func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink ToolEventSink, ensureSnapshot bool) (results []protocol.ToolResult, mayHaveExecuted bool, err error) {
+func (a *Agent) executeActions(ctx context.Context, actions []*PendingAction, eventSink tools.EventSink, ensureSnapshot bool) (results []protocol.ToolResult, mayHaveExecuted bool, err error) {
 	var executionStarted atomic.Bool
 	toolCtx, toolRun, execute := a.beginToolRun(ctx)
 	if !execute {
@@ -1671,7 +1671,7 @@ func commonDenialReason(reasons []string) string {
 	return "another tool call in the batch was denied"
 }
 
-func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink ToolEventSink, started func(), completed func(*PendingAction, protocol.ToolResult)) {
+func (a *Agent) executePendingActionGroup(ctx context.Context, exec executor.Executor, actions []*PendingAction, warnings []string, results []protocol.ToolResult, eventSink tools.EventSink, started func(), completed func(*PendingAction, protocol.ToolResult)) {
 	var wg sync.WaitGroup
 	for i, action := range actions {
 		i, action := i, action
@@ -1703,7 +1703,7 @@ func (a *Agent) recordLoopWarning(action *PendingAction) string {
 	)
 }
 
-func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor, action *PendingAction, loopWarning string, eventSink ToolEventSink, started func()) protocol.ToolResult {
+func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor, action *PendingAction, loopWarning string, eventSink tools.EventSink, started func()) protocol.ToolResult {
 	prefixed := func(text string) string {
 		if loopWarning == "" {
 			return text
@@ -1742,8 +1742,8 @@ func (a *Agent) executePendingAction(ctx context.Context, exec executor.Executor
 		}
 	}
 	started()
-	ctx = withToolEventSink(ctx, eventSink)
-	ctx = withToolCallContext(ctx, call)
+	ctx = tools.WithEventSink(ctx, eventSink)
+	ctx = tools.WithCallInfo(ctx, tools.CallInfo{ID: call.ToolCallID, Name: call.Name})
 	invoke := buildMiddlewareChain(a.middlewares, func(ctx context.Context, c *ToolCall) (any, error) {
 		return c.Tool.Execute(ctx, c.Executor, c.Arguments)
 	})

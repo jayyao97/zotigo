@@ -1,4 +1,4 @@
-package builtin
+package subagent
 
 import (
 	"context"
@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/core/transport"
 )
 
@@ -197,7 +198,7 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 			}
 			recorder := registerSpawnTestProvider(t, report)
 			exec := newSpawnTestExecutor(t)
-			spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&ReadFileTool{}})
+			spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&builtin.ReadFileTool{}})
 			result, err := spawn.Execute(context.Background(), exec, `{"name":"../../untrusted","description":"review","prompt":"Review"}`)
 			if err != nil {
 				t.Fatal(err)
@@ -226,7 +227,7 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 				var recovered strings.Builder
 				for offset := 0; offset < len(report); {
 					args, _ := json.Marshal(map[string]any{"path": path, "byte_offset": offset})
-					part, err := (&ReadFileTool{}).Execute(context.Background(), exec, string(args))
+					part, err := (&builtin.ReadFileTool{}).Execute(context.Background(), exec, string(args))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -252,7 +253,7 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 				var recovered strings.Builder
 				for offset := 1; offset <= lines+1; offset += 20 {
 					args, _ := json.Marshal(map[string]any{"path": path, "offset": offset, "limit": 20})
-					part, err := (&ReadFileTool{}).Execute(context.Background(), exec, string(args))
+					part, err := (&builtin.ReadFileTool{}).Execute(context.Background(), exec, string(args))
 					if err != nil {
 						t.Fatal(err)
 					}
@@ -286,7 +287,7 @@ func (e reportWriteFailureExecutor) WriteFile(context.Context, string, []byte, o
 
 func TestSpawnReportSurvivesSaveFailure(t *testing.T) {
 	recorder := registerSpawnTestProvider(t, "completed findings")
-	spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&ReadFileTool{}})
+	spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&builtin.ReadFileTool{}})
 	result, err := spawn.Execute(context.Background(), reportWriteFailureExecutor{newSpawnTestExecutor(t)}, `{"description":"review","prompt":"Review"}`)
 	if err != nil {
 		t.Fatal(err)

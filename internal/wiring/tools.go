@@ -6,6 +6,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/lsp"
+	"github.com/jayyao97/zotigo/core/subagent"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 )
@@ -17,7 +18,7 @@ type ToolSetConfig struct {
 	ShellPolicy            *builtin.ShellPolicy
 	LSPManager             *lsp.Manager
 	Spawn                  bool
-	SpawnApprovalRequester builtin.SpawnApprovalRequester
+	SpawnApprovalRequester subagent.SpawnApprovalRequester
 	// ACP fs/read_text_file cannot preserve binary image bytes.
 	DisableViewImage bool
 }
@@ -82,15 +83,15 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 	}
 
 	if cfg.Spawn {
-		spawnOpts := []builtin.SpawnOption{
-			builtin.WithApprovalPolicySource(func() agent.ApprovalPolicy {
+		spawnOpts := []subagent.SpawnOption{
+			subagent.WithApprovalPolicySource(func() agent.ApprovalPolicy {
 				return ag.Describe().ApprovalPolicy
 			}),
 		}
 		if cfg.SpawnApprovalRequester != nil {
-			spawnOpts = append(spawnOpts, builtin.WithSpawnApprovalRequester(cfg.SpawnApprovalRequester))
+			spawnOpts = append(spawnOpts, subagent.WithSpawnApprovalRequester(cfg.SpawnApprovalRequester))
 		}
-		ag.RegisterTool(builtin.NewSpawnTool(cfg.Profile, childTools, spawnOpts...))
+		ag.RegisterTool(subagent.NewSpawnTool(cfg.Profile, childTools, spawnOpts...))
 	}
 
 	return nil

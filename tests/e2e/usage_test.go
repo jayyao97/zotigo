@@ -500,11 +500,3 @@ func TestE2E_UsageAllProviders(t *testing.T) {
 		})
 	}
 }
-
-// firstProfile returns the first profile from a map.
-func firstProfile(profiles map[string]config.ProfileConfig) config.ProfileConfig {
-	for _, p := range profiles {
-		return p
-	}
-	return config.ProfileConfig{}
-}

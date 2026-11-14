@@ -1,4 +1,7 @@
-package builtin
+// Package subagent provides the spawn tool: a tool whose execution runs a
+// child agent. It sits above core/agent, which is why it is not one of the
+// leaf tools in core/tools/builtin.
+package subagent
 
 import (
 	"context"
@@ -263,8 +266,8 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		return nil, fmt.Errorf("failed to run subagent: %w", err)
 	}
 	var trace []string
-	eventSink, hasEventSink := agent.ToolEventSinkFromContext(ctx)
-	parentCall, hasParentCall := agent.ToolCallFromContext(ctx)
+	eventSink, hasEventSink := tools.EventSinkFromContext(ctx)
+	parentCall, hasParentCall := tools.CallInfoFromContext(ctx)
 	forwardChildEvent := func(event protocol.Event) {
 		if !hasEventSink || !hasParentCall {
 			return

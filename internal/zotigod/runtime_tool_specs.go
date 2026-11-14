@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/tools"
 )
@@ -52,7 +51,7 @@ func (t *sessionRuntimeTool) Classify(tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "reads daemon-authorized session history"}
 }
 func (t *sessionRuntimeTool) Execute(ctx context.Context, _ executor.Executor, arguments string) (any, error) {
-	call, ok := agent.ToolCallFromContext(ctx)
+	call, ok := tools.CallInfoFromContext(ctx)
 	if !ok || t.turnID == nil || t.turnID() == "" {
 		return nil, errors.New("session tool requires an active host turn and tool call ID")
 	}

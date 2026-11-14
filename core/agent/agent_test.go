@@ -863,7 +863,7 @@ func (t *ProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelSafe}
 }
 func (t *ProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
-	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+	if sink, ok := tools.EventSinkFromContext(ctx); ok {
 		sink(protocol.Event{
 			Type: protocol.EventTypeToolProgress,
 			ToolResult: &protocol.ToolResult{
@@ -888,7 +888,7 @@ func (t *ApprovalProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision
 	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
 }
 func (t *ApprovalProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
-	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+	if sink, ok := tools.EventSinkFromContext(ctx); ok {
 		sink(protocol.Event{
 			Type: protocol.EventTypeToolProgress,
 			ToolResult: &protocol.ToolResult{

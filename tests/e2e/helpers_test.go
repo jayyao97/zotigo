@@ -40,10 +40,6 @@ func shouldSkipProviderError(providerName string, err error) bool {
 	return strings.Contains(msg, "only supported in v1/responses")
 }
 
-func isOpenRouterBaseURL(baseURL string) bool {
-	return strings.Contains(strings.ToLower(baseURL), "openrouter.ai")
-}
-
 // ============ Agent Helpers ============
 
 func newTestAgent(t *testing.T, profile config.ProfileConfig) *agent.Agent {

@@ -8,7 +8,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 )
 
@@ -63,7 +63,7 @@ func (t *workerRuntimeTransport) RequestApproval(ctx context.Context, pending []
 	return t.requestApproval(ctx, pending, "")
 }
 
-func (t *workerRuntimeTransport) RequestSpawnApproval(ctx context.Context, request builtin.SpawnApprovalRequest) ([]zotigotransport.ApprovalResult, error) {
+func (t *workerRuntimeTransport) RequestSpawnApproval(ctx context.Context, request subagent.SpawnApprovalRequest) ([]zotigotransport.ApprovalResult, error) {
 	pending := make([]zotigotransport.PendingToolCall, 0, len(request.Actions))
 	for _, action := range request.Actions {
 		if action == nil {

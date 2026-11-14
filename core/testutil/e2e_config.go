@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 
 	"github.com/jayyao97/zotigo/core/config"
 	"gopkg.in/yaml.v3"
@@ -120,9 +119,4 @@ func findConfigPath() string {
 	}
 
 	return e2eConfigFileNames[0]
-}
-
-func isYAMLFile(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	return ext == ".yaml" || ext == ".yml"
 }

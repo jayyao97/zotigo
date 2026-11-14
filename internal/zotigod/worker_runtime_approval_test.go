@@ -14,7 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/tools/builtin"
+	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 )
 
@@ -101,7 +101,7 @@ func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
 	go func() {
-		results, _ := transport.RequestSpawnApproval(context.Background(), builtin.SpawnApprovalRequest{
+		results, _ := transport.RequestSpawnApproval(context.Background(), subagent.SpawnApprovalRequest{
 			AgentName: "reviewer", Actions: []*agent.PendingAction{{ToolCallID: "child-call", Name: "shell", Arguments: `{"command":"touch file"}`}},
 		})
 		resultCh <- results
@@ -149,7 +149,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 	transport := newWorkerRuntimeTransport(sessionID, display, func(_ context.Context, approval approvalRequestResponse) { notified <- approval })
 	resultCh := make(chan []zotigotransport.ApprovalResult, 1)
 	go func() {
-		results, _ := transport.RequestSpawnApproval(ctx, builtin.SpawnApprovalRequest{
+		results, _ := transport.RequestSpawnApproval(ctx, subagent.SpawnApprovalRequest{
 			AgentName: "reviewer",
 			Actions:   []*agent.PendingAction{{ToolCallID: "child-call", Name: "shell", Arguments: `{"command":"go test ./..."}`}},
 		})
