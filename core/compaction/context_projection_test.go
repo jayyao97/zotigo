@@ -10,6 +10,9 @@ import (
 )
 
 func TestToolProjectionIsStableAcrossRepeatedUseAndRestore(t *testing.T) {
+	// Token-counting large fixtures is CPU-bound; the test works only on
+	// in-memory values of its own, so it can overlap with other tests.
+	t.Parallel()
 	c := NewCompressor(DefaultCompressorConfig())
 	for name, text := range map[string]string{
 		"english":        strings.Repeat("word ", 20000),

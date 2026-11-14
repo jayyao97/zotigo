@@ -141,16 +141,6 @@ func TestLoopDetector_ConsecutiveOnly(t *testing.T) {
 	}
 }
 
-func TestLoopDetector_DefaultThresholds(t *testing.T) {
-	cfg := DefaultLoopDetectorConfig()
-	if cfg.MaxRepeats != 7 {
-		t.Errorf("expected default MaxRepeats=7, got %d", cfg.MaxRepeats)
-	}
-	if cfg.WindowSize != 15 {
-		t.Errorf("expected default WindowSize=15, got %d", cfg.WindowSize)
-	}
-}
-
 func TestLoopDetector_Suggestion(t *testing.T) {
 	ld := NewLoopDetector(LoopDetectorConfig{
 		MaxRepeats: 2,

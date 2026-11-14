@@ -9,6 +9,7 @@ import (
 )
 
 func TestInspectSourceClassifiesFolderAndGitSubdirectory(t *testing.T) {
+	t.Parallel()
 	folder := t.TempDir()
 	inspection, err := InspectSource(context.Background(), folder)
 	if err != nil {

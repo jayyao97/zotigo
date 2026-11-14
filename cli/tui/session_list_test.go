@@ -48,72 +48,57 @@ func keyPress(s string) tea.KeyPressMsg {
 	return tea.KeyPressMsg{Text: s}
 }
 
-func TestVisibleRows_UnknownHeight(t *testing.T) {
-	m := newTestSessionsModel(50, 0, 0)
-	if got := m.visibleRows(); got != defaultVisibleSessionRows {
-		t.Fatalf("unknown height should render conservative page, got %d", got)
+func TestVisibleRows(t *testing.T) {
+	tests := []struct {
+		name   string
+		height int
+		want   int
+		reason string
+	}{
+		{name: "UnknownHeight", height: 0, want: defaultVisibleSessionRows, reason: "unknown height should render conservative page"},
+		{name: "ReservesHeaderFooter", height: 30, want: 26, reason: "height 30 minus 4 overhead = 26"},
+		{name: "TinyTerminalFloor", height: 4, want: 3, reason: "visible rows should floor at 3 on tiny terminals"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestSessionsModel(50, 0, tc.height)
+			if got := m.visibleRows(); got != tc.want {
+				t.Fatalf("%s, got %d", tc.reason, got)
+			}
+		})
 	}
 }
 
-func TestVisibleRows_ReservesHeaderFooter(t *testing.T) {
-	m := newTestSessionsModel(50, 0, 30)
-	if got := m.visibleRows(); got != 26 {
-		t.Fatalf("height 30 minus 4 overhead = 26, got %d", got)
+func TestClampOffset(t *testing.T) {
+	tests := []struct {
+		name     string
+		sessions int
+		cursor   int
+		height   int
+		offset   int
+		want     int
+		reason   string
+	}{
+		// height 10 -> visible 6. Cursor at 20 should make offset = 15 so cursor
+		// sits on the last visible row.
+		{name: "CursorBelowWindowScrollsDown", sessions: 50, cursor: 20, height: 10, offset: 0, want: 15, reason: "expected offset 15"},
+		// Start scrolled down, then jump cursor to the top.
+		{name: "CursorAboveWindowScrollsUp", sessions: 50, cursor: 2, height: 10, offset: 30, want: 2, reason: "expected offset to follow cursor up to 2"},
+		{name: "CursorInsideWindowNoop", sessions: 50, cursor: 20, height: 10, offset: 18, want: 18, reason: "cursor already visible, offset should not move"},
+		// 3 sessions, viewport fits them all -> offset must be 0. Starts from a garbage offset.
+		{name: "ShorterThanViewport", sessions: 3, cursor: 2, height: 30, offset: 99, want: 0, reason: "list shorter than viewport should reset offset to 0"},
+		// height 10 -> visible 6; 10 sessions -> maxOffset = 4.
+		{name: "OffsetNeverPastEnd", sessions: 10, cursor: 9, height: 10, offset: 99, want: 4, reason: "expected offset clamped to 4 (10-6)"},
 	}
-}
-
-func TestVisibleRows_TinyTerminalFloor(t *testing.T) {
-	m := newTestSessionsModel(50, 0, 4)
-	if got := m.visibleRows(); got != 3 {
-		t.Fatalf("visible rows should floor at 3 on tiny terminals, got %d", got)
-	}
-}
-
-func TestClampOffset_CursorBelowWindowScrollsDown(t *testing.T) {
-	// height 10 -> visible 6. Cursor at 20 should make offset = 15 so cursor
-	// sits on the last visible row.
-	m := newTestSessionsModel(50, 20, 10).clampOffset()
-	if m.offset != 15 {
-		t.Fatalf("expected offset 15, got %d", m.offset)
-	}
-}
-
-func TestClampOffset_CursorAboveWindowScrollsUp(t *testing.T) {
-	// Start scrolled down, then jump cursor to the top.
-	m := newTestSessionsModel(50, 2, 10)
-	m.offset = 30
-	m = m.clampOffset()
-	if m.offset != 2 {
-		t.Fatalf("expected offset to follow cursor up to 2, got %d", m.offset)
-	}
-}
-
-func TestClampOffset_CursorInsideWindowNoop(t *testing.T) {
-	m := newTestSessionsModel(50, 20, 10)
-	m.offset = 18
-	m = m.clampOffset()
-	if m.offset != 18 {
-		t.Fatalf("cursor already visible, offset should not move; got %d", m.offset)
-	}
-}
-
-func TestClampOffset_ShorterThanViewport(t *testing.T) {
-	// 3 sessions, viewport fits them all -> offset must be 0.
-	m := newTestSessionsModel(3, 2, 30)
-	m.offset = 99 // garbage
-	m = m.clampOffset()
-	if m.offset != 0 {
-		t.Fatalf("list shorter than viewport should reset offset to 0, got %d", m.offset)
-	}
-}
-
-func TestClampOffset_OffsetNeverPastEnd(t *testing.T) {
-	// height 10 -> visible 6; 10 sessions -> maxOffset = 4.
-	m := newTestSessionsModel(10, 9, 10)
-	m.offset = 99
-	m = m.clampOffset()
-	if m.offset != 4 {
-		t.Fatalf("expected offset clamped to 4 (10-6), got %d", m.offset)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			m := newTestSessionsModel(tc.sessions, tc.cursor, tc.height)
+			m.offset = tc.offset
+			m = m.clampOffset()
+			if m.offset != tc.want {
+				t.Fatalf("%s, got %d", tc.reason, m.offset)
+			}
+		})
 	}
 }
 

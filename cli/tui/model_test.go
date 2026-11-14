@@ -795,6 +795,9 @@ func submitAndSettle(t *testing.T, model *Model, text string) []string {
 // Review round 3: a lost response is not a rejection. The input stays a
 // stop target, Ctrl+C asks, and "stop" pauses the turn it started.
 func TestLostSubmitResponseKeepsInputStoppable(t *testing.T) {
+	// SubmitTracked sits out its full retry backoff here. The test only uses
+	// its own fake service and model, so it can overlap with other tests.
+	t.Parallel()
 	service := newFakeService(zotigodclient.Session{ID: "sess_1", Live: true})
 	service.items = []session.DisplayItem{}
 	service.submitErr = io.ErrUnexpectedEOF
@@ -851,6 +854,9 @@ func msgsOf(t *testing.T, cmd tea.Cmd) []tea.Msg {
 // Review round 4: Esc after an unconfirmed submission must stop the turn
 // the input may have started, not exit as if idle.
 func TestEscAfterLostSubmitResponseStopsTurn(t *testing.T) {
+	// SubmitTracked sits out its full retry backoff here. The test only uses
+	// its own fake service and model, so it can overlap with other tests.
+	t.Parallel()
 	service := newFakeService(zotigodclient.Session{ID: "sess_1", Live: true})
 	service.items = []session.DisplayItem{}
 	service.submitErr = io.ErrUnexpectedEOF

@@ -17,6 +17,7 @@ func defaultCacheRefs(t *testing.T, repo Repository) []string {
 }
 
 func TestRepositoryDefaultCacheReferencesConverge(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
@@ -49,6 +50,7 @@ func TestRepositoryDefaultCacheReferencesConverge(t *testing.T) {
 }
 
 func TestRepositoryDefaultCacheReadersAndPlansSurviveCollection(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")

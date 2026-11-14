@@ -326,6 +326,17 @@ func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
 	defer retriedWorker.Close()
 }
 
+// unmatchedWorkerAttachRequest builds an attach request for a generation that
+// never connects. handleWorkerAttach waits for the matching worker under the
+// request context, so a short request deadline reaches the same "no matching
+// connection" rejection without sitting out the full workerRegistrationWait.
+func unmatchedWorkerAttachRequest(t *testing.T, sessionID string) *http.Request {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	t.Cleanup(cancel)
+	return httptest.NewRequest(http.MethodPost, "/internal/sessions/"+sessionID+"/worker/attach", workerReadyBody("stale")).WithContext(ctx)
+}
+
 func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 	registry := newSessionRegistry()
 	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
@@ -337,7 +348,7 @@ func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
+	handler.ServeHTTP(rec, unmatchedWorkerAttachRequest(t, created.ID))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("ready without connection status = %d, want %d: %s", rec.Code, http.StatusConflict, rec.Body.String())
 	}
@@ -630,7 +641,7 @@ func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
+	handler.ServeHTTP(rec, unmatchedWorkerAttachRequest(t, created.ID))
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)
 	}
@@ -850,7 +861,7 @@ func TestWorkerAttachRejectsCreatedSession(t *testing.T) {
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
-	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/internal/sessions/"+created.ID+"/worker/attach", workerReadyBody("stale")))
+	handler.ServeHTTP(rec, unmatchedWorkerAttachRequest(t, created.ID))
 
 	if rec.Code != http.StatusConflict {
 		t.Fatalf("expected status %d, got %d", http.StatusConflict, rec.Code)

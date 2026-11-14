@@ -3,6 +3,7 @@ package workspace
 import "testing"
 
 func TestStorageSlug(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		input    string
@@ -26,6 +27,7 @@ func TestStorageSlug(t *testing.T) {
 }
 
 func TestStorageNameUsesStableIDPrefix(t *testing.T) {
+	t.Parallel()
 	if got := storageName("Readable Name", "project_12345678-abcd-ef00", "project_", "project"); got != "readable-name-12345678" {
 		t.Fatalf("project storage name = %q", got)
 	}

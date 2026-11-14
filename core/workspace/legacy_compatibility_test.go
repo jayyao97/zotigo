@@ -8,6 +8,7 @@ import (
 )
 
 func TestLegacyReregisteredLocalSourceOverridesRetiredMapping(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, existing, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -54,6 +55,7 @@ func TestLegacyReregisteredLocalSourceOverridesRetiredMapping(t *testing.T) {
 }
 
 func TestCompletionQueueStatesStayInvisibleToLegacyDispatcher(t *testing.T) {
+	t.Parallel()
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

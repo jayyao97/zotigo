@@ -13,6 +13,7 @@ import (
 )
 
 func TestRepositoryCacheFallbackSnapshotAndValidation(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
@@ -68,6 +69,7 @@ func TestRepositoryCacheFallbackSnapshotAndValidation(t *testing.T) {
 }
 
 func TestRepositoryCacheLockTimeoutUsesLastSuccessfulCache(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
@@ -95,6 +97,7 @@ func TestRepositoryCacheLockTimeoutUsesLastSuccessfulCache(t *testing.T) {
 }
 
 func TestRepositoryMigrationFailureKeepsLocalAndRetriesAfterRestart(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -191,6 +194,7 @@ func TestRepositoryMaintenanceDoesNotProbeCheckedLocalSourcesOrOpen(t *testing.T
 }
 
 func TestRepositoryMaintenanceRefreshesCachedRemote(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
@@ -271,6 +275,7 @@ func TestRepositoryDefaultBackupSurvivesPartialRefresh(t *testing.T) {
 }
 
 func TestRepositoryMaintenanceLifecycleWakesAndRefreshes(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "cache")
@@ -388,6 +393,7 @@ func TestWorkspaceCreationSurvivesConcurrentLocalMigration(t *testing.T) {
 }
 
 func TestDeleteSourceResolvesMigratedOriginalID(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, local := createGitWorkspaceFixture(t)
 	prepared, err := store.prepareRepositorySelection(ctx, legacy.ProjectID, WorkspaceSourceInput{SourceID: local.ID})

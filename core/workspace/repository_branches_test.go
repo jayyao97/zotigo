@@ -13,6 +13,7 @@ import (
 )
 
 func TestSourceBranchesExceedScalarGitOutputLimit(t *testing.T) {
+	t.Parallel()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	commit := strings.TrimSpace(runGitProvisionCommand(t, source.CanonicalPath, "rev-parse", "HEAD"))
 	var refs strings.Builder
@@ -31,6 +32,7 @@ func TestSourceBranchesExceedScalarGitOutputLimit(t *testing.T) {
 }
 
 func TestSourceBranchesExposeMigrationSnapshots(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, original := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -88,6 +90,7 @@ func TestSourceBranchesExposeMigrationSnapshots(t *testing.T) {
 }
 
 func TestRefreshSourceBranchesFindsNewRemoteBranches(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")

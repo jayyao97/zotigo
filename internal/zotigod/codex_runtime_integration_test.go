@@ -229,7 +229,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
 	})
 	workers := newWorkerRegistry()
-	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 100 * time.Millisecond}
 	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
@@ -350,7 +350,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 		},
 	}}
 	workers := newWorkerRegistry()
-	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 100 * time.Millisecond}
 	handler := newHandler(registry, source, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})

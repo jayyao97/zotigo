@@ -10,6 +10,7 @@ import (
 )
 
 func TestRuntimeWorkspaceBindingCreatingToBound(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -54,6 +55,7 @@ func TestRuntimeWorkspaceBindingCreatingToBound(t *testing.T) {
 }
 
 func TestReuseRuntimeWorkspaceDoesNotOverwriteWinner(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -77,6 +79,7 @@ func TestReuseRuntimeWorkspaceDoesNotOverwriteWinner(t *testing.T) {
 }
 
 func TestRuntimeWorkspaceBindingRebuildAndReplaceAreRevisionFenced(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)

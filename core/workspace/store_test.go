@@ -17,6 +17,7 @@ import (
 )
 
 func TestCatalogMutationsDuringSessionWrites(t *testing.T) {
+	t.Parallel()
 	root, ctx := t.TempDir(), context.Background()
 	catalog, err := Open(root)
 	if err != nil {
@@ -65,6 +66,7 @@ func TestCatalogMutationsDuringSessionWrites(t *testing.T) {
 }
 
 func TestStorePersistsCatalogWhenDerivedSessionIndexIsCleared(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	ctx := context.Background()
 	store, err := Open(root)
@@ -119,6 +121,7 @@ func TestStorePersistsCatalogWhenDerivedSessionIndexIsCleared(t *testing.T) {
 }
 
 func TestRenameProject(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -161,6 +164,7 @@ func TestRenameProject(t *testing.T) {
 }
 
 func TestRenameWorkspaceChangesDisplayTitleOnly(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -192,6 +196,7 @@ func TestRenameWorkspaceChangesDisplayTitleOnly(t *testing.T) {
 }
 
 func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +235,7 @@ func TestDuplicateDisplayNamesUseDistinctStorageNames(t *testing.T) {
 }
 
 func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -304,6 +310,7 @@ func TestProjectSourceAndWorkspaceCRUD(t *testing.T) {
 }
 
 func TestSourceConstraintsAndReferences(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -370,6 +377,7 @@ func TestSourceConstraintsAndReferences(t *testing.T) {
 }
 
 func TestCatalogPermissionsAndUnknownVersion(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	store, err := Open(root)
 	if err != nil {
@@ -396,6 +404,7 @@ func TestCatalogPermissionsAndUnknownVersion(t *testing.T) {
 }
 
 func TestMigratesV1ProjectLifecycleSchema(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
 	if err != nil {
@@ -433,6 +442,7 @@ func TestMigratesV1ProjectLifecycleSchema(t *testing.T) {
 }
 
 func TestMigratesV2CheckoutOwnershipSchema(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
 	if err != nil {

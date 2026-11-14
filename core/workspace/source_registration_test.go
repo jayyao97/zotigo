@@ -11,6 +11,7 @@ import (
 )
 
 func TestSourceDeregistrationPreservesExistingWorkspace(t *testing.T) {
+	t.Parallel()
 	for _, archived := range []bool{false, true} {
 		name := "ready"
 		if archived {
@@ -62,6 +63,7 @@ func TestSourceDeregistrationPreservesExistingWorkspace(t *testing.T) {
 }
 
 func TestSourceReRegistrationRetainsIdentity(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	input := SourceInput{Kind: source.Kind, CanonicalPath: source.CanonicalPath,
@@ -90,6 +92,7 @@ func TestSourceReRegistrationRetainsIdentity(t *testing.T) {
 }
 
 func TestSourceRegistrationMigration(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	ctx := context.Background()
 	store, err := Open(root)
@@ -134,6 +137,7 @@ func TestSourceRegistrationMigration(t *testing.T) {
 }
 
 func TestDeregisteredFolderPreservesBindingsAndRejectsNewBindings(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []FolderMode{FolderModeDirect, FolderModeReference, FolderModeCopy} {
 		t.Run(string(mode), func(t *testing.T) {
 			ctx := context.Background()

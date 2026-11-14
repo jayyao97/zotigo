@@ -12,6 +12,7 @@ import (
 )
 
 func TestProvisionWorkspaceScaffoldIsIdempotent(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -56,6 +57,7 @@ func TestProvisionWorkspaceScaffoldIsIdempotent(t *testing.T) {
 }
 
 func TestProvisionWorkspaceScaffoldRestoresMissingAgentInstructions(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -88,6 +90,7 @@ func TestProvisionWorkspaceScaffoldRestoresMissingAgentInstructions(t *testing.T
 }
 
 func TestWorkspaceAgentInstructionsUpgradeLegacyDirectoryNamesWithoutLosingNotes(t *testing.T) {
+	t.Parallel()
 	path := filepath.Join(t.TempDir(), agentsInstructionsName)
 	legacy := "- `code/<source-key>/` contains source repositories.\n- `notes/<source-key>/` contains shared knowledge and reference material.\n\n## User notes\nKeep this.\n"
 	if err := os.WriteFile(path, []byte(legacy), 0o600); err != nil {
@@ -107,6 +110,7 @@ func TestWorkspaceAgentInstructionsUpgradeLegacyDirectoryNamesWithoutLosingNotes
 }
 
 func TestProvisionWorkspaceScaffoldRejectsUnknownTarget(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)

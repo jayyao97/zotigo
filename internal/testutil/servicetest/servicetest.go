@@ -195,17 +195,14 @@ func (p *Provider) RequestCount() int {
 	return len(p.requests)
 }
 
-// DelayEvents returns a proxy to baseURL that holds every event-stream
-// response for delay before forwarding it, while other API calls pass
-// through at once. It reproduces clients whose view lags the service.
-func DelayEvents(t *testing.T, baseURL string, delay time.Duration) string {
-	return Proxy(t, baseURL, ProxyOptions{EventDelay: delay})
-}
-
 // ProxyOptions configures Proxy.
 type ProxyOptions struct {
 	// EventDelay holds each event-stream response before forwarding it.
 	EventDelay time.Duration
+	// EventGate, when set, holds each event-stream response until the
+	// channel is closed. Unlike EventDelay the test decides exactly when
+	// the client's view catches up.
+	EventGate <-chan struct{}
 	// DropMessageResponses forwards POST .../messages to the service and
 	// then closes the connection without a response, so the client cannot
 	// tell whether its input was accepted.
@@ -226,6 +223,13 @@ func Proxy(t *testing.T, baseURL string, opts ProxyOptions) string {
 		if opts.EventDelay > 0 && strings.HasSuffix(r.URL.Path, "/events") {
 			select {
 			case <-time.After(opts.EventDelay):
+			case <-r.Context().Done():
+				return
+			}
+		}
+		if opts.EventGate != nil && strings.HasSuffix(r.URL.Path, "/events") {
+			select {
+			case <-opts.EventGate:
 			case <-r.Context().Done():
 				return
 			}

@@ -60,6 +60,9 @@ func TestTransientErrors(t *testing.T) {
 }
 
 func TestRetryHTTPTimeoutWithLiveCaller(t *testing.T) {
+	// Two real retry backoffs (1s and 2s plus jitter) elapse here. The test
+	// owns its provider and server, so it can overlap with other tests.
+	t.Parallel()
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
@@ -158,6 +161,9 @@ func TestRetryAfter(t *testing.T) {
 }
 
 func TestRetryBudgetIsBounded(t *testing.T) {
+	// Two real retry backoffs (1s and 2s plus jitter) elapse here. The test
+	// owns its provider and server, so it can overlap with other tests.
+	t.Parallel()
 	inner := &retryTestProvider{events: []protocol.Event{protocol.NewErrorEvent(errors.New(`{"error":{"code":503}}`))}}
 	stream, _ := (&retryProvider{Provider: inner}).StreamChat(context.Background(), nil, nil)
 	retries, failures := 0, 0

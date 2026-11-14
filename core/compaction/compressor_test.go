@@ -27,6 +27,9 @@ func cjkText(runes int) string {
 }
 
 func TestToolProjectionSeparatesReportsFromLogs(t *testing.T) {
+	// Token-counting large fixtures is CPU-bound; the test works only on
+	// in-memory values of its own, so it can overlap with other tests.
+	t.Parallel()
 	compressor := NewCompressor(DefaultCompressorConfig())
 	for _, name := range []string{"spawn", "shell"} {
 		text := cjkText(4200) + "\nFINAL FINDINGS AND TEST RESULTS"
@@ -53,6 +56,9 @@ func TestToolProjectionSeparatesReportsFromLogs(t *testing.T) {
 }
 
 func TestCompactionPreservesRecentSpawnReport(t *testing.T) {
+	// Token-counting large fixtures is CPU-bound; the test works only on
+	// in-memory values of its own, so it can overlap with other tests.
+	t.Parallel()
 	for _, mode := range []string{"none", "success", "failure"} {
 		for _, force := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s/force=%v", mode, force), func(t *testing.T) {

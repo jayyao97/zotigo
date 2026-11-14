@@ -748,11 +748,27 @@ func TestStopTurnDoesNotGuessForUnlocatedAcceptedInput(t *testing.T) {
 	submissions := NewSubmissions()
 	submissions.Begin("unknown-outcome")
 	submissions.Finish("unknown-outcome", errors.New("connection reset"))
-	stopCtx, cancel := context.WithTimeout(ctx, time.Second)
+	// StopTurn waits out this deadline; it spans several poll rounds
+	// (stopPollInterval), each of which could wrongly report "nothing ran".
+	stopCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	if result, err := StopTurn(stopCtx, conn.Client, created.ID, StopTarget{InputIDs: []string{"unknown-outcome"}, Submissions: submissions}); err == nil {
 		t.Fatalf("result=%v, want an error instead of a guess", result)
 	}
+}
+
+// shortenSubmitRetryDelays keeps SubmitTracked's retry count but shrinks the
+// pauses between attempts, so a test that exhausts every retry does not sit
+// out the full production backoff. Tests using it must not run in parallel.
+func shortenSubmitRetryDelays(t *testing.T) {
+	t.Helper()
+	original := submitRetryDelays
+	shortened := make([]time.Duration, len(original))
+	for index, delay := range original {
+		shortened[index] = delay / 25
+	}
+	submitRetryDelays = shortened
+	t.Cleanup(func() { submitRetryDelays = original })
 }
 
 // Review round 3: the response to an accepted submission is lost. The
@@ -768,6 +784,7 @@ func TestLostSubmitResponseStaysStoppable(t *testing.T) {
 	}
 	lossy := conn.Via(servicetest.Proxy(t, conn.BaseURL(), servicetest.ProxyOptions{DropMessageResponses: true}))
 	submissions := NewSubmissions()
+	shortenSubmitRetryDelays(t)
 	_, err = SubmitTracked(ctx, lossy, created.ID, MessageRequest{Text: "slow", ClientMessageID: "lost"}, submissions)
 	if !errors.Is(err, ErrSubmissionUnconfirmed) || SubmissionRejectedErr(err) {
 		t.Fatalf("err = %v, want unconfirmed", err)
@@ -825,7 +842,10 @@ func TestStopTurnStopsKnownTurnWhileLocatingOtherInput(t *testing.T) {
 	}
 	submissions := NewSubmissions()
 	submissions.Finish("never-recorded", errors.New("connection reset"))
-	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// StopTurn keeps looking for "never-recorded" until this deadline, so the
+	// deadline is the test's running time. It still spans several poll rounds
+	// (stopPollInterval) after the known turn is stopped in the first one.
+	stopCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	result, err := StopTurn(stopCtx, conn.Client, created.ID, StopTarget{InputIDs: []string{"known", "never-recorded"}, Submissions: submissions})
 	if err == nil || result != StopRequested {

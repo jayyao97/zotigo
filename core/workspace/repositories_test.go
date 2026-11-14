@@ -36,6 +36,7 @@ func createReadyRepository(store *Store, ctx context.Context, remote, name strin
 }
 
 func TestManagedRepositorySharedFreshDefaultAndOverrides(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "")
@@ -127,6 +128,7 @@ func TestManagedRepositorySharedFreshDefaultAndOverrides(t *testing.T) {
 }
 
 func TestManagedRepositoryMigrationPreservesLegacyWorktree(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, oldSource := createGitWorkspaceFixture(t)
 	oldBindings, err := store.ListWorkspaceSources(ctx, legacy.ID)
@@ -211,6 +213,7 @@ func TestManagedRepositoryMigrationPreservesLegacyWorktree(t *testing.T) {
 }
 
 func TestManagedRepositoryNoRemoteAndAmbiguousRemoteStayLocal(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	for _, remotes := range []int{0, 2} {
@@ -232,6 +235,7 @@ func TestManagedRepositoryNoRemoteAndAmbiguousRemoteStayLocal(t *testing.T) {
 }
 
 func TestManagedRepositoryFailedCloneCanRetry(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, _ := repositoryFixture(t)
 	remote := filepath.Join(t.TempDir(), "not-yet-created")
@@ -257,6 +261,7 @@ func TestManagedRepositoryFailedCloneCanRetry(t *testing.T) {
 }
 
 func TestManagedRepositoryMissingDefaultAllowsExplicitBranch(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	bare := filepath.Join(t.TempDir(), "remote.git")
@@ -286,6 +291,7 @@ func TestManagedRepositoryMissingDefaultAllowsExplicitBranch(t *testing.T) {
 }
 
 func TestManagedRepositoryRejectsCredentialURLsAndHelpers(t *testing.T) {
+	t.Parallel()
 	for _, remote := range []string{"ext::sh -c id", "https://secret@example.com/repo.git", "https://u:secret@example.com/repo.git", "https://example.com/repo?token=secret", "-upload-pack=evil", "ftp://example.com/repo", "relative/path"} {
 		if err := validateRemote(remote); !errors.Is(err, ErrInvalid) {
 			t.Errorf("accepted %q: %v", remote, err)
@@ -299,6 +305,7 @@ func TestManagedRepositoryRejectsCredentialURLsAndHelpers(t *testing.T) {
 }
 
 func TestManagedRepositoryReregistrationAndProjectDeletion(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	local := filepath.Join(t.TempDir(), "local")
@@ -359,6 +366,7 @@ func TestManagedRepositoryReregistrationAndProjectDeletion(t *testing.T) {
 }
 
 func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	repo, err := createReadyRepository(store, ctx, remote, "")
@@ -421,6 +429,7 @@ func TestManagedRepositoryDowngradeKeepsGitAndSourceBindings(t *testing.T) {
 }
 
 func TestManagedRepositoryPreparedSourceReadableWithoutMigration(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, source := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")
@@ -461,6 +470,7 @@ func TestManagedRepositoryPreparedSourceReadableWithoutMigration(t *testing.T) {
 }
 
 func TestManagedRepositoryUnsupportedLocalNameDoesNotBlockStartup(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, remote := repositoryFixture(t)
 	local := filepath.Join(t.TempDir(), strings.Repeat("x", 120))
@@ -496,6 +506,7 @@ func TestManagedRepositoryUnsupportedLocalNameDoesNotBlockStartup(t *testing.T) 
 }
 
 func TestManagedRepositoryMigrationReactivatesReplacement(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, legacy, local := createGitWorkspaceFixture(t)
 	remote := filepath.Join(t.TempDir(), "remote.git")

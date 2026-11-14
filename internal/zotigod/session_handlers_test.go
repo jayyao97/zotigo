@@ -1483,59 +1483,32 @@ func TestSessionsListSerializesEmptyArray(t *testing.T) {
 	}
 }
 
-func TestSessionsRejectsUnsupportedMethod(t *testing.T) {
-	req := httptest.NewRequest(http.MethodDelete, "/sessions", nil)
-	rec := httptest.NewRecorder()
-
-	newTestHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
+func TestRoutesRejectUnsupportedMethod(t *testing.T) {
+	tests := []struct {
+		name      string
+		method    string
+		path      string
+		wantAllow string
+	}{
+		{name: "SessionsRejectsUnsupportedMethod", method: http.MethodDelete, path: "/sessions", wantAllow: "GET, POST"},
+		{name: "SessionRejectsUnsupportedMethod", method: http.MethodPost, path: "/sessions/sess-1", wantAllow: http.MethodGet},
+		{name: "SessionStartRejectsUnsupportedMethod", method: http.MethodGet, path: "/sessions/sess-1/start", wantAllow: http.MethodPost},
+		{name: "HealthRejectsNonGET", method: http.MethodPost, path: "/health", wantAllow: http.MethodGet},
 	}
-	if got := rec.Header().Get("Allow"); got != "GET, POST" {
-		t.Fatalf("expected Allow header %q, got %q", "GET, POST", got)
-	}
-}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(tc.method, tc.path, nil)
+			rec := httptest.NewRecorder()
 
-func TestSessionRejectsUnsupportedMethod(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/sessions/sess-1", nil)
-	rec := httptest.NewRecorder()
+			newTestHandler().ServeHTTP(rec, req)
 
-	newTestHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
-	}
-	if got := rec.Header().Get("Allow"); got != http.MethodGet {
-		t.Fatalf("expected Allow header %q, got %q", http.MethodGet, got)
-	}
-}
-
-func TestSessionStartRejectsUnsupportedMethod(t *testing.T) {
-	req := httptest.NewRequest(http.MethodGet, "/sessions/sess-1/start", nil)
-	rec := httptest.NewRecorder()
-
-	newTestHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
-	}
-	if got := rec.Header().Get("Allow"); got != http.MethodPost {
-		t.Fatalf("expected Allow header %q, got %q", http.MethodPost, got)
-	}
-}
-
-func TestHealthRejectsNonGET(t *testing.T) {
-	req := httptest.NewRequest(http.MethodPost, "/health", nil)
-	rec := httptest.NewRecorder()
-
-	newTestHandler().ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusMethodNotAllowed {
-		t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
-	}
-	if got := rec.Header().Get("Allow"); got != http.MethodGet {
-		t.Fatalf("expected Allow header %q, got %q", http.MethodGet, got)
+			if rec.Code != http.StatusMethodNotAllowed {
+				t.Fatalf("expected status %d, got %d", http.StatusMethodNotAllowed, rec.Code)
+			}
+			if got := rec.Header().Get("Allow"); got != tc.wantAllow {
+				t.Fatalf("expected Allow header %q, got %q", tc.wantAllow, got)
+			}
+		})
 	}
 }
 

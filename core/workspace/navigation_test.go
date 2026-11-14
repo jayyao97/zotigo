@@ -8,6 +8,7 @@ import (
 )
 
 func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	project2, err := store.CreateProject(ctx, "Second")
@@ -97,6 +98,7 @@ func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
 }
 
 func TestNavigationReorderValidationIsAtomic(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	pin := NavigationItem{Kind: "workspace", ID: workspace.ID}
@@ -132,6 +134,7 @@ func TestNavigationReorderValidationIsAtomic(t *testing.T) {
 }
 
 func TestNavigationImportFirstClientWinsAndDropsStaleIDs(t *testing.T) {
+	t.Parallel()
 	store, ws, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	second, err := store.CreateProject(ctx, "Second")
@@ -163,6 +166,7 @@ func TestNavigationImportFirstClientWinsAndDropsStaleIDs(t *testing.T) {
 }
 
 func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixtureInRoot(t, t.TempDir())
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "old-session", workspace.ID); err != nil {
