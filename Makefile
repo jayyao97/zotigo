@@ -98,12 +98,12 @@ vet: ## Run go vet, including the e2e build tag
 lint: ## Run golangci-lint
 	@golangci-lint run
 
-.PHONY: check-testutil-imports
-check-testutil-imports: ## Reject test helper imports in production sources
-	@go run ./scripts/check_testutil_imports
+.PHONY: check-layering
+check-layering: ## Enforce the package dependency rules in docs/architecture.md
+	@go run ./scripts/check_layering
 
 .PHONY: check
-check: check-testutil-imports format vet lint test ## Everything CI checks, plus formatting in place
+check: check-layering format vet lint test ## Everything CI checks, plus formatting in place
 
 # Housekeeping
 .PHONY: deps-check

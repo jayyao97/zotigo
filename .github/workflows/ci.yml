@@ -75,8 +75,8 @@ jobs:
           restore-keys: |
             go-check-${{ runner.os }}-${{ runner.arch }}-${{ steps.go-cache.outputs.version }}-${{ hashFiles('go.sum') }}-
 
-      - name: Test helper import boundary
-        run: make check-testutil-imports
+      - name: Package layering
+        run: make check-layering
 
       - name: gofmt
         run: |
