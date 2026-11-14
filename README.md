@@ -17,54 +17,20 @@ Positioned as a competitor to tools like Claude Code, Gemini CLI, and Codex CLI,
 
 ## Architecture
 
-Zotigo follows a strict three-layer architecture:
+Zotigo is a session service plus thin clients:
 
-```mermaid
-graph TD
-    subgraph "Presentation Layer"
-        TUI["Terminal UI (Bubbletea)"]
-        Web["Web UI (Future)"]
-    end
+- **`zotigod`** (`internal/zotigod`) owns sessions. It runs each live session's
+  agent turn in its own worker process, persists a durable display log, and
+  serves one HTTP + SSE API.
+- **Clients** (`zotigo` TUI, `zotigo-acp`, Desktop, Web) attach to that API.
+  A turn keeps running when a client exits and can be reattached from another.
+- **`core/`** is the agent library the worker runs: turn loop, tools,
+  provider adapters, context compaction, persistence types. It does not depend
+  on the service and can be embedded on its own.
 
-    subgraph "Conversation Protocol Layer (The Core)"
-        Protocol["Universal Protocol"]
-        Session["Session & Context Manager"]
-        HIL["Human-in-the-Loop Guard"]
-        Storage["Persistence Engine"]
-    end
-
-    subgraph "Provider Layer"
-        Adapter["Transparent Forwarder"]
-        OpenAI["OpenAI API"]
-        Claude["Anthropic API"]
-        Gemini["Google Gemini API"]
-        DeepSeek["DeepSeek API"]
-    end
-
-    TUI --> Protocol
-    Web --> Protocol
-    Protocol --> Session
-    Session --> HIL
-    HIL --> Adapter
-    Adapter --> OpenAI
-    Adapter --> Claude
-    Adapter --> Gemini
-    Adapter --> DeepSeek
-```
-
-### 1. Presentation Layer (Top)
-Rich **TUI (Terminal User Interface)** with streaming responses, tool call visualization, and an approval flow (accept / deny / feedback). Purely a view layer with no business logic.
-
-### 2. Conversation Protocol Layer (Middle)
-The brain of Zotigo:
-- **Protocol Conversion:** Standardized internal message format.
-- **Context Management:** Sliding-window history with intelligent compression.
-- **Tool Orchestration:** Safety-aware tool dispatch with auto-approve for read-only operations.
-- **Skill System:** Auto-enabled skills that inject domain-specific instructions into the system prompt, dynamically reloaded from disk.
-- **Persistence:** Session state saved to `.zotigo/sessions/`.
-
-### 3. Provider Layer (Bottom)
-Thin, transparent layer translating the Zotigo Protocol into vendor-specific API calls, supporting native capabilities of each model.
+[docs/architecture.md](docs/architecture.md) describes the process model, the
+package layers and why each exists, the dependency rules CI enforces, reserved
+abstractions, compatibility surfaces and known debt.
 
 ## Features
 
@@ -79,23 +45,21 @@ Thin, transparent layer translating the Zotigo Protocol into vendor-specific API
 
 ```
 zotigo/
-├── cli/                       # TUI and slash-command layer
-│   ├── commands/              # Command registry and builtins
-│   └── tui/                   # Bubbletea TUI model
-├── core/
-│   ├── agent/                 # Conversation + tool-calling loop
-│   │   └── prompt/            # System/user prompt builder
-│   ├── config/                # Config loading/merge
-│   ├── providers/             # OpenAI / Anthropic / Gemini adapters
-│   ├── sandbox/               # Execution safety policy
-│   ├── services/              # Loop detection / compression / tokenizer
-│   ├── session/               # Session persistence and locking
-│   ├── skills/                # Skill discovery, loading, and injection
-│   ├── tools/                 # Built-in tools
-│   ├── lsp/                   # Language server integration
-│   └── transport/             # Runner transport abstraction
-├── e2e.config.example.json    # Example config for provider E2E tests
-└── E2E_TESTING.md             # E2E test configuration guide
+├── cmd/                  # Entrypoints: zotigo, zotigod, acp, zotigo-update
+├── cli/                  # TUI (tui/) and slash commands (commands/)
+├── internal/             # The product
+│   ├── zotigod/          # Session service: daemon, workers, HTTP API
+│   ├── zotigodclient/    # Go client + daemon discovery/start
+│   ├── wiring/           # How the product assembles an agent
+│   ├── cliapp/ acpserver/  # The TUI and ACP client applications
+│   └── channels/ hooks/ update/ diagnostics/ ...
+├── core/                 # Embeddable agent library
+│   ├── protocol/ config/ executor/ skills/ lsp/   # Foundation
+│   ├── tools/ providers/ compaction/ transport/   # Capabilities
+│   ├── agent/            # Turn loop (prompt/, loopguard/)
+│   └── runner/ subagent/ session/ middleware/ acp/  # Built around the agent
+├── tests/e2e/            # Provider end-to-end tests (build tag e2e)
+└── docs/                 # architecture.md, zotigod-api.md, ...
 ```
 
 ## Installation

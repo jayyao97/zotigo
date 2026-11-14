@@ -9,7 +9,7 @@ Zotigo is a Go CLI agent in the spirit of Claude Code: streaming TUI, multi‑pr
 Run these often; they are the canonical preflight before any change is "done".
 
 ```bash
-make check                # gofmt + go vet + golangci-lint + go test ./... — what CI also runs
+make check                # layering check + gofmt + go vet + golangci-lint + go test -race ./... — what CI also runs
 make test                 # unit + integration tests
 make test-e2e             # E2E tests (need zotigo.e2e.yaml — see E2E_TESTING.md)
 go test ./core/agent/... -count=1 -run TestAgent_<Name>   # focused test loop
@@ -43,12 +43,12 @@ Top‑level:
 - `internal/sessionadapter/` — `agent.Snapshot` to `core/session` persistence mapping
 - `core/` — protocol‑first runtime
 - `tests/e2e/` — provider end‑to‑end tests (build tag `e2e`)
-- `docs/` — architecture notes (e.g. `extension-points.md`)
+- `docs/` — `architecture.md` (process model, package layers and the dependency rules `make check-layering` enforces; read it before adding a package or moving code across packages), `extension-points.md`, `zotigod-api.md`
 
 Inside `core/`:
 - `agent/` — conversation loop, tool dispatch, safety classifier, approval flow; `agent/prompt/` builds system prompts and reminders
 - `providers/{openai,anthropic,gemini}/` — LLM adapters; openai has `chat_provider.go` (Chat Completions) and `response_provider.go` (Responses API for gpt‑5 / o‑series)
-- `tools/` — `tools.Tool` interface + `builtin/` implementations
+- `tools/` — `tools.Tool` interface and per-call context + `builtin/` leaf tools; `subagent/` — the spawn tool (runs a child agent)
 - `middleware/` — agent‑level tool‑call middleware (observability, etc.)
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
 - `transport/` — IO abstraction (channel, ACP, stdio)

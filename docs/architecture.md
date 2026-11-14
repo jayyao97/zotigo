@@ -1,0 +1,245 @@
+# Architecture
+
+This document explains how Zotigo is put together and why each part exists.
+It is the place to look before adding a package or moving code across one of
+the boundaries below. Related documents:
+
+- `docs/zotigod-api.md`: the daemon's public HTTP contract
+- `docs/terminal-and-acp-clients.md`: how the TUI and ACP attach to the daemon
+- `docs/extension-points.md`: `agent.Middleware` vs `runner.Listeners`
+- `AGENTS.md`: working rules, commands and conventions
+
+## One sentence
+
+Zotigo is a session service (`zotigod`) that runs agent turns in per-session
+worker processes, plus thin clients (TUI, ACP, Desktop, Web) that all speak
+the same HTTP API. The agent itself is a library under `core/` that
+knows nothing about the service.
+
+## Processes
+
+```
+ zotigo (TUI)       zotigo-acp        Desktop / Web
+      │                 │                  │
+      └─────────────────┴──── HTTP + SSE ──┘
+                               │  public API
+                    ┌──────────▼───────────┐  session registry, catalog,
+                    │ zotigod (daemon)     │  durable display log, input queue,
+                    │  internal/zotigod    │  approvals, worker supervision,
+                    └──────────┬───────────┘  IM channel connections
+              launches one process per live session
+           ┌───────────────────┴────────────────────┐
+┌──────────▼───────────┐                 ┌──────────▼───────────┐
+│ native worker        │                 │ Codex worker         │
+│  core/agent loop     │                 │  bridge to codex     │
+│  tools, provider     │                 │  app-server          │
+└──────────────────────┘                 └──────────────────────┘
+   each worker dials back to the daemon on /internal/* (WebSocket + HTTP)
+```
+
+Why this shape:
+
+- **A turn must outlive its client.** Closing the TUI or an editor must not
+  kill a running turn, and a second client must be able to attach. So turns run
+  in the service, never in a client.
+- **A worker crash must not take down other sessions.** Each live session gets
+  its own process. The daemon holds only state it can rebuild from disk; the
+  worker holds the agent and is disposable. Recovery replays durable commands
+  to a fresh worker.
+- **Clients must not drift apart.** All of them read the same durable display
+  items and send the same commands, so there is one implementation of
+  approvals, steering, queueing and history.
+
+The embedded mode (`zotigo --no-daemon --state-dir <dir>`) runs the same
+handler and worker launcher inside the client process on a private port. It is
+a deployment variant, not a second implementation.
+
+## Layers
+
+```
+cmd/            entrypoints only
+cli/            TUI and slash commands               ── clients
+internal/       the product: daemon, clients, wiring ── product
+core/           embeddable agent library             ── library
+```
+
+`core/` never imports `internal/`, `cli/` or `cmd/`. Everything else in this
+section is a finer cut of that one rule.
+
+### core: the library
+
+From the bottom up. A package may import packages above it in this list, never
+below.
+
+| Level | Packages | What it is | Why it is separate |
+| --- | --- | --- | --- |
+| Foundation | `protocol`, `config`, `executor`, `debug`, `skills`, `lsp`, `catalogschema`, `acp`, `agent/prompt`, `agent/loopguard` | Data types and self-contained mechanisms. Each imports no other Zotigo package. | They are the vocabulary. If `protocol` or `config` could reach upward, every package would transitively depend on the agent. |
+| Capabilities | `tools`, `tools/builtin`, `providers/*`, `compaction`, `transport`, `observability/*`, `textassist`, `workspace` | Things an agent uses: the tool contract and leaf tools, model adapters, context compaction, the IO interface, tracing, one-shot model calls, the workspace catalog. | They are used by the agent and must not know about it. A tool that imports its caller cannot be tested or reused without the whole agent. |
+| Kernel | `agent` | The turn loop: stream from the provider, classify and run tool calls, build and compact context, keep the audit trail. | The one place where conversation semantics live. It does not know how it is hosted, driven or persisted. |
+| Around the kernel | `runner`, `subagent`, `middleware`, `session`, `acp/embed` | Things built from an agent: drive it over a transport, run a child agent as a tool, standard middleware, persist its snapshot, plug it into an ACP connection. | Each needs the agent's types, so each sits above it. Keeping them out of `agent` keeps the kernel free of transport, storage and recursion. |
+
+Notes on specific packages:
+
+- **`tools` vs `tools/builtin` vs `subagent`.** `tools` is the contract: the
+  `Tool` interface, safety levels, and the per-call context values
+  (`EventSink`, `CallInfo`) the agent attaches for a tool to read. `builtin`
+  holds leaf tools. The spawn tool creates a child agent, so it cannot be a
+  leaf; it lives in `subagent`.
+- **`session` sits above `agent` on purpose.** A persisted session embeds
+  `agent.Snapshot`. Persistence depending on the domain model is the normal
+  direction; the reverse would be the problem, and the layering check forbids
+  it. An earlier plan to hide this behind type aliases was dropped: it would
+  have added indirection without removing a real dependency.
+- **`executor` is the environment seam.** Every tool receives an
+  `executor.Executor` (`ReadFile / WriteFile / Stat / Exec`). Running tools
+  somewhere else (a container, a remote sandbox) means implementing that
+  interface, not changing tools.
+- **`acp` is protocol only.** JSON-RPC server and ACP types, no other Zotigo
+  import. `acp/embed` holds the adapters that connect an ACP connection
+  directly to an in-process agent.
+
+### internal: the product
+
+| Package | What it is | Why it is separate |
+| --- | --- | --- |
+| `zotigod` | The session service: HTTP handlers, session registry, worker supervision, display log, input queue, approvals, channels dispatch, and both worker runtimes. | See Processes. |
+| `zotigodclient` | Go client for the public API plus daemon discovery and start. | The TUI and ACP need exactly the same attach, resubmit and stop logic. |
+| `wiring` | Builds an agent the way the product wants it: prompt builders, tool set, observer, classifier. | One place decides "what a Zotigo agent is" so the worker and any future host do not diverge. |
+| `sessionadapter` | Maps `agent.Snapshot` to and from `session.Session`. | Keeps persistence mapping out of both the agent and the store. |
+| `cliapp`, `acpserver` | The two client applications. Both are daemon clients. | Entry wiring for `cmd/zotigo` and `cmd/acp`. |
+| `channels`, `channels/feishu` | IM channel connections that create and drive sessions. | Long-lived network connections owned by the daemon. |
+| `codexapp`, `runtime` | Client for the Codex app-server and the runtime identity types shared with it. | The Codex worker is a bridge, not an agent loop. |
+| `hooks` | User-configured command hooks as agent middleware. | Product policy on top of the generic middleware seam. |
+| `environment` | `Executor` + `session.Store` chosen together. Reserved; see below. | Composition concept, so it lives beside `wiring`. |
+| `update`, `diagnostics`, `buildinfo` | Self-update, crash and log capture, version constant. | Operational concerns of the binaries. |
+| `testutil/*` | Test fixtures. Importable only from tests. | Enforced by the layering check. |
+
+`internal/zotigod` is one large package. Files are named by area so the
+package reads as groups:
+
+- `daemon_run.go`, `app.go` (handler and route table), `api_response.go`, `auth.go`
+- `session_*`: registry, handlers, activation, decoration, catalog, fork, tools
+- `control_handlers.go`, `pause_steering_handlers.go`, `command_items.go`,
+  `input_queue.go`, `approval*`, `interactions.go`: the command surface
+- `worker_attach_handlers.go`, `worker_registry.go`, `worker_process.go`,
+  `worker_display_log.go`: the daemon's side of the worker link
+- `worker_client*.go`, `worker_runtime_*.go`, `worker_command_replay.go`: the
+  native worker process
+- `codex_*`: the Codex worker process
+- `channel_*`, `catalog_handlers.go`, `file_*`, `*_handler.go`: feature APIs
+
+### cli
+
+`cli/tui` renders durable display items and sends commands through
+`zotigodclient`. It never constructs an agent. `cli/commands` is the slash
+command registry.
+
+## Enforcement
+
+`make check-layering` (also a CI step) runs `scripts/check_layering`, which
+scans the imports of every production Go file against a small rule table:
+
+1. `core` must not import `internal`, `cli` or `cmd`.
+2. Foundation packages import no other Zotigo package.
+3. Capability packages must not import `agent`, `session`, `runner`,
+   `subagent` or `middleware`.
+4. `agent` must not import `session`, `runner`, `subagent`, `middleware`,
+   `transport`, `workspace`, `skills` or `acp`.
+5. `cli` must not import `agent`, `internal/zotigod` or `internal/wiring`.
+6. `internal/testutil` is importable only from tests.
+
+Tests are exempt: a test may import upward to build a fixture. When adding a
+package, decide its level and add it to the table.
+
+## Context injection
+
+Text the model sees beyond the conversation has one concept and two injection
+points, both in `core/agent/prompt`:
+
+- **Turn boundary: `UserContextBuilder`** (in use). Produces a separate
+  contextual user message (environment, project instructions, request
+  context). It is persisted, diffed between turns, and understood by
+  compaction.
+- **Mid-turn: `ReminderBuilder`** (reserved, no provider registered). Appends a
+  `<system-reminder>` to the last tool result of a batch.
+
+Four places still hand-roll a reminder instead of going through
+`ReminderBuilder`: the loop warning (prefixed to a tool result), the
+empty-response retry prompt, `request_context`, and the worker's tool-recovery
+notice. They are listed as debt, not migrated, because moving them changes
+where the text appears to the model.
+
+## Reserved abstractions
+
+Kept on purpose although the product does not use them today. Do not delete
+them as dead code; do not design new features around their current shape
+without reading the note.
+
+| What | Why it is kept | Note |
+| --- | --- | --- |
+| `acp/embed` (`Transport`, `RemoteExecutor`) | Library users who run an agent in-process with an editor on the other end. | `zotigo-acp` does not use it; tools run in the session runtime. |
+| `internal/environment` | Seam for non-local execution environments. | Its interface pairs `Executor()` with `Store()`. Sessions are now stored by the daemon, so a remote environment will likely need only the executor half. Decide when the first non-local environment is built. |
+| `prompt.ReminderBuilder`, `agent.WithReminder` | The general mid-turn reminder entry. | See Context injection. |
+| `transport.ChannelTransport`, `runner.Start/Stop` | In-process hosting of an agent behind a channel pair. | Used by tests and by library users; the worker uses `RunFullTurnStarted` with its own transport. |
+| `middleware.ToolSpan` | Tool-call tracing spans. | Not registered by `wiring`, so production traces have no per-tool spans. |
+| `providers.WithToolChoiceRequired` | Forcing a tool call. | No caller yet. |
+| `config.Security`, `config.UI.Theme` | Config schema. | Parsed and preserved; not read. |
+
+## Compatibility surfaces
+
+Changing any of these needs a migration or a version check, not a refactor:
+
+- On-disk state under the state directory: session files, display log,
+  catalog SQLite schema (`core/catalogschema`, see `docs/catalog-migrations.md`),
+  worker command cursors and WAL.
+- Config schema (`~/.zotigo/config.yaml`, project `zotigo.yaml`).
+- Public HTTP API and SSE events (`docs/zotigod-api.md`), and the `/internal/*`
+  routes between daemon and workers.
+- CLI flags and environment variables.
+- Every string the model reads: system prompts, tool descriptions and schemas,
+  reminders, tool result formats.
+
+## Tests
+
+- Unit tests sit next to the code. Agent and tool tests use `LocalExecutor` on
+  `t.TempDir()` and a mock provider registered through `providers.Register`.
+- `internal/zotigod` tests drive the real handler through `httptest` with a
+  fake worker launcher, or run a real worker runtime against a mock provider.
+  `testmain_test.go` isolates HOME and the state directory.
+- `tests/e2e` (build tag `e2e`) calls real providers and needs
+  `zotigo.e2e.yaml`.
+- A test should assert behavior through the API production uses. Tests whose
+  only subject is an accessor nothing calls, or that re-implement the logic
+  they check, are removed rather than kept green.
+- Fixtures that must be long should not be `strings.Repeat` of one rune or
+  phrase: the tokenizer is quadratic on such input (see Known debt).
+
+## Known debt
+
+- `internal/zotigod` is still a single package. A split into sub-packages
+  (wire types, session log, daemon, native worker, Codex worker) would make
+  the daemon/worker boundary a compile-time fact. It was not done with the
+  file-level split because about forty unexported symbols are shared across
+  that boundary and the white-box tests would have to move with them; it
+  should be done one boundary at a time.
+- `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
+- `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
+  writes a "user approved action" audit event that the production path
+  (`ResolvePendingActions`) never writes. Either production should record that
+  event or the tests should move to the production entry. Related test-only
+  entries: `ExecuteBypassedPendingActions`, public `SubmitToolOutputs`,
+  `GetContextStats`, `WithHistoryRecorder`, `Compressor.Compress`,
+  `SystemPromptBuilder.SetStaticPrompt`, `catalogschema.NewDriver`,
+  `WithCompressorSummarizer`, `SkillDefinition.HasAlias`.
+- The BPE tokenizer is quadratic on long runs of a repeated rune or short
+  phrase (30,000 identical CJK runes take about 7 seconds). This is reachable
+  from real input, not only from tests.
+- Four hand-rolled reminder injections (see Context injection).
+- `session.Session.Turns` duplicates `AgentSnapshot.Turns`; it is written and
+  persisted but not read.
+- `/snapshot`, `/rewind` and `/snapshots` slash commands cannot work: they
+  need an executor the TUI no longer has.
+- The embedded service does not run repository maintenance.
+- `/internal/sessions/{id}/turn/interrupted` has no caller in this repository.
+- A spawned child agent does not inherit the parent's skill directories as
+  safe read locations.
