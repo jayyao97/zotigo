@@ -49,6 +49,10 @@ func (h *handler) handleCatalogSessions(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusMethodNotAllowed, "method not allowed")
 		return
 	}
+	if r.URL.Query().Get("page") == "true" {
+		h.handleCatalogSessionPage(w, r)
+		return
+	}
 	diagnostics := h.codexSyncDiagnostics(r.Context(), r.URL.Query().Get("sync_codex") == "true")
 	projections, err := h.listSessionProjections(r.Context())
 	if err != nil {

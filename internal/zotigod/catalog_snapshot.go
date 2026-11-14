@@ -9,10 +9,11 @@ import (
 // This is a catalog read projection, not client UI state. Selection and local
 // preferences remain client-owned. It does not fetch Git or synchronize runtimes.
 type catalogSnapshot struct {
-	Projects   []projectDetail             `json:"projects"`
-	Workspaces []zotigoworkspace.Workspace `json:"workspaces"`
-	Navigation zotigoworkspace.Navigation  `json:"navigation"`
-	Sessions   []sessionProjection         `json:"sessions"`
+	SessionQueryVersion int                         `json:"session_query_version"`
+	Projects            []projectDetail             `json:"projects"`
+	Workspaces          []zotigoworkspace.Workspace `json:"workspaces"`
+	Navigation          zotigoworkspace.Navigation  `json:"navigation"`
+	Sessions            []sessionProjection         `json:"sessions"`
 }
 
 func (h *handler) handleCatalogSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -31,7 +32,7 @@ func (h *handler) handleCatalogSnapshot(w http.ResponseWriter, r *http.Request) 
 		h.writeCatalogError(w, err)
 		return
 	}
-	result := catalogSnapshot{Projects: []projectDetail{}, Workspaces: []zotigoworkspace.Workspace{}, Sessions: []sessionProjection{}}
+	result := catalogSnapshot{SessionQueryVersion: 1, Projects: []projectDetail{}, Workspaces: []zotigoworkspace.Workspace{}, Sessions: []sessionProjection{}}
 	for _, project := range projects {
 		sources, err := h.catalog.ListSources(ctx, project.ID)
 		if err != nil {
@@ -49,6 +50,10 @@ func (h *handler) handleCatalogSnapshot(w http.ResponseWriter, r *http.Request) 
 	result.Navigation, err = h.catalog.GetNavigation(ctx)
 	if err != nil {
 		h.writeCatalogError(w, err)
+		return
+	}
+	if r.URL.Query().Get("sessions") == "none" {
+		writeAPIJSON(w, http.StatusOK, result)
 		return
 	}
 	projections, err := h.listSessionProjections(ctx)

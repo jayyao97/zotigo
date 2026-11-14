@@ -1527,20 +1527,7 @@ func (h *handler) listSessions(ctx context.Context) ([]Session, error) {
 	for _, meta := range metadata {
 		if _, ok := seen[meta.ID]; ok {
 			idx := registryIndex[meta.ID]
-			sessions[idx].Agent = meta.Agent
-			if meta.Agent == string(zotigoruntime.AgentCodex) {
-				sessions[idx].ProfileName = ""
-			} else {
-				sessions[idx].ProfileName = meta.ProfileName
-			}
-			sessions[idx].Model = meta.Model
-			sessions[idx].ReasoningEffort = meta.ReasoningEffort
-			sessions[idx].ApprovalPolicy = meta.ApprovalPolicy
-			sessions[idx].UpdatedAt = meta.UpdatedAt
-			sessions[idx].LastPrompt = meta.LastPrompt
-			sessions[idx].ChannelToolsVersion = meta.Capabilities.ChannelToolsVersion
-			sessions[idx].SessionToolsVersion = meta.Capabilities.SessionToolsVersion
-			sessions[idx].ChannelToolsEligible = channelToolsEligible(meta)
+			sessions[idx] = withSessionMetadata(sessions[idx], meta)
 			continue
 		}
 		sessions = append(sessions, sessionFromMetadata(meta, SessionStateOffline, false))
@@ -2528,4 +2515,24 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_, _ = w.Write(data)
+}
+
+// Runtime liveness comes from the registry; user-editable configuration comes
+// from durable metadata, including while a worker is still applying a change.
+func withSessionMetadata(runtime Session, meta zotigosession.Metadata) Session {
+	runtime.Agent = meta.Agent
+	if meta.Agent == string(zotigoruntime.AgentCodex) {
+		runtime.ProfileName = ""
+	} else {
+		runtime.ProfileName = meta.ProfileName
+	}
+	runtime.Model = meta.Model
+	runtime.ReasoningEffort = meta.ReasoningEffort
+	runtime.ApprovalPolicy = meta.ApprovalPolicy
+	runtime.UpdatedAt = meta.UpdatedAt
+	runtime.LastPrompt = meta.LastPrompt
+	runtime.ChannelToolsVersion = meta.Capabilities.ChannelToolsVersion
+	runtime.SessionToolsVersion = meta.Capabilities.SessionToolsVersion
+	runtime.ChannelToolsEligible = channelToolsEligible(meta)
+	return runtime
 }

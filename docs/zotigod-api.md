@@ -1552,3 +1552,40 @@ repositories, synchronize Codex sessions, import legacy navigation order, or sto
 client selection. Explicit runtime synchronization remains on the existing API.
 Older clients can continue using the individual endpoints. New clients fall back
 to those endpoints only when the snapshot route returns 404 or 405.
+
+
+### Paged catalog navigation
+
+`GET /catalog/snapshot?sessions=none` returns the usual project, workspace and
+navigation structure with an empty `sessions` array and `session_query_version: 1`.
+Omitting `sessions=none` preserves the existing complete snapshot contract.
+
+`GET /catalog/sessions?page=true` selects indexed metadata before assembling the
+bounded response. It returns `sessions`, `query_version: 1`, and an optional
+`next_cursor`. Pass that opaque cursor with the same filters to continue.
+
+Parameters:
+
+- `limit`: 1–200, default 50.
+- `project_id`, `workspace_id`, `ungrouped=true`, `pinned=true`, `include_archived=true`.
+- `unread=true|false`; omitted includes both. Read state is shared with existing clients.
+- `since`: inclusive RFC3339 metadata activity timestamp.
+- `channel=all|pinned|none`: defaults to all. `pinned` includes non-Channel sessions
+  plus Channel-bound sessions pinned individually or through their workspace/project.
+  Disabled Channel bindings still count; no message history or Channel configuration
+  is sent to the client to determine membership.
+- `q`: whitespace-separated terms AND-matched across title, prompt preview,
+  workspace title and project name.
+- `ids`: comma-separated session IDs, at most 200, for bounded metadata refreshes.
+- `sync_codex=true`: explicit best-effort external history synchronization, retaining
+  the existing diagnostics contract without a complete catalog response.
+
+Ordering is activity descending then ID ascending. Workspace-scoped pages preserve
+workspace positions first, then activity/ID. The cursor is a seek position, not a
+frozen snapshot: concurrent activity or reordering can move records between pages;
+clients deduplicate IDs and refresh loaded windows. Summary reads do not deserialize
+session snapshots or display logs. Unread queries start from a partial unread index.
+Search scans metadata when necessary; it does not search message bodies.
+
+The navigation indexes are a compatible catalog extension. API/data epochs remain
+unchanged, and previous binaries can still read and write the database.

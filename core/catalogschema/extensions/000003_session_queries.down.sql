@@ -1,0 +1,4 @@
+DROP INDEX idx_session_organization_workspace_seek;
+DROP INDEX idx_session_read_state_unread;
+DROP INDEX idx_session_organization_workspace_page;
+DROP INDEX idx_sessions_activity_page;

@@ -53,6 +53,8 @@ type Store interface {
 
 // ListFilter defines filtering criteria for listing sessions.
 type ListFilter struct {
+	// IDs restricts reads to known sessions; nil means unrestricted.
+	IDs []string
 	// WorkingDirectory filters by project path.
 	// Empty string means no filter.
 	WorkingDirectory string

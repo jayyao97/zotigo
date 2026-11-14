@@ -148,9 +148,15 @@ func (i *sessionIndex) list(ctx context.Context, filter ListFilter) ([]Metadata,
 	var query strings.Builder
 	query.WriteString(sessionMetadataQuery)
 	args := make([]any, 0, 2)
+	query.WriteString(` WHERE 1=1`)
 	if filter.WorkingDirectory != "" {
-		query.WriteString(` WHERE working_directory = ?`)
+		query.WriteString(` AND working_directory = ?`)
 		args = append(args, filter.WorkingDirectory)
+	}
+	if filter.IDs != nil {
+		ids, _ := json.Marshal(filter.IDs)
+		query.WriteString(` AND id IN (SELECT value FROM json_each(?))`)
+		args = append(args, string(ids))
 	}
 	query.WriteString(` ORDER BY `)
 	switch filter.OrderBy {

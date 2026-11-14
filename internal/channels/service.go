@@ -1742,3 +1742,13 @@ func (s *Service) patchInterrupted(ctx context.Context, messages []Message) {
 		_ = s.clearProcessingMarker(message.ID, handle)
 	}
 }
+
+// BoundSessionIDs returns only indexed binding keys for catalog filtering.
+func (s *Service) BoundSessionIDs(ctx context.Context) ([]string, error) {
+	s.configMu.RLock()
+	defer s.configMu.RUnlock()
+	if s.closed {
+		return nil, errors.New("channel service is closed")
+	}
+	return s.store.BoundSessionIDs(ctx)
+}

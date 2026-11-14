@@ -2,6 +2,7 @@ package catalogschema
 
 import (
 	"context"
+	"fmt"
 	"testing"
 )
 
@@ -90,7 +91,7 @@ func TestCompatibleFutureExtensionsDoNotBlockBinaryRollback(t *testing.T) {
 	if err := upgrade(ctx, db, root); err != nil {
 		t.Fatal(err)
 	}
-	execSQL(t, db, `CREATE TABLE future_addition(id INTEGER); INSERT INTO future_addition VALUES(42); UPDATE catalog_extensions SET version=3`)
+	execSQL(t, db, fmt.Sprintf(`CREATE TABLE future_addition(id INTEGER); INSERT INTO future_addition VALUES(42); UPDATE catalog_extensions SET version=%d`, ExtensionVersion+1))
 	if ok, err := ready(ctx, db); err != nil || !ok {
 		t.Fatalf("future compatible extension blocks old startup: %t %v", ok, err)
 	}
@@ -104,7 +105,7 @@ func TestCompatibleFutureExtensionsDoNotBlockBinaryRollback(t *testing.T) {
 	if err := db.QueryRow(`SELECT id FROM future_addition`).Scan(&value); err != nil || value != 42 {
 		t.Fatalf("future data removed: %d %v", value, err)
 	}
-	if err := db.QueryRow(`SELECT version FROM catalog_extensions`).Scan(&version); err != nil || version != 3 {
+	if err := db.QueryRow(`SELECT version FROM catalog_extensions`).Scan(&version); err != nil || version != ExtensionVersion+1 {
 		t.Fatalf("future journal downgraded: %d %v", version, err)
 	}
 	if err := MigrateOffline(ctx, db, root, 14); err == nil {
