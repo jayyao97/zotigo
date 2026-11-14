@@ -15,10 +15,21 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 )
 
+// cjkText returns non-repeating CJK text. The BPE tokenizer is quadratic on
+// long runs of one repeated rune or short repeated phrase, so strings.Repeat
+// fixtures of this size take seconds per token count (minutes under -race).
+func cjkText(runes int) string {
+	text := make([]rune, runes)
+	for index := range text {
+		text[index] = rune(0x4E00 + (index*7919)%20000)
+	}
+	return string(text)
+}
+
 func TestToolProjectionSeparatesReportsFromLogs(t *testing.T) {
 	compressor := NewCompressor(DefaultCompressorConfig())
 	for _, name := range []string{"spawn", "shell"} {
-		text := strings.Repeat("中文报告说明", 700) + "\nFINAL FINDINGS AND TEST RESULTS"
+		text := cjkText(4200) + "\nFINAL FINDINGS AND TEST RESULTS"
 		history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: name, Type: protocol.ToolResultTypeText, Text: text}}}}}
 		before, _ := json.Marshal(history)
 		got := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
@@ -33,7 +44,7 @@ func TestToolProjectionSeparatesReportsFromLogs(t *testing.T) {
 			t.Fatal("projection mutated history")
 		}
 	}
-	text := strings.Repeat("中", 30000)
+	text := cjkText(30000)
 	history := []protocol.Message{{Role: protocol.RoleTool, Content: []protocol.ContentPart{{Type: protocol.ContentTypeToolResult, ToolResult: &protocol.ToolResult{ToolName: "spawn", Type: protocol.ToolResultTypeText, Text: text}}}}}
 	got := compressor.ProjectPrompt(history, 2000)[0].Content[0].ToolResult.Text
 	if !utf8.ValidString(got) || len(got) > 64100 || !strings.Contains(got, "[... truncated ...]") {
@@ -49,7 +60,7 @@ func TestCompactionPreservesRecentSpawnReport(t *testing.T) {
 				if mode != "none" {
 					c.SetSummarizer(&MockSummarizer{MessagesSummary: "older turns", TextSummary: "should not replace findings", ShouldFail: mode == "failure"})
 				}
-				report := "Full report: /workspace/.zotigo/subagent-reports/report.md\n" + strings.Repeat("报告内容", 1000) + "\nFINAL FINDINGS AND TEST RESULTS"
+				report := "Full report: /workspace/.zotigo/subagent-reports/report.md\n" + cjkText(4000) + "\nFINAL FINDINGS AND TEST RESULTS"
 				history := []protocol.Message{
 					protocol.NewUserMessage("old task"),
 					protocol.NewAssistantMessage(strings.Repeat("old answer ", 2000)),
