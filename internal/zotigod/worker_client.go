@@ -544,6 +544,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		}),
 		ApprovalPolicy:       approvalPolicy,
 		TranscriptDir:        transcriptDir,
+		SafeDirs:             skills.Dirs(),
 		Observer:             observer,
 		ConfigureClassifier:  true,
 		ApprovalInstructions: sess.PromptConfig.ApprovalInstructions,
@@ -566,7 +567,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		return nil, fmt.Errorf("create agent: %w", err)
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "agent", stepStarted)
-	agent.WithSkillManager(skills)(ag)
 	durabilityRecorder := &workerDurabilityRecorder{display: display, wal: runtimeWAL}
 	if runtimeWAL != nil {
 		agent.WithDurabilityRecorder(durabilityRecorder)(ag)

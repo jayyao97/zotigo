@@ -19,7 +19,6 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	"github.com/jayyao97/zotigo/core/services"
-	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -47,7 +46,6 @@ type Agent struct {
 	loopDetector                *services.LoopDetector
 	compressor                  *services.Compressor
 	compressorSummarizer        services.Summarizer
-	skillManager                *skills.SkillManager
 	classifier                  SafetyClassifier
 	classifierProfileName       string
 	classifierProfile           config.ProfileConfig
@@ -137,11 +135,6 @@ func WithCompressorSummarizer(s services.Summarizer) AgentOption {
 			a.compressor.SetSummarizer(s)
 		}
 	}
-}
-
-// WithSkillManager sets the skill manager.
-func WithSkillManager(sm *skills.SkillManager) AgentOption {
-	return func(a *Agent) { a.skillManager = sm }
 }
 
 // WithTools registers one or more tools.
@@ -374,21 +367,6 @@ func (a *Agent) Describe() Description {
 		d.ClassifierModel = a.classifierProfile.Model
 	}
 	return d
-}
-
-// SetSkillManager sets the skill manager at runtime.
-func (a *Agent) SetSkillManager(sm *skills.SkillManager) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.skillManager = sm
-	a.extraSafeDirs = append(a.extraSafeDirs, sm.Dirs()...)
-}
-
-// SkillManager returns the agent's skill manager.
-func (a *Agent) SkillManager() *skills.SkillManager {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.skillManager
 }
 
 // AuditTurns returns a copy of persisted turn audit records.

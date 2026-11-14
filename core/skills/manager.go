@@ -2,7 +2,6 @@ package skills
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 )
@@ -159,18 +158,25 @@ func (m *SkillManager) Count() int {
 	return len(m.skills)
 }
 
+// Dirs returns the roots skills are discovered from. Hosts register them as
+// safe read locations so the model can open a skill's files without approval.
+// Roots that do not exist yet are included: /skills --reload picks up a
+// directory created after startup, and reads there must be safe too.
 func (m *SkillManager) Dirs() []string {
 	m.mu.RLock()
-	dirs := append([]string{m.userDir, GetProjectSkillsDir(m.projectDir)}, m.extraDirs...)
-	m.mu.RUnlock()
-	var existing []string
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			existing = append(existing, dir)
+	defer m.mu.RUnlock()
+	var dirs []string
+	for _, dir := range append([]string{m.userDir, m.projectSkillsDir()}, m.extraDirs...) {
+		if dir != "" {
+			dirs = append(dirs, dir)
 		}
 	}
-	return existing
+	return dirs
+}
+
+func (m *SkillManager) projectSkillsDir() string {
+	if m.projectDir == "" {
+		return ""
+	}
+	return GetProjectSkillsDir(m.projectDir)
 }

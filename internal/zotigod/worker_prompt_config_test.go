@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -24,6 +25,7 @@ type workerPromptCaptureProvider struct {
 	messages [][]protocol.Message
 	step     int
 	classify bool
+	readPath string // defaults to note.txt
 }
 
 func (p *workerPromptCaptureProvider) Name() string { return "worker-prompt-capture" }
@@ -41,7 +43,12 @@ func (p *workerPromptCaptureProvider) StreamChat(_ context.Context, messages []p
 		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
 	} else if step == 1 {
 		events <- protocol.Event{Type: protocol.EventTypeToolCallDelta, Index: 0, ToolCallDelta: &protocol.ToolCallDelta{ID: "call-1", Name: "read_file"}}
-		events <- protocol.Event{Type: protocol.EventTypeToolCallEnd, Index: 0, ToolCall: &protocol.ToolCall{ID: "call-1", Name: "read_file", Arguments: `{"path":"note.txt"}`}}
+		readPath := p.readPath
+		if readPath == "" {
+			readPath = "note.txt"
+		}
+		arguments, _ := json.Marshal(map[string]string{"path": readPath})
+		events <- protocol.Event{Type: protocol.EventTypeToolCallEnd, Index: 0, ToolCall: &protocol.ToolCall{ID: "call-1", Name: "read_file", Arguments: string(arguments)}}
 		events <- protocol.NewFinishEvent(protocol.FinishReasonToolCalls)
 	} else {
 		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
@@ -58,6 +65,9 @@ func (p *workerPromptCaptureProvider) joinedPrompts() string {
 		for _, message := range messages {
 			for _, part := range message.Content {
 				text.WriteString(part.Text)
+				if part.ToolResult != nil {
+					text.WriteString(part.ToolResult.Text)
+				}
 				text.WriteByte('\n')
 			}
 		}
@@ -148,5 +158,78 @@ profiles:
 	if !strings.Contains(classifierPrompt, "You are a strict safety reviewer") ||
 		!strings.Contains(classifierPrompt, "Deny access outside the bound workspace.") {
 		t.Fatalf("native worker classifier prompt did not combine base and session instructions: %q", classifierPrompt)
+	}
+}
+
+// A user-level skill lives outside the working directory. Its files must be
+// readable without approval: the skill index tells the model to open SKILL.md.
+func TestNativeWorkerReadsUserSkillFilesWithoutApproval(t *testing.T) {
+	const mainProviderName = "worker-skill-read-main"
+	const classifierProviderName = "worker-skill-read-classifier"
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	skillFile := filepath.Join(home, ".agents", "skills", "demo", "SKILL.md")
+	if err := os.MkdirAll(filepath.Dir(skillFile), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(skillFile, []byte("---\nname: demo\ndescription: Demo skill.\n---\nSKILL BODY MARKER\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	mainProvider := &workerPromptCaptureProvider{readPath: skillFile}
+	classifierProvider := &workerPromptCaptureProvider{classify: true}
+	providers.Register(mainProviderName, func(config.ProfileConfig) (providers.Provider, error) { return mainProvider, nil })
+	providers.Register(classifierProviderName, func(config.ProfileConfig) (providers.Provider, error) { return classifierProvider, nil })
+
+	workDir := t.TempDir()
+	projectConfig := fmt.Sprintf(`default_profile: main
+profiles:
+  main:
+    provider: %s
+    model: main
+    safety:
+      classifier:
+        enabled: true
+        profile: reviewer
+  reviewer:
+    provider: %s
+    model: reviewer
+`, mainProviderName, classifierProviderName)
+	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
+		t.Fatal(err)
+	}
+	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	now := time.Now().UTC()
+	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
+		ID: "session-skill-read", WorkingDirectory: workDir, ProfileName: "main", CreatedAt: now, UpdatedAt: now,
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	runtime, err := newWorkerRuntime(context.Background(), workerRuntimeConfig{SessionID: "session-skill-read", Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)
+	if err := runtime.startMessageTurn(context.Background(), "command-1", 1, &messageCommandPayload{Text: "use the demo skill"}); err != nil {
+		t.Fatal(err)
+	}
+	runtime.mu.Lock()
+	done := runtime.turnDone
+	runtime.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("native worker turn did not finish")
+	}
+	if prompts := classifierProvider.joinedPrompts(); prompts != "" {
+		t.Fatalf("reading a user skill file was sent to the safety classifier: %q", prompts)
+	}
+	if !strings.Contains(mainProvider.joinedPrompts(), "SKILL BODY MARKER") {
+		t.Fatal("skill file content did not reach the model")
 	}
 }
