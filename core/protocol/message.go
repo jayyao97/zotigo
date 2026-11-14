@@ -166,37 +166,6 @@ func SessionUsage(history []Message) Usage {
 	return total
 }
 
-// LastTurnUsage returns the most recent assistant turn's recorded
-// usage (or false when history has none). The last turn's TotalInput
-// is the closest proxy for "current context occupancy" — exactly what
-// the next request will pay for before any new user content is added.
-func LastTurnUsage(history []Message) (Usage, bool) {
-	for i := len(history) - 1; i >= 0; i-- {
-		m := history[i]
-		if m.Role != RoleAssistant {
-			continue
-		}
-		if m.Metadata == nil || m.Metadata.Usage == nil {
-			continue
-		}
-		return *m.Metadata.Usage, true
-	}
-	return Usage{}, false
-}
-
-// CountAssistantTurns returns how many assistant messages are in
-// history. Centralized so /cost and the TUI summary can't drift on
-// what counts as a turn.
-func CountAssistantTurns(history []Message) int {
-	n := 0
-	for _, msg := range history {
-		if msg.Role == RoleAssistant {
-			n++
-		}
-	}
-	return n
-}
-
 type ContentPart struct {
 	Type      ContentType `json:"type"`
 	Text      string      `json:"text,omitempty"`

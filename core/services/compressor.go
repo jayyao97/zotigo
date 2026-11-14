@@ -150,31 +150,10 @@ type CompressionResult struct {
 	TranscriptPath   string // Path to the saved transcript file, empty if not saved
 }
 
-// NeedsCompression checks the same bounded prompt projection that will be
-// dispatched to the provider.
-func (c *Compressor) NeedsCompression(messages []protocol.Message) bool {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-
-	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
-	tokens := c.countTokens(messages)
-	threshold := int(float64(c.config.ContextWindowSize) * c.config.TriggerRatio)
-	return tokens > threshold
-}
-
 // CountTokens returns a bounded local-tokenizer estimate over the model-visible
 // parts of every message. Inline media is omitted, structured media receives a
 // nominal cost, and tool-result text observes ToolOutputThreshold.
 func (c *Compressor) CountTokens(messages []protocol.Message) int {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)
-	return c.countTokens(messages)
-}
-
-// EstimatePromptTokens returns the local estimate for the bounded prompt
-// projection. ContextTokens adds provider calibration when a valid anchor exists.
-func (c *Compressor) EstimatePromptTokens(messages []protocol.Message) int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	messages = c.truncateToolResults(messages, c.config.ToolOutputThreshold)

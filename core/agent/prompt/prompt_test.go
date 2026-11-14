@@ -18,29 +18,16 @@ func TestStaticSystemPrompt_Embedded(t *testing.T) {
 	}
 }
 
-func TestDynamicContext_WithSection(t *testing.T) {
-	dc := NewDynamicContext(
-		WithSection("env", func(_ PromptContext) string { return "linux" }),
-	)
-
-	if len(dc.Sections) != 1 {
-		t.Fatalf("Expected 1 section, got %d", len(dc.Sections))
-	}
-	if dc.Sections[0].Tag != "env" {
-		t.Errorf("Expected tag 'env', got '%s'", dc.Sections[0].Tag)
-	}
-}
-
 func TestDynamicContext_Build(t *testing.T) {
-	dc := NewDynamicContext()
+	dc := NewSystemPromptBuilder().DynamicContext
 	if dc.Build(PromptContext{}) != "" {
 		t.Error("Empty DynamicContext should build to empty string")
 	}
 
-	dc = NewDynamicContext(
-		WithSection("environment", func(_ PromptContext) string { return "Working directory: /tmp" }),
-		WithSection("project", func(_ PromptContext) string { return "Go project" }),
-	)
+	dc = NewSystemPromptBuilder(
+		WithDynamicSection("environment", func(_ PromptContext) string { return "Working directory: /tmp" }),
+		WithDynamicSection("project", func(_ PromptContext) string { return "Go project" }),
+	).DynamicContext
 
 	result := dc.Build(PromptContext{})
 	if !strings.Contains(result, "<environment>") {
@@ -129,7 +116,10 @@ func TestSystemPromptBuilder_EmptyStaticPrompt(t *testing.T) {
 
 func TestUserContextBuilderNoContext(t *testing.T) {
 	w := NewUserContextBuilder()
-	result := w.BuildMetaUserContext(PromptContext{})
+	result, _, err := w.BuildFull(PromptContext{})
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
 	if result != "" {
 		t.Errorf("Expected empty context, got '%s'", result)
 	}
@@ -137,14 +127,17 @@ func TestUserContextBuilderNoContext(t *testing.T) {
 
 func TestUserContextBuilderWithContext(t *testing.T) {
 	w := NewUserContextBuilder(
-		WithContext("file", func(_ PromptContext) string { return "main.go contents here" }),
+		WithKeyedContext("file", "file", func(_ PromptContext) string { return "main.go contents here" }),
 	)
 
-	result := w.BuildMetaUserContext(PromptContext{})
-	if !strings.Contains(result, "<user_context>") {
+	result, _, err := w.BuildFull(PromptContext{})
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
+	if !strings.HasPrefix(result, "<user_context update=\"full\">\n") || !strings.HasSuffix(result, "\n</user_context>") {
 		t.Errorf("context should be wrapped in <user_context>, got %q", result)
 	}
-	if !strings.Contains(result, "<file>") || !strings.Contains(result, "main.go contents here") {
+	if !strings.Contains(result, "<file>\nmain.go contents here\n</file>") {
 		t.Error("context section should be rendered as <file>...</file>")
 	}
 	if strings.Contains(result, "Fix the bug") {
@@ -154,11 +147,14 @@ func TestUserContextBuilderWithContext(t *testing.T) {
 
 func TestUserContextBuilderSkipEmpty(t *testing.T) {
 	w := NewUserContextBuilder(
-		WithContext("empty", func(_ PromptContext) string { return "" }),
-		WithContext("whitespace", func(_ PromptContext) string { return "   " }),
+		WithKeyedContext("empty", "empty", func(_ PromptContext) string { return "" }),
+		WithKeyedContext("whitespace", "whitespace", func(_ PromptContext) string { return "   " }),
 	)
 
-	result := w.BuildMetaUserContext(PromptContext{})
+	result, _, err := w.BuildFull(PromptContext{})
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
 	if result != "" {
 		t.Errorf("Expected empty context, got '%s'", result)
 	}
@@ -166,15 +162,15 @@ func TestUserContextBuilderSkipEmpty(t *testing.T) {
 
 func TestDynamicContext_LazyEvaluation(t *testing.T) {
 	var callCount int64
-	dc := NewDynamicContext(
-		WithSection("counter", func(_ PromptContext) string {
+	dc := NewSystemPromptBuilder(
+		WithDynamicSection("counter", func(_ PromptContext) string {
 			n := atomic.AddInt64(&callCount, 1)
 			if n == 1 {
 				return "first"
 			}
 			return "second"
 		}),
-	)
+	).DynamicContext
 
 	r1 := dc.Build(PromptContext{})
 	if !strings.Contains(r1, "first") {
@@ -192,11 +188,11 @@ func TestDynamicContext_LazyEvaluation(t *testing.T) {
 }
 
 func TestDynamicContext_EmptyProvider(t *testing.T) {
-	dc := NewDynamicContext(
-		WithSection("present", func(_ PromptContext) string { return "data" }),
-		WithSection("absent", func(_ PromptContext) string { return "" }),
-		WithSection("blank", func(_ PromptContext) string { return "   " }),
-	)
+	dc := NewSystemPromptBuilder(
+		WithDynamicSection("present", func(_ PromptContext) string { return "data" }),
+		WithDynamicSection("absent", func(_ PromptContext) string { return "" }),
+		WithDynamicSection("blank", func(_ PromptContext) string { return "   " }),
+	).DynamicContext
 
 	result := dc.Build(PromptContext{})
 	if !strings.Contains(result, "<present>") {
@@ -213,14 +209,17 @@ func TestDynamicContext_EmptyProvider(t *testing.T) {
 func TestUserContextBuilderLazyContext(t *testing.T) {
 	var receivedCtx PromptContext
 	w := NewUserContextBuilder(
-		WithContext("info", func(ctx PromptContext) string {
+		WithKeyedContext("info", "info", func(ctx PromptContext) string {
 			receivedCtx = ctx
 			return "dir=" + ctx.WorkDir
 		}),
 	)
 
 	pctx := PromptContext{WorkDir: "/my/project", SessionID: "sess-123"}
-	result := w.BuildMetaUserContext(pctx)
+	result, _, err := w.BuildFull(pctx)
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
 
 	if receivedCtx.WorkDir != "/my/project" {
 		t.Errorf("Provider should receive WorkDir '/my/project', got '%s'", receivedCtx.WorkDir)
@@ -240,7 +239,10 @@ func TestUserContextBuilderAttributedSection(t *testing.T) {
 		}),
 	)
 
-	result := w.BuildMetaUserContext(PromptContext{})
+	result, _, err := w.BuildFull(PromptContext{})
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
 	if !strings.Contains(result, `<project_instructions source="AGENTS.md">`) {
 		t.Fatalf("expected attributed opening tag, got %q", result)
 	}
@@ -316,8 +318,8 @@ func TestUserContextBuilderBuildUpdate(t *testing.T) {
 
 func TestUserContextBuilderLegacyDuplicateTagsGetStableKeys(t *testing.T) {
 	w := NewUserContextBuilder(
-		WithContext("note", func(_ PromptContext) string { return "first" }),
-		WithContext("note", func(_ PromptContext) string { return "second" }),
+		WithKeyedContext("", "note", func(_ PromptContext) string { return "first" }),
+		WithKeyedContext("", "note", func(_ PromptContext) string { return "second" }),
 	)
 
 	full, state, err := w.BuildUpdate(PromptContext{}, nil)

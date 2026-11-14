@@ -388,7 +388,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 		t.Fatalf("start display turn: %v", err)
 	}
 	transport := newWorkerRuntimeTransport(sessionID, display, nil)
-	approval, _, err := transport.beginApproval(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}})
+	approval, _, err := transport.beginApprovalFrom(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}, "")
 	if err != nil {
 		t.Fatalf("begin approval: %v", err)
 	}
@@ -450,7 +450,7 @@ func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 	if !interrupted || !canceled {
 		t.Fatalf("pause did not win arbitration: interrupted=%v canceled=%v", interrupted, canceled)
 	}
-	if _, _, err := transport.beginApproval(turnCtx, []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}); !errors.Is(err, context.Canceled) {
+	if _, _, err := transport.beginApprovalFrom(turnCtx, []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}, ""); !errors.Is(err, context.Canceled) {
 		t.Fatalf("approval error after interruption = %v, want context canceled", err)
 	}
 	items, _, err := source.LoadItems(context.Background(), sessionID)
@@ -471,7 +471,7 @@ func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 		t.Fatalf("start display turn: %v", err)
 	}
 	transport := newWorkerRuntimeTransport(sessionID, display, nil)
-	if _, _, err := transport.beginApproval(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}); err != nil {
+	if _, _, err := transport.beginApprovalFrom(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}, ""); err != nil {
 		t.Fatalf("begin approval: %v", err)
 	}
 	canceled := false
@@ -501,7 +501,7 @@ func TestWorkerRuntimeReleasedApprovalDoesNotBlockPauseOrNextTurn(t *testing.T) 
 	}
 	transport := newWorkerRuntimeTransport(sessionID, display, nil)
 	pending := []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}
-	approval, _, err := transport.beginApproval(context.Background(), pending)
+	approval, _, err := transport.beginApprovalFrom(context.Background(), pending, "")
 	if err != nil {
 		t.Fatalf("begin approval: %v", err)
 	}
@@ -523,7 +523,7 @@ func TestWorkerRuntimeReleasedApprovalDoesNotBlockPauseOrNextTurn(t *testing.T) 
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start next display turn: %v", err)
 	}
-	next, _, err := transport.beginApproval(context.Background(), pending)
+	next, _, err := transport.beginApprovalFrom(context.Background(), pending, "")
 	if err != nil {
 		t.Fatalf("begin same approval in next turn: %v", err)
 	}
@@ -811,7 +811,7 @@ func TestWorkerRuntimeApprovalClearsInMemoryStateWhenPersistenceFails(t *testing
 		t.Fatalf("start display turn: %v", err)
 	}
 	transport := newWorkerRuntimeTransport("sess-persist-failure", display, nil)
-	_, _, err := transport.beginApproval(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}})
+	_, _, err := transport.beginApprovalFrom(context.Background(), []zotigotransport.PendingToolCall{{ID: "call-1", Name: "glob"}}, "")
 	if err == nil {
 		t.Fatal("expected approval persistence failure")
 	}
@@ -832,11 +832,11 @@ func TestWorkerRuntimeApprovalRegistrationIsIdempotent(t *testing.T) {
 	}
 	transport := newWorkerRuntimeTransport(sessionID, display, nil)
 	pending := []zotigotransport.PendingToolCall{{ID: "call-1", Name: "shell", Arguments: `{"command":"touch file"}`}}
-	first, firstDecisionCh, err := transport.beginApproval(context.Background(), pending)
+	first, firstDecisionCh, err := transport.beginApprovalFrom(context.Background(), pending, "")
 	if err != nil {
 		t.Fatalf("begin first approval: %v", err)
 	}
-	second, secondDecisionCh, err := transport.beginApproval(context.Background(), pending)
+	second, secondDecisionCh, err := transport.beginApprovalFrom(context.Background(), pending, "")
 	if err != nil {
 		t.Fatalf("reuse approval registration: %v", err)
 	}

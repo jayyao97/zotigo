@@ -120,10 +120,6 @@ func (t *workerRuntimeTransport) SendInput(ctx context.Context, input zotigotran
 	}
 }
 
-func (t *workerRuntimeTransport) beginApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
-	return t.beginApprovalFrom(ctx, pending, "")
-}
-
 func (t *workerRuntimeTransport) beginApprovalFrom(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
 	return t.registerApproval(ctx, pending, requesterName, false)
 }

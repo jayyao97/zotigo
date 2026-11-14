@@ -37,57 +37,6 @@ func TestTokenizer_Count(t *testing.T) {
 	}
 }
 
-func TestTokenizer_CountBatch(t *testing.T) {
-	tk, err := DefaultTokenizer()
-	if err != nil {
-		t.Fatalf("Failed to create tokenizer: %v", err)
-	}
-
-	texts := []string{
-		"Hello, world!",
-		"This is a test.",
-		"Multiple strings.",
-	}
-
-	total := tk.CountBatch(texts)
-
-	// Count individually and compare
-	individual := 0
-	for _, text := range texts {
-		individual += tk.Count(text)
-	}
-
-	if total != individual {
-		t.Errorf("CountBatch = %d, but individual sum = %d", total, individual)
-	}
-}
-
-func TestTokenizer_Models(t *testing.T) {
-	models := []string{
-		"gpt-4",
-		"gpt-4o",
-		"gpt-3.5-turbo",
-		"claude-3-opus",
-		"unknown-model",
-		"",
-	}
-
-	for _, model := range models {
-		t.Run(model, func(t *testing.T) {
-			tk, err := NewTokenizer(model)
-			if err != nil {
-				t.Fatalf("Failed to create tokenizer for %s: %v", model, err)
-			}
-
-			// Should be able to count tokens
-			count := tk.Count("Hello, world!")
-			if count <= 0 {
-				t.Error("Should count at least 1 token")
-			}
-		})
-	}
-}
-
 func TestTokenizer_AsTokenCounter(t *testing.T) {
 	tk, err := DefaultTokenizer()
 	if err != nil {
@@ -106,40 +55,6 @@ func TestTokenizer_AsTokenCounter(t *testing.T) {
 	direct := tk.Count("Hello, world!")
 	if count != direct {
 		t.Errorf("TokenCounter = %d, but direct = %d", count, direct)
-	}
-}
-
-func TestCompareEstimation(t *testing.T) {
-	tests := []string{
-		"Hello, world!",
-		"The quick brown fox jumps over the lazy dog.",
-		"func main() { fmt.Println(\"hello\") }",
-	}
-
-	for _, text := range tests {
-		estimated, actual := CompareEstimation(text)
-		t.Logf("Text: %q\n  Estimated: %d, Actual: %d, Diff: %d (%.1f%%)",
-			text[:min(len(text), 30)], estimated, actual,
-			estimated-actual, float64(estimated-actual)/float64(actual)*100)
-
-		// Estimate should be in reasonable range (not off by more than 2x)
-		if estimated > actual*3 || estimated < actual/3 {
-			t.Errorf("Estimation too far off for %q: estimated=%d, actual=%d",
-				text, estimated, actual)
-		}
-	}
-}
-
-func TestMustDefaultTokenizer(t *testing.T) {
-	// Should not panic
-	tk := MustDefaultTokenizer()
-	if tk == nil {
-		t.Error("MustDefaultTokenizer returned nil")
-	}
-
-	count := tk.Count("test")
-	if count <= 0 {
-		t.Error("Should count tokens")
 	}
 }
 

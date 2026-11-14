@@ -1711,57 +1711,6 @@ func TestAgentAddsToolResultUsageToSessionUsage(t *testing.T) {
 	}
 }
 
-func TestAgentClearHistoryPreservesCumulativeUsage(t *testing.T) {
-	const providerName = "clear-history-usage"
-	turnUsage := protocol.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}
-	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
-		return &profileTextProvider{name: providerName, text: "answer", usage: &turnUsage}, nil
-	})
-	exec, err := executor.NewLocalExecutor(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	events, err := ag.Run(context.Background(), "before clear")
-	if err != nil {
-		t.Fatal(err)
-	}
-	progressSeen := false
-	for event := range events {
-		if event.Type == protocol.EventTypeUsageUpdated && event.Usage != nil {
-			progressSeen = true
-			if *event.Usage != turnUsage || event.ContextUsage == nil || event.ContextUsage.Tokens < turnUsage.TotalInput() {
-				t.Fatalf("invalid progress: %+v", event)
-			}
-		}
-		if event.Type == protocol.EventTypeFinish && (event.Usage == nil || *event.Usage != turnUsage) {
-			t.Fatalf("finish lost turn usage: %+v", event.Usage)
-		}
-	}
-	if !progressSeen {
-		t.Fatal("usage not emitted before turn completion")
-	}
-	ag.ClearHistory()
-	cleared := ag.Snapshot()
-	if len(cleared.History) != 0 || cleared.CumulativeUsage != turnUsage {
-		t.Fatalf("clear lost session usage: history=%d usage=%+v", len(cleared.History), cleared.CumulativeUsage)
-	}
-	events, err = ag.Run(context.Background(), "after clear")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range events {
-	}
-	want := turnUsage.Add(turnUsage)
-	if got := ag.Snapshot().CumulativeUsage; got != want {
-		t.Fatalf("cumulative usage after clear = %+v, want %+v", got, want)
-	}
-}
-
 func TestAgentDefersAutoToolsUntilBatchApproval(t *testing.T) {
 	providers.Register("batch-with-approval", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &BatchToolProvider{Tools: []string{"safe_a", "needs_approval", "safe_b"}}, nil
@@ -2321,41 +2270,6 @@ func TestAgent_512KProfileWithMultiMegabytePayloadDoesNotInflateTokensOrRepeatCo
 	}
 	if compactionCount > 1 {
 		t.Fatalf("repeated compaction triggered on consecutive turns: count = %d", compactionCount)
-	}
-}
-
-func TestAgentResetLoopDetector(t *testing.T) {
-	providers.Register("mock-loop", func(cfg config.ProfileConfig) (providers.Provider, error) {
-		return &StatsMockProvider{}, nil
-	})
-
-	tmpDir := t.TempDir()
-	exec, err := executor.NewLocalExecutor(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create executor: %v", err)
-	}
-
-	cfg := config.ProfileConfig{Provider: "mock-loop"}
-	ag, err := agent.New(cfg, exec)
-	if err != nil {
-		t.Fatalf("Failed to create agent: %v", err)
-	}
-
-	// Reset should not panic even with no history
-	ag.ResetLoopDetector()
-
-	// Run a conversation
-	events, _ := ag.Run(context.Background(), "Test")
-	for range events {
-	}
-
-	// Reset again
-	ag.ResetLoopDetector()
-
-	// Loop stats should be reset
-	stats := ag.GetContextStats()
-	if loopCalls, ok := stats["loop_total_calls"]; ok && loopCalls > 0 {
-		t.Logf("Loop stats after reset: %v", stats)
 	}
 }
 
@@ -4060,7 +3974,7 @@ func TestAgentSteeringCancelsStartedTool(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop that tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop that tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4108,7 +4022,7 @@ func TestAgentSteeringPreservesToolCompletedBeforeLaterToolWasInterrupted(t *tes
 		t.Fatalf("run: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop the second tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop the second tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4149,7 +4063,7 @@ func TestAgentSteeringPreservesToolThatSucceedsAfterCancellation(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	<-tool.started
-	if err := ag.QueueTurnUserInput("change direction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("change direction")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 	close(tool.release)
@@ -4198,7 +4112,7 @@ func TestAgentSteeringCancelsStartedApprovedTool(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop approved tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop approved tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4241,7 +4155,7 @@ func TestAgentPersistsUserContextBeforeRealUserMessage(t *testing.T) {
 	ag, err := agent.New(cfg, exec,
 		agent.WithSystemPromptBuilder(prompt.NewSystemPromptBuilder(prompt.WithStaticPrompt("base system"))),
 		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
-			prompt.WithContext("environment", func(ctx prompt.PromptContext) string {
+			prompt.WithKeyedContext("environment", "environment", func(ctx prompt.PromptContext) string {
 				return "cwd=" + ctx.WorkDir
 			}),
 		)),
@@ -4544,10 +4458,10 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatal("provider did not start")
 	}
 	currentDate = "2026-07-29"
-	if err := ag.QueueTurnUserInput("first correction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("first correction")); err != nil {
 		t.Fatalf("queue first input: %v", err)
 	}
-	if err := ag.QueueTurnUserInput("second correction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("second correction")); err != nil {
 		t.Fatalf("queue second input: %v", err)
 	}
 	close(prov.Release)
@@ -4589,7 +4503,7 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatalf("expected merged queued input in history, got %#v", got)
 	}
 
-	if err := ag.QueueTurnUserInput("late"); err == nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("late")); err == nil {
 		t.Fatal("expected queueing input without an active turn to fail")
 	}
 }
@@ -4631,7 +4545,7 @@ func TestAgentDrainsStructuredQueuedTurnUserInputIntoHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("queue structured input: %v", err)
 	}
-	if err := ag.QueueTurnUserInput("then use the simpler fix"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("then use the simpler fix")); err != nil {
 		t.Fatalf("queue text input: %v", err)
 	}
 	close(prov.Release)
@@ -4730,11 +4644,11 @@ func TestAgentQueuesTurnUserInputWhilePaused(t *testing.T) {
 	}
 	ag.Restore(agent.Snapshot{State: agent.StatePaused})
 
-	if err := ag.QueueTurnUserInput("apply after approval"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("apply after approval")); err != nil {
 		t.Fatalf("queue input while paused: %v", err)
 	}
 	ag.Restore(agent.Snapshot{State: agent.StateIdle})
-	if err := ag.QueueTurnUserInput("late"); err == nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("late")); err == nil {
 		t.Fatal("expected queueing input while idle to fail")
 	}
 }

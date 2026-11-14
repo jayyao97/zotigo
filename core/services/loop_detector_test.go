@@ -88,45 +88,6 @@ func TestLoopDetector_WindowSliding(t *testing.T) {
 	}
 }
 
-func TestLoopDetector_Reset(t *testing.T) {
-	ld := NewLoopDetector(LoopDetectorConfig{
-		MaxRepeats: 3,
-		WindowSize: 10,
-	})
-
-	// Add some calls
-	ld.RecordCall("read_file", `{"path": "test.txt"}`)
-	ld.RecordCall("read_file", `{"path": "test.txt"}`)
-
-	// Reset
-	ld.Reset()
-
-	// Should start fresh
-	status := ld.RecordCall("read_file", `{"path": "test.txt"}`)
-	if status.RepeatCount != 1 {
-		t.Errorf("After reset, repeat count should be 1, got %d", status.RepeatCount)
-	}
-}
-
-func TestLoopDetector_PatternLoop(t *testing.T) {
-	ld := NewLoopDetector(LoopDetectorConfig{
-		MaxRepeats: 2,
-		WindowSize: 20,
-	})
-
-	// Create a pattern: A, B, A, B, A, B (pattern of 2 repeated 3 times)
-	for i := 0; i < 3; i++ {
-		ld.RecordCall("read_file", `{"path": "a.txt"}`)
-		ld.RecordCall("write_file", `{"path": "b.txt"}`)
-	}
-
-	status := ld.CheckPatternLoop(4)
-	// Pattern detection is a nice-to-have feature
-	// The basic loop detection (same call repeated) is the core functionality
-	// For now, just verify it doesn't panic
-	_ = status
-}
-
 func TestLoopDetector_Stats(t *testing.T) {
 	ld := NewLoopDetector(DefaultLoopDetectorConfig())
 

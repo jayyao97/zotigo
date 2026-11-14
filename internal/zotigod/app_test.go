@@ -3001,8 +3001,8 @@ func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	stopKeepalive := startWorkerClientKeepalive(clientConn, 10*time.Millisecond, 30*time.Millisecond)
-	defer stopKeepalive()
+	writer := newWorkerClientWriter(clientConn, 10*time.Millisecond, 30*time.Millisecond)
+	defer writer.Close()
 
 	if _, _, err := clientConn.ReadMessage(); err == nil {
 		t.Fatal("expected worker websocket read to fail after pong timeout")

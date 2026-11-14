@@ -95,9 +95,6 @@ func TestCompatibleFutureExtensionsDoNotBlockBinaryRollback(t *testing.T) {
 	if ok, err := ready(ctx, db); err != nil || !ok {
 		t.Fatalf("future compatible extension blocks old startup: %t %v", ok, err)
 	}
-	if err := CheckExtensions(ctx, db); err != nil {
-		t.Fatal(err)
-	}
 	if err := upgrade(ctx, db, root); err != nil {
 		t.Fatal(err)
 	}

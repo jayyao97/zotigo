@@ -2457,11 +2457,6 @@ func (w *workerClientWriter) writeMessage(messageType int, value any) error {
 	return w.conn.WriteMessage(messageType, data)
 }
 
-func startWorkerClientKeepalive(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) func() {
-	writer := newWorkerClientWriter(conn, pingInterval, pongWait)
-	return writer.Close
-}
-
 func acquireWorkerSessionLock(ctx context.Context, store zotigosession.Store, sessionID string) (func() error, error) {
 	if err := store.Lock(ctx, sessionID); err != nil {
 		return nil, fmt.Errorf("lock session %s: %w", sessionID, err)

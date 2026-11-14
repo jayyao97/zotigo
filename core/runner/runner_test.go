@@ -93,7 +93,7 @@ func (t *MockTool) Execute(ctx context.Context, exec executor.Executor, args str
 	return "tool result", nil
 }
 
-func TestRunner_RunOnce(t *testing.T) {
+func TestRunner_RunFullTurnStarted(t *testing.T) {
 	providers.Register("simple_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &SimpleMockProvider{}, nil
 	})
@@ -117,10 +117,10 @@ func TestRunner_RunOnce(t *testing.T) {
 
 	ctx := context.Background()
 
-	// Run in goroutine since RunOnce sends events
+	// Run in goroutine since RunFullTurnStarted sends events
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Hi"), nil)
 	}()
 
 	// Collect events
@@ -140,14 +140,14 @@ collectLoop:
 		}
 	}
 
-	// Wait for RunOnce to complete
+	// Wait for RunFullTurnStarted to complete
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for RunOnce to complete")
+		t.Fatal("Timeout waiting for RunFullTurnStarted to complete")
 	}
 
 	// Verify events
@@ -203,89 +203,98 @@ func TestRunner_ApprovalFlow(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	// Step 1: Run and expect need_approval
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Do something"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Do something"), nil)
 	}()
 
-	// Collect events until need_approval
-	var lastEvent protocol.Event
 	// These are liveness guards, not latency assertions. Race-enabled CI
 	// may spend seconds scheduling each phase under package-level load.
 	timeout := time.NewTimer(10 * time.Second)
 	defer timeout.Stop()
-
-collectLoop1:
-	for {
+	nextEvent := func(phase string) protocol.Event {
+		t.Helper()
 		select {
 		case event := <-tr.Events():
-			lastEvent = event
-			if event.Type == protocol.EventTypeFinish {
-				break collectLoop1
-			}
+			return event
 		case <-timeout.C:
-			t.Fatal("Timeout waiting for events")
+			t.Fatalf("Timeout %s", phase)
 		}
+		return protocol.Event{}
 	}
 
-	// Wait for RunOnce to return (non-blocking)
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+	// Step 1: the agent's stream ends with need_approval.
+	var lastEvent protocol.Event
+	for {
+		lastEvent = nextEvent("waiting for events")
+		if lastEvent.Type == protocol.EventTypeFinish {
+			break
 		}
-	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout - RunOnce should return immediately on need_approval")
 	}
-
-	// Verify we got need_approval
 	if lastEvent.FinishReason != "need_approval" {
 		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
 	}
 
-	// Verify GetPendingApprovals returns the pending tool calls
-	pending := r.GetPendingApprovals()
-	if len(pending) != 1 {
-		t.Fatalf("Expected 1 pending approval, got %d", len(pending))
+	// The runner then asks the transport for approval; ChannelTransport
+	// surfaces that request as its own need_approval finish event.
+	request := nextEvent("waiting for the transport approval request")
+	if request.Type != protocol.EventTypeFinish || request.FinishReason != "need_approval" {
+		t.Fatalf("Expected transport approval request, got %#v", request)
 	}
-	if pending[0].Name != "test_tool" {
-		t.Errorf("Expected test_tool, got %s", pending[0].Name)
+
+	// The turn stays open until the approval is answered.
+	select {
+	case err := <-done:
+		t.Fatalf("RunFullTurnStarted returned before approval was answered: %v", err)
+	default:
+	}
+
+	// Verify the pending tool calls awaiting approval
+	snap := ag.Snapshot()
+	if snap.State != agent.StatePaused {
+		t.Fatalf("Expected state paused, got %s", snap.State)
+	}
+	if len(snap.PendingActions) != 1 {
+		t.Fatalf("Expected 1 pending approval, got %d", len(snap.PendingActions))
+	}
+	if snap.PendingActions[0].Name != "test_tool" {
+		t.Errorf("Expected test_tool, got %s", snap.PendingActions[0].Name)
+	}
+	if snap.PendingActions[0].ToolCallID != "call_1" {
+		t.Errorf("Expected call_1, got %s", snap.PendingActions[0].ToolCallID)
 	}
 
 	// The approval continuation gets its own budget; do not reuse the
 	// deadline that started before the initial model response.
 	timeout.Reset(10 * time.Second)
 
-	// Step 2: Submit approval
-	go func() {
-		done <- r.SubmitApproval(ctx, []transport.ApprovalResult{
-			{ToolCallID: "call_1", Approved: true},
-		})
-	}()
+	// Step 2: Answer the approval request through the transport
+	if err := tr.SendApproval(ctx, []transport.ApprovalResult{
+		{ToolCallID: "call_1", Approved: true},
+	}); err != nil {
+		t.Fatalf("SendApproval error: %v", err)
+	}
 
 	// Collect events until final finish
-collectLoop2:
+	var toolResult *protocol.ToolResult
 	for {
-		select {
-		case event := <-tr.Events():
-			lastEvent = event
-			if event.Type == protocol.EventTypeFinish && event.FinishReason == protocol.FinishReasonStop {
-				break collectLoop2
-			}
-		case <-timeout.C:
-			t.Fatal("Timeout waiting for final events")
+		lastEvent = nextEvent("waiting for final events")
+		if lastEvent.Type == protocol.EventTypeToolResultDone {
+			toolResult = lastEvent.ToolResult
+		}
+		if lastEvent.Type == protocol.EventTypeFinish && lastEvent.FinishReason == protocol.FinishReasonStop {
+			break
 		}
 	}
 
-	// Wait for SubmitApproval to complete
+	// Wait for RunFullTurnStarted to complete
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("SubmitApproval error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for SubmitApproval to complete")
+		t.Fatal("Timeout waiting for RunFullTurnStarted to complete")
 	}
 
 	// Verify final state
@@ -293,10 +302,123 @@ collectLoop2:
 		t.Errorf("Expected stop, got %s", lastEvent.FinishReason)
 	}
 
+	// The approved tool ran and its result was delivered
+	if toolResult == nil {
+		t.Fatal("Expected a tool result event after approval")
+	}
+	if toolResult.ToolCallID != "call_1" || toolResult.IsError || toolResult.Text != "tool result" {
+		t.Errorf("Expected successful result of call_1, got %#v", toolResult)
+	}
+
 	// No more pending approvals
-	pending = r.GetPendingApprovals()
-	if pending != nil {
-		t.Errorf("Expected no pending approvals, got %d", len(pending))
+	snap = ag.Snapshot()
+	if snap.State == agent.StatePaused {
+		t.Errorf("Expected agent to leave paused state, got %s", snap.State)
+	}
+	if len(snap.PendingActions) != 0 {
+		t.Errorf("Expected no pending approvals, got %d", len(snap.PendingActions))
+	}
+}
+
+func TestRunner_ApprovalFlow_Denied(t *testing.T) {
+	mockProvider := &ToolCallMockProvider{}
+	providers.Register("toolcall_mock", func(cfg config.ProfileConfig) (providers.Provider, error) {
+		return mockProvider, nil
+	})
+
+	tmpDir := t.TempDir()
+	exec, err := executor.NewLocalExecutor(tmpDir)
+	if err != nil {
+		t.Fatalf("Failed to create executor: %v", err)
+	}
+
+	cfg := config.ProfileConfig{Provider: "toolcall_mock"}
+	ag, err := agent.New(cfg, exec)
+	if err != nil {
+		t.Fatalf("Failed to create agent: %v", err)
+	}
+
+	ag.RegisterTool(&MockTool{})
+	ag.SetApprovalPolicy(agent.ApprovalPolicyManual)
+
+	tr := transport.NewChannelTransport(10)
+	defer tr.Close()
+
+	r := runner.New(ag, tr)
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Do something"), nil)
+	}()
+
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	nextEvent := func(phase string) protocol.Event {
+		t.Helper()
+		select {
+		case event := <-tr.Events():
+			return event
+		case <-timeout.C:
+			t.Fatalf("Timeout %s", phase)
+		}
+		return protocol.Event{}
+	}
+
+	for approvalRequests := 0; approvalRequests < 2; {
+		event := nextEvent("waiting for the transport approval request")
+		if event.Type != protocol.EventTypeFinish {
+			continue
+		}
+		if event.FinishReason != "need_approval" {
+			t.Fatalf("Expected need_approval, got %s", event.FinishReason)
+		}
+		approvalRequests++
+	}
+
+	timeout.Reset(10 * time.Second)
+	if err := tr.SendApproval(ctx, []transport.ApprovalResult{
+		{ToolCallID: "call_1", Approved: false, Reason: "not now"},
+	}); err != nil {
+		t.Fatalf("SendApproval error: %v", err)
+	}
+
+	var toolResult *protocol.ToolResult
+	for {
+		event := nextEvent("waiting for final events")
+		if event.Type == protocol.EventTypeToolResultDone {
+			toolResult = event.ToolResult
+		}
+		if event.Type == protocol.EventTypeFinish {
+			if event.FinishReason != protocol.FinishReasonStop {
+				t.Fatalf("Expected stop, got %s", event.FinishReason)
+			}
+			break
+		}
+	}
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunFullTurnStarted error: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for RunFullTurnStarted to complete")
+	}
+
+	if toolResult == nil {
+		t.Fatal("Expected a denied tool result event")
+	}
+	if toolResult.ToolCallID != "call_1" ||
+		toolResult.ToolName != "test_tool" ||
+		toolResult.Type != protocol.ToolResultTypeExecutionDenied ||
+		toolResult.Reason != "not now" ||
+		!toolResult.IsError {
+		t.Errorf("Expected execution-denied result for call_1, got %#v", toolResult)
+	}
+	if len(ag.Snapshot().PendingActions) != 0 {
+		t.Errorf("Expected no pending approvals, got %d", len(ag.Snapshot().PendingActions))
 	}
 }
 
@@ -413,7 +535,7 @@ func TestRunner_Listeners_AfterTurn(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Hi"), nil)
 	}()
 
 	// Drain events
@@ -433,10 +555,10 @@ drainLoop:
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for RunOnce")
+		t.Fatal("Timeout waiting for RunFullTurnStarted")
 	}
 
 	if !called {
@@ -471,50 +593,84 @@ func TestRunner_Listeners_OnPause(t *testing.T) {
 	tr := transport.NewChannelTransport(10)
 	defer tr.Close()
 
-	var gotSnapshot agent.Snapshot
-	called := false
+	paused := make(chan agent.Snapshot, 1)
 	listeners := runner.Listeners{
 		OnPause: func(snap agent.Snapshot) {
-			called = true
-			gotSnapshot = snap
+			paused <- snap
 		},
 	}
 
 	r := runner.New(ag, tr, runner.WithListeners(listeners))
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
+	defer cancel()
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Do something"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Do something"), nil)
 	}()
 
-	timeout := time.After(2 * time.Second)
-drainLoop:
-	for {
+	timeout := time.NewTimer(10 * time.Second)
+	defer timeout.Stop()
+	nextEvent := func(phase string) protocol.Event {
+		t.Helper()
 		select {
 		case event := <-tr.Events():
-			if event.Type == protocol.EventTypeFinish {
-				break drainLoop
+			return event
+		case <-timeout.C:
+			t.Fatalf("Timeout %s", phase)
+		}
+		return protocol.Event{}
+	}
+
+	for {
+		event := nextEvent("waiting for events")
+		if event.Type == protocol.EventTypeFinish {
+			if event.FinishReason != "need_approval" {
+				t.Fatalf("Expected need_approval, got %s", event.FinishReason)
 			}
-		case <-timeout:
-			t.Fatal("Timeout waiting for events")
+			break
+		}
+	}
+
+	var gotSnapshot agent.Snapshot
+	select {
+	case gotSnapshot = <-paused:
+	case err := <-done:
+		t.Fatalf("RunFullTurnStarted returned before OnPause fired: %v", err)
+	case <-timeout.C:
+		t.Fatal("OnPause hook was not called")
+	}
+	if gotSnapshot.State != agent.StatePaused {
+		t.Errorf("Expected state paused, got %s", gotSnapshot.State)
+	}
+
+	// The turn is still waiting on the transport; answer so it can finish.
+	timeout.Reset(10 * time.Second)
+	if err := tr.SendApproval(ctx, []transport.ApprovalResult{
+		{ToolCallID: "call_1", Approved: true},
+	}); err != nil {
+		t.Fatalf("SendApproval error: %v", err)
+	}
+	for {
+		event := nextEvent("waiting for final events")
+		if event.Type == protocol.EventTypeFinish && event.FinishReason == protocol.FinishReasonStop {
+			break
 		}
 	}
 
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for RunOnce")
+	case <-time.After(10 * time.Second):
+		t.Fatal("Timeout waiting for RunFullTurnStarted")
 	}
 
-	if !called {
-		t.Fatal("OnPause hook was not called")
-	}
-	if gotSnapshot.State != agent.StatePaused {
-		t.Errorf("Expected state paused, got %s", gotSnapshot.State)
+	select {
+	case extra := <-paused:
+		t.Errorf("OnPause fired more than once, second snapshot state %s", extra.State)
+	default:
 	}
 }
 
@@ -710,7 +866,7 @@ func TestRunner_Listeners_PanicRecover(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Hi"), nil)
 	}()
 
 	timeout := time.After(2 * time.Second)
@@ -729,10 +885,10 @@ drainLoop:
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for RunOnce")
+		t.Fatal("Timeout waiting for RunFullTurnStarted")
 	}
 
 	// AfterTurn panicked -> should be recovered and forwarded to OnError
@@ -771,7 +927,7 @@ func TestRunner_Listeners_Nil(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- r.RunOnce(ctx, protocol.NewUserMessage("Hi"))
+		done <- r.RunFullTurnStarted(ctx, protocol.NewUserMessage("Hi"), nil)
 	}()
 
 	timeout := time.After(2 * time.Second)
@@ -790,10 +946,10 @@ drainLoop:
 	select {
 	case err := <-done:
 		if err != nil {
-			t.Fatalf("RunOnce error: %v", err)
+			t.Fatalf("RunFullTurnStarted error: %v", err)
 		}
 	case <-time.After(time.Second):
-		t.Fatal("Timeout waiting for RunOnce")
+		t.Fatal("Timeout waiting for RunFullTurnStarted")
 	}
 }
 

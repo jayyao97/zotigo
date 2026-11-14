@@ -83,13 +83,6 @@ func (m *SkillManager) EnsureLoaded() error {
 	return m.Load()
 }
 
-func (m *SkillManager) SetAgentsDir(dir string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.userDir = dir
-	m.loaded = false
-}
-
 func (m *SkillManager) addSkill(skill *SkillDefinition) {
 	if old, exists := m.skills[skill.Name]; exists {
 		for _, alias := range old.Aliases {
@@ -135,12 +128,6 @@ func (m *SkillManager) Diagnostics() []Diagnostic {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return append([]Diagnostic(nil), m.diagnostics...)
-}
-
-func (m *SkillManager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.skills)
 }
 
 // Dirs returns the roots skills are discovered from. Hosts register them as

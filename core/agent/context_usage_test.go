@@ -34,7 +34,7 @@ func calibratedTestAgent() *Agent {
 
 func TestBuildContextUsesAPIAndInvalidatesAfterCompression(t *testing.T) {
 	a := calibratedTestAgent()
-	if a.compressor.NeedsCompression(a.conversation.history) {
+	if a.compressor.NeedsCompressionTokens(a.compressor.CountTokens(a.conversation.history)) {
 		t.Fatal("fixture local estimate should be below threshold")
 	}
 	_, _, compact, err := a.buildContext(context.Background())

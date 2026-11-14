@@ -562,29 +562,3 @@ func TestMigratesV2CheckoutOwnershipSchema(t *testing.T) {
 		t.Fatalf("checkout after migration = %+v", checkout)
 	}
 }
-
-func TestOpenReadOnlyDoesNotPermitCatalogWrites(t *testing.T) {
-	root := catalogtest.NewRoot(t)
-	store, err := Open(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.CreateProject(context.Background(), "Existing"); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-	readOnly, err := OpenReadOnly(root)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = readOnly.Close() })
-	projects, err := readOnly.ListProjects(context.Background())
-	if err != nil || len(projects) != 1 {
-		t.Fatalf("read-only projects = %+v, err=%v", projects, err)
-	}
-	if _, err := readOnly.CreateProject(context.Background(), "Rejected"); err == nil {
-		t.Fatal("read-only catalog accepted a write")
-	}
-}

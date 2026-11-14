@@ -84,7 +84,7 @@ func TestDiscoverSkills_FollowsDirectorySymlink(t *testing.T) {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover linked skill: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestDiscoverSkills_SkipsBrokenDirectorySymlink(t *testing.T) {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover alongside broken symlink: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDiscoverSkills_SkipsSymlinkResolutionCycles(t *testing.T) {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover alongside symlink cycles: %v", err)
 	}
@@ -173,7 +173,7 @@ func TestDiscoverSkills_SkipsUnreadableSymlinkTree(t *testing.T) {
 		t.Skip("current user can read mode-000 directories")
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover alongside unreadable symlink tree: %v", err)
 	}
@@ -199,7 +199,7 @@ func TestDiscoverSkills_RealDirectoryErrorWinsOverOptionalAlias(t *testing.T) {
 		t.Skip("current user can read mode-000 directories")
 	}
 
-	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+	if _, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents); err == nil {
 		t.Fatal("expected unreadable real directory to remain an error")
 	}
 }
@@ -222,7 +222,7 @@ func TestDiscoverSkills_RequiredSubtreeErrorWinsOverOptionalAlias(t *testing.T) 
 		t.Skip("current user can read mode-000 directories")
 	}
 
-	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+	if _, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents); err == nil {
 		t.Fatal("expected unreadable required subtree to remain an error")
 	}
 }
@@ -244,7 +244,7 @@ func TestDiscoverSkills_RequiredEntryInfoErrorIsReported(t *testing.T) {
 		t.Skip("current user can inspect entries in a non-searchable directory")
 	}
 
-	if _, err := DiscoverSkills(root, SkillSourceAgents); err == nil {
+	if _, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents); err == nil {
 		t.Fatal("expected required entry inspection error")
 	}
 }
@@ -270,7 +270,7 @@ func TestDiscoverSkills_DeduplicatesSymlinkCycle(t *testing.T) {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover symlink cycle: %v", err)
 	}
@@ -305,7 +305,7 @@ func TestDiscoverSkills_PrefersShallowPathToSharedSymlinkTarget(t *testing.T) {
 		t.Skipf("directory symlinks unavailable: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover shared symlink target: %v", err)
 	}
@@ -333,7 +333,7 @@ func TestDiscoverSkills_PreservesDepthBoundary(t *testing.T) {
 		t.Fatalf("write beyond-boundary skill: %v", err)
 	}
 
-	discovered, err := DiscoverSkills(root, SkillSourceAgents)
+	discovered, _, err := DiscoverSkillsWithDiagnostics(root, SkillSourceAgents)
 	if err != nil {
 		t.Fatalf("discover depth boundary: %v", err)
 	}
@@ -384,8 +384,8 @@ Project skill instructions.
 	}
 
 	// Should have builtin + user + project skills
-	if sm.Count() < 3 {
-		t.Errorf("Expected at least 3 skills (builtin + user + project), got %d", sm.Count())
+	if len(sm.List()) < 3 {
+		t.Errorf("Expected at least 3 skills (builtin + user + project), got %d", len(sm.List()))
 	}
 
 	// Check user skill
@@ -695,7 +695,7 @@ func containsHelper(s, substr string) bool {
 	return false
 }
 
-func TestGetAgentsUserSkillsDir_Exists(t *testing.T) {
+func TestSkillManager_LoadsUserDir(t *testing.T) {
 	// Use a temp dir injected via WithUserDir — mirrors ReloadAgentsDir
 	// but is simpler since we don't need the reload scenario.
 	// Avoids writing to the user's real ~/.agents/skills/.
@@ -725,12 +725,13 @@ func TestSkillManager_ReloadAgentsDir(t *testing.T) {
 	agentsDir := filepath.Join(tmpDir, "agents-skills")
 	projectDir := filepath.Join(tmpDir, "project")
 
-	// Create manager with empty agentsDir — simulates ~/.agents/skills/ not existing
-	sm := NewSkillManager(projectDir, WithUserDir(""))
+	// Point the manager at an agentsDir that does not exist yet — simulates
+	// ~/.agents/skills/ not existing
+	sm := NewSkillManager(projectDir, WithUserDir(agentsDir))
 	if err := sm.Load(); err != nil {
 		t.Fatalf("Initial Load failed: %v", err)
 	}
-	initial := sm.Count()
+	initial := len(sm.List())
 
 	// Now create the directory and a skill file — simulates user
 	// creating ~/.agents/skills/ after startup
@@ -738,15 +739,13 @@ func TestSkillManager_ReloadAgentsDir(t *testing.T) {
 	content := "---\nname: reload-skill\ndescription: Added after reload\n---\nReloaded!\n"
 	os.WriteFile(filepath.Join(agentsDir, "reload-skill", "SKILL.md"), []byte(content), 0644)
 
-	// Point at the new dir and reload
-	sm.SetAgentsDir(agentsDir)
 	if err := sm.Reload(); err != nil {
 		t.Fatalf("Reload failed: %v", err)
 	}
 
 	// Should now see the new skill
-	if sm.Count() <= initial {
-		t.Errorf("Expected skill count %d+, got %d", initial+1, sm.Count())
+	if len(sm.List()) <= initial {
+		t.Errorf("Expected skill count %d+, got %d", initial+1, len(sm.List()))
 	}
 	if _, ok := sm.Get("reload-skill"); !ok {
 		t.Error("Expected to find reload-skill after reload")

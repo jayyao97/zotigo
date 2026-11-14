@@ -71,11 +71,3 @@ func (s *SkillDefinition) HasAlias(alias string) bool {
 	}
 	return false
 }
-
-// MatchesNameOrAlias checks if the skill matches the given name or alias
-func (s *SkillDefinition) MatchesNameOrAlias(nameOrAlias string) bool {
-	if s.Name == nameOrAlias {
-		return true
-	}
-	return s.HasAlias(nameOrAlias)
-}

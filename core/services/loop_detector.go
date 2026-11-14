@@ -15,8 +15,6 @@ type LoopDetector struct {
 	// Configuration
 	maxRepeats int // Max times the same call pattern can repeat
 	windowSize int // Number of recent calls to track
-	//nolint:unused // Staged for similarity-based detection (currently exact-match only).
-	similarityThresh float64
 
 	// State
 	recentCalls []callSignature
@@ -24,9 +22,7 @@ type LoopDetector struct {
 
 // callSignature represents a unique identifier for a tool call
 type callSignature struct {
-	hash     string
-	toolName string
-	argsHash string
+	hash string
 }
 
 // LoopDetectorConfig holds configuration for the loop detector
@@ -115,57 +111,6 @@ func (d *LoopDetector) RecordCall(toolName string, args string) LoopStatus {
 	}
 }
 
-// CheckPatternLoop checks if there's a repeating pattern of multiple calls
-func (d *LoopDetector) CheckPatternLoop(patternSize int) LoopStatus {
-	d.mu.RLock()
-	defer d.mu.RUnlock()
-
-	if len(d.recentCalls) < patternSize*2 {
-		return LoopStatus{IsLooping: false}
-	}
-
-	// Check if the last N calls repeat a pattern
-	calls := d.recentCalls
-	n := len(calls)
-
-	// Look for repeating patterns of size patternSize
-	for size := 2; size <= patternSize && size*2 <= n; size++ {
-		pattern1 := calls[n-size*2 : n-size]
-		pattern2 := calls[n-size:]
-
-		if d.patternsMatch(pattern1, pattern2) {
-			// Count how many times this pattern appears
-			repeatCount := 2
-			for i := n - size*3; i >= 0 && i+size <= n-size*2; i -= size {
-				if d.patternsMatch(calls[i:i+size], pattern1) {
-					repeatCount++
-				} else {
-					break
-				}
-			}
-
-			if repeatCount >= d.maxRepeats {
-				return LoopStatus{
-					IsLooping:   true,
-					RepeatCount: repeatCount,
-					Pattern:     fmt.Sprintf("Pattern of %d calls repeated %d times", size, repeatCount),
-					Suggestion:  "The agent is repeating a sequence of tool calls. Consider changing approach or asking for clarification.",
-				}
-			}
-		}
-	}
-
-	return LoopStatus{IsLooping: false}
-}
-
-// Reset clears all recorded calls
-func (d *LoopDetector) Reset() {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	d.recentCalls = make([]callSignature, 0, d.windowSize)
-}
-
 // createSignature creates a unique signature for a tool call
 func (d *LoopDetector) createSignature(toolName string, args string) callSignature {
 	// Hash the combination of tool name and arguments
@@ -173,27 +118,9 @@ func (d *LoopDetector) createSignature(toolName string, args string) callSignatu
 	hash := sha256.Sum256([]byte(combined))
 	hashStr := hex.EncodeToString(hash[:8]) // Use first 8 bytes
 
-	argsHash := sha256.Sum256([]byte(args))
-	argsHashStr := hex.EncodeToString(argsHash[:8])
-
 	return callSignature{
-		hash:     hashStr,
-		toolName: toolName,
-		argsHash: argsHashStr,
+		hash: hashStr,
 	}
-}
-
-// patternsMatch checks if two patterns of calls are identical
-func (d *LoopDetector) patternsMatch(p1, p2 []callSignature) bool {
-	if len(p1) != len(p2) {
-		return false
-	}
-	for i := range p1 {
-		if p1[i].hash != p2[i].hash {
-			return false
-		}
-	}
-	return true
 }
 
 // getSuggestion returns a suggestion based on the tool and repeat count

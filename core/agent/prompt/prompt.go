@@ -91,25 +91,6 @@ type DynamicContext struct {
 	Sections []ContextSection
 }
 
-// DynamicOption configures a DynamicContext during construction.
-type DynamicOption func(*DynamicContext)
-
-// WithSection returns a DynamicOption that appends a lazy context section.
-func WithSection(tag string, provider func(PromptContext) string) DynamicOption {
-	return func(dc *DynamicContext) {
-		dc.Sections = append(dc.Sections, ContextSection{Tag: tag, Provider: provider})
-	}
-}
-
-// NewDynamicContext creates a DynamicContext with the given options.
-func NewDynamicContext(opts ...DynamicOption) *DynamicContext {
-	dc := &DynamicContext{}
-	for _, opt := range opts {
-		opt(dc)
-	}
-	return dc
-}
-
 // Build renders all sections as XML-tagged blocks.
 // Providers are called lazily; empty results are skipped.
 func (dc *DynamicContext) Build(ctx PromptContext) string {
@@ -180,13 +161,6 @@ type UserContextBuilder struct {
 // UserContextOption configures a UserContextBuilder during construction.
 type UserContextOption func(*UserContextBuilder)
 
-// WithContext returns a UserContextOption that appends a lazy context section.
-func WithContext(tag string, provider func(PromptContext) string) UserContextOption {
-	return func(w *UserContextBuilder) {
-		w.ContextSections = append(w.ContextSections, ContextSection{Tag: tag, Provider: provider})
-	}
-}
-
 // WithKeyedContext appends a lazy user-context section with a stable diff key.
 func WithKeyedContext(key, tag string, provider func(PromptContext) string) UserContextOption {
 	return func(w *UserContextBuilder) {
@@ -219,29 +193,6 @@ func NewUserContextBuilder(opts ...UserContextOption) *UserContextBuilder {
 		opt(w)
 	}
 	return w
-}
-
-// Build renders all context sections as one meta user-context payload.
-// Providers are called lazily; empty outputs are skipped.
-func (w *UserContextBuilder) Build(ctx PromptContext) string {
-	if len(w.ContextSections) == 0 {
-		return ""
-	}
-	return renderContextSections(ctx, w.ContextSections)
-}
-
-// BuildMetaUserContext wraps the rendered sections in a single marker so the
-// provider can distinguish contextual user fragments from the real user request.
-func (w *UserContextBuilder) BuildMetaUserContext(ctx PromptContext) string {
-	context := w.Build(ctx)
-	if context == "" {
-		return ""
-	}
-	var b strings.Builder
-	b.WriteString("<user_context>\n")
-	b.WriteString(context)
-	b.WriteString("\n</user_context>")
-	return b.String()
 }
 
 const userContextStateVersion = 1

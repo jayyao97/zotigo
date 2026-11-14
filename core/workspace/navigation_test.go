@@ -48,13 +48,16 @@ func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(navigation.Pinned, desired) {
 		t.Fatalf("navigation = %+v, %v", navigation, err)
 	}
-	// A second connection sees the same shared order.
-	reader, err := OpenReadOnly(store.RootDir())
+	// A reopened catalog sees the same shared order.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(store.RootDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
-	other, err := reader.GetNavigation(ctx)
+	defer store.Close()
+	other, err := store.GetNavigation(ctx)
 	if err != nil || !reflect.DeepEqual(other, navigation) {
 		t.Fatalf("other client = %+v, %v", other, err)
 	}

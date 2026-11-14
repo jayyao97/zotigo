@@ -85,18 +85,6 @@ func (m *SkillManager) BuildSkillIndex() string {
 	return buf.String()
 }
 
-// ReplaceMentions replaces $skill-name with the skill description
-func (m *SkillManager) ReplaceMentions(text string) string {
-	return skillMentionRegex.ReplaceAllStringFunc(text, func(match string) string {
-		name := match[1:] // Remove $ prefix
-		skill, ok := m.Get(name)
-		if !ok {
-			return match // Keep original if skill not found
-		}
-		return fmt.Sprintf("[skill: %s]", skill.Name)
-	})
-}
-
 // ResolveExplicit resolves and deduplicates names for one turn.
 func (m *SkillManager) ResolveExplicit(names []string) ([]*SkillDefinition, error) {
 	if err := m.EnsureLoaded(); err != nil {

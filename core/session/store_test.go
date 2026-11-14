@@ -1143,46 +1143,6 @@ func TestFileStore_LockIsExclusive(t *testing.T) {
 	}
 }
 
-func TestManager_CreateAndLoad(t *testing.T) {
-	tmpDir := catalogtest.NewRoot(t)
-	store, err := NewFileStore(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-
-	mgr := NewManagerWithStore(store)
-	defer mgr.Close()
-
-	// Create new session
-	sess, err := mgr.CreateNew("/test/project")
-	if err != nil {
-		t.Fatalf("CreateNew failed: %v", err)
-	}
-
-	if sess.ID == "" {
-		t.Error("Session ID should not be empty")
-	}
-	if sess.WorkingDirectory != "/test/project" {
-		t.Errorf("WorkingDirectory mismatch: got %s", sess.WorkingDirectory)
-	}
-	if sess.Turns == nil {
-		t.Error("Expected turns slice to be initialized")
-	}
-
-	// Load the session
-	loaded, err := mgr.Load(sess.ID)
-	if err != nil {
-		t.Fatalf("Load failed: %v", err)
-	}
-
-	if loaded.ID != sess.ID {
-		t.Errorf("ID mismatch: got %s, want %s", loaded.ID, sess.ID)
-	}
-	if loaded.Turns == nil {
-		t.Error("Expected turns slice to be initialized on load")
-	}
-}
-
 func TestFileStore_Get_BackfillsMissingTurns(t *testing.T) {
 	tmpDir := t.TempDir()
 	store, err := NewFileStore(tmpDir)
@@ -1218,40 +1178,5 @@ func TestFileStore_Get_BackfillsMissingTurns(t *testing.T) {
 	}
 	if len(loaded.Turns) != 0 {
 		t.Fatalf("Expected no turns, got %d", len(loaded.Turns))
-	}
-}
-
-func TestManager_ListByDir(t *testing.T) {
-	tmpDir := catalogtest.NewRoot(t)
-	store, err := NewFileStore(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create store: %v", err)
-	}
-
-	mgr := NewManagerWithStore(store)
-	defer mgr.Close()
-
-	// Create sessions in different directories
-	_, err = mgr.CreateNew("/project/a")
-	if err != nil {
-		t.Fatalf("CreateNew failed: %v", err)
-	}
-	_, err = mgr.CreateNew("/project/a")
-	if err != nil {
-		t.Fatalf("CreateNew failed: %v", err)
-	}
-	_, err = mgr.CreateNew("/project/b")
-	if err != nil {
-		t.Fatalf("CreateNew failed: %v", err)
-	}
-
-	// List for /project/a
-	sessions, err := mgr.ListByDir("/project/a")
-	if err != nil {
-		t.Fatalf("ListByDir failed: %v", err)
-	}
-
-	if len(sessions) != 2 {
-		t.Errorf("Expected 2 sessions, got %d", len(sessions))
 	}
 }

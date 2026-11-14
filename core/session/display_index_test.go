@@ -19,7 +19,7 @@ func TestDisplayIndexWindowAndPagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -47,7 +47,7 @@ func TestDisplayIndexBackfillRepairAndBoundedRead(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -114,7 +114,7 @@ func BenchmarkDisplayIndexRecentPage(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(b.TempDir())
+	sess, err := createTestSession(store, b.TempDir())
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -145,7 +145,7 @@ func TestDisplayIndexReplacementInvalidation(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestDisplayIndexIgnoresIncompleteCrashTail(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

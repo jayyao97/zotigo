@@ -112,7 +112,7 @@ func TestCompressor_DefaultTriggerRatio(t *testing.T) {
 	}
 }
 
-func TestCompressor_EstimatePromptTokensUsesProjectedLocalEstimate(t *testing.T) {
+func TestCompressor_CountTokensUsesProjectedLocalEstimate(t *testing.T) {
 	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
 
 	// The provider snapshot deliberately disagrees with the locally projected
@@ -146,9 +146,9 @@ func TestCompressor_EstimatePromptTokensUsesProjectedLocalEstimate(t *testing.T)
 		},
 	}
 
-	got := c.EstimatePromptTokens(history)
-	if got >= 13_000 || got != c.CountTokens(history) {
-		t.Errorf("EstimatePromptTokens = %d, want projected local count %d without provider anchor", got, c.CountTokens(history))
+	got := c.CountTokens(history)
+	if got >= 13_000 {
+		t.Errorf("CountTokens = %d, want projected local count below the 13000-token provider snapshot", got)
 	}
 }
 
@@ -175,7 +175,7 @@ func TestCompressor_StaleProviderAnchorDoesNotTriggerCompression(t *testing.T) {
 		{Role: protocol.RoleUser, Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "next question"}}},
 	}
 
-	if c.NeedsCompression(history) {
+	if c.NeedsCompressionTokens(c.CountTokens(history)) {
 		t.Fatal("stale provider snapshot triggered compression of a small projected prompt")
 	}
 
@@ -188,7 +188,7 @@ func TestCompressor_StaleProviderAnchorDoesNotTriggerCompression(t *testing.T) {
 	}
 }
 
-func TestCompressor_EstimatePromptTokensWithoutProviderSnapshot(t *testing.T) {
+func TestCompressor_CountTokensWithoutProviderSnapshot(t *testing.T) {
 	c := NewCompressor(CompressorConfig{ContextWindowSize: 1_000_000})
 
 	// First turn: local projection must still produce a positive estimate.
@@ -200,8 +200,8 @@ func TestCompressor_EstimatePromptTokensWithoutProviderSnapshot(t *testing.T) {
 			},
 		},
 	}
-	if got := c.EstimatePromptTokens(history); got <= 0 {
-		t.Errorf("EstimatePromptTokens with no anchor returned %d, want positive fallback", got)
+	if got := c.CountTokens(history); got <= 0 {
+		t.Errorf("CountTokens with no anchor returned %d, want positive fallback", got)
 	}
 
 	// Assistant usage metadata does not affect the local estimate.
@@ -209,12 +209,12 @@ func TestCompressor_EstimatePromptTokensWithoutProviderSnapshot(t *testing.T) {
 		Role:    protocol.RoleAssistant,
 		Content: []protocol.ContentPart{{Type: protocol.ContentTypeText, Text: "ok"}},
 	})
-	if got := c.EstimatePromptTokens(history); got <= 0 {
-		t.Errorf("EstimatePromptTokens with usage-less assistant returned %d, want positive fallback", got)
+	if got := c.CountTokens(history); got <= 0 {
+		t.Errorf("CountTokens with usage-less assistant returned %d, want positive fallback", got)
 	}
 }
 
-func TestCompressor_NeedsCompression(t *testing.T) {
+func TestCompressor_NeedsCompressionTokens(t *testing.T) {
 	// Create a compressor with a small context window for testing
 	c := NewCompressor(CompressorConfig{
 		ContextWindowSize: 100, // 100 tokens
@@ -231,7 +231,7 @@ func TestCompressor_NeedsCompression(t *testing.T) {
 		},
 	}
 
-	if c.NeedsCompression(smallMsgs) {
+	if c.NeedsCompressionTokens(c.CountTokens(smallMsgs)) {
 		t.Error("Small messages should not need compression")
 	}
 
@@ -245,7 +245,7 @@ func TestCompressor_NeedsCompression(t *testing.T) {
 		},
 	}
 
-	if !c.NeedsCompression(largeMsgs) {
+	if !c.NeedsCompressionTokens(c.CountTokens(largeMsgs)) {
 		t.Error("Large messages should need compression")
 	}
 }
@@ -530,8 +530,8 @@ func TestCompressor_CompressionRetainsProviderUsageSnapshot(t *testing.T) {
 	if !retainedUsage {
 		t.Fatal("compaction discarded the last provider usage snapshot")
 	}
-	if c.NeedsCompression(compressed) {
-		t.Fatalf("rewritten prompt immediately requested another compaction: %d tokens", c.EstimatePromptTokens(compressed))
+	if c.NeedsCompressionTokens(c.CountTokens(compressed)) {
+		t.Fatalf("rewritten prompt immediately requested another compaction: %d tokens", c.CountTokens(compressed))
 	}
 }
 
@@ -550,10 +550,10 @@ func TestCompressor_IgnoresProviderUsageSnapshotForNextPrompt(t *testing.T) {
 			}},
 		},
 	}
-	if got := c.EstimatePromptTokens(history); got >= 512000 {
+	if got := c.CountTokens(history); got >= 512000 {
 		t.Fatalf("impossible provider anchor was treated as context occupancy: %d", got)
 	}
-	if c.NeedsCompression(history) {
+	if c.NeedsCompressionTokens(c.CountTokens(history)) {
 		t.Fatal("impossible provider anchor triggered compaction")
 	}
 }
@@ -677,12 +677,12 @@ func TestCompressor_DynamicThreshold(t *testing.T) {
 	}
 
 	// Small window should need compression (250 > 140)
-	if !smallWindow.NeedsCompression(msgs) {
+	if !smallWindow.NeedsCompressionTokens(smallWindow.CountTokens(msgs)) {
 		t.Error("Small context window should need compression")
 	}
 
 	// Large window should not need compression (250 < 70000)
-	if largeWindow.NeedsCompression(msgs) {
+	if largeWindow.NeedsCompressionTokens(largeWindow.CountTokens(msgs)) {
 		t.Error("Large context window should not need compression")
 	}
 }

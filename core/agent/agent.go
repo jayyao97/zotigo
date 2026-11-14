@@ -364,14 +364,6 @@ func (a *Agent) AuditTurns() []TurnAudit {
 	return turns
 }
 
-// ResetLoopDetector clears the loop detection history.
-// Call this when starting a new conversation or topic.
-func (a *Agent) ResetLoopDetector() {
-	if a.loopDetector != nil {
-		a.loopDetector.Reset()
-	}
-}
-
 // GetContextStats returns statistics about the current context.
 func (a *Agent) GetContextStats() map[string]int {
 	a.mu.RLock()
@@ -478,29 +470,6 @@ func cloneTurnAudit(turn TurnAudit) TurnAudit {
 		turn.SafetyEvents[index].ContextSummary.RequestContext = turn.SafetyEvents[index].ContextSummary.RequestContext.Clone()
 	}
 	return turn
-}
-
-// ClearHistory starts a fresh conversation while retaining session-level usage.
-func (a *Agent) ClearHistory() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.conversation.restore(nil, nil)
-	a.pendingTurnUser = nil
-	a.pendingActions = nil
-	a.deferredActions = nil
-	a.turnSafety = TurnSafetyState{}
-	a.turns = make([]TurnAudit, 0)
-}
-
-// QueueTurnUserInput queues additional user input for the active turn.
-// Pending inputs are merged and appended to runtime history as a normal user
-// message before the next provider request.
-func (a *Agent) QueueTurnUserInput(text string) error {
-	text = strings.TrimSpace(text)
-	if text == "" {
-		return errors.New("input is required")
-	}
-	return a.QueueTurnUserMessage(protocol.NewUserMessage(text))
 }
 
 // QueueTurnUserMessage queues structured user input for the active turn.

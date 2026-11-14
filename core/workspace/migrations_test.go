@@ -92,11 +92,6 @@ func TestCatalogMigrationRejectsActiveWriterAndInvalidTargets(t *testing.T) {
 		_ = other.Close()
 		t.Fatal("second writer acquired catalog")
 	}
-	reader, err := OpenReadOnly(s.RootDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = reader.Close()
 	for _, target := range []uint{0, 6, schemaVersion + 1} {
 		if err := MigrateCatalog(context.Background(), s.RootDir(), target); err == nil {
 			t.Fatalf("accepted target %d", target)

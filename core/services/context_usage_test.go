@@ -46,7 +46,7 @@ func TestContextTokensCalibration(t *testing.T) {
 	}
 	history = append(history, answer)
 	tokens, valid := c.ContextTokens(history, prompt)
-	if !valid || tokens != 527163+c.CountTokens(history[1:]) || !c.NeedsCompressionTokens(tokens) || c.NeedsCompression(history) {
+	if !valid || tokens != 527163+c.CountTokens(history[1:]) || !c.NeedsCompressionTokens(tokens) || c.NeedsCompressionTokens(c.CountTokens(history)) {
 		t.Fatalf("API overflow/local underestimate: %d %v", tokens, valid)
 	}
 	// Cache tokens are counted once; output is measured from retained content,

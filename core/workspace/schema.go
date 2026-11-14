@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sync"
@@ -35,43 +34,6 @@ type Store struct {
 	preparationWake    chan struct{}
 	writerLock         *flock.Flock
 	schemaLock         *flock.Flock
-}
-
-// OpenReadOnly opens an existing catalog without running migrations or writing
-// pragmas. It is intended for CLI projections; zotigod remains the sole writer.
-func OpenReadOnly(rootDir string) (*Store, error) {
-	if rootDir == "" {
-		dir, err := config.StateDir()
-		if err != nil {
-			return nil, fmt.Errorf("workspace catalog home: %w", err)
-		}
-		rootDir = dir
-	}
-	dbPath := filepath.Join(rootDir, "catalog.sqlite")
-	if _, err := os.Stat(dbPath); err != nil {
-		return nil, fmt.Errorf("open workspace catalog read-only: %w", err)
-	}
-	dsn := (&url.URL{Scheme: "file", Path: dbPath, RawQuery: "mode=ro"}).String()
-	db, err := sql.Open("sqlite", dsn)
-	if err != nil {
-		return nil, fmt.Errorf("open workspace catalog read-only: %w", err)
-	}
-	db.SetMaxOpenConns(1)
-	store := &Store{db: db, rootDir: rootDir, branchRefreshSlots: make(chan struct{}, 2)}
-	var version int
-	if err := db.QueryRow(`SELECT version FROM schema_meta WHERE singleton = 1`).Scan(&version); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("read workspace catalog version: %w", err)
-	}
-	if version != schemaVersion {
-		_ = db.Close()
-		return nil, fmt.Errorf("workspace catalog version %d is not supported", version)
-	}
-	if err := catalogschema.CheckExtensions(context.Background(), db); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
-	return store, nil
 }
 
 func Open(rootDir string) (*Store, error) {

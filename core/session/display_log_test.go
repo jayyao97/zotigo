@@ -14,17 +14,17 @@ import (
 )
 
 func TestManagerAppendDisplayItemAssignsMonotonicSequence(t *testing.T) {
-	manager := newDisplayLogTestManager(t)
-	sess, err := manager.CreateNew(t.TempDir())
+	store := newDisplayLogTestStore(t)
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 
-	first, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage})
+	first, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage})
 	if err != nil {
 		t.Fatalf("append first item: %v", err)
 	}
-	second, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemAssistantMessage})
+	second, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemAssistantMessage})
 	if err != nil {
 		t.Fatalf("append second item: %v", err)
 	}
@@ -46,7 +46,7 @@ func TestFileStoreAppendDisplayItemsAssignsOneContiguousBatch(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestFileStoreAppendDisplayItemsAfterRejectsStaleProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,26 +94,25 @@ func TestManagerAppendDisplayItemTruncatesPartialTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
 		t.Fatalf("append first item: %v", err)
 	}
 	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), `{"id":"partial"`); err != nil {
 		t.Fatalf("append partial item: %v", err)
 	}
 
-	second, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemAssistantMessage})
+	second, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemAssistantMessage})
 	if err != nil {
 		t.Fatalf("append second item: %v", err)
 	}
 	if second.Sequence != 2 {
 		t.Fatalf("expected second sequence 2, got %d", second.Sequence)
 	}
-	items, ok, err := manager.ListDisplayItems(sess.ID)
+	items, ok, err := store.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatalf("list display items: %v", err)
 	}
@@ -133,8 +132,7 @@ func TestFileStoreAppendDisplayItemSerializesAcrossStoreInstances(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create second store: %v", err)
 	}
-	manager := NewManagerWithStore(firstStore)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(firstStore, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
@@ -155,7 +153,7 @@ func TestFileStoreAppendDisplayItemSerializesAcrossStoreInstances(t *testing.T) 
 	go appendMany(secondStore)
 	wg.Wait()
 
-	items, ok, err := manager.ListDisplayItems(sess.ID)
+	items, ok, err := firstStore.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatalf("list display items: %v", err)
 	}
@@ -183,8 +181,7 @@ func TestFileStoreAppendDisplayItemAtomicallySerializesDecisionWithTurnBoundary(
 	if err != nil {
 		t.Fatal(err)
 	}
-	manager := NewManagerWithStore(inputStore)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(inputStore, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -218,7 +215,7 @@ func TestFileStoreAppendDisplayItemAtomicallySerializesDecisionWithTurnBoundary(
 	if err := <-turnDone; err != nil {
 		t.Fatal(err)
 	}
-	items, _, err := manager.ListDisplayItems(sess.ID)
+	items, _, err := inputStore.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,19 +229,18 @@ func TestManagerListDisplayItemsIgnoresPartialFinalLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
 		t.Fatalf("append item: %v", err)
 	}
 	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), `{"id":"partial"`); err != nil {
 		t.Fatalf("append partial item: %v", err)
 	}
 
-	items, ok, err := manager.ListDisplayItems(sess.ID)
+	items, ok, err := store.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatalf("list display items: %v", err)
 	}
@@ -259,12 +255,11 @@ func TestFileStoreAppendDisplayItemIfIgnoresValidNoNewlineTail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
 		t.Fatalf("append first item: %v", err)
 	}
 	rawTail := `{"id":"item_partial","sequence":2,"type":"turn_started","turn":{"id":"turn-partial"}}`
@@ -284,7 +279,7 @@ func TestFileStoreAppendDisplayItemIfIgnoresValidNoNewlineTail(t *testing.T) {
 	if second.Sequence != 2 {
 		t.Fatalf("expected no-newline tail to be truncated before sequence assignment, got %d", second.Sequence)
 	}
-	items, ok, err := manager.ListDisplayItems(sess.ID)
+	items, ok, err := store.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatalf("list display items: %v", err)
 	}
@@ -299,19 +294,18 @@ func TestManagerListDisplayItemsRejectsMalformedCompleteLine(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
 		t.Fatalf("append item: %v", err)
 	}
 	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), "{bad-json}\n"); err != nil {
 		t.Fatalf("append malformed item: %v", err)
 	}
 
-	if _, _, err := manager.ListDisplayItems(sess.ID); err == nil {
+	if _, _, err := store.ListDisplayItems(context.Background(), sess.ID); err == nil {
 		t.Fatal("expected malformed complete line to fail")
 	}
 }
@@ -321,12 +315,11 @@ func TestFileStoreListDisplayItemsFromOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemUserMessage}); err != nil {
 		t.Fatalf("append first item: %v", err)
 	}
 
@@ -342,7 +335,7 @@ func TestFileStoreListDisplayItemsFromOffset(t *testing.T) {
 		t.Fatalf("expected positive next offset, got %d", offset)
 	}
 
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{Type: DisplayItemAssistantMessage}); err != nil {
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{Type: DisplayItemAssistantMessage}); err != nil {
 		t.Fatalf("append second item: %v", err)
 	}
 	if err := appendRawDisplayLog(store.displayLogPath(sess.ID), `{"id":"partial"`); err != nil {
@@ -415,16 +408,17 @@ func TestPageDisplayItemsBeforeCursor(t *testing.T) {
 }
 
 func TestDisplayLogDoesNotFollowRuntimeHistoryReplacement(t *testing.T) {
-	manager := newDisplayLogTestManager(t)
-	sess, err := manager.CreateNew(t.TempDir())
+	store := newDisplayLogTestStore(t)
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
 	sess.AgentSnapshot.History = []protocol.Message{protocol.NewUserMessage("old prompt")}
-	if err := manager.Save(sess); err != nil {
+	sess.UpdatedAt = time.Now()
+	if err := store.Put(context.Background(), sess); err != nil {
 		t.Fatalf("save session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{
 		Type:    DisplayItemUserMessage,
 		Role:    string(protocol.RoleUser),
 		Content: []DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "old prompt"}},
@@ -433,11 +427,12 @@ func TestDisplayLogDoesNotFollowRuntimeHistoryReplacement(t *testing.T) {
 	}
 
 	sess.AgentSnapshot.History = []protocol.Message{protocol.NewUserMessage("compressed summary")}
-	if err := manager.Save(sess); err != nil {
+	sess.UpdatedAt = time.Now()
+	if err := store.Put(context.Background(), sess); err != nil {
 		t.Fatalf("save compressed session: %v", err)
 	}
 
-	items, ok, err := manager.ListDisplayItems(sess.ID)
+	items, ok, err := store.ListDisplayItems(context.Background(), sess.ID)
 	if err != nil {
 		t.Fatalf("list display items: %v", err)
 	}
@@ -457,12 +452,11 @@ func TestDisplayLogIsStoredOutsideSessionJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	manager := NewManagerWithStore(store)
-	sess, err := manager.CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	if _, err := manager.AppendDisplayItem(sess.ID, DisplayItem{
+	if _, err := store.AppendDisplayItem(context.Background(), sess.ID, DisplayItem{
 		Type:    DisplayItemUserMessage,
 		Role:    string(protocol.RoleUser),
 		Content: []DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: "display prompt"}},
@@ -486,13 +480,13 @@ func TestDisplayLogIsStoredOutsideSessionJSON(t *testing.T) {
 	}
 }
 
-func newDisplayLogTestManager(t *testing.T) *Manager {
+func newDisplayLogTestStore(t *testing.T) *FileStore {
 	t.Helper()
 	store, err := NewFileStore(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	return NewManagerWithStore(store)
+	return store
 }
 
 func makeDisplayItems(count int) []DisplayItem {
