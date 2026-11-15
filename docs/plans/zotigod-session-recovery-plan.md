@@ -1,5 +1,7 @@
 # Zotigod Session Recovery Plan
 
+> Status (2026-11): implemented. Stored sessions are listed as `offline` with a `live` flag (`SessionStateOffline` in `internal/zotigod/session_handlers.go`), and `ensureSessionRunning` in `internal/zotigod/session_activation.go` is the shared resume path used by start and by message submission (`internal/zotigod/input_queue.go`); turn-scoped commands on an offline session fail with `errWorkerOffline` (`internal/zotigod/pause_steering_handlers.go`).
+
 ## Background
 
 Desktop can already show old conversation history through `GET /sessions/{id}/items`. That history comes from the durable display log on disk.

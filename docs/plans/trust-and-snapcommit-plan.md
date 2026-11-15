@@ -1,5 +1,7 @@
 # Trust and Snapcommit Plan
 
+> Status (2026-11): partly implemented. Per-call safety classification with a configurable LLM classifier (`core/agent/safety.go`, `core/agent/provider_classifier.go`, `SafetyClassifierConfig` in `core/config/types.go`), turn audit events (`core/agent/turn_audit.go`, `core/session/audit.go`) and the once-per-turn pre-action `snap-commit` snapshot (`ensureSnapshotForActions` in `core/agent/action_safety.go`) exist. A failed snapshot returns an error instead of going back to an approval state as the plan describes, the `core/safety` package the plan names was not created (the code lives in `core/agent`), and the user-facing snapshot surfacing in step 6 was not verified.
+
 ## Background
 
 The current approval model is too coarse for a trustworthy autonomous coding workflow.

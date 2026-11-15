@@ -9,11 +9,11 @@ Zotigo is a Go CLI agent in the spirit of Claude Code: streaming TUI, multi‑pr
 Run these often; they are the canonical preflight before any change is "done".
 
 ```bash
-make check                # layering check + gofmt + go vet + golangci-lint + go test -race ./... — what CI also runs
+make check                # layering check + gofmt/goimports (rewrites files) + go vet (incl. -tags=e2e) + golangci-lint + go test -race ./...; CI runs the read-only equivalents step by step, not `make check`
 make test                 # unit + integration tests
 make test-e2e             # E2E tests (need zotigo.e2e.yaml — see E2E_TESTING.md)
 go test ./core/agent/... -count=1 -run TestAgent_<Name>   # focused test loop
-gofmt -w <file>           # pre-commit hook will reject otherwise
+gofmt -w <file>           # CI's gofmt step will reject otherwise
 python3 scripts/install_test.py  # source installer transaction tests
 python3 scripts/toolchains_test.py  # isolated download/checksum/cache tests
 make build                # produces ./build/zotigo
@@ -22,13 +22,13 @@ go run ./cmd/acp --no-daemon --state-dir /tmp/zotigo-dev      # ACP JSON-RPC ser
 ZOTIGO_DEBUG=true go run ./cmd/zotigo   # verbose agent + provider event logging
 ```
 
-There is a **pre-commit hook** (`.git/hooks/pre-commit`) that runs `gofmt -l` on staged `.go` files and rejects commits that need formatting. Don't bypass with `--no-verify`; just run `gofmt -w`.
+CI (`.github/workflows/ci.yml`) fails on any file `gofmt -l` or `goimports -l` would change. The repository does not ship a pre-commit hook (hooks are per clone); if your clone has one that runs `gofmt -l` on staged `.go` files, don't bypass it with `--no-verify`; just run `gofmt -w`.
 
 ## Tech Stack
 - **Go 1.25+** (`go.mod`).
 - **TUI**: `charm.land/bubbletea/v2` + lipgloss.
 - **Config**: viper / YAML (`~/.zotigo/config.yaml`).
-- **Provider SDKs**: `openai/openai-go/v3` (Chat + Responses APIs), `anthropic-sdk-go`, `google/generative-ai-go`.
+- **Provider SDKs**: `openai/openai-go/v3` (Chat + Responses APIs), `anthropic-sdk-go`, `google.golang.org/genai`.
 - **Editor protocol**: ACP (Agent Client Protocol) over JSON‑RPC.
 
 ## Project Structure
@@ -51,7 +51,7 @@ Inside `core/`:
 - `tools/` — `tools.Tool` interface and per-call context + `builtin/` leaf tools; `subagent/` — the spawn tool (runs a child agent)
 - `middleware/` — agent‑level tool‑call middleware (observability, etc.)
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
-- `transport/` — IO abstraction (channel, ACP, stdio)
+- `transport/` — IO abstraction: the `Transport` interface and `ChannelTransport` (the ACP transport lives in `core/acp/embed/`)
 - `executor/` — filesystem + shell abstraction; `LocalExecutor` (and ACP `RemoteExecutor` lives in `core/acp/embed/`)
 - `compaction/` — context compressor, tokenizer, summarizer; `agent/loopguard/` — loop detector; `textassist/` — one-shot title and translation calls
 - `skills/` — skill discovery and prompt injection
@@ -65,8 +65,9 @@ Inside `core/`:
 - **File**: `read_file`, `write_file`, `edit` (precise string replacement, supports `replace_all`).
 - **Search**: `grep`, `glob`.
 - **Shell**: `shell` with a read‑only command whitelist baked into `ShellTool` policy. Directory creation, deletion, listing — all go through Shell, not dedicated tools.
-- **Web**: `web_search` (Tavily), `web_fetch`.
-- **LSP**: `lsp` (definition / references / diagnostics).
+- **Web**: `web_search` (Tavily or DeepSeek backend), `web_fetch`.
+- **LSP**: `lsp` (definition / references / hover / implementation / symbols / diagnostics).
+- **Image**: `view_image`. **Subagent**: `spawn` (`core/subagent/`, registered only when the host enables it).
 - Registration site: `internal/wiring/tools.go` via `ag.RegisterTool(...)`, with host-specific options passed by each app. There is no `CreateDefaultRegistry` — the agent gets exactly the tools its host wires in.
 - The `Executor` interface is intentionally narrow: `ReadFile / WriteFile / Stat / Exec` plus `WorkDir / Platform / Init / Close`. New filesystem capabilities should come through Shell unless they need structured returns.
 
@@ -112,11 +113,11 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - `reasoning_content` from llama.cpp / DeepSeek / OpenRouter is surfaced through the Chat Completions path so the agent sees thinking blocks regardless of provider.
 
 ## Loop Detection
-- `core/agent/loopguard/loop_detector.go` flags identical **consecutive** tool calls. Defaults: warn at 5 in a row, window 15. Iterative workflows (`go test → edit → go test → edit → go test`) intentionally do NOT trigger because any intervening different call resets the streak.
+- `core/agent/loopguard/loop_detector.go` flags identical **consecutive** tool calls. Defaults: warn at 7 in a row, window 15. Iterative workflows (`go test → edit → go test → edit → go test`) intentionally do NOT trigger because any intervening different call resets the streak.
 - When triggered, the warning is **prefixed** into the next tool result text wrapped in `<system-reminder>`. It is NOT a separate `ToolResult` (OpenAI Chat Completions rejects duplicate `tool_call_id` in one tool‑role message).
 
 ## Code Style
-- Format with `gofmt -w`; no goimports group reordering needed (the pre-commit hook only checks gofmt).
+- Format with `gofmt -w` and keep imports `goimports`-clean (`make format` runs both; CI checks both with `-l`).
 - Avoid single‑letter vars (except `i`, `r`, `w`, `t *testing.T` etc.).
 - **Comments explain why, not what**: don't restate the type signature; do explain non‑obvious tradeoffs and references to other files.
 - Don't add license headers unless asked.
@@ -156,7 +157,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 **Never do**
 - `git commit` without an explicit user request.
 - `git push --force` (or `--force-with-lease`) to `master` / `main`.
-- `--no-verify` to skip the gofmt pre‑commit hook — fix the formatting instead.
+- `--no-verify` to skip a local gofmt pre‑commit hook — fix the formatting instead.
 - Commit `.env`, API keys, anything from `~/.zotigo/`, or `e2e.config.json` with real keys.
 - Run `git reset --hard` or `rm -rf` outside a `t.TempDir()`/`./build/` without explicit confirmation.
 - Add features, refactors, or abstractions beyond what the task asked for; flag drive‑by ideas in the response, don't smuggle them into the diff.
@@ -173,4 +174,4 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - Tools not firing: confirm registration in `internal/wiring/tools.go` and host options in the session worker (`internal/zotigod/worker/runtime_setup.go`); `ZOTIGO_DEBUG=true` prints stream events showing whether the model emitted tool calls.
 - Classifier silent‑failing: look for `provider classifier timeout` in debug logs. Default is 20s; lower `safety.classifier.timeout_ms` only after confirming the underlying model is fast enough.
 - Empty output / loop: `ZOTIGO_DEBUG=true`; check for the loop‑guard `<system-reminder>` in the latest tool result. The runner ends a turn on `FinishReason == stop`.
-- gofmt pre‑commit failure: run `gofmt -w` on the listed files, re‑stage, retry the commit.
+- gofmt failure (CI step or a local pre‑commit hook): run `gofmt -w` on the listed files, re‑stage, retry the commit.

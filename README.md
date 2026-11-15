@@ -35,7 +35,7 @@ abstractions, compatibility surfaces and known debt.
 ## Features
 
 - **Multi-Provider Support:** OpenAI, Anthropic, and Google Gemini — switch models on the fly.
-- **Built-in Tools:** file, edit/patch, shell, grep/glob, git, LSP, web search (Tavily), web fetch.
+- **Built-in Tools:** file read/write, edit, image view, shell, grep/glob, LSP, web search (Tavily or DeepSeek), web fetch, subagent spawn.
 - **Skill System:** Extensible skills (builtin, user, project) auto-injected into the prompt — no manual activation needed. Use `/skills` to list, `/<skill-name>` to invoke.
 - **Safe Execution:** Tool safety policy with auto-approve for read-only tools, manual approval for mutations. Toggle auto-approve with `Shift+Tab`.
 - **Context Awareness:** Project files, git history, loop detection, and automatic context compression.
@@ -149,7 +149,7 @@ limits fail when the profile is prepared. For compatibility, Gemini profiles
 may still read the old `params.max_tokens` value when top-level
 `max_output_tokens` is absent, but new configuration should use the top-level
 field and it takes precedence. Codex app-server sessions use Codex's own model
-settings and are not given Zotigo's 32K default.
+settings and are not given Zotigo's 120000 default.
 
 Native provider requests have a separate **24 MiB serialized-body budget**,
 independent of the token context window. Override it for a particular endpoint

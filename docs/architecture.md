@@ -127,7 +127,7 @@ package reads as groups:
 - `control_handlers.go`, `pause_steering_handlers.go`, `command_items.go`,
   `input_queue.go`, `approval*`, `interaction_handlers.go`, `codex_request_expiry.go`: the command surface
 - `worker_attach_handlers.go`, `worker_registry.go`, `worker_process.go`,
-  `worker_display_log.go`: the daemon's side of the worker link
+  `worker_handlers.go`, `worker_command_handlers.go`: the daemon's side of the worker link
 - `codex_session_syncer.go`, `codex_input_images.go`,
   `codex_request_expiry.go`, `codex_settings_handler.go`: the daemon's own
   Codex code (history sync under the session registry and operation locks,
