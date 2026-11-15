@@ -405,12 +405,28 @@ func orderedActions(actions []*PendingAction) []*PendingAction {
 	return ordered
 }
 
+// mergeDeferredSkippedResults gives every deferred action that has no result in
+// outputs a skipped (or interrupted) one, and returns all results in call
+// order. A deferred action that ran with the approved batch already has its
+// result in outputs and must not get a second one: providers reject a tool
+// call with two results.
 func mergeDeferredSkippedResults(deferred []*PendingAction, outputs []protocol.ToolResult, reason string) []protocol.ToolResult {
-	results := make([]protocol.ToolResult, 0, len(deferred)+len(outputs))
+	answered := make(map[string]struct{}, len(outputs))
+	for _, output := range outputs {
+		answered[output.ToolCallID] = struct{}{}
+	}
+	unanswered := make([]*PendingAction, 0, len(deferred))
+	for _, action := range deferred {
+		if _, ok := answered[action.ToolCallID]; !ok {
+			unanswered = append(unanswered, action)
+		}
+	}
+
+	results := make([]protocol.ToolResult, 0, len(unanswered)+len(outputs))
 	if reason == "interrupted_by_steering" {
-		results = append(results, interruptedActionResults(deferred)...)
+		results = append(results, interruptedActionResults(unanswered)...)
 	} else {
-		for _, action := range deferred {
+		for _, action := range unanswered {
 			results = append(results, skippedToolResult(action, reason))
 		}
 	}
