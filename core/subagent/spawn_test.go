@@ -365,6 +365,19 @@ func TestSpawnToolClassify(t *testing.T) {
 	if outsideScope.Level != tools.LevelLow {
 		t.Fatalf("spawn workdir outside safe scope should be low risk gated by approval, got %s", outsideScope.Level.String())
 	}
+
+	// A directory that is only safe to read (a skill root) is not a place a
+	// subagent may be rooted without approval: the child could write there.
+	for _, agentType := range []string{"general-purpose", "explore"} {
+		readOnlySafeDir := spawn.Classify(tools.SafetyCall{
+			Arguments: `{"description":"d","prompt":"p","agent_type":"` + agentType + `","workdir":"` + outsideDir + `"}`,
+			WorkDir:   parentDir,
+			SafeDirs:  []string{parentDir, outsideDir},
+		})
+		if !readOnlySafeDir.RequiresApproval {
+			t.Fatalf("%s spawn rooted in a read-only safe dir should require approval, got %#v", agentType, readOnlySafeDir)
+		}
+	}
 }
 
 func TestSpawnToolUsesRequestedWorkDir(t *testing.T) {

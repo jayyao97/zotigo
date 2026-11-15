@@ -162,7 +162,10 @@ func (t *SpawnTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 	}
 	_ = json.Unmarshal([]byte(call.Arguments), &args)
 	if strings.TrimSpace(args.WorkDir) != "" {
-		if !tools.IsInSafeScope(call, []string{"workdir"}) || tools.IsSensitivePath(call, []string{"workdir"}) {
+		// The child's working directory is where it may write. Extra safe
+		// directories (for example skill roots) are safe to read only, so
+		// they must not let a subagent be rooted there without approval.
+		if !tools.IsInWorkDir(call, []string{"workdir"}) || tools.IsSensitivePath(call, []string{"workdir"}) {
 			return tools.SafetyDecision{
 				Level:            tools.LevelLow,
 				Reason:           "subagent workdir expands safe scope",
