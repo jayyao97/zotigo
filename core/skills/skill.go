@@ -61,13 +61,3 @@ type SkillDefinition struct {
 func (s *SkillDefinition) IsEnabled() bool {
 	return s.Enabled == nil || *s.Enabled
 }
-
-// HasAlias checks if the skill has a specific alias
-func (s *SkillDefinition) HasAlias(alias string) bool {
-	for _, a := range s.Aliases {
-		if a == alias {
-			return true
-		}
-	}
-	return false
-}

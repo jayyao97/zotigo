@@ -13,25 +13,6 @@ import (
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
-// GetContextStats returns statistics about the current context.
-func (a *Agent) GetContextStats() map[string]int {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-
-	stats := make(map[string]int)
-	history := a.conversation.history
-	stats["message_count"] = len(history)
-	if a.compressor != nil {
-		stats["estimated_tokens"] = a.contextTokensLocked()
-	}
-	if a.loopDetector != nil {
-		for k, v := range a.loopDetector.Stats() {
-			stats["loop_"+k] = v
-		}
-	}
-	return stats
-}
-
 // ForceCompress manually triggers context compression.
 // Returns the compression result with statistics.
 func (a *Agent) ForceCompress(ctx context.Context) (*compaction.CompressionResult, error) {
@@ -141,7 +122,7 @@ func (a *Agent) compressHistoryWithPromptLocked(
 	)
 	a.compacting.Store(true)
 	defer a.compacting.Store(false)
-	if !reactive && a.provider != nil && a.compressorSummarizer == nil {
+	if !reactive && a.provider != nil {
 		messages := append(append([]protocol.Message(nil), system...), history...)
 		toolList := sortedToolList(a.tools)
 		summarizer := compaction.NewProviderSummarizer(a.provider, compaction.WithSummarizerObserver(a.observer, a.cfg.Model))

@@ -20,7 +20,15 @@ func (failingHistoryRecorder) RecordHistory(agent.HistoryMutation) error {
 	return errors.New("disk full")
 }
 
+func (failingHistoryRecorder) RecordToolExecutionStarted(context.Context, *agent.ToolCall) error {
+	return nil
+}
+
 type failingToolResultRecorder struct{}
+
+func (failingToolResultRecorder) RecordToolExecutionStarted(context.Context, *agent.ToolCall) error {
+	return nil
+}
 
 func (failingToolResultRecorder) RecordHistory(mutation agent.HistoryMutation) error {
 	for _, message := range mutation.Messages {
@@ -59,7 +67,7 @@ func TestHistoryRecorderFailureStopsBeforeProviderCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer exec.Close()
-	ag, err := agent.New(config.ProfileConfig{Provider: "history-journal-test", Model: "test"}, exec, agent.WithHistoryRecorder(failingHistoryRecorder{}))
+	ag, err := agent.New(config.ProfileConfig{Provider: "history-journal-test", Model: "test"}, exec, agent.WithDurabilityRecorder(failingHistoryRecorder{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +167,7 @@ func TestToolOutputJournalFailurePreservesPausedState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer exec.Close()
-	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithHistoryRecorder(failingHistoryRecorder{}))
+	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec, agent.WithDurabilityRecorder(failingHistoryRecorder{}))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,8 +178,8 @@ func TestToolOutputJournalFailurePreservesPausedState(t *testing.T) {
 			Name:       "shell",
 		}},
 	})
-	_, err = ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{
-		protocol.NewTextToolResult("call-1", "denied", true),
+	_, err = ag.ResolvePendingActions(context.Background(), map[string]protocol.ToolResult{
+		"call-1": {ToolCallID: "call-1", Type: protocol.ToolResultTypeExecutionDenied, Reason: "denied"},
 	})
 	if err == nil {
 		t.Fatal("expected tool output journal failure")
@@ -195,7 +203,7 @@ func TestExecutedToolJournalFailureCannotBeRetried(t *testing.T) {
 	calls := 0
 	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
 		agent.WithTools(&CountingApprovalTool{name: "side_effect", calls: &calls}),
-		agent.WithHistoryRecorder(failingHistoryRecorder{}),
+		agent.WithDurabilityRecorder(failingHistoryRecorder{}),
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +252,7 @@ func TestAutoExecutedToolJournalFailureCannotContinue(t *testing.T) {
 	var calls atomic.Int32
 	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec,
 		agent.WithTools(&TimeTool{}),
-		agent.WithHistoryRecorder(failingToolResultRecorder{}),
+		agent.WithDurabilityRecorder(failingToolResultRecorder{}),
 		agent.WithMiddleware(func(next agent.Next) agent.Next {
 			return func(ctx context.Context, call *agent.ToolCall) (any, error) {
 				calls.Add(1)

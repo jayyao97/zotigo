@@ -32,7 +32,7 @@ func TestE2E_AgentLongConversation(t *testing.T) {
 
 	cfg := config.ProfileConfig{Provider: "e2e-verbose"}
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a helpful assistant.")
+	prompt.WithStaticPrompt("You are a helpful assistant.")(pb)
 	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
@@ -51,24 +51,18 @@ func TestE2E_AgentLongConversation(t *testing.T) {
 		}
 
 		if (i+1)%5 == 0 {
-			stats := ag.GetContextStats()
-			t.Logf("Turn %d: messages=%d, tokens=%d",
-				i+1, stats["message_count"], stats["estimated_tokens"])
+			t.Logf("Turn %d: messages=%d", i+1, len(ag.Snapshot().History))
 		}
 	}
 
-	statsBefore := ag.GetContextStats()
-	t.Logf("Before compression: messages=%d, tokens=%d",
-		statsBefore["message_count"], statsBefore["estimated_tokens"])
+	t.Logf("Before compression: messages=%d", len(ag.Snapshot().History))
 
 	result, err := ag.ForceCompress(ctx)
 	if err != nil {
 		t.Fatalf("ForceCompress error: %v", err)
 	}
 
-	statsAfter := ag.GetContextStats()
-	t.Logf("After compression: messages=%d, tokens=%d",
-		statsAfter["message_count"], statsAfter["estimated_tokens"])
+	t.Logf("After compression: messages=%d", len(ag.Snapshot().History))
 
 	t.Logf("Compression result: compressed=%v, tokens %d -> %d",
 		result.Compressed, result.OriginalTokens, result.CompressedTokens)
@@ -96,7 +90,7 @@ func TestE2E_AgentWithToolCalls(t *testing.T) {
 
 	cfg := config.ProfileConfig{Provider: "e2e-tools"}
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a coding assistant.")
+	prompt.WithStaticPrompt("You are a coding assistant.")(pb)
 	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
@@ -123,8 +117,7 @@ func TestE2E_AgentWithToolCalls(t *testing.T) {
 		t.Logf("Turn %d response: %s", i+1, truncate(content, 50))
 	}
 
-	stats := ag.GetContextStats()
-	t.Logf("Final stats: messages=%d, tokens=%d", stats["message_count"], stats["estimated_tokens"])
+	t.Logf("Final stats: messages=%d", len(ag.Snapshot().History))
 
 	result, err := ag.ForceCompress(ctx)
 	if err != nil {
@@ -155,7 +148,7 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 	}
 
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a helpful assistant. Keep responses brief.")
+	prompt.WithStaticPrompt("You are a helpful assistant. Keep responses brief.")(pb)
 	ag, err := agent.New(profileCfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
@@ -187,9 +180,7 @@ func TestE2E_AgentCompressionWithRealProvider(t *testing.T) {
 
 		t.Logf("Response %d: %s", i+1, truncate(response, 100))
 
-		stats := ag.GetContextStats()
-		t.Logf("Stats after turn %d: messages=%d, tokens=%d",
-			i+1, stats["message_count"], stats["estimated_tokens"])
+		t.Logf("Stats after turn %d: messages=%d", i+1, len(ag.Snapshot().History))
 	}
 
 	result, err := ag.ForceCompress(ctx)
@@ -217,7 +208,7 @@ func TestE2E_MemoryUnderPressure(t *testing.T) {
 
 	cfg := config.ProfileConfig{Provider: "e2e-memory"}
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("System")
+	prompt.WithStaticPrompt("System")(pb)
 	ag, err := agent.New(cfg, exec, agent.WithSystemPromptBuilder(pb))
 	if err != nil {
 		t.Fatalf("Failed to create agent: %v", err)
@@ -231,9 +222,7 @@ func TestE2E_MemoryUnderPressure(t *testing.T) {
 		}
 
 		if i%10 == 9 {
-			stats := ag.GetContextStats()
-			t.Logf("Iteration %d: messages=%d, tokens=%d",
-				i+1, stats["message_count"], stats["estimated_tokens"])
+			t.Logf("Iteration %d: messages=%d", i+1, len(ag.Snapshot().History))
 
 			result, _ := ag.ForceCompress(ctx)
 			if result.Compressed {

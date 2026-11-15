@@ -46,12 +46,6 @@ func newConversationState() conversationState {
 	return conversationState{history: make([]protocol.Message, 0)}
 }
 
-// WithHistoryRecorder installs the synchronous durability boundary used by
-// runtimes that need mid-turn crash recovery.
-func WithHistoryRecorder(recorder HistoryRecorder) AgentOption {
-	return func(a *Agent) { a.conversation.recorder = recorder }
-}
-
 // WithDurabilityRecorder installs every runtime durability boundary together
 // so a host cannot journal history while accidentally omitting tool starts.
 func WithDurabilityRecorder(recorder DurabilityRecorder) AgentOption {

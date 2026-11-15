@@ -269,14 +269,40 @@ Changing any of these needs a migration or a version check, not a refactor:
   the package and are exported only because tests in another package call
   them: `HandleNotification`, `PersistSteering` and `Append`.
 - `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
-- `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
-  writes a "user approved action" audit event that the production path
-  (`ResolvePendingActions`) never writes. Either production should record that
-  event or the tests should move to the production entry. Related test-only
-  entries: `ExecuteBypassedPendingActions`, public `SubmitToolOutputs`,
-  `GetContextStats`, `WithHistoryRecorder`, `Compressor.Compress`,
-  `SystemPromptBuilder.SetStaticPrompt`, `catalogschema.NewDriver`,
-  `WithCompressorSummarizer`, `SkillDefinition.HasAlias`.
+- `Agent.ApproveAndExecutePendingActions` is called only by tests (17 calls:
+  14 in `core/agent/agent_test.go`, 2 in `core/agent/conversation_state_test.go`,
+  1 in `tests/e2e/safety_test.go`). Production approves through
+  `ResolvePendingActions(ctx, deniedOnly)` (`core/runner/runner.go`,
+  `core/subagent/spawn.go`). The two differ in ways the tests depend on, so
+  the tests cannot simply move:
+  - it overlays the saved trace context (`ResumeTrace`) before the approved
+    tools run; `ResolvePendingActions` does not, so tool spans started from a
+    caller context without the trace marker fall outside the turn's trace
+    (only the follow-up generation is re-attached, inside
+    `submitToolOutputs`). `TestAgent_TracePersistsAcrossManualApproval` passes
+    only through the test-only entry and fails on the production one;
+  - it takes the pre-execution snapshot synchronously and returns a snapshot
+    failure as an error; `ResolvePendingActions` takes it inside the execution
+    goroutine and reports the failure as an error event
+    (`TestAgent_SnapshotFailureStopsExecution` asserts the returned error);
+  - it writes a "user approved action" audit event per approved action, which
+    `ResolvePendingActions` never writes (no test asserts this event);
+  - it requires `StatePaused`; `ResolvePendingActions` only requires a
+    non-empty pending list, and it alone handles denials.
+  Removing it needs a decision first: either production resumes the trace
+  (and records the approval event) in `ResolvePendingActions`, or those
+  guarantees are dropped on purpose.
+- `Compressor.Compress` (threshold-gated compression) is called only by tests:
+  `core/compaction/compressor_test.go`, `internal/zotigod/session_handlers_test.go`
+  and `tests/e2e/compressor_test.go`. Production decides the threshold itself
+  (`NeedsCompressionTokens`) and then calls `ForceCompress` or
+  `ForceCompressWithSummary`, so the gate inside `Compress` is tested but
+  never used.
+- `catalogschema.NewDriver` is called only by `core/workspace/migrations_test.go`
+  (three calls), which needs to run ad-hoc SQL through the foreign-key
+  preserving driver. `catalogschema.Migrate` builds the same `Driver` with a
+  struct literal; the fields are unexported, so a test in another package has
+  no other way to construct one.
 - The BPE tokenizer is quadratic on long runs of a repeated rune or short
   phrase (30,000 identical CJK runes take about 7 seconds). This is reachable
   from real input, not only from tests.

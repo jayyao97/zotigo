@@ -79,19 +79,6 @@ func TestSystemPromptBuilder_BuildMessages_WithDynamic(t *testing.T) {
 	}
 }
 
-func TestSystemPromptBuilder_SetStaticPrompt(t *testing.T) {
-	pb := NewSystemPromptBuilder()
-	pb.SetStaticPrompt("Custom system prompt.")
-
-	msgs := pb.BuildMessages(PromptContext{})
-	if len(msgs) != 1 {
-		t.Fatalf("Expected 1 message, got %d", len(msgs))
-	}
-	if msgs[0] != "Custom system prompt." {
-		t.Errorf("Expected custom prompt, got '%s'", msgs[0])
-	}
-}
-
 func TestSystemPromptBuilder_WithStaticPromptOption(t *testing.T) {
 	pb := NewSystemPromptBuilder(WithStaticPrompt("Option prompt."))
 
@@ -105,8 +92,7 @@ func TestSystemPromptBuilder_WithStaticPromptOption(t *testing.T) {
 }
 
 func TestSystemPromptBuilder_EmptyStaticPrompt(t *testing.T) {
-	pb := NewSystemPromptBuilder()
-	pb.SetStaticPrompt("")
+	pb := NewSystemPromptBuilder(WithStaticPrompt(""))
 
 	msgs := pb.BuildMessages(PromptContext{})
 	if len(msgs) != 0 {

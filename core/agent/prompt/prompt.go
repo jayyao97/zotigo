@@ -130,12 +130,6 @@ func NewSystemPromptBuilder(opts ...SystemPromptOption) *SystemPromptBuilder {
 	return b
 }
 
-// SetStaticPrompt replaces the built-in static prompt entirely.
-// This is the override mechanism for SDK users.
-func (b *SystemPromptBuilder) SetStaticPrompt(s string) {
-	b.StaticPrompt = s
-}
-
 // BuildMessages returns ordered system prompt texts as separate strings.
 // Each string becomes its own protocol.Message with RoleSystem.
 // Order: [static] → [dynamic context]

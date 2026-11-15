@@ -149,68 +149,6 @@ func (a *Agent) ApproveAndExecutePendingActions(ctx context.Context) (<-chan pro
 	return a.executeResolvedPendingActions(ctx, resolvedActions, false)
 }
 
-// ExecuteBypassedPendingActions resumes a paused snapshot without carrying its
-// old approval decisions into an explicitly bypassed process. Registered tools
-// execute without classification or snapshots; tools unavailable in the
-// current process remain blocked.
-func (a *Agent) ExecuteBypassedPendingActions(ctx context.Context) (<-chan protocol.Event, error) {
-	a.mu.RLock()
-	if a.policy != ApprovalPolicyBypass {
-		a.mu.RUnlock()
-		return nil, fmt.Errorf("approval policy is not bypass_permissions")
-	}
-	if a.state != StatePaused || len(a.pendingActions) == 0 {
-		a.mu.RUnlock()
-		return nil, fmt.Errorf("agent is not paused")
-	}
-	saved := a.activeTraceCtx
-	actions := make([]*PendingAction, 0, len(a.deferredActions)+len(a.pendingActions))
-	for _, action := range append(append([]*PendingAction(nil), a.deferredActions...), a.pendingActions...) {
-		resolved := *action
-		if _, ok := a.tools[action.Name]; ok {
-			resolved.Decision = ActionDecision{
-				Decision: ExecutionDecisionAutoExecute,
-				Source:   SafetyDecisionSourceBypass,
-				Reason:   "permission checks bypassed",
-			}
-		} else {
-			resolved.Decision = ActionDecision{
-				Decision:  ExecutionDecisionBlock,
-				Source:    SafetyDecisionSourceHardRule,
-				Reason:    "tool not found",
-				RiskLevel: tools.LevelBlocked.String(),
-			}
-		}
-		actions = append(actions, &resolved)
-	}
-	a.mu.RUnlock()
-	if saved != nil {
-		ctx = a.observer.ResumeTrace(ctx, saved)
-	}
-
-	for _, action := range actions {
-		a.appendSafetyEvent(AuditEvent{
-			ToolCallID:     action.ToolCallID,
-			ToolName:       action.Name,
-			DecisionSource: action.Decision.Source,
-			Decision:       mapExecutionDecision(action.Decision.Decision),
-			Reason:         action.Decision.Reason,
-			RiskLevel:      action.Decision.RiskLevel,
-			SnapshotStatus: SnapshotStatusNotNeeded,
-			ContextSummary: AuditContextSummary{
-				UserPrompt: a.turnSafety.CurrentUserPrompt,
-				Trigger:    action.Decision.Reason,
-			},
-		})
-	}
-	return a.executeResolvedPendingActions(ctx, orderedActions(actions), false)
-}
-
-// SubmitToolOutputs submits tool results and resumes the agent loop.
-func (a *Agent) SubmitToolOutputs(ctx context.Context, outputs []protocol.ToolResult) (<-chan protocol.Event, error) {
-	return a.submitToolOutputs(ctx, outputs, true, false)
-}
-
 func (a *Agent) submitToolOutputs(ctx context.Context, outputs []protocol.ToolResult, mergeDeferred bool, toolsExecuted bool) (<-chan protocol.Event, error) {
 	a.mu.Lock()
 	if a.state != StatePaused {

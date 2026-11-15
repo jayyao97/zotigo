@@ -341,7 +341,7 @@ func newDynamicCachingTestAgent(
 	for i := 0; i < 150; i++ {
 		largePrompt.WriteString("Stable cache-prefix rule: preserve deterministic instructions across every request.\n")
 	}
-	pb.SetStaticPrompt(largePrompt.String())
+	prompt.WithStaticPrompt(largePrompt.String())(pb)
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),

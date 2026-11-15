@@ -51,7 +51,7 @@ func newTestAgent(t *testing.T, profile config.ProfileConfig) *agent.Agent {
 	}
 
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a concise assistant. Always reply in as few words as possible.")
+	prompt.WithStaticPrompt("You are a concise assistant. Always reply in as few words as possible.")(pb)
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
@@ -82,7 +82,7 @@ func newCachingTestAgent(t *testing.T, profile config.ProfileConfig) *agent.Agen
 			"Write unit tests for all new code. Ensure proper error handling and logging. "+
 			"Use dependency injection for testability. Keep functions small and focused.\n", i+1))
 	}
-	pb.SetStaticPrompt(largePrompt.String())
+	prompt.WithStaticPrompt(largePrompt.String())(pb)
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),

@@ -1191,11 +1191,11 @@ func TestAgentReActLoop(t *testing.T) {
 		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
 	}
 
-	toolRes := protocol.NewTextToolResult("call_1", "12:00", false)
-
-	events2, err := ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{toolRes})
+	// Approve the pending call the way production does: no denial decisions,
+	// so the registered TimeTool runs and its "12:00" result resumes the loop.
+	events2, err := ag.ResolvePendingActions(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("Submit error: %v", err)
+		t.Fatalf("Resolve error: %v", err)
 	}
 
 	var content string
@@ -1397,66 +1397,6 @@ func TestAgentReviewAllToolsKeepsBlockedCallsAsHardRule(t *testing.T) {
 	}
 	if got := ag.Snapshot().State; got != agent.StateIdle {
 		t.Fatalf("state = %s, want idle after blocked result", got)
-	}
-}
-
-func TestAgentBypassResumeExecutesRegisteredAndBlocksUnknownTools(t *testing.T) {
-	const providerName = "bypass-resume"
-	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
-		return &profileTextProvider{name: providerName, text: "resumed"}, nil
-	})
-	exec, err := executor.NewLocalExecutor(t.TempDir())
-	if err != nil {
-		t.Fatalf("executor: %v", err)
-	}
-	defer exec.Close()
-	tool := &BypassProbeTool{}
-	ag, err := agent.New(
-		config.ProfileConfig{Provider: providerName},
-		exec,
-		agent.WithApprovalPolicy(agent.ApprovalPolicyBypass),
-		agent.WithTools(tool),
-	)
-	if err != nil {
-		t.Fatalf("agent.New: %v", err)
-	}
-	assistant := protocol.NewAssistantMessage("")
-	assistant.AddToolCall(protocol.ToolCall{ID: "known", Name: tool.Name(), Arguments: `{}`})
-	assistant.AddToolCall(protocol.ToolCall{ID: "unknown", Name: "missing_tool", Arguments: `{}`})
-	ag.Restore(agent.Snapshot{
-		State:   agent.StatePaused,
-		History: []protocol.Message{protocol.NewUserMessage("continue"), assistant},
-		PendingActions: []*agent.PendingAction{
-			{ToolCallID: "known", Name: tool.Name(), Arguments: `{}`, Order: 0},
-			{ToolCallID: "unknown", Name: "missing_tool", Arguments: `{}`, Order: 1},
-		},
-	})
-
-	events, err := ag.ExecuteBypassedPendingActions(context.Background())
-	if err != nil {
-		t.Fatalf("ExecuteBypassedPendingActions: %v", err)
-	}
-	results := make(map[string]protocol.ToolResult)
-	for event := range events {
-		if event.Type == protocol.EventTypeError {
-			t.Fatalf("unexpected error event: %v", event.Error)
-		}
-		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
-			results[event.ToolResult.ToolCallID] = *event.ToolResult
-		}
-	}
-
-	if tool.classifyCalls != 0 {
-		t.Fatalf("Tool.Classify called %d times, want 0", tool.classifyCalls)
-	}
-	if tool.executeCalls != 1 {
-		t.Fatalf("Tool.Execute called %d times, want 1", tool.executeCalls)
-	}
-	if result := results["unknown"]; result.Type != protocol.ToolResultTypeExecutionDenied || !result.IsError {
-		t.Fatalf("unknown tool result = %#v, want execution denied", result)
-	}
-	if ag.Snapshot().TurnSafety.SnapshotAttempted {
-		t.Fatal("snapshot must not be attempted for bypassed resumed actions")
 	}
 }
 
@@ -1966,9 +1906,8 @@ func TestAgentGetContextStats(t *testing.T) {
 	}
 
 	// Initial stats
-	stats := ag.GetContextStats()
-	if stats["message_count"] != 0 {
-		t.Errorf("Expected 0 messages initially, got %d", stats["message_count"])
+	if n := len(ag.Snapshot().History); n != 0 {
+		t.Errorf("Expected 0 messages initially, got %d", n)
 	}
 
 	// Run a conversation
@@ -1976,20 +1915,24 @@ func TestAgentGetContextStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	for range events {
-		// Drain events
+	// Production reports context size on the event stream.
+	var usage *protocol.ContextUsage
+	for e := range events {
+		if e.ContextUsage != nil {
+			usage = e.ContextUsage
+		}
 	}
 
 	// Stats should update
-	stats = ag.GetContextStats()
-	if stats["message_count"] < 2 {
-		t.Errorf("Expected at least 2 messages (user + assistant), got %d", stats["message_count"])
+	messageCount := len(ag.Snapshot().History)
+	if messageCount < 2 {
+		t.Errorf("Expected at least 2 messages (user + assistant), got %d", messageCount)
 	}
-	if stats["estimated_tokens"] <= 0 {
-		t.Errorf("Expected positive token count, got %d", stats["estimated_tokens"])
+	if usage == nil || usage.Tokens <= 0 {
+		t.Fatalf("Expected positive context token count on the event stream, got %+v", usage)
 	}
 
-	t.Logf("Context stats: messages=%d, tokens=%d", stats["message_count"], stats["estimated_tokens"])
+	t.Logf("Context stats: messages=%d, tokens=%d", messageCount, usage.Tokens)
 }
 
 func TestAgentForceCompress(t *testing.T) {
@@ -2021,9 +1964,7 @@ func TestAgentForceCompress(t *testing.T) {
 	}
 
 	// Get stats before compression
-	statsBefore := ag.GetContextStats()
-	t.Logf("Before compression: messages=%d, tokens=%d",
-		statsBefore["message_count"], statsBefore["estimated_tokens"])
+	t.Logf("Before compression: messages=%d", len(ag.Snapshot().History))
 
 	// Force compress
 	result, err := ag.ForceCompress(context.Background())
@@ -2041,9 +1982,7 @@ func TestAgentForceCompress(t *testing.T) {
 				result.CompressedTokens, result.OriginalTokens)
 		}
 
-		statsAfter := ag.GetContextStats()
-		t.Logf("After compression: messages=%d, tokens=%d",
-			statsAfter["message_count"], statsAfter["estimated_tokens"])
+		t.Logf("After compression: messages=%d", len(ag.Snapshot().History))
 	}
 }
 
@@ -3509,8 +3448,8 @@ func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
 	for range events {
 	}
 
-	_, err = ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{
-		{
+	_, err = ag.ResolvePendingActions(context.Background(), map[string]protocol.ToolResult{
+		"call_1": {
 			ToolCallID: "call_1",
 			ToolName:   "write_file",
 			Type:       protocol.ToolResultTypeExecutionDenied,
@@ -3518,7 +3457,7 @@ func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("SubmitToolOutputs error: %v", err)
+		t.Fatalf("ResolvePendingActions error: %v", err)
 	}
 
 	turns := ag.Snapshot().Turns

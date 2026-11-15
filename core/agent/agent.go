@@ -42,7 +42,6 @@ type Agent struct {
 	// Services
 	loopDetector                *loopguard.LoopDetector
 	compressor                  *compaction.Compressor
-	compressorSummarizer        compaction.Summarizer
 	classifier                  SafetyClassifier
 	classifierProfileName       string
 	classifierProfile           config.ProfileConfig
@@ -115,16 +114,6 @@ func WithApprovalPolicy(p ApprovalPolicy) AgentOption {
 	return func(a *Agent) {
 		a.requestedPolicy = p
 		a.refreshApprovalPolicy()
-	}
-}
-
-// WithCompressorSummarizer sets the LLM summarizer for high-quality summaries.
-func WithCompressorSummarizer(s compaction.Summarizer) AgentOption {
-	return func(a *Agent) {
-		a.compressorSummarizer = s
-		if a.compressor != nil {
-			a.compressor.SetSummarizer(s)
-		}
 	}
 }
 
@@ -237,11 +226,7 @@ func (a *Agent) configureCompressorSummarizer() {
 	if a.compressor == nil {
 		return
 	}
-	summarizer := a.compressorSummarizer
-	if summarizer == nil {
-		summarizer = compaction.NewProviderSummarizer(a.provider, compaction.WithSummarizerObserver(a.observer, a.cfg.Model))
-	}
-	a.compressor.SetSummarizer(summarizer)
+	a.compressor.SetSummarizer(compaction.NewProviderSummarizer(a.provider, compaction.WithSummarizerObserver(a.observer, a.cfg.Model)))
 }
 
 // RegisterTool adds a tool to the agent. Safe to call after construction.

@@ -3,6 +3,7 @@ package skills
 import (
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -34,7 +35,7 @@ This is a test skill.
 	if len(skill.Aliases) != 2 {
 		t.Errorf("Expected 2 aliases, got %d", len(skill.Aliases))
 	}
-	if !skill.HasAlias("ts") {
+	if !slices.Contains(skill.Aliases, "ts") {
 		t.Error("Expected alias 'ts'")
 	}
 	if skill.Instructions == "" {
