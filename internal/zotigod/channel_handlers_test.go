@@ -1270,3 +1270,104 @@ func TestChannelStopKeepsAdmissionClosedUntilDurablePauseIsAccepted(t *testing.T
 		t.Fatal("durable pause command was not sent to the worker")
 	}
 }
+
+// The worker decides at admission time whether this starts a turn or steers
+// an existing one, including when the previous turn ends while input is in flight.
+func TestChannelDispatchAdmitsSteeringOrNewTurn(t *testing.T) {
+	for _, steering := range []bool{true, false} {
+		t.Run(fmt.Sprint("steering=", steering), func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer store.Close()
+			const id = "channel-input"
+			now := time.Now().UTC()
+			dir := t.TempDir()
+			if err := store.Put(ctx, &zotigosession.Session{
+				Metadata: zotigosession.Metadata{ID: id, WorkingDirectory: dir, CreatedAt: now, UpdatedAt: now, ApprovalPolicy: agent.ApprovalPolicyAuto, PromptConfig: zotigosession.PromptConfig{Revision: 1}},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			registry := newSessionRegistry()
+			registry.Add(Session{ID: id, State: SessionStateRunning, WorkingDirectory: dir, CreatedAt: now})
+			source := sessionlog.StoredItemSource{Store: store}
+			workers := newWorkerRegistry()
+			events := sessionlog.NewEventBroker()
+			ops := newSessionOperationLocks()
+			h := &handler{registry: registry, store: store, items: source, workers: workers, events: events, sessionOps: ops}
+			server := httptest.NewServer(newHandler(registry, source, handlerOptions{store: store, workers: workers, events: events, sessionOps: ops}))
+			defer server.Close()
+			worker, generation := connectWorkerForActivation(t, server, id, "0")
+			defer worker.Close()
+			markWorkerReady(t, server, id, generation)
+			type outcome struct {
+				result channels.TaskResult
+				err    error
+			}
+			done := make(chan outcome, 1)
+			var progressEvents []channels.PublicExecutionEvent
+			go func() {
+				result, err := h.DispatchChannelTask(ctx, channels.Task{SessionID: id, ConnectionID: "connection", MessageID: "message", Text: "additional evidence", ApprovalPolicy: "auto", Origin: channels.TaskOrigin{Provider: "feishu", ActorRole: "owner"}}, func(p channels.Progress) { progressEvents = append(progressEvents, p.Events...) }, nil)
+				done <- outcome{result, err}
+			}()
+			if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			var input wire.Message
+			if err := worker.ReadJSON(&input); err != nil {
+				t.Fatal(err)
+			}
+			request := input.InputRequest
+			if request == nil || request.StartOnly || request.SteeringOnly {
+				t.Fatalf("must admit either mode: %+v", request)
+			}
+			if !request.RequirePromptRevision || request.RequiredPromptRevision != 1 || request.RequiredApprovalPolicy != agent.ApprovalPolicyAuto {
+				t.Fatalf("lost policy fence: %+v", request)
+			}
+			if request.Command.Message.RequestContext.Source != "feishu" {
+				t.Fatal("lost trusted origin")
+			}
+			command := request.Command
+			if steering {
+				command = sessionlog.SteeringCommandForRequest(*request, "existing-turn")
+			}
+			accepted, err := sessionlog.AppendAcceptedInput(ctx, source, id, command)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{RequestID: request.RequestID, Command: &accepted}}); err != nil {
+				t.Fatal(err)
+			}
+			if !steering {
+				for _, item := range []zotigosession.DisplayItem{
+					{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "new-turn"}},
+					{Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "new-turn", LastAgentMessage: "investigation result"}},
+				} {
+					if _, err := source.AppendItem(ctx, id, item); err != nil {
+						t.Fatal(err)
+					}
+				}
+			}
+			select {
+			case got := <-done:
+				if got.err != nil {
+					t.Fatal(got.err)
+				}
+				if steering && (len(progressEvents) != 1 || progressEvents[0].Type != channels.ExecutionRunStarted) {
+					t.Fatalf("missing acknowledgment run start: %+v", progressEvents)
+				}
+				if steering && got.result.Text != "已补充到当前任务。" {
+					t.Fatalf("steering must acknowledge without waiting for another turn: %+v", got.result)
+				}
+				if !steering && got.result.Text != "investigation result" {
+					t.Fatalf("new turn result: %+v", got.result)
+				}
+			case <-ctx.Done():
+				t.Fatal("channel dispatch did not finish")
+			}
+		})
+	}
+}
