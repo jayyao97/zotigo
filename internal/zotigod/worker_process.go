@@ -17,6 +17,16 @@ type workerLauncher interface {
 	Start(ctx context.Context, sessionID string, workingDirectory string) error
 }
 
+// workerStopper is implemented by launchers that own worker processes.
+type workerStopper interface {
+	// Stop kills the session's worker process, if any, and waits for it to exit.
+	Stop(ctx context.Context, sessionID string) error
+}
+
+func (l *processWorkerLauncher) Stop(ctx context.Context, sessionID string) error {
+	return l.stopAndWait(ctx, sessionID)
+}
+
 func (l *processWorkerLauncher) StartCodex(ctx context.Context, spec zotigoruntime.WorkerLaunchSpec, socketPath string, onExit func()) error {
 	if l == nil {
 		return fmt.Errorf("codex worker launcher is not configured")

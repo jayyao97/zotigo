@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
@@ -137,12 +139,54 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 			if err := h.expireDisconnectedCodexRequests(context.Background(), id); err != nil && h.logger != nil {
 				h.logger.Printf("expire Codex requests on disconnect: session=%s error=%v", id, err)
 			}
+		} else if err := h.interruptTurnOfLostWorker(context.Background(), id); err != nil && h.logger != nil {
+			h.logger.Printf("interrupt turn after worker disconnect: session=%s error=%v", id, err)
 		}
 		_, _ = h.reconcileApprovalState(context.Background(), id, session)
 	}
 	h.registry.MarkIdle(id)
 	_, _ = h.registry.ResetStarting(id)
 	h.registry.ClearWorkerGeneration(id, generation)
+}
+
+// interruptTurnOfLostWorker closes the turn a native worker left open when its
+// connection went away, so the session stops reporting itself as working.
+// Without it the turn stayed open until the next message started a new worker.
+//
+// The caller holds the session lock and has checked that the lost worker is
+// still the session's current one, so no replacement has been started. The
+// process is stopped first: a worker that lost its connection but kept running
+// would otherwise keep writing into a turn already recorded as interrupted.
+// The next worker still repairs the agent history on startup and finds no open
+// turn to interrupt.
+func (h *handler) interruptTurnOfLostWorker(ctx context.Context, id string) error {
+	if stopper, ok := h.launcher.(workerStopper); ok {
+		stopCtx, cancel := context.WithTimeout(ctx, workerbase.HTTPTimeout)
+		err := stopper.Stop(stopCtx, id)
+		cancel()
+		if err != nil {
+			return fmt.Errorf("stop worker process: %w", err)
+		}
+	}
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return err
+	}
+	turnID, started := sessionlog.LastOpenTurn(items)
+	// A turn waiting for an approval or an answer is left to the next worker,
+	// which records the unanswered request as denied before closing the turn.
+	if turnID == "" || sessionlog.HasPendingHumanRequest(items) {
+		return nil
+	}
+	duration := int64(0)
+	if !started.IsZero() {
+		duration = max(time.Since(started).Milliseconds(), 0)
+	}
+	_, err = h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemTurnInterrupted,
+		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "interrupted", Reason: sessionlog.WorkerRestartedReason, DurationMS: duration},
+	})
+	return err
 }
 
 func (h *handler) reconcileApprovalState(ctx context.Context, id string, session Session) (Session, error) {

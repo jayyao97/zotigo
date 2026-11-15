@@ -45,6 +45,85 @@ func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
 	}
 }
 
+type recordingWorkerStopper struct{ stopped []string }
+
+func (s *recordingWorkerStopper) Start(context.Context, string, string) error { return nil }
+func (s *recordingWorkerStopper) Stop(_ context.Context, sessionID string) error {
+	s.stopped = append(s.stopped, sessionID)
+	return nil
+}
+
+// A worker that dies mid-turn must not leave the session looking busy until
+// someone sends the next message.
+func TestWorkerDisconnectInterruptsItsOpenTurn(t *testing.T) {
+	turnStarted := zotigosession.DisplayItem{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}}
+	approvalRequest := zotigosession.DisplayItem{
+		Type: zotigosession.DisplayItemApprovalRequest, Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
+		Approval: &zotigosession.DisplayApproval{ID: "apr-1", TurnID: "turn-1", Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}}},
+	}
+	for _, tc := range []struct {
+		name            string
+		agent           string
+		items           []zotigosession.DisplayItem
+		staleGeneration bool
+		wantInterrupted bool
+	}{
+		{name: "open turn", items: []zotigosession.DisplayItem{turnStarted}, wantInterrupted: true},
+		{name: "no open turn", items: nil},
+		{name: "turn waiting for approval is left to the next worker", items: []zotigosession.DisplayItem{turnStarted, approvalRequest}},
+		{name: "a replaced worker is not the session's worker any more", items: []zotigosession.DisplayItem{turnStarted}, staleGeneration: true},
+		{name: "codex sessions close their own turns", agent: "codex", items: []zotigosession.DisplayItem{turnStarted}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const id = "sess-lost-worker"
+			registry := newSessionRegistry()
+			registry.Add(Session{ID: id, Agent: tc.agent, State: SessionStateRunning, Working: true})
+			if err := registry.SetWorkerGeneration(id, "worker-1"); err != nil {
+				t.Fatal(err)
+			}
+			if tc.staleGeneration {
+				if _, err := registry.RestartWorker(id); err != nil {
+					t.Fatal(err)
+				}
+			}
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{id: tc.items}}
+			stopper := &recordingWorkerStopper{}
+			handler := &handler{
+				registry: registry, items: source, launcher: stopper,
+				events: sessionlog.NewEventBroker(), sessionOps: newSessionOperationLocks(),
+			}
+
+			handler.handleWorkerDisconnect(id, "worker-1")
+
+			items, _, err := source.LoadItems(context.Background(), id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var interrupted []zotigosession.DisplayItem
+			for _, item := range items {
+				if item.Type == zotigosession.DisplayItemTurnInterrupted {
+					interrupted = append(interrupted, item)
+				}
+			}
+			if !tc.wantInterrupted {
+				if len(interrupted) != 0 {
+					t.Fatalf("unexpected turn_interrupted items: %#v", interrupted)
+				}
+				return
+			}
+			if len(interrupted) != 1 || interrupted[0].Turn == nil || interrupted[0].Turn.ID != "turn-1" || interrupted[0].Turn.Reason != sessionlog.WorkerRestartedReason {
+				t.Fatalf("turn_interrupted items = %#v, want one for turn-1 with reason %q", interrupted, sessionlog.WorkerRestartedReason)
+			}
+			if sessionlog.LastOpenTurnID(items) != "" {
+				t.Fatal("turn is still open after the worker was lost")
+			}
+			if len(stopper.stopped) != 1 || stopper.stopped[0] != id {
+				t.Fatalf("worker process stops = %v, want the lost worker stopped before its turn is closed", stopper.stopped)
+			}
+		})
+	}
+}
+
 func TestStaleWorkerDisconnectDoesNotResetRestartedSession(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "sess-stale-disconnect", State: SessionStateRunning})
