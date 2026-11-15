@@ -175,14 +175,18 @@ type ContentPart struct {
 	// includes "reasoning.encrypted_content". Both fields must be
 	// echoed back verbatim on the next turn (via a reasoning input
 	// item) to preserve chain-of-thought across a stateless call.
-	ReasoningID      string      `json:"reasoning_id,omitempty"`
-	EncryptedContent string      `json:"encrypted_content,omitempty"`
-	Image            *MediaPart  `json:"image,omitempty"`
-	Audio            *MediaPart  `json:"audio,omitempty"`
-	Video            *MediaPart  `json:"video,omitempty"`
-	File             *FilePart   `json:"file,omitempty"`
-	ToolCall         *ToolCall   `json:"tool_call,omitempty"`
-	ToolResult       *ToolResult `json:"tool_result,omitempty"`
+	ReasoningID      string `json:"reasoning_id,omitempty"`
+	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// Origin names the model service that produced a reasoning part (see
+	// providers.ReasoningOrigin). Reasoning is only replayed to the service
+	// it came from. Empty on history recorded before origins were tracked.
+	Origin     string      `json:"origin,omitempty"`
+	Image      *MediaPart  `json:"image,omitempty"`
+	Audio      *MediaPart  `json:"audio,omitempty"`
+	Video      *MediaPart  `json:"video,omitempty"`
+	File       *FilePart   `json:"file,omitempty"`
+	ToolCall   *ToolCall   `json:"tool_call,omitempty"`
+	ToolResult *ToolResult `json:"tool_result,omitempty"`
 }
 
 type MediaPart struct {

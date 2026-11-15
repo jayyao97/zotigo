@@ -12,7 +12,7 @@ import (
 const ProviderName = "openai"
 
 func init() {
-	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(New)))
+	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(providers.WithOwnReasoningOnly(New))))
 }
 
 // New chooses between the Chat Completions API (/v1/chat/completions)

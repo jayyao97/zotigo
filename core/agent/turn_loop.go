@@ -354,6 +354,14 @@ func (a *Agent) RunMessage(ctx context.Context, msg protocol.Message) (<-chan pr
 			}
 
 			asstMsg := protocol.NewAssistantMessage(currentContent)
+			// Record which service produced the reasoning, so it is only
+			// replayed to that service after a profile switch.
+			a.mu.RLock()
+			reasoningOrigin := providers.ReasoningOrigin(a.cfg)
+			a.mu.RUnlock()
+			for i := range reasoningBlocks {
+				reasoningBlocks[i].Origin = reasoningOrigin
+			}
 			// Prepend reasoning blocks in emit order so the next turn
 			// sees them with their original inter-block position.
 			if len(reasoningBlocks) > 0 {
