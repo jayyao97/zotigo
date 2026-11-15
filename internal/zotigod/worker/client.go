@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr error) {
+func Run(ctx context.Context, cfg workerbase.Config) (returnErr error) {
 	bootStarted := time.Now()
 	if strings.TrimSpace(cfg.SessionID) == "" {
 		return fmt.Errorf("session_id is required")
@@ -42,7 +42,7 @@ func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr erro
 		return err
 	}
 	workerbase.LogBootStep(cfg.SessionID, "session_lock", stepStarted, bootStarted)
-	var runtime *workerRuntime
+	var runtime *Runtime
 	var conn *websocket.Conn
 	var generation string
 	stopKeepalive := func() {}
@@ -99,7 +99,7 @@ func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr erro
 	clientWriter = workerbase.NewWriter(conn, workerbase.DefaultPingInterval, workerbase.DefaultPongWait)
 	stopKeepalive = clientWriter.Close
 	displayBarrier := workerbase.NewDisplayBarrierClient(clientWriter)
-	commandCh, inputCh, approvalCh, runtimeToolResults, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
+	commandCh, inputCh, approvalCh, runtimeToolResults, readErrCh := ReadMessages(conn, displayBarrier.Acknowledge)
 	runtimeToolClient := &workerbase.RuntimeToolClient{Writer: clientWriter, Results: runtimeToolResults}
 
 	stepStarted = time.Now()
@@ -132,7 +132,7 @@ func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr erro
 	if err != nil {
 		return err
 	}
-	cursor, err = replayWorkerCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
+	cursor, err = ReplayCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
 	if err != nil {
 		return err
 	}
@@ -177,7 +177,7 @@ func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr erro
 			if command.Sequence <= cursor.Sequence {
 				continue
 			}
-			cursor, err = replayWorkerCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
+			cursor, err = ReplayCommands(ctx, httpClient, daemonURL, cfg.SessionID, runtime, cursor)
 			if err != nil {
 				runErr = err
 				return err
@@ -239,7 +239,7 @@ func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr erro
 	}
 }
 
-func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan wire.Command, <-chan wire.InputRequest, <-chan wire.ApprovalDecision, <-chan wire.RuntimeToolResult, <-chan error) {
+func ReadMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan wire.Command, <-chan wire.InputRequest, <-chan wire.ApprovalDecision, <-chan wire.RuntimeToolResult, <-chan error) {
 	commandCh := make(chan wire.Command, workerbase.CommandBufferSize)
 	inputCh := make(chan wire.InputRequest, workerbase.CommandBufferSize)
 	approvalCh := make(chan wire.ApprovalDecision, workerbase.CommandBufferSize)

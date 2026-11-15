@@ -19,6 +19,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/worker"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
@@ -45,7 +46,7 @@ func TestWorkerClientInitializationFailurePreservesError(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	runErr := runWorkerClient(context.Background(), workerbase.Config{
+	runErr := worker.Run(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: sessionID,
 		AuthToken: "worker-secret",
@@ -103,13 +104,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	display := sessionlog.NewLog("sess-worker-profile", sessionlog.StoredItemSource{Store: store})
-	runtime := &workerRuntime{
-		sessionID: "sess-worker-profile",
-		workDir:   workDir,
-		store:     store,
-		agent:     ag,
-		display:   display,
-	}
+	runtime := worker.NewRuntimeForTest("sess-worker-profile", workDir, store, ag, display)
 	commandItem, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{

@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -19,7 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *wire.ProfileCommandPayload) (<-chan error, error) {
+func (r *Runtime) switchProfile(ctx context.Context, commandID string, command *wire.ProfileCommandPayload) (<-chan error, error) {
 	completion := make(chan error, 1)
 	predecessor, ordered := r.nextProfileOrder()
 	target := strings.TrimSpace(command.Name)
@@ -68,7 +68,7 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 	return completion, nil
 }
 
-func (r *workerRuntime) nextProfileOrder() (<-chan struct{}, chan struct{}) {
+func (r *Runtime) nextProfileOrder() (<-chan struct{}, chan struct{}) {
 	r.profileOrderMu.Lock()
 	defer r.profileOrderMu.Unlock()
 	predecessor := r.profileOrderTail
@@ -82,7 +82,7 @@ func (r *workerRuntime) nextProfileOrder() (<-chan struct{}, chan struct{}) {
 	return predecessor, ordered
 }
 
-func (r *workerRuntime) nextProfileEpoch() (uint64, error) {
+func (r *Runtime) nextProfileEpoch() (uint64, error) {
 	r.profileMu.Lock()
 	defer r.profileMu.Unlock()
 	if err := r.currentFatalError(); err != nil {
@@ -92,7 +92,7 @@ func (r *workerRuntime) nextProfileEpoch() (uint64, error) {
 	return r.profileEpoch, nil
 }
 
-func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uint64, commandID string, from string, target string, model string) error {
+func (r *Runtime) commitLatestProfileSwitch(ctx context.Context, epoch uint64, commandID string, from string, target string, model string) error {
 	r.profileMu.Lock()
 	defer r.profileMu.Unlock()
 	if r.profileEpoch != epoch {
@@ -109,13 +109,13 @@ func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uin
 	return err
 }
 
-func (r *workerRuntime) turnHookModel() string {
+func (r *Runtime) turnHookModel() string {
 	r.profileMu.Lock()
 	defer r.profileMu.Unlock()
 	return r.hookModel
 }
 
-func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered chan struct{}, commandID string, target string, result <-chan error, completion chan<- error) {
+func (r *Runtime) finishProfileSwitch(predecessor <-chan struct{}, ordered chan struct{}, commandID string, target string, result <-chan error, completion chan<- error) {
 	defer close(completion)
 	err := <-result
 	<-predecessor
@@ -153,7 +153,7 @@ func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered
 	completion <- nil
 }
 
-func (r *workerRuntime) completeProfileFailure(predecessor <-chan struct{}, ordered chan struct{}, completion chan<- error, commandID string, target string, cause error) {
+func (r *Runtime) completeProfileFailure(predecessor <-chan struct{}, ordered chan struct{}, completion chan<- error, commandID string, target string, cause error) {
 	defer close(completion)
 	<-predecessor
 	defer close(ordered)
@@ -171,7 +171,7 @@ func (r *workerRuntime) completeProfileFailure(predecessor <-chan struct{}, orde
 	completion <- err
 }
 
-func (r *workerRuntime) fail(err error) {
+func (r *Runtime) fail(err error) {
 	if err == nil {
 		return
 	}
@@ -190,13 +190,13 @@ func (r *workerRuntime) fail(err error) {
 	}
 }
 
-func (r *workerRuntime) currentFatalError() error {
+func (r *Runtime) currentFatalError() error {
 	r.fatalMu.Lock()
 	defer r.fatalMu.Unlock()
 	return r.fatalErr
 }
 
-func (r *workerRuntime) commitProfileSwitch(ctx context.Context, commandID string, from string, target string) error {
+func (r *Runtime) commitProfileSwitch(ctx context.Context, commandID string, from string, target string) error {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
 	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, r.workDir)
@@ -227,7 +227,7 @@ func (r *workerRuntime) commitProfileSwitch(ctx context.Context, commandID strin
 	return nil
 }
 
-func (r *workerRuntime) recordProfileFailure(ctx context.Context, commandID string, target string, err error) error {
+func (r *Runtime) recordProfileFailure(ctx context.Context, commandID string, target string, err error) error {
 	if appendErr := r.display.ProfileFailed(ctx, commandID, r.agent.ActiveProfileName(), target, err); appendErr != nil {
 		return appendErr
 	}

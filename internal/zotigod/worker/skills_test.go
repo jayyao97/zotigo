@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"os"

@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -105,7 +105,7 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-replay", &workerRuntime{}, workerbase.CommandCursor{})
+	cursor, err := ReplayCommands(context.Background(), server.Client(), server.URL, "sess-replay", &Runtime{}, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay commands: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 }
 
 func TestWorkerRuntimeRejectsMalformedTypedCommand(t *testing.T) {
-	runtime := &workerRuntime{}
+	runtime := &Runtime{}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:       "cmd-1",
 		Sequence: 1,
@@ -161,7 +161,7 @@ func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-malformed", &workerRuntime{}, workerbase.CommandCursor{})
+	cursor, err := ReplayCommands(context.Background(), server.Client(), server.URL, "sess-malformed", &Runtime{}, workerbase.CommandCursor{})
 	if err == nil || !strings.Contains(err.Error(), "invalid message command payload") {
 		t.Fatalf("expected malformed command error, got %v", err)
 	}
@@ -216,7 +216,7 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := runWorkerClient(context.Background(), workerbase.Config{
+	err := Run(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: "sess-init-before-connect",
 	})
@@ -242,7 +242,7 @@ func TestWorkerClientDialErrorIncludesHTTPResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := runWorkerClient(context.Background(), workerbase.Config{
+	err := Run(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: "sess-dial-conflict",
 	})
@@ -302,7 +302,7 @@ func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-profile-failure",
 		workDir:   workDir,
 		store:     workerUnavailableStore{err: errors.New("store unavailable")},
@@ -370,7 +370,7 @@ func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 		t.Fatalf("create agent: %v", err)
 	}
 	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-profile-build-failure",
 		workDir:   workDir,
 		store:     store,
@@ -422,7 +422,7 @@ func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
 		}
 		return nil
 	}}
-	runtime := &workerRuntime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: sessionlog.NewLog("sess-marker-failure", source)}
+	runtime := &Runtime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: sessionlog.NewLog("sess-marker-failure", source)}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{ID: "profile-command", Type: wire.CommandProfile, Profile: &wire.ProfileCommandPayload{Name: "broken"}}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
@@ -449,7 +449,7 @@ func TestWorkerRuntimeDoesNotCompleteLaterProfileAfterMarkerFailure(t *testing.T
 		}
 		return nil
 	}}
-	runtime := &workerRuntime{sessionID: "sess-marker-order", agent: ag, display: sessionlog.NewLog("sess-marker-order", source)}
+	runtime := &Runtime{sessionID: "sess-marker-order", agent: ag, display: sessionlog.NewLog("sess-marker-order", source)}
 	ready := make(chan struct{})
 	close(ready)
 	orderedA := make(chan struct{})
@@ -512,7 +512,7 @@ func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) 
 		t.Fatalf("create agent: %v", err)
 	}
 	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-profile-supersede",
 		workDir:   workDir,
 		store:     store,
@@ -621,7 +621,7 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-profile-linear",
 		workDir:   workDir,
 		store:     store,
@@ -735,7 +735,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create old agent: %v", err)
 	}
-	firstRuntime := &workerRuntime{
+	firstRuntime := &Runtime{
 		sessionID: "sess-profile-uncertain",
 		workDir:   workDir,
 		store:     store,
@@ -760,7 +760,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		_, _ = w.Write(data)
 	}))
 	defer commandServer.Close()
-	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-profile-uncertain", firstRuntime, workerbase.CommandCursor{})
+	cursor, replayErr := ReplayCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-profile-uncertain", firstRuntime, workerbase.CommandCursor{})
 	var uncertain *workerbase.ProfileStateUncertainError
 	if !errors.As(replayErr, &uncertain) {
 		t.Fatalf("expected uncertain replay error, got %v", replayErr)
@@ -802,7 +802,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create new agent: %v", err)
 	}
-	secondRuntime := &workerRuntime{
+	secondRuntime := &Runtime{
 		sessionID: "sess-profile-uncertain",
 		workDir:   workDir,
 		store:     baseStore,
@@ -869,7 +869,7 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 			return nil
 		},
 	}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-profile-append-failure",
 		workDir:   workDir,
 		store:     store,
@@ -948,7 +948,7 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		display:    display,
 		turnActive: true,
 	}
@@ -975,7 +975,7 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 
 func TestWorkerRuntimeCloseWaitsForTurnPersistence(t *testing.T) {
 	done := make(chan struct{})
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		turnActive: true,
 		turnDone:   done,
 	}
@@ -1022,7 +1022,7 @@ func TestWorkerRuntimeCloseWaitsForIdleProfileApply(t *testing.T) {
 		},
 	})
 	<-applyStarted
-	runtime := &workerRuntime{agent: ag}
+	runtime := &Runtime{agent: ag}
 	closed := make(chan struct{})
 	go func() {
 		runtime.Close()
@@ -1073,7 +1073,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	transport := zotigotransport.NewChannelTransport(10)
 	defer transport.Close()
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-close-stream",
 		store:     store,
 		agent:     ag,
@@ -1128,7 +1128,7 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new agent: %v", err)
 	}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID:  "sess-ready",
 		workDir:    "/workspace",
 		agent:      ag,
@@ -1201,7 +1201,7 @@ func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
 	ag.Restore(agent.Snapshot{State: agent.StatePaused})
 	ready := make(chan struct{})
 	close(ready)
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-paused-input", agent: ag, display: display,
 		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true,
 	}
@@ -1236,7 +1236,7 @@ func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	ag.Restore(agent.Snapshot{State: agent.StateRunning})
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-starting-input", agent: ag, display: display,
 		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}),
 	}
@@ -1292,7 +1292,7 @@ func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T)
 	close(ready)
 	transport := zotigotransport.NewChannelTransport(4)
 	defer transport.Close()
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-completion-input", store: store, agent: ag, display: display,
 		turnActive: true, turnReady: ready, turnDone: make(chan struct{}), readyDone: true, fatalCh: make(chan error, 1),
 	}
@@ -1362,7 +1362,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 	}
 	ready := make(chan struct{})
 	close(ready)
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		agent:      ag,
 		display:    display,
 		turnActive: true,
@@ -1398,7 +1398,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 }
 
 func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
-	runtime := &workerRuntime{turnActive: true, turnDone: make(chan struct{})}
+	runtime := &Runtime{turnActive: true, turnDone: make(chan struct{})}
 	err := runtime.startMessageTurn(context.Background(), "message", 1, &wire.MessageCommandPayload{Text: "queued"})
 	if !errors.Is(err, sessionlog.ErrActiveTurn) {
 		t.Fatalf("start message error = %v, want active_turn", err)
@@ -1429,7 +1429,7 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	transport := zotigotransport.NewChannelTransport(4)
 	defer transport.Close()
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-stopping", store: store, agent: ag,
 		display:    sessionlog.NewLog("sess-stopping", source),
 		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}), fatalCh: make(chan error, 1),
@@ -1494,7 +1494,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
+	_, _, _, _, errCh := ReadMessages(clientConn, nil)
 	for idx := uint64(1); idx <= workerbase.CommandBufferSize+1; idx++ {
 		msg := wire.Message{
 			Type: wire.MessageCommand,

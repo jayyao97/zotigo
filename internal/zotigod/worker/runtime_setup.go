@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -49,7 +49,7 @@ type workerRuntimeConfig struct {
 	RuntimeTools           *workerbase.RuntimeToolClient
 }
 
-type workerRuntime struct {
+type Runtime struct {
 	sessionID        string
 	workDir          string
 	skills           *skills.SkillManager
@@ -89,7 +89,7 @@ type workerRuntime struct {
 	turnCommandSequence uint64
 }
 
-func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRuntime, error) {
+func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*Runtime, error) {
 	stepStarted := time.Now()
 	cwd, err := os.Getwd()
 	if err != nil {
@@ -289,7 +289,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("repair open display turn: %w", err)
 	}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID:     cfg.SessionID,
 		workDir:       cwd,
 		skills:        skills,
@@ -346,7 +346,7 @@ func resolveWorkerProfile(sess *zotigosession.Session, appConfig *config.Config)
 	return appConfig.ResolveProfile(sess.ProfileName)
 }
 
-func (r *workerRuntime) Close() {
+func (r *Runtime) Close() {
 	r.mu.Lock()
 	active := r.turnActive
 	done := r.turnDone
@@ -399,5 +399,18 @@ func (r *workerRuntime) Close() {
 	}
 	if r.cleanup != nil {
 		r.cleanup()
+	}
+}
+
+// NewRuntimeForTest builds a Runtime from already-constructed parts, without
+// connecting to a daemon. Test-only: daemon tests in internal/zotigod use it to
+// drive a native runtime against an in-process handler.
+func NewRuntimeForTest(sessionID, workDir string, store zotigosession.Store, ag *agent.Agent, display *sessionlog.Log) *Runtime {
+	return &Runtime{
+		sessionID: sessionID,
+		workDir:   workDir,
+		store:     store,
+		agent:     ag,
+		display:   display,
 	}
 }

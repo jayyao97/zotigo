@@ -1,8 +1,12 @@
-package zotigod
+package worker
 
 import (
 	"context"
+	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
 
 	"sync"
 	"time"
@@ -12,6 +16,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/internal/testutil/catalogtest"
 )
 
 // writeWorkerTestJSON answers a stubbed daemon endpoint the way the daemon's
@@ -77,4 +82,52 @@ func (s *blockingProfileUpdateStore) UpdateProfile(ctx context.Context, id strin
 	return s.Store.(interface {
 		UpdateProfile(context.Context, string, string, time.Time) error
 	}).UpdateProfile(ctx, id, profileName, updatedAt)
+}
+
+func newTestStoreRoot(t *testing.T) string {
+	t.Helper()
+	return catalogtest.NewRoot(t)
+}
+
+type noopProvider struct{}
+
+func (p *noopProvider) Name() string { return "noop" }
+
+func (p *noopProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
+	ch := make(chan protocol.Event)
+	close(ch)
+	return ch, nil
+}
+
+func tinyPNGBase64() string {
+	return "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg=="
+}
+
+type rollbackFailingProfileStore struct {
+	zotigosession.Store
+	updates int
+}
+
+func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	s.updates++
+	if s.updates == 2 {
+		return errors.New("rollback unavailable")
+	}
+	return s.Store.(interface {
+		UpdateProfile(context.Context, string, string, time.Time) error
+	}).UpdateProfile(ctx, id, profileName, updatedAt)
+}
+
+func writeDaemonTestSkill(t *testing.T, root, name, description, instructions string) string {
+	t.Helper()
+	dir := filepath.Join(root, name)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "SKILL.md")
+	content := "---\nname: " + name + "\ndescription: " + description + "\n---\n" + instructions + "\n"
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

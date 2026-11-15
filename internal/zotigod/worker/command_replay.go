@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -13,7 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, runtime *workerRuntime, cursor workerbase.CommandCursor) (workerbase.CommandCursor, error) {
+func ReplayCommands(ctx context.Context, client *http.Client, daemonURL string, sessionID string, runtime *Runtime, cursor workerbase.CommandCursor) (workerbase.CommandCursor, error) {
 	type pendingProfile struct {
 		sequence   uint64
 		completion <-chan error
@@ -86,7 +86,7 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 	}
 }
 
-func loadAppliedWorkerCommandSequences(ctx context.Context, runtime *workerRuntime) (map[uint64]bool, error) {
+func loadAppliedWorkerCommandSequences(ctx context.Context, runtime *Runtime) (map[uint64]bool, error) {
 	if runtime == nil || runtime.display == nil || runtime.display.Items == nil {
 		return nil, nil
 	}

@@ -18,6 +18,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/worker"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
@@ -297,7 +298,7 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	defer unsubscribe()
 	writer := workerbase.NewUnstartedWriter(workerConn, workerbase.DeltaBufferSize)
 	barrierClient := workerbase.NewDisplayBarrierClient(writer)
-	_, _, _, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
+	_, _, _, _, readErrCh := worker.ReadMessages(workerConn, barrierClient.Acknowledge)
 	writer.SendDelta(wire.DisplayDelta{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
 	writer.SendDisplayWake()
 	barrierResult := make(chan error, 1)

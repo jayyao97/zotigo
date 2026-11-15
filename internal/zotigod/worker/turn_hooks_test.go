@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -97,7 +97,7 @@ func TestWorkerRuntimeDispatchesTurnHooksWithUsage(t *testing.T) {
 	transport := newWorkerRuntimeTransport("sess-turn-hooks", display, nil)
 	t.Cleanup(func() { _ = transport.Close() })
 	dispatcher := &channelHookDispatcher{events: make(chan hooks.Event, 3)}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-turn-hooks", workDir: "/workspace", store: store, agent: ag,
 		runner: runner.New(ag, transport), transport: transport, display: display,
 		hooks: dispatcher, hookModel: "model-test",
@@ -172,7 +172,7 @@ func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {
 	transport := newWorkerRuntimeTransport("sess-turn-error", display, nil)
 	t.Cleanup(func() { _ = transport.Close() })
 	dispatcher := &channelHookDispatcher{events: make(chan hooks.Event, 3)}
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID: "sess-turn-error", workDir: "/workspace", store: store, agent: ag,
 		runner: runner.New(ag, transport), transport: transport, display: display,
 		hooks: dispatcher, hookModel: "model-test",

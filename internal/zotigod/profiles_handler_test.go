@@ -23,6 +23,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/worker"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
@@ -423,11 +424,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	if err != nil {
 		t.Fatalf("create recovery agent: %v", err)
 	}
-	runtime := &workerRuntime{
-		sessionID: "sess-repair-different-profile",
-		agent:     ag,
-		display:   sessionlog.NewLog("sess-repair-different-profile", source),
-	}
+	runtime := worker.NewRuntimeForTest("sess-repair-different-profile", "", nil, ag, sessionlog.NewLog("sess-repair-different-profile", source))
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, wire.CommandsPage{
 			Commands:   []wire.Command{sessionlog.ProfileCommandFromItem(commandA), sessionlog.PauseCommandFromItem(pause), sessionlog.ProfileCommandFromItem(commandB)},
@@ -435,7 +432,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 		})
 	}))
 	defer commandServer.Close()
-	cursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{Sequence: commandA.Sequence})
+	cursor, err := worker.ReplayCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-repair-different-profile", runtime, workerbase.CommandCursor{Sequence: commandA.Sequence})
 	if err != nil {
 		t.Fatalf("replay repaired commands: %v", err)
 	}

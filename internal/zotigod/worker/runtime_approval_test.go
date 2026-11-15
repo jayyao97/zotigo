@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -165,7 +165,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runtime := &workerRuntime{sessionID: sessionID, store: store, transport: transport, runtimeWAL: wal}
+	runtime := &Runtime{sessionID: sessionID, store: store, transport: transport, runtimeWAL: wal}
 	if err := runtime.releaseApproval(ctx, resolution); err != nil {
 		t.Fatalf("release approval with active parent WAL: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 	transport := newWorkerRuntimeTransport(sessionID, display, nil)
 	ready := make(chan struct{})
 	close(ready)
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		sessionID:  sessionID,
 		agent:      ag,
 		transport:  transport,
@@ -406,7 +406,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 	}
 	done := make(chan struct{})
 	close(done)
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		agent:      ag,
 		transport:  transport,
 		display:    display,
@@ -566,7 +566,7 @@ func TestWorkerRuntimeRepairsPausedAgentWhenPauseWinsApprovalRace(t *testing.T) 
 	if _, err := transport.interruptTurn(context.Background(), turnID, "user requested", func() {}); err != nil {
 		t.Fatalf("interrupt turn: %v", err)
 	}
-	runtime := &workerRuntime{agent: ag, transport: transport}
+	runtime := &Runtime{agent: ag, transport: transport}
 	snapshot := runtime.snapshotAfterTurn(turnID)
 	if snapshot.State != agent.StateIdle || len(snapshot.PendingActions) != 0 || len(snapshot.DeferredActions) != 0 {
 		t.Fatalf("paused agent was not repaired: %#v", snapshot)
@@ -776,7 +776,7 @@ func TestWorkerRuntimeCloseLeavesPendingApprovalTurnForReplacement(t *testing.T)
 	turnCtx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	close(done)
-	runtime := &workerRuntime{
+	runtime := &Runtime{
 		agent:      ag,
 		transport:  transport,
 		display:    display,

@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -73,7 +73,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 				}, NextOffset: 1})
 			}))
 			defer server.Close()
-			if _, err := replayWorkerCommands(ctx, server.Client(), server.URL, sessionID, runtime, cursor); err != nil {
+			if _, err := ReplayCommands(ctx, server.Client(), server.URL, sessionID, runtime, cursor); err != nil {
 				t.Fatal(err)
 			}
 			items, _, err := store.ListDisplayItems(ctx, sessionID)
@@ -106,7 +106,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 			}))
 			defer pendingServer.Close()
 			for attempt := 0; attempt < 2; attempt++ {
-				if _, err := replayWorkerCommands(ctx, pendingServer.Client(), pendingServer.URL, sessionID, runtime, cursor); err != nil {
+				if _, err := ReplayCommands(ctx, pendingServer.Client(), pendingServer.URL, sessionID, runtime, cursor); err != nil {
 					t.Fatal(err)
 				}
 				runtime.mu.Lock()

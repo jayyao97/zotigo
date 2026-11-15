@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -21,7 +21,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *workerRuntime) pauseTurn(ctx context.Context, command *wire.PauseCommandPayload) error {
+func (r *Runtime) pauseTurn(ctx context.Context, command *wire.PauseCommandPayload) error {
 	currentTurnID := r.display.CurrentTurnID()
 	if currentTurnID == "" {
 		return nil
@@ -43,7 +43,7 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *wire.PauseComman
 	return err
 }
 
-func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command wire.Command) error {
+func (r *Runtime) queueTurnUserInput(ctx context.Context, command wire.Command) error {
 	payload := command.Steering
 	msg, err := sessionlog.UserMessageFromCommand(payload.Text, payload.Images, "steering")
 	if err != nil {
@@ -92,7 +92,7 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command wire.Com
 	return r.afterTurnUserInputQueued(ctx, currentTurnID, payload.Text)
 }
 
-func (r *workerRuntime) afterTurnUserInputQueued(ctx context.Context, turnID string, text string) error {
+func (r *Runtime) afterTurnUserInputQueued(ctx context.Context, turnID string, text string) error {
 	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, text)
 	snapshot := r.agent.Snapshot()
 	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
@@ -115,7 +115,7 @@ func isStaleTurnUserInputError(err error) bool {
 	return errors.Is(err, agent.ErrNotRunning)
 }
 
-func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *wire.MessageCommandPayload) error {
+func (r *Runtime) startMessageTurn(ctx context.Context, commandID string, commandSequence uint64, command *wire.MessageCommandPayload) error {
 	msg, err := messageFromCommandWithSkills(commandID, command, r.skills)
 	if err != nil {
 		return err
@@ -221,7 +221,7 @@ func isCompactCommand(command *wire.MessageCommandPayload) bool {
 	return false
 }
 
-func (r *workerRuntime) compactTurn(ctx context.Context) error {
+func (r *Runtime) compactTurn(ctx context.Context) error {
 	result, err := r.agent.ForceCompress(ctx)
 	if err != nil {
 		return err
@@ -276,7 +276,7 @@ func messageFromCommandWithSkills(commandID string, command *wire.MessageCommand
 	return enriched, nil
 }
 
-func (r *workerRuntime) noteTurnCommandSequence(sequence uint64) {
+func (r *Runtime) noteTurnCommandSequence(sequence uint64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.turnActive && sequence > r.turnCommandSequence {
@@ -284,13 +284,13 @@ func (r *workerRuntime) noteTurnCommandSequence(sequence uint64) {
 	}
 }
 
-func (r *workerRuntime) turnSequence() uint64 {
+func (r *Runtime) turnSequence() uint64 {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.turnCommandSequence
 }
 
-func (r *workerRuntime) NotifyIdleIfIdle(ctx context.Context, commandSequence uint64) error {
+func (r *Runtime) NotifyIdleIfIdle(ctx context.Context, commandSequence uint64) error {
 	r.mu.Lock()
 	active := r.turnActive
 	r.mu.Unlock()
@@ -300,7 +300,7 @@ func (r *workerRuntime) NotifyIdleIfIdle(ctx context.Context, commandSequence ui
 	return r.notifyIdle(ctx, wire.Idle{CommandSequence: commandSequence})
 }
 
-func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
+func (r *Runtime) snapshotAfterTurn(turnID string) agent.Snapshot {
 	snapshot := r.agent.Snapshot()
 	if r.transport == nil {
 		return snapshot
@@ -326,7 +326,7 @@ func messageFromCommand(commandID string, command *wire.MessageCommandPayload) (
 	return message, nil
 }
 
-func (r *workerRuntime) cancelCurrentTurn() {
+func (r *Runtime) cancelCurrentTurn() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.turnCancel != nil {
@@ -334,7 +334,7 @@ func (r *workerRuntime) cancelCurrentTurn() {
 	}
 }
 
-func (r *workerRuntime) finishTurn() {
+func (r *Runtime) finishTurn() {
 	r.agent.ClearPendingTurnUserInput()
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -351,13 +351,13 @@ func (r *workerRuntime) finishTurn() {
 	r.turnDone = nil
 }
 
-func (r *workerRuntime) markTurnReady() {
+func (r *Runtime) markTurnReady() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.closeTurnReadyLocked()
 }
 
-func (r *workerRuntime) closeTurnReadyLocked() {
+func (r *Runtime) closeTurnReadyLocked() {
 	if r.turnReady == nil || r.readyDone {
 		return
 	}
@@ -365,7 +365,7 @@ func (r *workerRuntime) closeTurnReadyLocked() {
 	r.readyDone = true
 }
 
-func (r *workerRuntime) closeTurnDoneLocked() {
+func (r *Runtime) closeTurnDoneLocked() {
 	if r.turnDone == nil || r.doneDone {
 		return
 	}
@@ -373,7 +373,7 @@ func (r *workerRuntime) closeTurnDoneLocked() {
 	r.doneDone = true
 }
 
-func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot, completedTurnIDs ...string) error {
+func (r *Runtime) saveSnapshot(ctx context.Context, snap agent.Snapshot, completedTurnIDs ...string) error {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
 	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, "")
@@ -394,7 +394,7 @@ func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot, c
 	return r.store.Put(ctx, sess)
 }
 
-func (r *workerRuntime) beginRuntimeWAL(ctx context.Context) error {
+func (r *Runtime) beginRuntimeWAL(ctx context.Context) error {
 	if r.runtimeWAL == nil {
 		return nil
 	}

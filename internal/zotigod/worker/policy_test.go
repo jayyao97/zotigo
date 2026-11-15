@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -116,7 +116,7 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 			return nil
 		},
 	}
-	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
+	cursor, replayErr := ReplayCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if replayErr == nil || !strings.Contains(replayErr.Error(), "completion marker unavailable") {
 		t.Fatalf("expected completion marker failure, got %v", replayErr)
 	}
@@ -132,7 +132,7 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	}
 
 	runtime.display.Items = storedItems
-	cursor, err = replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
+	cursor, err = ReplayCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay pending policy command: %v", err)
 	}
@@ -164,7 +164,7 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 		t.Fatalf("expected one completion marker per command, got %#v", items)
 	}
 
-	staleCursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
+	staleCursor, err := ReplayCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay stale cursor: %v", err)
 	}

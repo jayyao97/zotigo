@@ -1,4 +1,4 @@
-package zotigod
+package worker
 
 import (
 	"context"
@@ -17,12 +17,12 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *workerRuntime) HandleCommand(ctx context.Context, command wire.Command) error {
+func (r *Runtime) HandleCommand(ctx context.Context, command wire.Command) error {
 	_, err := r.handleCommand(ctx, command)
 	return err
 }
 
-func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputRequest) wire.InputResult {
+func (r *Runtime) AcceptInput(ctx context.Context, request wire.InputRequest) wire.InputResult {
 	result := wire.InputResult{RequestID: request.RequestID}
 	command, err := r.acceptInput(ctx, request)
 	if err != nil {
@@ -33,7 +33,7 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputReque
 	return result
 }
 
-func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputRequest) (wire.Command, error) {
+func (r *Runtime) acceptInput(ctx context.Context, request wire.InputRequest) (wire.Command, error) {
 	if existing, found, err := sessionlog.FindExistingInput(ctx, r.display.Items, r.sessionID, request.Command, sessionlog.StoreRoot(r.store)); err != nil {
 		return wire.Command{}, err
 	} else if found {
@@ -153,7 +153,7 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 	return stored, nil
 }
 
-func (r *workerRuntime) waitForTurnAdmission(ctx context.Context, turnID string) (bool, error) {
+func (r *Runtime) waitForTurnAdmission(ctx context.Context, turnID string) (bool, error) {
 	r.mu.Lock()
 	active := r.turnActive
 	ready := r.turnReady
@@ -172,7 +172,7 @@ func (r *workerRuntime) waitForTurnAdmission(ctx context.Context, turnID string)
 	}
 }
 
-func (r *workerRuntime) resolveApproval(ctx context.Context, decision wire.ApprovalDecision) (wire.ApprovalResult, *workerApprovalResolution) {
+func (r *Runtime) resolveApproval(ctx context.Context, decision wire.ApprovalDecision) (wire.ApprovalResult, *workerApprovalResolution) {
 	result := wire.ApprovalResult{RequestID: decision.RequestID}
 	if r.transport == nil {
 		result.Error = "approval transport is not configured"
@@ -187,7 +187,7 @@ func (r *workerRuntime) resolveApproval(ctx context.Context, decision wire.Appro
 	return result, &resolution
 }
 
-func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerApprovalResolution) error {
+func (r *Runtime) releaseApproval(ctx context.Context, resolution workerApprovalResolution) error {
 	if r.transport == nil {
 		return fmt.Errorf("approval transport is not configured")
 	}
@@ -199,7 +199,7 @@ func (r *workerRuntime) releaseApproval(ctx context.Context, resolution workerAp
 	return r.transport.releaseApproval(ctx, resolution)
 }
 
-func (r *workerRuntime) handleCommand(ctx context.Context, command wire.Command) (<-chan error, error) {
+func (r *Runtime) handleCommand(ctx context.Context, command wire.Command) (<-chan error, error) {
 	if err := r.currentFatalError(); err != nil {
 		return nil, err
 	}
@@ -274,7 +274,7 @@ func validateWorkerCommand(command wire.Command) error {
 	return nil
 }
 
-func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
+func (r *Runtime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
 	target, err := workerbase.NormalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err
