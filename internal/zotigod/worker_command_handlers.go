@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -37,7 +38,7 @@ func (h *handler) handleWorkerTurnInterrupted(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
-	if openTurnID := lastOpenTurnID(items); openTurnID == "" || openTurnID != turnID {
+	if openTurnID := sessionlog.LastOpenTurnID(items); openTurnID == "" || openTurnID != turnID {
 		writeAPIError(w, http.StatusConflict, "turn_id does not match active turn")
 		return
 	}

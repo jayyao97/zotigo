@@ -1237,7 +1237,7 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string),
 		toolNames: make(map[string]string), toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
 	}
-	runtime.activeTurnID, runtime.turnStarted = lastOpenTurn(items)
+	runtime.activeTurnID, runtime.turnStarted = sessionlog.LastOpenTurn(items)
 	if runtime.activeTurnID != "turn-old" {
 		t.Fatalf("open turn was not restored: %#v", runtime)
 	}

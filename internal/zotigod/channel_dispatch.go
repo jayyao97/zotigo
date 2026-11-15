@@ -16,6 +16,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const channelTaskTimeout = 2 * time.Hour
@@ -70,7 +71,7 @@ func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, store
 	if !exists {
 		return nil, errSessionNotFound
 	}
-	if err := requireIdleSession(items); err != nil || hasPendingHumanRequest(items) {
+	if err := requireIdleSession(items); err != nil || sessionlog.HasPendingHumanRequest(items) {
 		return nil, errSessionBusy
 	}
 	desired.Revision = current.Revision + 1
@@ -395,14 +396,14 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 	}
 }
 
-func channelMessageImages(inputs []channels.InboundImage) ([]messageImage, error) {
+func channelMessageImages(inputs []channels.InboundImage) ([]sessionlog.MessageImage, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
 	if len(inputs) > maxMessageImages {
 		return nil, fmt.Errorf("channel message images must contain at most %d items", maxMessageImages)
 	}
-	images := make([]messageImage, 0, len(inputs))
+	images := make([]sessionlog.MessageImage, 0, len(inputs))
 	totalBytes := 0
 	for index, input := range inputs {
 		if len(input.Data) == 0 {
@@ -423,7 +424,7 @@ func channelMessageImages(inputs []channels.InboundImage) ([]messageImage, error
 		if err != nil {
 			return nil, fmt.Errorf("validate channel message image %d: %w", index, err)
 		}
-		images = append(images, messageImage{MimeType: mimeType, Data: input.Data, SizeBytes: len(input.Data), Width: width, Height: height})
+		images = append(images, sessionlog.MessageImage{MimeType: mimeType, Data: input.Data, SizeBytes: len(input.Data), Width: width, Height: height})
 	}
 	return images, nil
 }

@@ -9,11 +9,12 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func requireIdleSession(items []zotigosession.DisplayItem) error {
-	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
+	if sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
 		return errSessionBusy
 	}
 	return nil
@@ -78,14 +79,14 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 	if err != nil {
 		return wire.Command{}, fmt.Errorf("load display items: %w", err)
 	}
-	turnID := lastOpenTurnID(items)
+	turnID := sessionlog.LastOpenTurnID(items)
 	if turnID == "" {
 		return wire.Command{}, errNoActiveTurn
 	}
 	if requestedTurnID != "" && requestedTurnID != turnID {
 		return wire.Command{}, errTurnMismatch
 	}
-	if hasPendingApprovalForTurn(items, turnID) {
+	if sessionlog.HasPendingApprovalForTurn(items, turnID) {
 		return wire.Command{}, errApprovalPending
 	}
 	if !h.ensureWorkerOnline(ctx, id) {
@@ -95,10 +96,10 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 	if err != nil {
 		return wire.Command{}, fmt.Errorf("reload display items: %w", err)
 	}
-	if lastOpenTurnID(items) != turnID {
+	if sessionlog.LastOpenTurnID(items) != turnID {
 		return wire.Command{}, errNoActiveTurn
 	}
-	if hasPendingApprovalForTurn(items, turnID) {
+	if sessionlog.HasPendingApprovalForTurn(items, turnID) {
 		return wire.Command{}, errApprovalPending
 	}
 	var interrupt *wire.InterruptTurn
@@ -261,11 +262,11 @@ func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx contex
 
 func requireOpenTurnWithoutPendingApproval(turnID string) func([]zotigosession.DisplayItem) error {
 	return func(items []zotigosession.DisplayItem) error {
-		openTurnID := lastOpenTurnID(items)
+		openTurnID := sessionlog.LastOpenTurnID(items)
 		if openTurnID != turnID && (openTurnID != "" || !hasTerminalTurn(items, turnID)) {
 			return errSessionBusy
 		}
-		if hasPendingApprovalForTurn(items, turnID) {
+		if sessionlog.HasPendingApprovalForTurn(items, turnID) {
 			return errApprovalPending
 		}
 		return nil

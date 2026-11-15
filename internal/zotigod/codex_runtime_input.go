@@ -256,12 +256,12 @@ func (r *codexWorkerRuntime) persistSteering(command wire.Command, turnID string
 		}
 	}
 	images := displayImagesFromCommand(command.Steering.Images)
-	item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
+	item := sessionlog.MessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
 	item.ID = command.ID
 	item.CreatedAt = command.CreatedAt
 	item.Turn = &zotigosession.DisplayTurn{ID: turnID}
 	item.Command = &zotigosession.DisplayCommand{
-		Type: wire.CommandSteering, Text: command.Steering.Text, Images: displayCommandImages(images), Skills: append([]string(nil), command.Steering.Skills...), TurnID: turnID,
+		Type: wire.CommandSteering, Text: command.Steering.Text, Images: sessionlog.CommandImages(images), Skills: append([]string(nil), command.Steering.Skills...), TurnID: turnID,
 	}
 	dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Steering.Text)
 	return r.append(item)

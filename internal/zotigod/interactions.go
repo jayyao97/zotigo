@@ -200,13 +200,13 @@ func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID
 	if err != nil || !exists {
 		return err
 	}
-	pendingApprovals := make(map[string]approvalRequest)
+	pendingApprovals := make(map[string]sessionlog.ApprovalRequest)
 	pendingInteractions := make(map[string]wire.InteractionRequest)
 	for _, item := range items {
 		if item.Approval != nil && item.Approval.ID != "" {
 			switch item.Type {
 			case zotigosession.DisplayItemApprovalRequest:
-				req, ok := approvalFromDisplayItems(sessionID, item.Approval.ID, []zotigosession.DisplayItem{item})
+				req, ok := sessionlog.ApprovalFromItems(sessionID, item.Approval.ID, []zotigosession.DisplayItem{item})
 				if ok && isCodexApproval(req) {
 					pendingApprovals[req.ID] = req
 				}
@@ -251,7 +251,7 @@ func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID
 	return nil
 }
 
-func isCodexApproval(req approvalRequest) bool {
+func isCodexApproval(req sessionlog.ApprovalRequest) bool {
 	if len(req.Pending) == 0 {
 		return false
 	}

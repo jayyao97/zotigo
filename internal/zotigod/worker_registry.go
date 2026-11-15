@@ -630,7 +630,7 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 		ApprovalDecision: &wire.ApprovalDecision{
 			RequestID:  requestID,
 			ApprovalID: approvalID,
-			Decisions:  copyApprovalDecisions(decisions),
+			Decisions:  sessionlog.CopyApprovalDecisions(decisions),
 			StopTurn:   stopTurn,
 		},
 	}

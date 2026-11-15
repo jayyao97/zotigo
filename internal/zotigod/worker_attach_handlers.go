@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -95,7 +96,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 
 func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session, generation string) {
 	items, _, err := h.items.LoadItems(ctx, session.ID)
-	if err != nil || lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingHumanRequest(items) {
+	if err != nil || sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) {
 		return
 	}
 	h.closeWorkerWhenIdle(session.ID, generation, wire.Idle{CommandSequence: latestCommandSequence(items)})
@@ -151,7 +152,7 @@ func (h *handler) reconcileApprovalState(ctx context.Context, id string, session
 	if err != nil {
 		return Session{}, err
 	}
-	if hasPendingHumanRequest(items) {
+	if sessionlog.HasPendingHumanRequest(items) {
 		if session.State == SessionStatePaused {
 			return session, nil
 		}
@@ -206,7 +207,7 @@ func (h *handler) handleWorkerFinish(w http.ResponseWriter, r *http.Request, id 
 		switch {
 		case loadErr != nil:
 			err = fmt.Errorf("load session activity: %w", loadErr)
-		case lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingApproval(items):
+		case sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || sessionlog.HasPendingApproval(items):
 			err = errInvalidSessionTransition
 		default:
 			session, err = h.registry.End(id)

@@ -99,10 +99,10 @@ func replayWorkerCommands(ctx context.Context, client *http.Client, daemonURL st
 }
 
 func loadAppliedWorkerCommandSequences(ctx context.Context, runtime *workerRuntime) (map[uint64]bool, error) {
-	if runtime == nil || runtime.display == nil || runtime.display.items == nil {
+	if runtime == nil || runtime.display == nil || runtime.display.Items == nil {
 		return nil, nil
 	}
-	items, _, err := runtime.display.items.LoadItems(ctx, runtime.sessionID)
+	items, _, err := runtime.display.Items.LoadItems(ctx, runtime.sessionID)
 	if err != nil {
 		return nil, fmt.Errorf("load worker command completions: %w", err)
 	}

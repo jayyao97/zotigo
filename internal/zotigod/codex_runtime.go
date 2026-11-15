@@ -10,6 +10,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -64,7 +65,7 @@ type codexPendingInteraction struct {
 }
 
 type codexPendingApproval struct {
-	request     approvalRequest
+	request     sessionlog.ApprovalRequest
 	rpcID       json.RawMessage
 	kind        codexApprovalKind
 	permissions json.RawMessage

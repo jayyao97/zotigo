@@ -136,15 +136,15 @@ func TestPendingHumanRequestsResolveOnlyAfterLastBlockingRequest(t *testing.T) {
 	interactionResolved := zotigosession.DisplayItem{Type: zotigosession.DisplayItemInteractionResponse, Interaction: &zotigosession.DisplayInteraction{ID: "interaction", TurnID: "turn-child-2", IsBlocking: true, Status: interactionStatusResolved}}
 	for _, order := range [][]zotigosession.DisplayItem{{approvalResolved, interactionResolved}, {interactionResolved, approvalResolved}} {
 		items := append([]zotigosession.DisplayItem(nil), requestItems...)
-		if !hasPendingHumanRequest(items) {
+		if !sessionlog.HasPendingHumanRequest(items) {
 			t.Fatal("two blocking requests were not detected")
 		}
 		items = append(items, order[0])
-		if !hasPendingHumanRequest(items) {
+		if !sessionlog.HasPendingHumanRequest(items) {
 			t.Fatal("resolving the first request resumed too early")
 		}
 		items = append(items, order[1])
-		if hasPendingHumanRequest(items) {
+		if sessionlog.HasPendingHumanRequest(items) {
 			t.Fatal("final request did not release the pause")
 		}
 	}
@@ -157,7 +157,7 @@ func TestCompletedTurnDoesNotRetainStaleHumanRequest(t *testing.T) {
 		{Type: zotigosession.DisplayItemTurnInterrupted, Turn: &zotigosession.DisplayTurn{ID: "old"}},
 		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "current"}},
 	}
-	if hasPendingHumanRequest(items) {
+	if sessionlog.HasPendingHumanRequest(items) {
 		t.Fatal("stale request from completed turn blocked the current turn")
 	}
 }
@@ -178,7 +178,7 @@ func TestCodexReconnectExpiresUnroutableApprovalAndInteraction(t *testing.T) {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-reconnect")
-	if err != nil || len(items) != 5 || items[3].Type != zotigosession.DisplayItemApprovalDecision || items[4].Type != zotigosession.DisplayItemInteractionResponse || hasPendingHumanRequest(items) {
+	if err != nil || len(items) != 5 || items[3].Type != zotigosession.DisplayItemApprovalDecision || items[4].Type != zotigosession.DisplayItemInteractionResponse || sessionlog.HasPendingHumanRequest(items) {
 		t.Fatalf("reconnected items = %#v, err=%v", items, err)
 	}
 }

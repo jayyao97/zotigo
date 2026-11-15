@@ -15,6 +15,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -89,7 +90,7 @@ func TestWorkerRuntimeDispatchesTurnHooksWithUsage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	display := newWorkerDisplayLog("sess-turn-hooks", &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	display := sessionlog.NewLog("sess-turn-hooks", &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
 	transport := newWorkerRuntimeTransport("sess-turn-hooks", display, nil)
 	t.Cleanup(func() { _ = transport.Close() })
 	dispatcher := &channelHookDispatcher{events: make(chan hooks.Event, 3)}
@@ -164,7 +165,7 @@ func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {
 		t.Fatal(err)
 	}
 	displayItems := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-turn-error", displayItems)
+	display := sessionlog.NewLog("sess-turn-error", displayItems)
 	transport := newWorkerRuntimeTransport("sess-turn-error", display, nil)
 	t.Cleanup(func() { _ = transport.Close() })
 	dispatcher := &channelHookDispatcher{events: make(chan hooks.Event, 3)}

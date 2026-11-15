@@ -386,8 +386,8 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	}))
 	defer commandServer.Close()
 
-	storedItems := runtime.display.items
-	runtime.display.items = &fakeDisplayItemSource{
+	storedItems := runtime.display.Items
+	runtime.display.Items = &fakeDisplayItemSource{
 		items: map[string][]zotigosession.DisplayItem{"sess-runtime-policy": {commandItem, oppositeItem}},
 		appendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Type == zotigosession.DisplayItemApprovalPolicyChanged {
@@ -411,7 +411,7 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 		t.Fatalf("stored policy = %#v, err = %v", stored, err)
 	}
 
-	runtime.display.items = storedItems
+	runtime.display.Items = storedItems
 	cursor, err = replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{})
 	if err != nil {
 		t.Fatalf("replay pending policy command: %v", err)

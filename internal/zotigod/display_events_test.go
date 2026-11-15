@@ -753,9 +753,9 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 			writer := &workerClientWriter{sendCh: make(chan wire.Message, 4), done: make(chan struct{})}
 			item := zotigosession.DisplayItem{ID: "finished-block", Type: zotigosession.DisplayItemAssistantMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "body"}}}
 			if kind == "native" {
-				log := newWorkerDisplayLog(sessionID, sessionlog.StoredItemSource{Store: store})
-				log.persisted = writer.SendDisplayItem
-				if _, err := log.appendItem(context.Background(), item); err != nil {
+				log := sessionlog.NewLog(sessionID, sessionlog.StoredItemSource{Store: store})
+				log.Persisted = writer.SendDisplayItem
+				if _, err := log.AppendItem(context.Background(), item); err != nil {
 					t.Fatal(err)
 				}
 			} else {

@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
 	workspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -53,7 +54,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	if err != nil {
 		return caller, err
 	}
-	if !exists || lastOpenTurnID(items) != turnID {
+	if !exists || sessionlog.LastOpenTurnID(items) != turnID {
 		return caller, errors.New("runtime tool caller turn is no longer active")
 	}
 	var pending, input *session.DisplayItem
@@ -145,7 +146,7 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 			if err != nil {
 				return "", err
 			}
-			turnID = lastOpenTurnID(items)
+			turnID = sessionlog.LastOpenTurnID(items)
 		}
 		caller, err := h.resolveRuntimeToolCaller(ctx, id, generation, turnID, false)
 		if err != nil {

@@ -10,12 +10,13 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerRuntimeTransport struct {
 	sessionID              string
-	display                *workerDisplayLog
+	display                *sessionlog.Log
 	notifyApproval         func(context.Context, wire.ApprovalRequest)
 	notifyApprovalResolved func(context.Context, wire.ApprovalRequest)
 
@@ -24,7 +25,7 @@ type workerRuntimeTransport struct {
 	closeOnce         sync.Once
 	approvalMu        sync.Mutex
 	approvalGate      chan struct{}
-	approval          *approvalRequest
+	approval          *sessionlog.ApprovalRequest
 	decisionCh        chan []zotigotransport.ApprovalResult
 	resolved          bool
 	released          bool
@@ -39,7 +40,7 @@ type workerApprovalResolution struct {
 	decisionCh chan []zotigotransport.ApprovalResult
 }
 
-func newWorkerRuntimeTransport(sessionID string, display *workerDisplayLog, notifyApproval func(context.Context, wire.ApprovalRequest)) *workerRuntimeTransport {
+func newWorkerRuntimeTransport(sessionID string, display *sessionlog.Log, notifyApproval func(context.Context, wire.ApprovalRequest)) *workerRuntimeTransport {
 	transport := &workerRuntimeTransport{
 		sessionID:      sessionID,
 		display:        display,
@@ -121,15 +122,15 @@ func (t *workerRuntimeTransport) SendInput(ctx context.Context, input zotigotran
 	}
 }
 
-func (t *workerRuntimeTransport) beginApprovalFrom(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
+func (t *workerRuntimeTransport) beginApprovalFrom(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string) (sessionlog.ApprovalRequest, <-chan []zotigotransport.ApprovalResult, error) {
 	return t.registerApproval(ctx, pending, requesterName, false)
 }
 
-func (t *workerRuntimeTransport) ensureApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
+func (t *workerRuntimeTransport) ensureApproval(ctx context.Context, pending []zotigotransport.PendingToolCall) (sessionlog.ApprovalRequest, <-chan []zotigotransport.ApprovalResult, error) {
 	return t.registerApproval(ctx, pending, "", true)
 }
 
-func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string, reuseReleased bool) (approvalRequest, <-chan []zotigotransport.ApprovalResult, error) {
+func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending []zotigotransport.PendingToolCall, requesterName string, reuseReleased bool) (sessionlog.ApprovalRequest, <-chan []zotigotransport.ApprovalResult, error) {
 	displayPending := make([]zotigosession.DisplayPendingApproval, 0, len(pending))
 	for _, item := range pending {
 		displayPending = append(displayPending, zotigosession.DisplayPendingApproval{
@@ -143,16 +144,16 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 	t.approvalMu.Lock()
 	if err := ctx.Err(); err != nil {
 		t.approvalMu.Unlock()
-		return approvalRequest{}, nil, err
+		return sessionlog.ApprovalRequest{}, nil, err
 	}
-	approval, err := newApprovalRequest(t.sessionID, t.display.CurrentTurnID(), displayPending)
+	approval, err := sessionlog.NewApprovalRequest(t.sessionID, t.display.CurrentTurnID(), displayPending)
 	if err != nil {
 		t.approvalMu.Unlock()
-		return approvalRequest{}, nil, err
+		return sessionlog.ApprovalRequest{}, nil, err
 	}
 	if t.interruptedTurnID == approval.TurnID {
 		t.approvalMu.Unlock()
-		return approvalRequest{}, nil, context.Canceled
+		return sessionlog.ApprovalRequest{}, nil, context.Canceled
 	}
 	if t.steeringTurnID == approval.TurnID {
 		t.steeringTurnID = ""
@@ -173,7 +174,7 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 			if t.resolved {
 				resolvedID := t.approval.ID
 				t.approvalMu.Unlock()
-				return approvalRequest{}, nil, fmt.Errorf("approval %s is already resolved", resolvedID)
+				return sessionlog.ApprovalRequest{}, nil, fmt.Errorf("approval %s is already resolved", resolvedID)
 			}
 			approval := *t.approval
 			decisionCh := t.decisionCh
@@ -183,7 +184,7 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 		if !t.released {
 			pendingID := t.approval.ID
 			t.approvalMu.Unlock()
-			return approvalRequest{}, nil, fmt.Errorf("approval %s is already pending", pendingID)
+			return sessionlog.ApprovalRequest{}, nil, fmt.Errorf("approval %s is already pending", pendingID)
 		}
 	}
 	t.approval = &approval
@@ -199,7 +200,7 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 		t.resolved = false
 		t.released = false
 		t.approvalMu.Unlock()
-		return approvalRequest{}, nil, fmt.Errorf("record approval request: %w", err)
+		return sessionlog.ApprovalRequest{}, nil, fmt.Errorf("record approval request: %w", err)
 	}
 	approval = persisted
 	*t.approval = approval
@@ -290,7 +291,7 @@ func (t *workerRuntimeTransport) resolveApproval(ctx context.Context, approvalID
 	}
 	approval := *t.approval
 	decisionCh := t.decisionCh
-	if err := validateApprovalDecisions(approval.Pending, decisions); err != nil {
+	if err := sessionlog.ValidateApprovalDecisions(approval.Pending, decisions); err != nil {
 		return workerApprovalResolution{}, err
 	}
 	resolved, err := t.display.ApprovalResolved(ctx, approval, decisions)

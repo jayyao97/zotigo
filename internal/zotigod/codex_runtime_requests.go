@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	channelruntime "github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -236,13 +237,13 @@ func (r *codexWorkerRuntime) registerCodexApproval(ctx context.Context, message 
 	if params.ThreadID != "" && params.ThreadID != r.threadID {
 		source = "codex_subagent:" + params.ThreadID
 	}
-	req, err := newApprovalRequest(r.cfg.SessionID, params.TurnID, []zotigosession.DisplayPendingApproval{{
+	req, err := sessionlog.NewApprovalRequest(r.cfg.SessionID, params.TurnID, []zotigosession.DisplayPendingApproval{{
 		ToolCallID: callID, ToolName: name, Arguments: arguments, Description: params.CWD, Reason: params.Reason, Source: source,
 	}})
 	if err != nil {
 		return err
 	}
-	item := zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalRequest, Turn: &zotigosession.DisplayTurn{ID: req.TurnID}, Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Pending: copyPendingApprovals(req.Pending)}}
+	item := zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalRequest, Turn: &zotigosession.DisplayTurn{ID: req.TurnID}, Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Pending: sessionlog.CopyPendingApprovals(req.Pending)}}
 	if err := r.append(item); err != nil {
 		return fmt.Errorf("record Codex approval request: %w", err)
 	}
@@ -264,7 +265,7 @@ func (r *codexWorkerRuntime) resolveCodexApproval(decision wire.ApprovalDecision
 	if !ok {
 		return wire.ApprovalResult{RequestID: decision.RequestID, Error: "approval is not pending"}, nil
 	}
-	if err := validateApprovalDecisions(pending.request.Pending, decision.Decisions); err != nil {
+	if err := sessionlog.ValidateApprovalDecisions(pending.request.Pending, decision.Decisions); err != nil {
 		return wire.ApprovalResult{RequestID: decision.RequestID, Error: err.Error()}, nil
 	}
 	approved := decision.Decisions[0].Approved
@@ -296,8 +297,8 @@ func (r *codexWorkerRuntime) resolveCodexApproval(decision wire.ApprovalDecision
 	}
 	resolvedAt := time.Now().UTC()
 	delete(r.approvals, decision.ApprovalID)
-	req := resolvedApprovalFromDecision(pending.request, decision.Decisions, resolvedAt)
-	if err := r.append(zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalDecision, Turn: &zotigosession.DisplayTurn{ID: req.TurnID}, Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Decisions: copyApprovalDecisions(req.Decisions)}}); err != nil {
+	req := sessionlog.ResolvedApprovalFromDecision(pending.request, decision.Decisions, resolvedAt)
+	if err := r.append(zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalDecision, Turn: &zotigosession.DisplayTurn{ID: req.TurnID}, Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Decisions: sessionlog.CopyApprovalDecisions(req.Decisions)}}); err != nil {
 		result := wire.ApprovalResult{RequestID: decision.RequestID, Error: fmt.Sprintf("record approval decision: %v", err)}
 		return result, fmt.Errorf("codex approval resolved but could not be recorded: %w", err)
 	}
@@ -355,7 +356,7 @@ func (r *codexWorkerRuntime) expireInteraction(req wire.InteractionRequest) erro
 	return r.append(interactionDisplayItem(req, true))
 }
 
-func (r *codexWorkerRuntime) expireApproval(req approvalRequest, reason string) error {
+func (r *codexWorkerRuntime) expireApproval(req sessionlog.ApprovalRequest, reason string) error {
 	decisions := make([]zotigosession.DisplayApprovalDecision, 0, len(req.Pending))
 	for _, pending := range req.Pending {
 		decisions = append(decisions, zotigosession.DisplayApprovalDecision{

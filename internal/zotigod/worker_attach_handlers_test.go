@@ -616,8 +616,8 @@ func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append stale turn: %v", err)
 	}
-	display := newWorkerDisplayLog("sess-restart", source)
-	if err := display.InterruptOpenTurn(context.Background(), workerRestartedReason); err != nil {
+	display := sessionlog.NewLog("sess-restart", source)
+	if err := display.InterruptOpenTurn(context.Background(), sessionlog.WorkerRestartedReason); err != nil {
 		t.Fatalf("interrupt open turn: %v", err)
 	}
 
@@ -628,7 +628,7 @@ func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
 	if items[1].Type != zotigosession.DisplayItemTurnInterrupted || items[1].Turn == nil {
 		t.Fatalf("expected interrupted turn, got %#v", items[1])
 	}
-	if items[1].Turn.ID != "turn-stale" || items[1].Turn.Reason != workerRestartedReason {
+	if items[1].Turn.ID != "turn-stale" || items[1].Turn.Reason != sessionlog.WorkerRestartedReason {
 		t.Fatalf("unexpected interrupted turn: %#v", items[1].Turn)
 	}
 }
@@ -709,7 +709,7 @@ func TestWorkerDisconnectReconcilesResolvedApproval(t *testing.T) {
 			TurnID:  "turn-historical",
 			Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call-historical", ToolName: "shell"}},
 		}},
-		{Type: zotigosession.DisplayItemTurnInterrupted, Turn: &zotigosession.DisplayTurn{ID: "turn-historical", Reason: workerRestartedReason}},
+		{Type: zotigosession.DisplayItemTurnInterrupted, Turn: &zotigosession.DisplayTurn{ID: "turn-historical", Reason: sessionlog.WorkerRestartedReason}},
 	} {
 		if _, err := source.AppendItem(context.Background(), created.ID, item); err != nil {
 			t.Fatalf("append historical display item: %v", err)

@@ -18,12 +18,12 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
 	controlChannelClosedReason    = "control_channel_closed"
-	workerRestartedReason         = "worker_restarted"
 	approvalWorkerRestartedReason = "worker restarted before approval completed"
 	defaultCommandsLimit          = 200
 	commandOffsetScanLines        = wire.MaxCommandsLimit
@@ -253,7 +253,7 @@ var (
 	errCommandIDConflict = errors.New("client message ID already belongs to different input")
 )
 
-func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, steeringOnly bool) (wire.Command, []messageImage, []zotigosession.ImageRef, error) {
+func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []sessionlog.MessageImage, selectedSkills []string, steeringOnly bool) (wire.Command, []sessionlog.MessageImage, []zotigosession.ImageRef, error) {
 	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
 		return wire.Command{}, nil, nil, err
@@ -294,7 +294,7 @@ type sessionInputConstraints struct {
 	requestContext *protocol.RequestContext
 }
 
-func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []messageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (wire.Command, error) {
+func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []sessionlog.MessageImage, selectedSkills []string, expectedTurnID string, steeringOnly bool, startOnly bool, constraints *sessionInputConstraints) (wire.Command, error) {
 	h.updateMu.RLock()
 	defer h.updateMu.RUnlock()
 	if h.updater != nil && h.updater.Draining() {
@@ -304,7 +304,7 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		return wire.Command{}, errWorkerInputStopping
 	}
 	var command wire.Command
-	var storedImages []messageImage
+	var storedImages []sessionlog.MessageImage
 	var refs []zotigosession.ImageRef
 	var submission *workerInputSubmission
 	err := func() error {

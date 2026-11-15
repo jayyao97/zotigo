@@ -9,6 +9,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func (h *handler) decorateSession(ctx context.Context, session Session, stored *zotigosession.Session) Session {
@@ -31,7 +32,7 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	items, _, err := h.items.LoadItems(ctx, session.ID)
 	if err == nil {
 		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePausing || session.State == SessionStatePaused {
-			session.Working = session.State == SessionStatePausing || lastOpenTurnID(items) != ""
+			session.Working = session.State == SessionStatePausing || sessionlog.LastOpenTurnID(items) != ""
 			session.ActiveTool = activeToolName(items)
 		} else {
 			session.Working = false

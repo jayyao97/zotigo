@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -232,9 +233,9 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 					other = append(other, candidate)
 				}
 			}
-			images := make([]messageImage, 0, len(command.Message.Images))
+			images := make([]sessionlog.MessageImage, 0, len(command.Message.Images))
 			for _, image := range command.Message.Images {
-				images = append(images, messageImage{SizeBytes: image.SizeBytes})
+				images = append(images, sessionlog.MessageImage{SizeBytes: image.SizeBytes})
 			}
 			if err := validateQueueCapacity(other, command.Message.Text, images); err != nil {
 				writeAPIError(w, 400, err.Error())
@@ -374,8 +375,8 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			}
 		}
 	}
-	turnActive := lastOpenTurnID(items) != ""
-	if hasPendingMessageCommand(items) || hasPendingHumanRequest(items) || (turnActive && resume) {
+	turnActive := sessionlog.LastOpenTurnID(items) != ""
+	if hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) || (turnActive && resume) {
 		if resume {
 			return errActiveTurn
 		}
@@ -548,7 +549,7 @@ func (h *handler) hydrateQueuedImages(command *wire.Command) error {
 	return err
 }
 
-func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []messageImage) error {
+func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []sessionlog.MessageImage) error {
 	if len(rows) >= 100 {
 		return fmt.Errorf("queue contains too many messages (maximum 100)")
 	}

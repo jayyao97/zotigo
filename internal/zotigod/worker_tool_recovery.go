@@ -9,12 +9,13 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const recoveryToolArgumentsLimit = 2048
 
 type workerDurabilityRecorder struct {
-	display *workerDisplayLog
+	display *sessionlog.Log
 	wal     *workerRuntimeWAL
 }
 

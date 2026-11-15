@@ -32,7 +32,7 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputReque
 }
 
 func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputRequest) (wire.Command, error) {
-	if existing, found, err := findExistingSessionInput(ctx, r.display.items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
+	if existing, found, err := findExistingSessionInput(ctx, r.display.Items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
 		return wire.Command{}, err
 	} else if found {
 		if request.SteeringOnly && existing.Type != wire.CommandSteering {
@@ -112,10 +112,10 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 		steering := steeringCommandForRequest(request, turnID)
 		r.display.QueueSteering(steering)
 		err := r.agent.QueueTurnUserMessageWithAdmission(message, func() error {
-			if err := validateCompletionSteering(ctx, r.display.items, r.sessionID, request.Command); err != nil {
+			if err := validateCompletionSteering(ctx, r.display.Items, r.sessionID, request.Command); err != nil {
 				return err
 			}
-			stored, appendErr := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, steering)
+			stored, appendErr := appendAcceptedSessionInput(ctx, r.display.Items, r.sessionID, steering)
 			if appendErr == nil {
 				steering = stored
 			}
@@ -141,7 +141,7 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 	}
 
 	messageCommand := messageCommandForRequest(request)
-	stored, err := appendAcceptedSessionInput(ctx, r.display.items, r.sessionID, messageCommand)
+	stored, err := appendAcceptedSessionInput(ctx, r.display.Items, r.sessionID, messageCommand)
 	if err != nil {
 		return wire.Command{}, err
 	}

@@ -23,7 +23,7 @@ import (
 func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T) {
 	const sessionID = "sess-event-driven-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -43,7 +43,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 	}()
 
 	deadline := time.Now().Add(2 * time.Second)
-	var approval approvalRequest
+	var approval sessionlog.ApprovalRequest
 	for time.Now().Before(deadline) {
 		items, _, err := source.LoadItems(context.Background(), sessionID)
 		if err != nil {
@@ -51,7 +51,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 		}
 		for _, item := range items {
 			if item.Type == zotigosession.DisplayItemApprovalRequest && item.Approval != nil {
-				approval, _ = approvalFromDisplayItems(sessionID, item.Approval.ID, items)
+				approval, _ = sessionlog.ApprovalFromItems(sessionID, item.Approval.ID, items)
 				break
 			}
 		}
@@ -64,7 +64,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 		t.Fatal("worker did not persist approval request")
 	}
 	notified := <-notifiedCh
-	if notified.ID != approval.ID || notified.Status != approvalStatusPending {
+	if notified.ID != approval.ID || notified.Status != sessionlog.ApprovalStatusPending {
 		t.Fatalf("unexpected approval notification: %#v", notified)
 	}
 	approved := []zotigosession.DisplayApprovalDecision{{ToolCallID: "call-1", Approved: true}}
@@ -72,7 +72,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 	if err != nil {
 		t.Fatalf("resolve approval: %v", err)
 	}
-	if resolution.approval.Status != approvalStatusResolved {
+	if resolution.approval.Status != sessionlog.ApprovalStatusResolved {
 		t.Fatalf("resolved status = %q", resolution.approval.Status)
 	}
 	select {
@@ -95,7 +95,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 	const sessionID = "sess-subagent-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -143,7 +143,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 		t.Fatal(err)
 	}
 
-	display := newWorkerDisplayLog(sessionID, sessionlog.StoredItemSource{Store: store})
+	display := sessionlog.NewLog(sessionID, sessionlog.StoredItemSource{Store: store})
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 func TestWorkerRuntimeSteeringWinsBeforeApprovalRegistration(t *testing.T) {
 	const sessionID = "sess-steering-before-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -195,7 +195,7 @@ func TestWorkerRuntimeSteeringWinsBeforeApprovalRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if len(items) != 1 || hasPendingApproval(items) {
+	if len(items) != 1 || sessionlog.HasPendingApproval(items) {
 		t.Fatalf("steering created a ghost approval: %#v", items)
 	}
 }
@@ -209,7 +209,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 		return &noopProvider{}, nil
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -271,7 +271,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if hasPendingApproval(items) {
+	if sessionlog.HasPendingApproval(items) {
 		t.Fatalf("approval registration window left a pending approval: %#v", items)
 	}
 }
@@ -279,7 +279,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 	const sessionID = "sess-steering-resolves-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -306,14 +306,14 @@ func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 		t.Fatalf("approval result = %#v", results)
 	}
 	resolved := <-resolvedNotification
-	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Reason != "interrupted_by_steering" {
+	if resolved.Status != sessionlog.ApprovalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Reason != "interrupted_by_steering" {
 		t.Fatalf("resolved notification = %#v", resolved)
 	}
 	items, _, err := source.LoadItems(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if hasPendingApproval(items) {
+	if sessionlog.HasPendingApproval(items) {
 		t.Fatalf("registered approval remained pending: %#v", items)
 	}
 }
@@ -321,7 +321,7 @@ func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 func TestWorkerRuntimeApprovalDecisionIsAppliedOnce(t *testing.T) {
 	const sessionID = "sess-single-decision"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -385,7 +385,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 		}},
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -426,7 +426,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 			requestCount++
 		}
 	}
-	if requestCount != 1 || hasPendingApproval(items) {
+	if requestCount != 1 || sessionlog.HasPendingApproval(items) {
 		t.Fatalf("close created a ghost approval after durable decision: %#v", items)
 	}
 }
@@ -434,7 +434,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 	const sessionID = "sess-pause-before-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -459,7 +459,7 @@ func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if hasPendingApproval(items) {
+	if sessionlog.HasPendingApproval(items) {
 		t.Fatalf("interrupted turn has pending approval: %#v", items)
 	}
 }
@@ -467,7 +467,7 @@ func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 	const sessionID = "sess-approval-before-pause"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -488,7 +488,7 @@ func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if got := lastOpenTurnID(items); got != turnID || !hasPendingApproval(items) {
+	if got := sessionlog.LastOpenTurnID(items); got != turnID || !sessionlog.HasPendingApproval(items) {
 		t.Fatalf("approval turn did not remain pending: %#v", items)
 	}
 }
@@ -496,7 +496,7 @@ func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 func TestWorkerRuntimeReleasedApprovalDoesNotBlockPauseOrNextTurn(t *testing.T) {
 	const sessionID = "sess-released-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -554,7 +554,7 @@ func TestWorkerRuntimeRepairsPausedAgentWhenPauseWinsApprovalRace(t *testing.T) 
 		}},
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-pause-repair", source)
+	display := sessionlog.NewLog("sess-pause-repair", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -584,7 +584,7 @@ func TestWorkerRuntimeApprovalCannotResolveDuringInitialization(t *testing.T) {
 			<-continueCh
 		}
 	}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -633,16 +633,16 @@ func TestWorkerRuntimeApprovalCannotResolveDuringInitialization(t *testing.T) {
 func TestWorkerDisplayLogResolvesPendingApprovalBeforeInterruptingRestartedTurn(t *testing.T) {
 	const sessionID = "sess-restarted-approval"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
-	approval := approvalRequest{
+	approval := sessionlog.ApprovalRequest{
 		ID:        "apr-restarted",
 		SessionID: sessionID,
 		TurnID:    turnID,
-		Status:    approvalStatusPending,
+		Status:    sessionlog.ApprovalStatusPending,
 		Pending:   []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
 	}
 	if _, err := display.ApprovalRequested(context.Background(), approval); err != nil {
@@ -655,7 +655,7 @@ func TestWorkerDisplayLogResolvesPendingApprovalBeforeInterruptingRestartedTurn(
 	if !recovered {
 		t.Fatal("expected pending approval recovery")
 	}
-	if err := display.InterruptOpenTurn(context.Background(), workerRestartedReason); err != nil {
+	if err := display.InterruptOpenTurn(context.Background(), sessionlog.WorkerRestartedReason); err != nil {
 		t.Fatalf("interrupt restarted turn: %v", err)
 	}
 	items, _, err := source.LoadItems(context.Background(), sessionID)
@@ -765,7 +765,7 @@ func TestWorkerRuntimeCloseLeavesPendingApprovalTurnForReplacement(t *testing.T)
 		}},
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -792,10 +792,10 @@ func TestWorkerRuntimeCloseLeavesPendingApprovalTurnForReplacement(t *testing.T)
 	if err != nil {
 		t.Fatalf("load display items: %v", err)
 	}
-	if got := lastOpenTurnID(items); got == "" {
+	if got := sessionlog.LastOpenTurnID(items); got == "" {
 		t.Fatalf("pending approval turn was interrupted during close: %#v", items)
 	}
-	if !hasPendingApproval(items) {
+	if !sessionlog.HasPendingApproval(items) {
 		t.Fatalf("close did not persist paused snapshot approval: %#v", items)
 	}
 }
@@ -808,7 +808,7 @@ func TestWorkerRuntimeApprovalClearsInMemoryStateWhenPersistenceFails(t *testing
 		}
 		return nil
 	}
-	display := newWorkerDisplayLog("sess-persist-failure", source)
+	display := sessionlog.NewLog("sess-persist-failure", source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}
@@ -828,7 +828,7 @@ func TestWorkerRuntimeApprovalClearsInMemoryStateWhenPersistenceFails(t *testing
 func TestWorkerRuntimeApprovalRegistrationIsIdempotent(t *testing.T) {
 	const sessionID = "sess-idempotent-registration"
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog(sessionID, source)
+	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
 	}

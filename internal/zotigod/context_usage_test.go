@@ -121,7 +121,7 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 	}
 	ctx := context.Background()
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("live", source)
+	display := sessionlog.NewLog("live", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}

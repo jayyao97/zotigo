@@ -1,4 +1,4 @@
-package zotigod
+package sessionlog
 
 import (
 	"errors"
@@ -7,17 +7,16 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const (
-	approvalStatusPending  = "pending"
-	approvalStatusResolved = "resolved"
+	ApprovalStatusPending  = "pending"
+	ApprovalStatusResolved = "resolved"
 )
 
-var errInvalidApprovalRequest = errors.New("invalid approval request")
+var ErrInvalidApprovalRequest = errors.New("invalid approval request")
 
-type approvalRequest struct {
+type ApprovalRequest struct {
 	ID         string
 	SessionID  string
 	TurnID     string
@@ -28,28 +27,28 @@ type approvalRequest struct {
 	ResolvedAt *time.Time
 }
 
-func newApprovalRequest(sessionID string, turnID string, pending []zotigosession.DisplayPendingApproval) (approvalRequest, error) {
+func NewApprovalRequest(sessionID string, turnID string, pending []zotigosession.DisplayPendingApproval) (ApprovalRequest, error) {
 	if err := validatePendingApprovals(turnID, pending); err != nil {
-		return approvalRequest{}, err
+		return ApprovalRequest{}, err
 	}
 
-	return approvalRequest{
-		ID:        sessionlog.NewID("apr"),
+	return ApprovalRequest{
+		ID:        NewID("apr"),
 		SessionID: sessionID,
 		TurnID:    strings.TrimSpace(turnID),
-		Status:    approvalStatusPending,
-		Pending:   copyPendingApprovals(pending),
+		Status:    ApprovalStatusPending,
+		Pending:   CopyPendingApprovals(pending),
 		CreatedAt: time.Now().UTC(),
 	}, nil
 }
 
-func hasPendingApproval(items []zotigosession.DisplayItem) bool {
-	turnID := lastOpenTurnID(items)
-	return turnID != "" && hasPendingApprovalForTurn(items, turnID)
+func HasPendingApproval(items []zotigosession.DisplayItem) bool {
+	turnID := LastOpenTurnID(items)
+	return turnID != "" && HasPendingApprovalForTurn(items, turnID)
 }
 
-func hasPendingHumanRequest(items []zotigosession.DisplayItem) bool {
-	turnID := lastOpenTurnID(items)
+func HasPendingHumanRequest(items []zotigosession.DisplayItem) bool {
+	turnID := LastOpenTurnID(items)
 	if turnID == "" {
 		return false
 	}
@@ -96,8 +95,8 @@ func hasPendingHumanRequest(items []zotigosession.DisplayItem) bool {
 	return len(pendingApprovals) > 0 || len(pendingInteractions) > 0
 }
 
-func approvalFromDisplayItems(sessionID string, approvalID string, items []zotigosession.DisplayItem) (approvalRequest, bool) {
-	var req approvalRequest
+func ApprovalFromItems(sessionID string, approvalID string, items []zotigosession.DisplayItem) (ApprovalRequest, bool) {
+	var req ApprovalRequest
 	for _, item := range items {
 		if item.Approval == nil || item.Approval.ID != approvalID {
 			continue
@@ -105,12 +104,12 @@ func approvalFromDisplayItems(sessionID string, approvalID string, items []zotig
 
 		switch item.Type {
 		case zotigosession.DisplayItemApprovalRequest:
-			req = approvalRequest{
+			req = ApprovalRequest{
 				ID:        item.Approval.ID,
 				SessionID: sessionID,
 				TurnID:    item.Approval.TurnID,
-				Status:    approvalStatusPending,
-				Pending:   copyPendingApprovals(item.Approval.Pending),
+				Status:    ApprovalStatusPending,
+				Pending:   CopyPendingApprovals(item.Approval.Pending),
 				CreatedAt: item.CreatedAt,
 			}
 		case zotigosession.DisplayItemApprovalDecision:
@@ -118,48 +117,48 @@ func approvalFromDisplayItems(sessionID string, approvalID string, items []zotig
 				continue
 			}
 			resolvedAt := item.CreatedAt
-			req.Status = approvalStatusResolved
-			req.Decisions = copyApprovalDecisions(item.Approval.Decisions)
+			req.Status = ApprovalStatusResolved
+			req.Decisions = CopyApprovalDecisions(item.Approval.Decisions)
 			req.ResolvedAt = &resolvedAt
 		}
 	}
 	return req, req.ID != ""
 }
 
-func resolvedApprovalFromDecision(req approvalRequest, decisions []zotigosession.DisplayApprovalDecision, resolvedAt time.Time) approvalRequest {
-	req.Status = approvalStatusResolved
-	req.Decisions = copyApprovalDecisions(decisions)
+func ResolvedApprovalFromDecision(req ApprovalRequest, decisions []zotigosession.DisplayApprovalDecision, resolvedAt time.Time) ApprovalRequest {
+	req.Status = ApprovalStatusResolved
+	req.Decisions = CopyApprovalDecisions(decisions)
 	req.ResolvedAt = &resolvedAt
 	return req
 }
 
 func validatePendingApprovals(turnID string, pending []zotigosession.DisplayPendingApproval) error {
 	if strings.TrimSpace(turnID) == "" {
-		return fmt.Errorf("%w: turn_id is required", errInvalidApprovalRequest)
+		return fmt.Errorf("%w: turn_id is required", ErrInvalidApprovalRequest)
 	}
 	if len(pending) == 0 {
-		return fmt.Errorf("%w: pending approvals are required", errInvalidApprovalRequest)
+		return fmt.Errorf("%w: pending approvals are required", ErrInvalidApprovalRequest)
 	}
 	seen := make(map[string]struct{}, len(pending))
 	for _, item := range pending {
 		toolCallID := strings.TrimSpace(item.ToolCallID)
 		if toolCallID == "" {
-			return fmt.Errorf("%w: tool_call_id is required", errInvalidApprovalRequest)
+			return fmt.Errorf("%w: tool_call_id is required", ErrInvalidApprovalRequest)
 		}
 		if strings.TrimSpace(item.ToolName) == "" {
-			return fmt.Errorf("%w: tool_name is required", errInvalidApprovalRequest)
+			return fmt.Errorf("%w: tool_name is required", ErrInvalidApprovalRequest)
 		}
 		if _, ok := seen[toolCallID]; ok {
-			return fmt.Errorf("%w: duplicate tool_call_id %q", errInvalidApprovalRequest, toolCallID)
+			return fmt.Errorf("%w: duplicate tool_call_id %q", ErrInvalidApprovalRequest, toolCallID)
 		}
 		seen[toolCallID] = struct{}{}
 	}
 	return nil
 }
 
-func validateApprovalDecisions(pending []zotigosession.DisplayPendingApproval, decisions []zotigosession.DisplayApprovalDecision) error {
+func ValidateApprovalDecisions(pending []zotigosession.DisplayPendingApproval, decisions []zotigosession.DisplayApprovalDecision) error {
 	if len(decisions) != len(pending) {
-		return fmt.Errorf("%w: expected %d decisions, got %d", errInvalidApprovalRequest, len(pending), len(decisions))
+		return fmt.Errorf("%w: expected %d decisions, got %d", ErrInvalidApprovalRequest, len(pending), len(decisions))
 	}
 
 	expected := make(map[string]struct{}, len(pending))
@@ -171,20 +170,20 @@ func validateApprovalDecisions(pending []zotigosession.DisplayPendingApproval, d
 	for _, decision := range decisions {
 		toolCallID := strings.TrimSpace(decision.ToolCallID)
 		if toolCallID == "" {
-			return fmt.Errorf("%w: tool_call_id is required", errInvalidApprovalRequest)
+			return fmt.Errorf("%w: tool_call_id is required", ErrInvalidApprovalRequest)
 		}
 		if _, ok := expected[toolCallID]; !ok {
-			return fmt.Errorf("%w: unknown tool_call_id %q", errInvalidApprovalRequest, toolCallID)
+			return fmt.Errorf("%w: unknown tool_call_id %q", ErrInvalidApprovalRequest, toolCallID)
 		}
 		if _, ok := seen[toolCallID]; ok {
-			return fmt.Errorf("%w: duplicate tool_call_id %q", errInvalidApprovalRequest, toolCallID)
+			return fmt.Errorf("%w: duplicate tool_call_id %q", ErrInvalidApprovalRequest, toolCallID)
 		}
 		seen[toolCallID] = struct{}{}
 	}
 	return nil
 }
 
-func copyPendingApprovals(items []zotigosession.DisplayPendingApproval) []zotigosession.DisplayPendingApproval {
+func CopyPendingApprovals(items []zotigosession.DisplayPendingApproval) []zotigosession.DisplayPendingApproval {
 	if len(items) == 0 {
 		return nil
 	}
@@ -197,7 +196,7 @@ func copyPendingApprovals(items []zotigosession.DisplayPendingApproval) []zotigo
 	return copied
 }
 
-func copyApprovalDecisions(items []zotigosession.DisplayApprovalDecision) []zotigosession.DisplayApprovalDecision {
+func CopyApprovalDecisions(items []zotigosession.DisplayApprovalDecision) []zotigosession.DisplayApprovalDecision {
 	if len(items) == 0 {
 		return nil
 	}

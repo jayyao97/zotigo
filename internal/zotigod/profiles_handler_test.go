@@ -423,7 +423,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	runtime := &workerRuntime{
 		sessionID: "sess-repair-different-profile",
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-repair-different-profile", source),
+		display:   sessionlog.NewLog("sess-repair-different-profile", source),
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, wire.CommandsPage{

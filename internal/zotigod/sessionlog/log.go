@@ -1,4 +1,4 @@
-package zotigod
+package sessionlog
 
 import (
 	"context"
@@ -9,18 +9,17 @@ import (
 	"github.com/google/uuid"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-type workerDisplayLog struct {
+type Log struct {
 	sessionID string
-	items     sessionlog.ItemSource
-	persisted func(zotigosession.DisplayItem)
-	wake      func(context.Context)
-	wakeSync  func(context.Context) error
-	barrier   func(context.Context) error
-	delta     func(wire.DisplayDelta)
+	Items     ItemSource
+	Persisted func(zotigosession.DisplayItem)
+	Wake      func(context.Context)
+	WakeSync  func(context.Context) error
+	Barrier   func(context.Context) error
+	Delta     func(wire.DisplayDelta)
 
 	mu            sync.Mutex
 	turnID        string
@@ -29,8 +28,8 @@ type workerDisplayLog struct {
 	runUsage      protocol.Usage
 	terminalID    string
 	terminal      string
-	block         *workerDisplayBlock
-	subagents     map[string]*workerSubagentBlock
+	block         *displayBlock
+	subagents     map[string]*subagentBlock
 	toolCalls     map[string]chan struct{}
 	toolCallErr   map[string]error
 	steering      map[string]wire.Command
@@ -38,31 +37,31 @@ type workerDisplayLog struct {
 	deltaMuted    bool
 }
 
-type workerDisplayBlock struct {
+type displayBlock struct {
 	id       string
 	index    int
 	partType string
 	text     string
 }
 
-type workerSubagentBlock struct {
-	block workerDisplayBlock
+type subagentBlock struct {
+	block displayBlock
 	info  zotigosession.DisplaySubagent
 }
 
-func newWorkerDisplayLog(sessionID string, items sessionlog.ItemSource) *workerDisplayLog {
-	return &workerDisplayLog{sessionID: sessionID, items: items}
+func NewLog(sessionID string, items ItemSource) *Log {
+	return &Log{sessionID: sessionID, Items: items}
 }
 
-func (l *workerDisplayLog) StartTurn(ctx context.Context) (string, error) {
+func (l *Log) StartTurn(ctx context.Context) (string, error) {
 	return l.startTurn(ctx, nil)
 }
 
-func (l *workerDisplayLog) StartTurnWithRuntime(ctx context.Context, runtime zotigosession.DisplayRuntime) (string, error) {
+func (l *Log) StartTurnWithRuntime(ctx context.Context, runtime zotigosession.DisplayRuntime) (string, error) {
 	return l.startTurn(ctx, &runtime)
 }
 
-func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession.DisplayRuntime) (string, error) {
+func (l *Log) startTurn(ctx context.Context, runtime *zotigosession.DisplayRuntime) (string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.turnStarted = time.Now()
@@ -72,32 +71,32 @@ func (l *workerDisplayLog) startTurn(ctx context.Context, runtime *zotigosession
 	l.terminalID = ""
 	l.terminal = ""
 	l.block = nil
-	l.subagents = make(map[string]*workerSubagentBlock)
+	l.subagents = make(map[string]*subagentBlock)
 	l.toolCalls = make(map[string]chan struct{})
 	l.toolCallErr = make(map[string]error)
 	l.steering = make(map[string]wire.Command)
 	l.steeringOrder = nil
 	l.deltaMuted = false
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: l.turnID, Runtime: runtime},
 	})
 	return l.turnID, err
 }
 
-func (l *workerDisplayLog) CurrentTurnID() string {
+func (l *Log) CurrentTurnID() string {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.turnID
 }
 
-func (l *workerDisplayLog) TerminalStatus(turnID string) (string, bool) {
+func (l *Log) TerminalStatus(turnID string) (string, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.terminal, turnID != "" && l.terminalID == turnID
 }
 
-func (l *workerDisplayLog) QueueSteering(command wire.Command) {
+func (l *Log) QueueSteering(command wire.Command) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.steering == nil {
@@ -108,15 +107,15 @@ func (l *workerDisplayLog) QueueSteering(command wire.Command) {
 	}
 	l.steering[command.ID] = command
 	// The current block may not emit another delta before it finishes.
-	if l.block != nil && l.delta != nil && !l.deltaMuted {
-		l.delta(wire.DisplayDelta{
+	if l.block != nil && l.Delta != nil && !l.deltaMuted {
+		l.Delta(wire.DisplayDelta{
 			ItemID: l.block.id, Role: string(protocol.RoleAssistant),
 			PartType: l.block.partType, BeforeInputID: l.beforeInputIDLocked(),
 		})
 	}
 }
 
-func (l *workerDisplayLog) beforeInputIDLocked() string {
+func (l *Log) beforeInputIDLocked() string {
 	for len(l.steeringOrder) > 0 {
 		id := l.steeringOrder[0]
 		if _, exists := l.steering[id]; exists {
@@ -127,21 +126,21 @@ func (l *workerDisplayLog) beforeInputIDLocked() string {
 	return ""
 }
 
-func (l *workerDisplayLog) DiscardSteering(commandID string) {
+func (l *Log) DiscardSteering(commandID string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	delete(l.steering, commandID)
 }
 
-func (l *workerDisplayLog) HasQueuedSteering(commandID string) bool {
+func (l *Log) HasQueuedSteering(commandID string) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	_, ok := l.steering[commandID]
 	return ok
 }
 
-func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+func (l *Log) ProfileChanged(ctx context.Context, commandID string, from string, to string) error {
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemProfileChanged,
 		Profile: &zotigosession.DisplayProfileChange{
 			CommandID: commandID,
@@ -152,8 +151,8 @@ func (l *workerDisplayLog) ProfileChanged(ctx context.Context, commandID string,
 	return err
 }
 
-func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, from string, to string, profileErr error) error {
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+func (l *Log) ProfileFailed(ctx context.Context, commandID string, from string, to string, profileErr error) error {
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemProfileFailed,
 		Error: profileErr.Error(),
 		Profile: &zotigosession.DisplayProfileChange{
@@ -165,8 +164,8 @@ func (l *workerDisplayLog) ProfileFailed(ctx context.Context, commandID string, 
 	return err
 }
 
-func (l *workerDisplayLog) ApprovalPolicyChanged(ctx context.Context, commandID string, from string, to string) error {
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+func (l *Log) ApprovalPolicyChanged(ctx context.Context, commandID string, from string, to string) error {
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalPolicyChanged,
 		ApprovalPolicy: &zotigosession.DisplayApprovalPolicyChange{
 			CommandID: commandID,
@@ -177,15 +176,15 @@ func (l *workerDisplayLog) ApprovalPolicyChanged(ctx context.Context, commandID 
 	return err
 }
 
-func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string) error {
+func (l *Log) InterruptOpenTurn(ctx context.Context, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	items, _, err := l.items.LoadItems(ctx, l.sessionID)
+	items, _, err := l.Items.LoadItems(ctx, l.sessionID)
 	if err != nil {
 		return err
 	}
-	turnID, started := lastOpenTurn(items)
+	turnID, started := LastOpenTurn(items)
 	if turnID == "" {
 		return nil
 	}
@@ -197,9 +196,9 @@ func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string)
 		}
 	}
 	if reason == "" {
-		reason = workerRestartedReason
+		reason = WorkerRestartedReason
 	}
-	_, err = l.appendItem(ctx, zotigosession.DisplayItem{
+	_, err = l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
 			ID:         turnID,
@@ -211,28 +210,28 @@ func (l *workerDisplayLog) InterruptOpenTurn(ctx context.Context, reason string)
 	return err
 }
 
-func (l *workerDisplayLog) MarkPaused() {
+func (l *Log) MarkPaused() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	l.block = nil
 }
 
-func (l *workerDisplayLog) ApprovalRequested(ctx context.Context, approval approvalRequest) (approvalRequest, error) {
+func (l *Log) ApprovalRequested(ctx context.Context, approval ApprovalRequest) (ApprovalRequest, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	item, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	item, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalRequest,
 		Approval: &zotigosession.DisplayApproval{
 			ID:      approval.ID,
 			TurnID:  approval.TurnID,
-			Pending: copyPendingApprovals(approval.Pending),
+			Pending: CopyPendingApprovals(approval.Pending),
 		},
 	})
 	if err != nil {
-		return approvalRequest{}, err
+		return ApprovalRequest{}, err
 	}
 	approval.CreatedAt = item.CreatedAt
-	_, _ = l.appendItem(ctx, zotigosession.DisplayItem{
+	_, _ = l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnPaused,
 		Turn: &zotigosession.DisplayTurn{
 			ID:     approval.TurnID,
@@ -243,31 +242,31 @@ func (l *workerDisplayLog) ApprovalRequested(ctx context.Context, approval appro
 	return approval, nil
 }
 
-func (l *workerDisplayLog) ApprovalResolved(ctx context.Context, approval approvalRequest, decisions []zotigosession.DisplayApprovalDecision) (approvalRequest, error) {
+func (l *Log) ApprovalResolved(ctx context.Context, approval ApprovalRequest, decisions []zotigosession.DisplayApprovalDecision) (ApprovalRequest, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	item, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	item, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalDecision,
 		Approval: &zotigosession.DisplayApproval{
 			ID:        approval.ID,
 			TurnID:    approval.TurnID,
-			Decisions: copyApprovalDecisions(decisions),
+			Decisions: CopyApprovalDecisions(decisions),
 		},
 	})
 	if err != nil {
-		return approvalRequest{}, err
+		return ApprovalRequest{}, err
 	}
-	return resolvedApprovalFromDecision(approval, decisions, item.CreatedAt), nil
+	return ResolvedApprovalFromDecision(approval, decisions, item.CreatedAt), nil
 }
 
-func (l *workerDisplayLog) ResolvePendingApprovalsForOpenTurn(ctx context.Context, reason string) (bool, error) {
+func (l *Log) ResolvePendingApprovalsForOpenTurn(ctx context.Context, reason string) (bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	items, _, err := l.items.LoadItems(ctx, l.sessionID)
+	items, _, err := l.Items.LoadItems(ctx, l.sessionID)
 	if err != nil {
 		return false, err
 	}
-	turnID := lastOpenTurnID(items)
+	turnID := LastOpenTurnID(items)
 	if turnID == "" {
 		return false, nil
 	}
@@ -293,7 +292,7 @@ func (l *workerDisplayLog) ResolvePendingApprovalsForOpenTurn(ctx context.Contex
 				Reason:     reason,
 			})
 		}
-		if _, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		if _, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemApprovalDecision,
 			Approval: &zotigosession.DisplayApproval{
 				ID:        item.Approval.ID,
@@ -309,7 +308,7 @@ func (l *workerDisplayLog) ResolvePendingApprovalsForOpenTurn(ctx context.Contex
 	return recovered, nil
 }
 
-func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
+func (l *Log) Interrupt(ctx context.Context, reason string) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.turnID == "" {
@@ -321,7 +320,7 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	}
 	turnID := l.turnID
 	usage := l.turnUsage.Add(l.runUsage).Normalized()
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
 		Turn: &zotigosession.DisplayTurn{
 			ID:         l.turnID,
@@ -339,13 +338,13 @@ func (l *workerDisplayLog) Interrupt(ctx context.Context, reason string) error {
 	return err
 }
 
-func (l *workerDisplayLog) Fail(ctx context.Context, err error) error {
+func (l *Log) Fail(ctx context.Context, err error) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	return l.failLocked(ctx, err)
 }
 
-func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event) error {
+func (l *Log) HandleEvent(ctx context.Context, event protocol.Event) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.turnID == "" {
@@ -367,11 +366,11 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			}
 		}
 		if l.block == nil {
-			l.block = &workerDisplayBlock{id: "item_" + uuid.NewString(), index: event.Index, partType: partType}
+			l.block = &displayBlock{id: "item_" + uuid.NewString(), index: event.Index, partType: partType}
 		}
 		l.block.text += event.ContentPartDelta.Text
-		if l.delta != nil && !l.deltaMuted {
-			l.delta(wire.DisplayDelta{
+		if l.Delta != nil && !l.deltaMuted {
+			l.Delta(wire.DisplayDelta{
 				BeforeInputID: l.beforeInputIDLocked(),
 				ItemID:        l.block.id,
 				Role:          string(protocol.RoleAssistant),
@@ -385,7 +384,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			if partType == "" {
 				partType = string(protocol.ContentTypeText)
 			}
-			l.block = &workerDisplayBlock{
+			l.block = &displayBlock{
 				id:       "item_" + uuid.NewString(),
 				index:    event.Index,
 				partType: partType,
@@ -400,7 +399,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			if err := l.flushBlockLocked(ctx); err != nil {
 				return err
 			}
-			_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+			_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 				Type: zotigosession.DisplayItemAssistantMessage,
 				Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{
@@ -420,7 +419,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			if err := l.flushBlockLocked(ctx); err != nil {
 				return err
 			}
-			_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+			_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 				Type: zotigosession.DisplayItemAssistantMessage,
 				Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{
@@ -431,8 +430,8 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			return err
 		}
 	case protocol.EventTypeToolProgress:
-		if event.ToolResult != nil && event.ToolResult.ToolCallID != "" && event.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
-			l.delta(wire.DisplayDelta{
+		if event.ToolResult != nil && event.ToolResult.ToolCallID != "" && event.ToolResult.Text != "" && l.Delta != nil && !l.deltaMuted {
+			l.Delta(wire.DisplayDelta{
 				BeforeInputID: l.beforeInputIDLocked(),
 				ItemID:        "tool-progress:" + event.ToolResult.ToolCallID,
 				Role:          string(protocol.RoleAssistant),
@@ -451,7 +450,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		if err := l.flushBlockLocked(ctx); err != nil {
 			return err
 		}
-		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemContextCompacted,
 			ContextCompaction: &zotigosession.DisplayContextCompaction{
 				OriginalTokens:   event.ContextCompaction.OriginalTokens,
@@ -465,8 +464,8 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		if err := l.flushBlockLocked(ctx); err != nil {
 			return err
 		}
-		if len(event.SteeringIDs) > 0 && l.barrier != nil {
-			if err := l.barrier(ctx); err != nil {
+		if len(event.SteeringIDs) > 0 && l.Barrier != nil {
+			if err := l.Barrier(ctx); err != nil {
 				l.deltaMuted = true
 				for _, commandID := range event.SteeringIDs {
 					delete(l.steering, commandID)
@@ -479,9 +478,9 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			if !ok || command.Steering == nil {
 				return fmt.Errorf("applied steering command %q is unavailable", commandID)
 			}
-			images := make([]messageImage, 0, len(command.Steering.Images))
+			images := make([]MessageImage, 0, len(command.Steering.Images))
 			for _, image := range command.Steering.Images {
-				images = append(images, messageImage{
+				images = append(images, MessageImage{
 					MimeType:  image.MimeType,
 					SizeBytes: image.SizeBytes,
 					Width:     image.Width,
@@ -489,33 +488,33 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 					BlobPath:  image.BlobPath,
 				})
 			}
-			item := displayMessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
+			item := MessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
 			item.ID = command.ID
 			item.CreatedAt = command.CreatedAt
 			item.Turn = &zotigosession.DisplayTurn{ID: l.turnID}
 			item.Command = &zotigosession.DisplayCommand{
 				Type:   wire.CommandSteering,
 				Text:   command.Steering.Text,
-				Images: displayCommandImages(images),
+				Images: CommandImages(images),
 				TurnID: l.turnID,
 			}
-			if _, err := l.items.AppendItem(ctx, l.sessionID, item); err != nil {
+			if _, err := l.Items.AppendItem(ctx, l.sessionID, item); err != nil {
 				return err
 			}
 			delete(l.steering, commandID)
 		}
 		if len(event.SteeringIDs) > 0 {
-			if l.wakeSync != nil {
-				if err := l.wakeSync(ctx); err != nil {
+			if l.WakeSync != nil {
+				if err := l.WakeSync(ctx); err != nil {
 					l.deltaMuted = true
 				}
-			} else if l.wake != nil {
-				l.wake(ctx)
+			} else if l.Wake != nil {
+				l.Wake(ctx)
 			}
 		}
 		return nil
 	case protocol.EventTypeRequestRetry:
-		_, err := l.appendItem(ctx, zotigosession.DisplayItem{Type: zotigosession.DisplayItemRequestRetry, Retry: event.Retry})
+		_, err := l.AppendItem(ctx, zotigosession.DisplayItem{Type: zotigosession.DisplayItemRequestRetry, Retry: event.Retry})
 		return err
 	case protocol.EventTypeUsageUpdated:
 		if event.Usage != nil {
@@ -529,7 +528,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 			usage := l.turnUsage.Add(l.runUsage).Normalized()
 			item.Turn = &zotigosession.DisplayTurn{ID: l.turnID, Usage: &usage}
 		}
-		_, err := l.appendItem(ctx, item)
+		_, err := l.AppendItem(ctx, item)
 		return err
 	case protocol.EventTypeFinish:
 		if event.Usage != nil {
@@ -548,7 +547,7 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 		if usage != (protocol.Usage{}) {
 			usagePointer = &usage
 		}
-		_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+		_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemTurnCompleted,
 			Turn: &zotigosession.DisplayTurn{
 				ID:                   l.turnID,
@@ -576,12 +575,12 @@ func (l *workerDisplayLog) HandleEvent(ctx context.Context, event protocol.Event
 	return nil
 }
 
-func (l *workerDisplayLog) flushBlockLocked(ctx context.Context) error {
+func (l *Log) flushBlockLocked(ctx context.Context) error {
 	if l.block == nil || l.block.text == "" {
 		l.block = nil
 		return nil
 	}
-	if _, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	if _, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		ID:      l.block.id,
 		Type:    zotigosession.DisplayItemAssistantMessage,
 		Role:    string(protocol.RoleAssistant),
@@ -593,7 +592,7 @@ func (l *workerDisplayLog) flushBlockLocked(ctx context.Context) error {
 	return nil
 }
 
-func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subagent *protocol.SubagentEvent) error {
+func (l *Log) handleSubagentEventLocked(ctx context.Context, subagent *protocol.SubagentEvent) error {
 	if subagent == nil || subagent.ToolCallID == "" {
 		return nil
 	}
@@ -626,15 +625,15 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 			current = nil
 		}
 		if current == nil {
-			current = &workerSubagentBlock{
-				block: workerDisplayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType},
+			current = &subagentBlock{
+				block: displayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType},
 				info:  info,
 			}
 			l.subagents[subagent.ToolCallID] = current
 		}
 		current.block.text += child.ContentPartDelta.Text
-		if l.delta != nil && !l.deltaMuted {
-			l.delta(wire.DisplayDelta{
+		if l.Delta != nil && !l.deltaMuted {
+			l.Delta(wire.DisplayDelta{
 				ItemID: current.block.id, Role: string(protocol.RoleAssistant), PartType: partType,
 				Delta: child.ContentPartDelta.Text, Subagent: &current.info,
 			})
@@ -647,8 +646,8 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 			if partType == "" {
 				partType = string(protocol.ContentTypeText)
 			}
-			l.subagents[subagent.ToolCallID] = &workerSubagentBlock{
-				block: workerDisplayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType, text: child.ContentPart.Text},
+			l.subagents[subagent.ToolCallID] = &subagentBlock{
+				block: displayBlock{id: "item_" + uuid.NewString(), index: child.Index, partType: partType, text: child.ContentPart.Text},
 				info:  info,
 			}
 		} else if current != nil && child.ContentPart != nil && child.ContentPart.Text != "" {
@@ -677,8 +676,8 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 			Type: string(protocol.ContentTypeToolResult), ToolResult: displayToolResultFromProtocol(child.ToolResult),
 		}}, "")
 	case protocol.EventTypeToolProgress:
-		if child.ToolResult != nil && child.ToolResult.ToolCallID != "" && child.ToolResult.Text != "" && l.delta != nil && !l.deltaMuted {
-			l.delta(wire.DisplayDelta{
+		if child.ToolResult != nil && child.ToolResult.ToolCallID != "" && child.ToolResult.Text != "" && l.Delta != nil && !l.deltaMuted {
+			l.Delta(wire.DisplayDelta{
 				ItemID: "subagent-tool-progress:" + subagent.ToolCallID + ":" + child.ToolResult.ToolCallID,
 				Role:   string(protocol.RoleAssistant), PartType: "tool_progress", Delta: child.ToolResult.Text,
 				ToolCallID: child.ToolResult.ToolCallID, ToolName: child.ToolResult.ToolName, Subagent: &info,
@@ -707,7 +706,7 @@ func (l *workerDisplayLog) handleSubagentEventLocked(ctx context.Context, subage
 	return nil
 }
 
-func (l *workerDisplayLog) flushSubagentBlockLocked(ctx context.Context, toolCallID string) error {
+func (l *Log) flushSubagentBlockLocked(ctx context.Context, toolCallID string) error {
 	current := l.subagents[toolCallID]
 	if current == nil || current.block.text == "" {
 		delete(l.subagents, toolCallID)
@@ -720,15 +719,15 @@ func (l *workerDisplayLog) flushSubagentBlockLocked(ctx context.Context, toolCal
 	return err
 }
 
-func (l *workerDisplayLog) appendSubagentItemLocked(ctx context.Context, itemID string, info zotigosession.DisplaySubagent, content []zotigosession.DisplayContentPart, errText string) error {
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+func (l *Log) appendSubagentItemLocked(ctx context.Context, itemID string, info zotigosession.DisplaySubagent, content []zotigosession.DisplayContentPart, errText string) error {
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 		Content: content, Subagent: &info, Error: errText,
 	})
 	return err
 }
 
-func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
+func (l *Log) failLocked(ctx context.Context, err error) error {
 	l.block = nil
 	usage := l.turnUsage.Add(l.runUsage).Normalized()
 	var usagePointer *protocol.Usage
@@ -736,14 +735,14 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 		usagePointer = &usage
 	}
 	errText := fmt.Sprintf("%v", err)
-	if _, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
+	if _, appendErr := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemError,
 		Error: errText,
 	}); appendErr != nil {
 		return appendErr
 	}
 	turnID := l.turnID
-	_, appendErr := l.appendItem(ctx, zotigosession.DisplayItem{
+	_, appendErr := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type:  zotigosession.DisplayItemTurnFailed,
 		Error: errText,
 		Turn: &zotigosession.DisplayTurn{
@@ -761,7 +760,7 @@ func (l *workerDisplayLog) failLocked(ctx context.Context, err error) error {
 	return appendErr
 }
 
-func (l *workerDisplayLog) ToolExecutionStarted(ctx context.Context, toolCallID string, toolName string) error {
+func (l *Log) ToolExecutionStarted(ctx context.Context, toolCallID string, toolName string) error {
 	if err := l.waitForToolCall(ctx, toolCallID); err != nil {
 		return err
 	}
@@ -770,7 +769,7 @@ func (l *workerDisplayLog) ToolExecutionStarted(ctx context.Context, toolCallID 
 	if l.turnID == "" {
 		return fmt.Errorf("tool execution started outside an active turn")
 	}
-	_, err := l.appendItem(ctx, zotigosession.DisplayItem{
+	_, err := l.AppendItem(ctx, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemToolExecutionStarted,
 		ToolExecution: &zotigosession.DisplayToolExecution{
 			TurnID:     l.turnID,
@@ -781,7 +780,7 @@ func (l *workerDisplayLog) ToolExecutionStarted(ctx context.Context, toolCallID 
 	return err
 }
 
-func (l *workerDisplayLog) waitForToolCall(ctx context.Context, toolCallID string) error {
+func (l *Log) waitForToolCall(ctx context.Context, toolCallID string) error {
 	l.mu.Lock()
 	ready := l.toolCalls[toolCallID]
 	if ready == nil {
@@ -808,7 +807,7 @@ func (l *workerDisplayLog) waitForToolCall(ctx context.Context, toolCallID strin
 	}
 }
 
-func (l *workerDisplayLog) completeToolCallLocked(toolCallID string, err error) {
+func (l *Log) completeToolCallLocked(toolCallID string, err error) {
 	ready := l.toolCalls[toolCallID]
 	if ready == nil {
 		ready = make(chan struct{})
@@ -822,16 +821,18 @@ func (l *workerDisplayLog) completeToolCallLocked(toolCallID string, err error) 
 	}
 }
 
-func (l *workerDisplayLog) appendItem(ctx context.Context, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
+// AppendItem writes one item to the durable log and notifies the daemon. It is
+// exported only because a daemon-side test drives it directly.
+func (l *Log) AppendItem(ctx context.Context, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
 	if item.Type == zotigosession.DisplayItemAssistantMessage {
 		item.BeforeInputID = l.beforeInputIDLocked()
 	}
-	stored, err := l.items.AppendItem(ctx, l.sessionID, item)
+	stored, err := l.Items.AppendItem(ctx, l.sessionID, item)
 	if err == nil {
-		if l.persisted != nil {
-			l.persisted(stored)
-		} else if l.wake != nil {
-			l.wake(ctx)
+		if l.Persisted != nil {
+			l.Persisted(stored)
+		} else if l.Wake != nil {
+			l.Wake(ctx)
 		}
 	}
 	return stored, err
@@ -879,4 +880,14 @@ func displayMediaPartFromProtocol(media *protocol.MediaPart) *zotigosession.Disp
 		FileID:    media.FileID,
 		MediaType: media.MediaType,
 	}
+}
+
+// HasToolCallWaiter reports whether a tool execution is waiting for the
+// durable tool_call item of toolCallID. It exists for tests outside this
+// package that need to observe that wait.
+func (l *Log) HasToolCallWaiter(toolCallID string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	_, ok := l.toolCalls[toolCallID]
+	return ok
 }

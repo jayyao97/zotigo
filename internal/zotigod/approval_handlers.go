@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -59,11 +60,11 @@ func (h *handler) handleApprovalDecision(w http.ResponseWriter, r *http.Request,
 		h.writeSessionNotLiveOrMissing(w, r.Context(), id, "approval decision requires a live session")
 		return
 	}
-	if approval.Status != approvalStatusPending {
+	if approval.Status != sessionlog.ApprovalStatusPending {
 		writeAPIError(w, http.StatusConflict, "approval request already resolved")
 		return
 	}
-	if err := validateApprovalDecisions(approval.Pending, decisions); err != nil {
+	if err := sessionlog.ValidateApprovalDecisions(approval.Pending, decisions); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -89,7 +90,7 @@ func approvalDecisionRequests(items []approvalDecisionRequestDTO) ([]zotigosessi
 	decisions := make([]zotigosession.DisplayApprovalDecision, 0, len(items))
 	for _, item := range items {
 		if item.Approved == nil {
-			return nil, fmt.Errorf("%w: approved is required", errInvalidApprovalRequest)
+			return nil, fmt.Errorf("%w: approved is required", sessionlog.ErrInvalidApprovalRequest)
 		}
 		decisions = append(decisions, zotigosession.DisplayApprovalDecision{
 			ToolCallID:   strings.TrimSpace(item.ToolCallID),
@@ -101,7 +102,7 @@ func approvalDecisionRequests(items []approvalDecisionRequestDTO) ([]zotigosessi
 	return decisions, nil
 }
 
-func publicApprovalRequest(approval approvalRequest) wire.ApprovalRequest {
+func publicApprovalRequest(approval sessionlog.ApprovalRequest) wire.ApprovalRequest {
 	return wire.ApprovalRequest{
 		ID:         approval.ID,
 		SessionID:  approval.SessionID,
@@ -114,15 +115,15 @@ func publicApprovalRequest(approval approvalRequest) wire.ApprovalRequest {
 	}
 }
 
-func (h *handler) loadApproval(r *http.Request, sessionID string, approvalID string) (approvalRequest, bool, error) {
+func (h *handler) loadApproval(r *http.Request, sessionID string, approvalID string) (sessionlog.ApprovalRequest, bool, error) {
 	_, inRegistry := h.registry.Get(sessionID)
 	items, inStore, err := h.items.LoadItems(r.Context(), sessionID)
 	if err != nil {
-		return approvalRequest{}, false, err
+		return sessionlog.ApprovalRequest{}, false, err
 	}
 	if !inRegistry && !inStore {
-		return approvalRequest{}, false, nil
+		return sessionlog.ApprovalRequest{}, false, nil
 	}
-	approval, ok := approvalFromDisplayItems(sessionID, approvalID, items)
+	approval, ok := sessionlog.ApprovalFromItems(sessionID, approvalID, items)
 	return approval, ok, nil
 }

@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -50,7 +51,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			}
 			delete(r.approvals, id)
 			if r.writer != nil {
-				response := publicApprovalRequest(resolvedApprovalFromDecision(pending.request, []zotigosession.DisplayApprovalDecision{{
+				response := publicApprovalRequest(sessionlog.ResolvedApprovalFromDecision(pending.request, []zotigosession.DisplayApprovalDecision{{
 					ToolCallID: pending.request.Pending[0].ToolCallID, Approved: false, Reason: "Codex request was resolved elsewhere",
 				}}, time.Now().UTC()))
 				r.writer.SendApprovalResult(ctx, wire.ApprovalResult{Approval: &response})

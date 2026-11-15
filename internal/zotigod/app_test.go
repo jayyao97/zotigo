@@ -712,11 +712,11 @@ func getSession(t *testing.T, handler http.Handler, id string) Session {
 
 func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source sessionlog.ItemSource, id string) wire.ApprovalRequest {
 	t.Helper()
-	approval := approvalRequest{
+	approval := sessionlog.ApprovalRequest{
 		ID:        sessionlog.NewID("apr"),
 		SessionID: id,
 		TurnID:    "turn-1",
-		Status:    approvalStatusPending,
+		Status:    sessionlog.ApprovalStatusPending,
 		Pending: []zotigosession.DisplayPendingApproval{{
 			ToolCallID:       "call-1",
 			ToolName:         "shell",
@@ -779,7 +779,7 @@ func respondToApprovalDecision(conn *websocket.Conn, source sessionlog.ItemSourc
 		}
 		resolvedAt := item.CreatedAt
 		resolved := approval
-		resolved.Status = approvalStatusResolved
+		resolved.Status = sessionlog.ApprovalStatusResolved
 		resolved.Decisions = publicDisplayApprovalDecisions(decision.Decisions)
 		resolved.ResolvedAt = &resolvedAt
 		if err := conn.WriteJSON(wire.Message{
@@ -915,7 +915,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source sessionlog
 				err = loadErr
 			}
 			if err == nil {
-				turnID := lastOpenTurnID(items)
+				turnID := sessionlog.LastOpenTurnID(items)
 				switch {
 				case request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID:
 					err = errTurnMismatch
@@ -967,7 +967,7 @@ func serveTestWorkerConnectionInputs(connection *workerConnection, source sessio
 				result := wire.InputResult{RequestID: request.RequestID}
 				items, _, err := source.LoadItems(context.Background(), sessionID)
 				if err == nil {
-					turnID := lastOpenTurnID(items)
+					turnID := sessionlog.LastOpenTurnID(items)
 					command := messageCommandForRequest(request)
 					if turnID != "" {
 						command = steeringCommandForRequest(request, turnID)

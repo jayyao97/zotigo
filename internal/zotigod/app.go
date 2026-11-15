@@ -283,13 +283,13 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 				handler.workers.acknowledgeDisplayBarrier(sessionID, *msg.DisplayBarrier)
 			}
 		case wire.MessageApprovalRequest:
-			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == approvalStatusPending {
+			if msg.ApprovalRequest != nil && msg.ApprovalRequest.Status == sessionlog.ApprovalStatusPending {
 				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.Pause(sessionID)
 				unlock()
 			}
 		case wire.MessageApprovalResult:
-			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == approvalStatusResolved {
+			if msg.ApprovalResult != nil && msg.ApprovalResult.Error == "" && msg.ApprovalResult.Approval != nil && msg.ApprovalResult.Approval.Status == sessionlog.ApprovalStatusResolved {
 				handler.reconcileHumanRequestState(sessionID)
 			}
 		case wire.MessageInteractionRequest:

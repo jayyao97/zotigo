@@ -57,7 +57,7 @@ func persistCodexImage(ctx context.Context, store zotigosession.Store, rootDir, 
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("%w: validate generated image %q: %v", errCodexImageUnavailable, item.ID, err)
 	}
-	stored, err := storeMessageImageBlobs(rootDir, sessionID, []messageImage{{
+	stored, err := storeMessageImageBlobs(rootDir, sessionID, []sessionlog.MessageImage{{
 		MimeType: mimeType, Data: data, SizeBytes: len(data), Width: width, Height: height,
 	}})
 	if err != nil {

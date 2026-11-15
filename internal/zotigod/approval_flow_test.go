@@ -36,8 +36,8 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	defer worker.Close()
 
 	approval := createApprovalRequestForTest(t, registry, source, created.ID)
-	if approval.Status != approvalStatusPending {
-		t.Fatalf("expected status %q, got %q", approvalStatusPending, approval.Status)
+	if approval.Status != sessionlog.ApprovalStatusPending {
+		t.Fatalf("expected status %q, got %q", sessionlog.ApprovalStatusPending, approval.Status)
 	}
 	if approval.TurnID != "turn-1" || len(approval.Pending) != 1 {
 		t.Fatalf("unexpected approval response: %#v", approval)
@@ -83,7 +83,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	if err := decodeAPIData(t, rec.Body.Bytes(), &resolved); err != nil {
 		t.Fatalf("decode approval response: %v", err)
 	}
-	if resolved.Status != approvalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved != approved {
+	if resolved.Status != sessionlog.ApprovalStatusResolved || len(resolved.Decisions) != 1 || resolved.Decisions[0].Approved != approved {
 		t.Fatalf("unexpected resolved approval: %#v", resolved)
 	}
 	if got := getSession(t, handler, created.ID); got.State != SessionStateRunning {
@@ -176,7 +176,7 @@ func TestWorkerApprovalRequestMessagePausesSession(t *testing.T) {
 		Type: wire.MessageApprovalRequest,
 		ApprovalRequest: &wire.ApprovalRequest{
 			ID:     "apr-worker-owned",
-			Status: approvalStatusPending,
+			Status: sessionlog.ApprovalStatusPending,
 		},
 	}); err != nil {
 		t.Fatalf("send approval request message: %v", err)
@@ -202,11 +202,11 @@ func TestWorkerApprovalRequestBeforeReadyKeepsSessionPaused(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker, generation := connectWorker(t, server, created.ID)
 	defer worker.Close()
-	approval := publicApprovalRequest(approvalRequest{
+	approval := publicApprovalRequest(sessionlog.ApprovalRequest{
 		ID:        "apr-before-ready",
 		SessionID: created.ID,
 		TurnID:    "turn-1",
-		Status:    approvalStatusPending,
+		Status:    sessionlog.ApprovalStatusPending,
 		Pending:   []zotigosession.DisplayPendingApproval{{ToolCallID: "call-1", ToolName: "shell"}},
 	})
 	if _, err := source.AppendItem(context.Background(), created.ID, zotigosession.DisplayItem{
@@ -267,11 +267,11 @@ func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
 	connections := make(chan *websocket.Conn, 2)
 	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
 		if launches.Add(1) == 2 {
-			display := newWorkerDisplayLog(sessionID, source)
+			display := sessionlog.NewLog(sessionID, source)
 			if _, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), approvalWorkerRestartedReason); err != nil {
 				return err
 			}
-			if err := display.InterruptOpenTurn(context.Background(), workerRestartedReason); err != nil {
+			if err := display.InterruptOpenTurn(context.Background(), sessionlog.WorkerRestartedReason); err != nil {
 				return err
 			}
 		}
@@ -321,7 +321,7 @@ func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load recovered display items: %v", err)
 	}
-	if hasPendingApproval(items) {
+	if sessionlog.HasPendingApproval(items) {
 		t.Fatal("replacement worker left approval pending")
 	}
 }
@@ -334,12 +334,12 @@ func TestWorkerApprovalRequestSurvivesTurnPausedHintAppendFailure(t *testing.T) 
 		}
 		return nil
 	}
-	display := newWorkerDisplayLog("sess-approval-write-failure", source)
-	approval := approvalRequest{
+	display := sessionlog.NewLog("sess-approval-write-failure", source)
+	approval := sessionlog.ApprovalRequest{
 		ID:        "apr-write-failure",
 		SessionID: "sess-approval-write-failure",
 		TurnID:    "turn-1",
-		Status:    approvalStatusPending,
+		Status:    sessionlog.ApprovalStatusPending,
 		Pending: []zotigosession.DisplayPendingApproval{{
 			ToolCallID: "call-1",
 			ToolName:   "shell",
@@ -500,8 +500,8 @@ func TestPersistedApprovalRemainsReadableWhenSessionEnds(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load approval: %v", err)
 	}
-	approval, ok := approvalFromDisplayItems(created.ID, approvalID, items)
-	if !ok || approval.Status != approvalStatusPending {
+	approval, ok := sessionlog.ApprovalFromItems(created.ID, approvalID, items)
+	if !ok || approval.Status != sessionlog.ApprovalStatusPending {
 		t.Fatalf("expected pending persisted approval, got %#v", approval)
 	}
 }
@@ -561,8 +561,8 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load persisted approval: %v", err)
 	}
-	workerView, ok := approvalFromDisplayItems(created.ID, approval.ID, items)
-	if !ok || workerView.Status != approvalStatusPending || len(workerView.Pending) != 1 {
+	workerView, ok := sessionlog.ApprovalFromItems(created.ID, approval.ID, items)
+	if !ok || workerView.Status != sessionlog.ApprovalStatusPending || len(workerView.Pending) != 1 {
 		t.Fatalf("expected pending approval after restart, got %#v", workerView)
 	}
 

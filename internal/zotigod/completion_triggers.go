@@ -40,7 +40,7 @@ func validateCompletionSteering(ctx context.Context, source sessionlog.ItemSourc
 	if err != nil {
 		return err
 	}
-	if hasPendingHumanRequest(items) {
+	if sessionlog.HasPendingHumanRequest(items) {
 		return errActiveTurn
 	}
 	return nil

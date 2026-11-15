@@ -2,6 +2,8 @@ package zotigod
 
 import (
 	"net/http"
+
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func (h *handler) handleUpdates(w http.ResponseWriter, r *http.Request) {
@@ -82,7 +84,7 @@ func (h *handler) handleUpdateDrain(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, 500, "cannot verify session is idle")
 			return
 		}
-		if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || hasPendingHumanRequest(items) {
+		if sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) {
 			writeAPIJSON(w, 200, false)
 			return
 		}

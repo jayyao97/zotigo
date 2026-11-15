@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -129,7 +130,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
-	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
+	if sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
 		writeAPIError(w, http.StatusConflict, "approval policy change requires an idle session")
 		return
 	}

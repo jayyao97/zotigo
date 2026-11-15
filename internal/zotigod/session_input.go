@@ -172,11 +172,11 @@ func displayItemForAcceptedInput(command wire.Command) zotigosession.DisplayItem
 	if command.Type == wire.CommandSteering {
 		itemType = zotigosession.DisplayItemSessionCommand
 	}
-	item := displayMessageItem(itemType, text, displayImages)
+	item := sessionlog.MessageItem(itemType, text, displayImages)
 	item.ID = command.ID
 	item.CreatedAt = command.CreatedAt
 	item.Command = &zotigosession.DisplayCommand{
-		Type: command.Type, Text: text, Images: displayCommandImages(displayImages), Skills: append([]string(nil), skills...), RequestContext: commandRequestContext(command).Clone(),
+		Type: command.Type, Text: text, Images: sessionlog.CommandImages(displayImages), Skills: append([]string(nil), skills...), RequestContext: commandRequestContext(command).Clone(),
 	}
 	if command.Steering != nil {
 		item.Command.TurnID = command.Steering.TurnID
@@ -184,10 +184,10 @@ func displayItemForAcceptedInput(command wire.Command) zotigosession.DisplayItem
 	return item
 }
 
-func displayImagesFromCommand(images []wire.CommandImageData) []messageImage {
-	result := make([]messageImage, 0, len(images))
+func displayImagesFromCommand(images []wire.CommandImageData) []sessionlog.MessageImage {
+	result := make([]sessionlog.MessageImage, 0, len(images))
 	for _, image := range images {
-		result = append(result, messageImage{
+		result = append(result, sessionlog.MessageImage{
 			MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath,
 		})
 	}

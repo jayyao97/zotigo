@@ -15,7 +15,7 @@ import (
 
 func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-tool-order", source)
+	display := sessionlog.NewLog("sess-tool-order", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -67,7 +67,7 @@ func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) 
 
 func TestWorkerToolExecutionDoesNotInvokeWhenStartedMarkerFails(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-tool-marker-failure", source)
+	display := sessionlog.NewLog("sess-tool-marker-failure", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -78,7 +78,7 @@ func TestWorkerToolExecutionDoesNotInvokeWhenStartedMarkerFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("persist tool call: %v", err)
 	}
-	display.items = sessionlog.FailingItemSource{Err: errors.New("disk full")}
+	display.Items = sessionlog.FailingItemSource{Err: errors.New("disk full")}
 	executed := false
 	recorder := &workerDurabilityRecorder{display: display}
 	invoke := func(ctx context.Context, call *agent.ToolCall) (any, error) {
@@ -368,14 +368,11 @@ func TestRecoverInterruptedToolIgnoresOlderUnknownAfterNewerCompletedTurn(t *tes
 	}
 }
 
-func waitForToolCallWaiter(t *testing.T, display *workerDisplayLog, toolCallID string) {
+func waitForToolCallWaiter(t *testing.T, display *sessionlog.Log, toolCallID string) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		display.mu.Lock()
-		_, ok := display.toolCalls[toolCallID]
-		display.mu.Unlock()
-		if ok {
+		if display.HasToolCallWaiter(toolCallID) {
 			return
 		}
 		if time.Now().After(deadline) {

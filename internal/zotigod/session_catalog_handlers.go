@@ -9,6 +9,7 @@ import (
 	"time"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type sessionProjection struct {
@@ -287,7 +288,7 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 				writeAPIError(w, http.StatusInternalServerError, "load session activity failed")
 				return
 			}
-			if requireIdleSession(items) != nil || hasPendingHumanRequest(items) {
+			if requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
 				writeAPIError(w, http.StatusConflict, "session is active")
 				return
 			}

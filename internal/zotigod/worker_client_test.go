@@ -786,7 +786,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	display := newWorkerDisplayLog("sess-worker-profile", sessionlog.StoredItemSource{Store: store})
+	display := sessionlog.NewLog("sess-worker-profile", sessionlog.StoredItemSource{Store: store})
 	runtime := &workerRuntime{
 		sessionID: "sess-worker-profile",
 		workDir:   workDir,
@@ -938,7 +938,7 @@ func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 		workDir:   workDir,
 		store:     unavailableSessionStore{err: errors.New("store unavailable")},
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-failure", source),
+		display:   sessionlog.NewLog("sess-profile-failure", source),
 	}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
@@ -1006,7 +1006,7 @@ func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 		workDir:   workDir,
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-build-failure", source),
+		display:   sessionlog.NewLog("sess-profile-build-failure", source),
 	}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
@@ -1053,7 +1053,7 @@ func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
 		}
 		return nil
 	}}
-	runtime := &workerRuntime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: newWorkerDisplayLog("sess-marker-failure", source)}
+	runtime := &workerRuntime{sessionID: "sess-marker-failure", workDir: workDir, agent: ag, display: sessionlog.NewLog("sess-marker-failure", source)}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{ID: "profile-command", Type: wire.CommandProfile, Profile: &wire.ProfileCommandPayload{Name: "broken"}}); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
@@ -1080,7 +1080,7 @@ func TestWorkerRuntimeDoesNotCompleteLaterProfileAfterMarkerFailure(t *testing.T
 		}
 		return nil
 	}}
-	runtime := &workerRuntime{sessionID: "sess-marker-order", agent: ag, display: newWorkerDisplayLog("sess-marker-order", source)}
+	runtime := &workerRuntime{sessionID: "sess-marker-order", agent: ag, display: sessionlog.NewLog("sess-marker-order", source)}
 	ready := make(chan struct{})
 	close(ready)
 	orderedA := make(chan struct{})
@@ -1148,7 +1148,7 @@ func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) 
 		workDir:   workDir,
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-supersede", source),
+		display:   sessionlog.NewLog("sess-profile-supersede", source),
 	}
 	events, err := ag.Run(context.Background(), "keep the current generation active")
 	if err != nil {
@@ -1257,7 +1257,7 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 		workDir:   workDir,
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-linear", sessionlog.StoredItemSource{Store: store}),
+		display:   sessionlog.NewLog("sess-profile-linear", sessionlog.StoredItemSource{Store: store}),
 	}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-a",
@@ -1371,7 +1371,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		workDir:   workDir,
 		store:     store,
 		agent:     oldAgent,
-		display:   newWorkerDisplayLog("sess-profile-uncertain", source),
+		display:   sessionlog.NewLog("sess-profile-uncertain", source),
 		fatalCh:   make(chan error, 1),
 	}
 	messageResponse, err := messageCommandFromItem(messageCommand, "")
@@ -1438,7 +1438,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		workDir:   workDir,
 		store:     baseStore,
 		agent:     newAgent,
-		display:   newWorkerDisplayLog("sess-profile-uncertain", source),
+		display:   sessionlog.NewLog("sess-profile-uncertain", source),
 	}
 	if err := secondRuntime.HandleCommand(context.Background(), profileCommandFromItem(command)); err != nil {
 		t.Fatalf("replay uncertain profile command: %v", err)
@@ -1505,7 +1505,7 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 		workDir:   workDir,
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-append-failure", source),
+		display:   sessionlog.NewLog("sess-profile-append-failure", source),
 	}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-command",
@@ -1575,7 +1575,7 @@ func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
 
 func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-close", source)
+	display := sessionlog.NewLog("sess-close", source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
@@ -1599,7 +1599,7 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 	if items[1].Turn.Reason != controlChannelClosedReason {
 		t.Fatalf("expected reason %q, got %#v", controlChannelClosedReason, items[1].Turn)
 	}
-	if got := lastOpenTurnID(items); got != "" {
+	if got := sessionlog.LastOpenTurnID(items); got != "" {
 		t.Fatalf("expected no open turn, got %q", got)
 	}
 }
@@ -1708,7 +1708,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 		sessionID: "sess-close-stream",
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-close-stream", source),
+		display:   sessionlog.NewLog("sess-close-stream", source),
 	}
 	runtime.runner = runner.New(ag, transport)
 	if err := runtime.startMessageTurn(context.Background(), "message-command", 1, &wire.MessageCommandPayload{Text: "wait"}); err != nil {
@@ -1745,7 +1745,7 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 		return &noopProvider{}, nil
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-ready", source)
+	display := sessionlog.NewLog("sess-ready", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -1815,7 +1815,7 @@ func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
 		return &noopProvider{}, nil
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-paused-input", source)
+	display := sessionlog.NewLog("sess-paused-input", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1852,7 +1852,7 @@ func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 	const providerName = "zotigod-starting-input-test"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-starting-input", source)
+	display := sessionlog.NewLog("sess-starting-input", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -1915,7 +1915,7 @@ func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T)
 		t.Fatal(err)
 	}
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-completion-input", source)
+	display := sessionlog.NewLog("sess-completion-input", source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -1977,7 +1977,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 		return &noopProvider{}, nil
 	})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-stale-steering", source)
+	display := sessionlog.NewLog("sess-stale-steering", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -2062,7 +2062,7 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	defer transport.Close()
 	runtime := &workerRuntime{
 		sessionID: "sess-stopping", store: store, agent: ag,
-		display:    newWorkerDisplayLog("sess-stopping", source),
+		display:    sessionlog.NewLog("sess-stopping", source),
 		turnActive: true, turnReady: make(chan struct{}), turnDone: make(chan struct{}), fatalCh: make(chan error, 1),
 	}
 	working := make(chan struct{}, 1)

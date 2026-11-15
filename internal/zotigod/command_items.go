@@ -8,10 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
-	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
@@ -154,50 +152,6 @@ func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (wir
 	default:
 		return wire.Command{}, false, nil
 	}
-}
-
-func displayMessageItem(itemType zotigosession.DisplayItemType, text string, images []messageImage) zotigosession.DisplayItem {
-	content := make([]zotigosession.DisplayContentPart, 0, 1+len(images))
-	if text != "" {
-		content = append(content, zotigosession.DisplayContentPart{
-			Type: string(protocol.ContentTypeText),
-			Text: text,
-		})
-	}
-	for _, img := range images {
-		content = append(content, zotigosession.DisplayContentPart{
-			Type: string(protocol.ContentTypeImage),
-			Image: &zotigosession.DisplayMediaPart{
-				MediaType: img.MimeType,
-				SizeBytes: img.SizeBytes,
-				Width:     img.Width,
-				Height:    img.Height,
-			},
-		})
-	}
-	return zotigosession.DisplayItem{
-		Type:    itemType,
-		Role:    string(protocol.RoleUser),
-		Content: content,
-	}
-}
-
-func displayCommandImages(images []messageImage) []zotigosession.DisplayCommandImage {
-	if len(images) == 0 {
-		return nil
-	}
-	resp := make([]zotigosession.DisplayCommandImage, 0, len(images))
-	for _, img := range images {
-		resp = append(resp, zotigosession.DisplayCommandImage{
-			MimeType:  img.MimeType,
-			SizeBytes: img.SizeBytes,
-			Width:     img.Width,
-			Height:    img.Height,
-			BlobPath:  img.BlobPath,
-			Data:      img.Data,
-		})
-	}
-	return resp
 }
 
 func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
@@ -378,59 +332,6 @@ func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) wire.Command 
 		command.ApprovalPolicy.Policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
 	}
 	return command
-}
-
-func lastOpenTurnID(items []zotigosession.DisplayItem) string {
-	id, _ := lastOpenTurn(items)
-	return id
-}
-
-func lastOpenTurn(items []zotigosession.DisplayItem) (string, time.Time) {
-	var open string
-	var started time.Time
-	for _, item := range items {
-		if item.Turn == nil || item.Turn.ID == "" {
-			continue
-		}
-		switch item.Type {
-		case zotigosession.DisplayItemTurnStarted, zotigosession.DisplayItemTurnPaused:
-			open = item.Turn.ID
-			if item.Type == zotigosession.DisplayItemTurnStarted {
-				started = item.CreatedAt
-			}
-		case zotigosession.DisplayItemTurnCompleted, zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
-			if open == item.Turn.ID {
-				open = ""
-				started = time.Time{}
-			}
-		}
-	}
-	return open, started
-}
-
-func hasPendingApprovalForTurn(items []zotigosession.DisplayItem, turnID string) bool {
-	pending := map[string]struct{}{}
-	pendingByTurn := false
-	for _, item := range items {
-		if item.Approval == nil || item.Approval.TurnID != turnID {
-			continue
-		}
-		switch item.Type {
-		case zotigosession.DisplayItemApprovalRequest:
-			if item.Approval.ID == "" {
-				pendingByTurn = true
-			} else {
-				pending[item.Approval.ID] = struct{}{}
-			}
-		case zotigosession.DisplayItemApprovalDecision:
-			if item.Approval.ID == "" {
-				pendingByTurn = false
-			} else {
-				delete(pending, item.Approval.ID)
-			}
-		}
-	}
-	return pendingByTurn || len(pending) > 0
 }
 
 func hasPendingMessageCommand(items []zotigosession.DisplayItem) bool {

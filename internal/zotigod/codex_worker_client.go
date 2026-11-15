@@ -13,6 +13,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -185,7 +186,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		if err != nil {
 			return fmt.Errorf("restore Codex display turn: %w", err)
 		}
-		runtime.activeTurnID, runtime.turnStarted = lastOpenTurn(items)
+		runtime.activeTurnID, runtime.turnStarted = sessionlog.LastOpenTurn(items)
 	}
 	cursor, err := recoverWorkerCommandCursor(ctx, store, cfg.SessionID)
 	if err != nil {

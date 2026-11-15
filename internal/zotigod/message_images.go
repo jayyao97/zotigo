@@ -20,6 +20,7 @@ import (
 
 	"github.com/bytedance/sonic"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const (
@@ -34,16 +35,6 @@ var errRequestBodyTooLarge = errors.New("request body too large")
 type submitMessageImageRequest struct {
 	MimeType   string `json:"mime_type"`
 	DataBase64 string `json:"data_base64"`
-}
-
-type messageImage struct {
-	MimeType  string
-	Data      []byte
-	SizeBytes int
-	Width     int
-	Height    int
-	BlobPath  string
-	LocalPath string
 }
 
 func readRequiredLimitedJSON(r *http.Request, value any, maxBytes int64) error {
@@ -63,7 +54,7 @@ func readRequiredLimitedJSON(r *http.Request, value any, maxBytes int64) error {
 	return sonic.Unmarshal(data, value)
 }
 
-func validateMessageImages(requests []submitMessageImageRequest) ([]messageImage, error) {
+func validateMessageImages(requests []submitMessageImageRequest) ([]sessionlog.MessageImage, error) {
 	if len(requests) == 0 {
 		return nil, nil
 	}
@@ -71,7 +62,7 @@ func validateMessageImages(requests []submitMessageImageRequest) ([]messageImage
 		return nil, fmt.Errorf("images must contain at most %d items", maxMessageImages)
 	}
 
-	images := make([]messageImage, 0, len(requests))
+	images := make([]sessionlog.MessageImage, 0, len(requests))
 	totalBytes := 0
 	for idx, req := range requests {
 		mimeType := strings.ToLower(strings.TrimSpace(req.MimeType))
@@ -99,7 +90,7 @@ func validateMessageImages(requests []submitMessageImageRequest) ([]messageImage
 		if err != nil {
 			return nil, fmt.Errorf("images[%d] does not match %s: %w", idx, mimeType, err)
 		}
-		images = append(images, messageImage{
+		images = append(images, sessionlog.MessageImage{
 			MimeType:  mimeType,
 			Data:      data,
 			SizeBytes: len(data),
@@ -144,7 +135,7 @@ func validateMessageImageData(mimeType string, data []byte) (int, int, error) {
 	return cfg.Width, cfg.Height, nil
 }
 
-func storeMessageImageBlobs(rootDir string, sessionID string, images []messageImage) ([]messageImage, error) {
+func storeMessageImageBlobs(rootDir string, sessionID string, images []sessionlog.MessageImage) ([]sessionlog.MessageImage, error) {
 	if len(images) == 0 {
 		return images, nil
 	}
@@ -156,7 +147,7 @@ func storeMessageImageBlobs(rootDir string, sessionID string, images []messageIm
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return nil, fmt.Errorf("create image directory: %w", err)
 	}
-	stored := make([]messageImage, len(images))
+	stored := make([]sessionlog.MessageImage, len(images))
 	copy(stored, images)
 	for i, img := range stored {
 		name, err := newMessageImageBlobName(img.MimeType)
@@ -176,7 +167,7 @@ func storeMessageImageBlobs(rootDir string, sessionID string, images []messageIm
 	return stored, nil
 }
 
-func cleanupMessageImageBlobs(images []messageImage) {
+func cleanupMessageImageBlobs(images []sessionlog.MessageImage) {
 	for _, img := range images {
 		if img.LocalPath == "" {
 			continue
@@ -235,7 +226,7 @@ func messageImageBlobPath(sessionID string, name string) (string, bool) {
 	return filepath.Join("sessions", sessionID+".images", name), true
 }
 
-func messageImageRefs(sessionID string, images []messageImage) ([]zotigosession.ImageRef, error) {
+func messageImageRefs(sessionID string, images []sessionlog.MessageImage) ([]zotigosession.ImageRef, error) {
 	if len(images) == 0 {
 		return nil, nil
 	}

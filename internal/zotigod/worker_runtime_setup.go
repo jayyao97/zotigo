@@ -56,7 +56,7 @@ type workerRuntime struct {
 	agent            *agent.Agent
 	runner           *runner.Runner
 	transport        *workerRuntimeTransport
-	display          *workerDisplayLog
+	display          *sessionlog.Log
 	observer         observability.Observer
 	runtimeWAL       *workerRuntimeWAL
 	cleanup          func()
@@ -139,16 +139,16 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		"process_start":  time.Now().UTC().Format(time.RFC3339),
 		"worker":         true,
 	})
-	display := newWorkerDisplayLog(cfg.SessionID, sessionlog.StoredItemSource{Store: cfg.Store})
-	display.delta = cfg.SendDelta
-	display.persisted = cfg.NotifyDisplayItem
-	display.wake = func(context.Context) {
+	display := sessionlog.NewLog(cfg.SessionID, sessionlog.StoredItemSource{Store: cfg.Store})
+	display.Delta = cfg.SendDelta
+	display.Persisted = cfg.NotifyDisplayItem
+	display.Wake = func(context.Context) {
 		if cfg.NotifyDisplay != nil {
 			cfg.NotifyDisplay()
 		}
 	}
-	display.barrier = cfg.DisplayBarrier
-	display.wakeSync = cfg.SyncDisplay
+	display.Barrier = cfg.DisplayBarrier
+	display.WakeSync = cfg.SyncDisplay
 	runtimeWAL := newWorkerRuntimeWAL(cfg.Store, cfg.SessionID)
 	recoveredRuntimeWAL, err := recoverRuntimeWAL(ctx, cfg.Store, sess)
 	if err != nil {
@@ -279,7 +279,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	}
 	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
-	if err := display.InterruptOpenTurn(ctx, workerRestartedReason); err != nil {
+	if err := display.InterruptOpenTurn(ctx, sessionlog.WorkerRestartedReason); err != nil {
 		if ownsHookDispatcher {
 			closeHookDispatcher(hookDispatcher)
 		}

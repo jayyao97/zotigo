@@ -226,7 +226,7 @@ func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
 	}
 	if err := worker.WriteJSON(wire.Message{
 		Type:            wire.MessageApprovalRequest,
-		ApprovalRequest: &wire.ApprovalRequest{ID: "approval-during-input", Status: approvalStatusPending},
+		ApprovalRequest: &wire.ApprovalRequest{ID: "approval-during-input", Status: sessionlog.ApprovalStatusPending},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -329,7 +329,7 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 			Turn: &zotigosession.DisplayTurn{
 				ID:     "turn-stale",
 				Status: "interrupted",
-				Reason: workerRestartedReason,
+				Reason: sessionlog.WorkerRestartedReason,
 			},
 		}); err != nil {
 			return err
@@ -371,7 +371,7 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 		t.Fatalf("expected stale start, interruption, and message, got %#v", items.Items)
 	}
 	if items.Items[1].Type != string(zotigosession.DisplayItemTurnInterrupted) ||
-		items.Items[1].Turn == nil || items.Items[1].Turn.Reason != workerRestartedReason {
+		items.Items[1].Turn == nil || items.Items[1].Turn.Reason != sessionlog.WorkerRestartedReason {
 		t.Fatalf("expected worker restart interruption, got %#v", items.Items[1])
 	}
 	if items.Items[2].Type != string(zotigosession.DisplayItemUserMessage) ||
