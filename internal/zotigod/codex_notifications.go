@@ -34,7 +34,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 				return err
 			}
 			now := time.Now().UTC()
-			req.Status = interactionStatusExpired
+			req.Status = sessionlog.InteractionStatusExpired
 			req.ResolvedAt = &now
 			delete(r.interactions, id)
 			if r.writer != nil {

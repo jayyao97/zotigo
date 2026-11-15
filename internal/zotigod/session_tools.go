@@ -81,7 +81,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 				}
 				if trigger.SessionID != id || trigger.State != "fired" || trigger.DeliveryMode != "steer" ||
 					item.Command.Text != completionPrompt(trigger.OnFire, trigger.CallbackText) ||
-					!sameRequestContext(item.Command.RequestContext, completionOrigin(trigger)) {
+					!sessionlog.SameRequestContext(item.Command.RequestContext, completionOrigin(trigger)) {
 					return caller, errors.New("completion steering has no matching host receipt")
 				}
 				continue
@@ -535,7 +535,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 			return nil, err
 		}
 		if existing.SourceSessionID != operation.SourceSessionID || existing.SourceTurnID != operation.SourceTurnID || existing.CallID != operation.CallID || existing.Name != operation.Name || !reflect.DeepEqual(existing.Input, input) || existing.TargetID != operation.TargetID {
-			return nil, errCommandIDConflict
+			return nil, sessionlog.ErrCommandIDConflict
 		}
 		operation = existing
 	} else if errors.Is(err, os.ErrNotExist) {
@@ -574,7 +574,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 		return nil, errSessionNotFound
 	}
 	commandID := "session_tool:" + turnKey + ":" + callKey
-	previous, found, err := findExistingSessionInput(ctx, h.items, operation.TargetID, wire.Command{ID: commandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
+	previous, found, err := sessionlog.FindExistingInput(ctx, h.items, operation.TargetID, wire.Command{ID: commandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
 	if err != nil {
 		return nil, err
 	}
@@ -607,7 +607,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, operation.TargetID, commandID, text, nil, nil, "", false, true, &sessionInputConstraints{approvalPolicy: target.ApprovalPolicy, promptRevision: target.PromptConfig.Revision, requestContext: caller.Origin})
 	if err != nil {
-		if errors.Is(err, errActiveTurn) || errors.Is(err, errInputPolicyMismatch) || errors.Is(err, errWorkerInputStopping) {
+		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, sessionlog.ErrInputPolicyMismatch) || errors.Is(err, errWorkerInputStopping) {
 			return nil, err
 		}
 		return uncertainSessionToolResult(operation.TargetID, commandID), nil

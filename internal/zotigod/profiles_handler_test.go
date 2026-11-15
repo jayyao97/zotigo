@@ -427,7 +427,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, wire.CommandsPage{
-			Commands:   []wire.Command{profileCommandFromItem(commandA), pauseCommandFromItem(pause), profileCommandFromItem(commandB)},
+			Commands:   []wire.Command{sessionlog.ProfileCommandFromItem(commandA), sessionlog.PauseCommandFromItem(pause), sessionlog.ProfileCommandFromItem(commandB)},
 			NextOffset: 1,
 		})
 	}))

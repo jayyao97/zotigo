@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -128,11 +129,11 @@ profiles:
 		t.Fatal(err)
 	}
 	defer runtime.Close()
-	if _, err := runtime.acceptInput(context.Background(), wire.InputRequest{RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequiredPromptRevision: 2, RequirePromptRevision: true}); !errors.Is(err, errInputPolicyMismatch) {
+	if _, err := runtime.acceptInput(context.Background(), wire.InputRequest{RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequiredPromptRevision: 2, RequirePromptRevision: true}); !errors.Is(err, sessionlog.ErrInputPolicyMismatch) {
 		t.Fatalf("prompt revision mismatch was admitted: %v", err)
 	}
 	runtime.agent.SetApprovalPolicy(agent.ApprovalPolicyBypass)
-	if _, err := runtime.acceptInput(context.Background(), wire.InputRequest{RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequiredPromptRevision: 3, RequirePromptRevision: true}); !errors.Is(err, errInputPolicyMismatch) {
+	if _, err := runtime.acceptInput(context.Background(), wire.InputRequest{RequiredApprovalPolicy: agent.ApprovalPolicyAuto, RequiredPromptRevision: 3, RequirePromptRevision: true}); !errors.Is(err, sessionlog.ErrInputPolicyMismatch) {
 		t.Fatalf("approval policy mismatch was admitted: %v", err)
 	}
 	runtime.agent.SetApprovalPolicy(agent.ApprovalPolicyAuto)

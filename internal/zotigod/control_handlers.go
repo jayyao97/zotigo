@@ -29,8 +29,6 @@ const (
 	commandOffsetScanLines        = wire.MaxCommandsLimit
 )
 
-var errCommandImageUnavailable = errors.New("command image payload unavailable")
-
 type pauseSessionRequest struct {
 	TurnID string `json:"turn_id,omitempty"`
 }
@@ -164,13 +162,13 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
-		case errors.Is(err, errActiveTurn):
+		case errors.Is(err, sessionlog.ErrActiveTurn):
 			writeAPIErrorCode(w, http.StatusConflict, "active_turn", err.Error())
-		case errors.Is(err, errInputPolicyMismatch):
+		case errors.Is(err, sessionlog.ErrInputPolicyMismatch):
 			writeAPIErrorCode(w, http.StatusConflict, "input_policy_mismatch", err.Error())
 		case errors.Is(err, errSessionBusy):
 			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
-		case errors.Is(err, errCommandIDConflict):
+		case errors.Is(err, sessionlog.ErrCommandIDConflict):
 			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
 		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			h.writeEnsureRunningError(w, err)
@@ -246,11 +244,8 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 }
 
 var (
-	errSessionBusy       = errors.New("session is busy")
-	errApprovalPending   = errors.New("approval is pending")
-	errNoActiveTurn      = errors.New("no active turn")
-	errTurnMismatch      = errors.New("active turn does not match expected turn")
-	errCommandIDConflict = errors.New("client message ID already belongs to different input")
+	errSessionBusy     = errors.New("session is busy")
+	errApprovalPending = errors.New("approval is pending")
 )
 
 func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []sessionlog.MessageImage, selectedSkills []string, steeringOnly bool) (wire.Command, []sessionlog.MessageImage, []zotigosession.ImageRef, error) {
@@ -329,14 +324,14 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 				return err
 			}
 			if stored == nil || stored.ApprovalPolicy != constraints.approvalPolicy || stored.PromptConfig.Revision != constraints.promptRevision {
-				return errInputPolicyMismatch
+				return sessionlog.ErrInputPolicyMismatch
 			}
 			items, _, err := h.items.LoadItems(ctx, id)
 			if err != nil {
 				return err
 			}
 			if pending, _, ok := pendingApprovalPolicyIntent(items); ok && pending != constraints.approvalPolicy {
-				return errInputPolicyMismatch
+				return sessionlog.ErrInputPolicyMismatch
 			}
 		}
 		var err error
@@ -383,23 +378,11 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		}
 		return wire.Command{}, err
 	}
-	if !sameCommandImagePaths(command, accepted) {
+	if !sessionlog.SameCommandImagePaths(command, accepted) {
 		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
 		cleanupMessageImageBlobs(storedImages)
 	}
 	return accepted, nil
-}
-
-func equalStrings(left []string, right []string) bool {
-	if len(left) != len(right) {
-		return false
-	}
-	for index := range left {
-		if left[index] != right[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func (h *handler) indexLegacyMessageImageRef(ctx context.Context, store imageRefStore, sessionID string, name string, blobPath string) (zotigosession.ImageRef, bool, error) {

@@ -30,8 +30,6 @@ const workerHTTPTimeout = 10 * time.Second
 
 const workerDialErrorBodyLimit = 4 * 1024
 
-var errActiveTurn = errors.New("active_turn: a turn is already active")
-
 const (
 	defaultWorkerClientPingInterval = 15 * time.Second
 	defaultWorkerClientPongWait     = 45 * time.Second

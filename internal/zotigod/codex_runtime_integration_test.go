@@ -278,7 +278,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+	if err := <-resultCh; !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 		t.Fatalf("expected no active turn, got %v", err)
 	}
 	if current, _ := registry.Get(session.ID); current.Working || current.ActiveTool != "" {
@@ -332,7 +332,7 @@ func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+	if err := <-resultCh; !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 		t.Fatalf("expected no active turn result before disconnect, got %v", err)
 	}
 }

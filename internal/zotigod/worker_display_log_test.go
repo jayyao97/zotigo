@@ -546,7 +546,7 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 	for _, inputID := range []string{"steer-1", "steer-2"} {
 		command := wire.Command{ID: inputID, Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: inputID, TurnID: turn}}
 		display.QueueSteering(command)
-		if _, err := appendAcceptedSessionInput(ctx, source, id, command); err != nil {
+		if _, err := sessionlog.AppendAcceptedInput(ctx, source, id, command); err != nil {
 			t.Fatal(err)
 		}
 	}

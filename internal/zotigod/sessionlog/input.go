@@ -1,39 +1,45 @@
-package zotigod
+package sessionlog
 
 import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-var errInputPolicyMismatch = errors.New("input policy changed before admission")
+var (
+	ErrActiveTurn          = errors.New("active_turn: a turn is already active")
+	ErrNoActiveTurn        = errors.New("no active turn")
+	ErrTurnMismatch        = errors.New("active turn does not match expected turn")
+	ErrCommandIDConflict   = errors.New("client message ID already belongs to different input")
+	ErrInputPolicyMismatch = errors.New("input policy changed before admission")
+)
 
-func workerInputErrorDetails(err error) (string, string) {
+func InputErrorDetails(err error) (string, string) {
 	switch {
-	case errors.Is(err, errNoActiveTurn):
+	case errors.Is(err, ErrNoActiveTurn):
 		return "no_active_turn", "steering requires an active turn"
-	case errors.Is(err, errActiveTurn):
-		if err != errActiveTurn {
+	case errors.Is(err, ErrActiveTurn):
+		if err != ErrActiveTurn {
 			return "active_turn", err.Error()
 		}
 		return "active_turn", "a turn is already active"
-	case errors.Is(err, errTurnMismatch):
+	case errors.Is(err, ErrTurnMismatch):
 		return "turn_mismatch", "expected_turn_id does not match active turn"
-	case errors.Is(err, errCommandIDConflict):
+	case errors.Is(err, ErrCommandIDConflict):
 		return "command_id_conflict", err.Error()
-	case errors.Is(err, errInputPolicyMismatch):
+	case errors.Is(err, ErrInputPolicyMismatch):
 		return "input_policy_mismatch", err.Error()
 	default:
 		return "input_failed", err.Error()
 	}
 }
 
-func findExistingSessionInput(ctx context.Context, source sessionlog.ItemSource, sessionID string, request wire.Command, rootDir string) (wire.Command, bool, error) {
+func FindExistingInput(ctx context.Context, source ItemSource, sessionID string, request wire.Command, rootDir string) (wire.Command, bool, error) {
 	items, _, err := source.LoadItems(ctx, sessionID)
 	if err != nil {
 		return wire.Command{}, false, err
@@ -43,24 +49,24 @@ func findExistingSessionInput(ctx context.Context, source sessionlog.ItemSource,
 			continue
 		}
 		if item.Command == nil || (item.Command.Type != wire.CommandMessage && item.Command.Type != wire.CommandSteering) {
-			return wire.Command{}, false, errCommandIDConflict
+			return wire.Command{}, false, ErrCommandIDConflict
 		}
-		existing, err := sessionInputCommandFromItem(item, rootDir)
+		existing, err := inputCommandFromItem(item, rootDir)
 		if err != nil {
 			return wire.Command{}, false, err
 		}
-		if !sameCommandInput(existing, request) {
-			return wire.Command{}, false, errCommandIDConflict
+		if !SameCommandInput(existing, request) {
+			return wire.Command{}, false, ErrCommandIDConflict
 		}
 		return existing, true, nil
 	}
 	return wire.Command{}, false, nil
 }
 
-func sameCommandInput(existing wire.Command, request wire.Command) bool {
+func SameCommandInput(existing wire.Command, request wire.Command) bool {
 	existingText, existingImages, existingSkills := commandInput(existing)
 	requestText, requestImages, requestSkills := commandInput(request)
-	if existingText != requestText || !equalStrings(existingSkills, requestSkills) || !sameRequestContext(commandRequestContext(existing), commandRequestContext(request)) || len(existingImages) != len(requestImages) {
+	if existingText != requestText || !equalStrings(existingSkills, requestSkills) || !SameRequestContext(commandRequestContext(existing), commandRequestContext(request)) || len(existingImages) != len(requestImages) {
 		return false
 	}
 	for index := range existingImages {
@@ -83,7 +89,7 @@ func commandRequestContext(command wire.Command) *protocol.RequestContext {
 	return command.Message.RequestContext
 }
 
-func sameRequestContext(left, right *protocol.RequestContext) bool {
+func SameRequestContext(left, right *protocol.RequestContext) bool {
 	if left == nil || right == nil {
 		return left == right
 	}
@@ -100,7 +106,7 @@ func commandInput(command wire.Command) (string, []wire.CommandImageData, []stri
 	return "", nil, nil
 }
 
-func sameCommandImagePaths(left wire.Command, right wire.Command) bool {
+func SameCommandImagePaths(left wire.Command, right wire.Command) bool {
 	_, leftImages, _ := commandInput(left)
 	_, rightImages, _ := commandInput(right)
 	if len(leftImages) != len(rightImages) {
@@ -114,9 +120,9 @@ func sameCommandImagePaths(left wire.Command, right wire.Command) bool {
 	return true
 }
 
-func inputMessageFromRequest(request wire.InputRequest) (message protocol.Message, err error) {
+func InputMessageFromRequest(request wire.InputRequest) (message protocol.Message, err error) {
 	text, images, _ := commandInput(request.Command)
-	message, err = userMessageFromCommand(text, images, "session input")
+	message, err = UserMessageFromCommand(text, images, "session input")
 	if err == nil && request.Command.Message != nil && request.Command.Message.RequestContext != nil {
 		message.Metadata = &protocol.MessageMetadata{RequestContext: request.Command.Message.RequestContext.Clone()}
 	}
@@ -124,7 +130,7 @@ func inputMessageFromRequest(request wire.InputRequest) (message protocol.Messag
 	return message, err
 }
 
-func messageCommandForRequest(request wire.InputRequest) wire.Command {
+func MessageCommandForRequest(request wire.InputRequest) wire.Command {
 	command := request.Command
 	command.Type = wire.CommandMessage
 	if command.Message == nil && command.Steering != nil {
@@ -134,7 +140,7 @@ func messageCommandForRequest(request wire.InputRequest) wire.Command {
 	return command
 }
 
-func steeringCommandForRequest(request wire.InputRequest, turnID string) wire.Command {
+func SteeringCommandForRequest(request wire.InputRequest, turnID string) wire.Command {
 	command := request.Command
 	text, images, skills := commandInput(command)
 	origin := commandRequestContext(command).Clone()
@@ -144,18 +150,18 @@ func steeringCommandForRequest(request wire.InputRequest, turnID string) wire.Co
 	return command
 }
 
-func appendAcceptedSessionInput(ctx context.Context, source sessionlog.ItemSource, sessionID string, command wire.Command) (wire.Command, error) {
-	atomic, ok := source.(sessionlog.AtomicItemSource)
+func AppendAcceptedInput(ctx context.Context, source ItemSource, sessionID string, command wire.Command) (wire.Command, error) {
+	atomic, ok := source.(AtomicItemSource)
 	if !ok {
 		return wire.Command{}, errors.New("display item source does not support atomic session input")
 	}
 	item, _, err := atomic.AppendItemAtomically(ctx, sessionID, func(items []zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error) {
 		for _, existing := range items {
 			if existing.ID == command.ID {
-				return zotigosession.DisplayItem{}, false, errCommandIDConflict
+				return zotigosession.DisplayItem{}, false, ErrCommandIDConflict
 			}
 		}
-		return displayItemForAcceptedInput(command), true, nil
+		return itemForAcceptedInput(command), true, nil
 	})
 	if err != nil {
 		return wire.Command{}, err
@@ -165,18 +171,18 @@ func appendAcceptedSessionInput(ctx context.Context, source sessionlog.ItemSourc
 	return command, nil
 }
 
-func displayItemForAcceptedInput(command wire.Command) zotigosession.DisplayItem {
+func itemForAcceptedInput(command wire.Command) zotigosession.DisplayItem {
 	text, images, skills := commandInput(command)
-	displayImages := displayImagesFromCommand(images)
+	displayImages := MessageImagesFromCommand(images)
 	itemType := zotigosession.DisplayItemUserMessage
 	if command.Type == wire.CommandSteering {
 		itemType = zotigosession.DisplayItemSessionCommand
 	}
-	item := sessionlog.MessageItem(itemType, text, displayImages)
+	item := MessageItem(itemType, text, displayImages)
 	item.ID = command.ID
 	item.CreatedAt = command.CreatedAt
 	item.Command = &zotigosession.DisplayCommand{
-		Type: command.Type, Text: text, Images: sessionlog.CommandImages(displayImages), Skills: append([]string(nil), skills...), RequestContext: commandRequestContext(command).Clone(),
+		Type: command.Type, Text: text, Images: CommandImages(displayImages), Skills: append([]string(nil), skills...), RequestContext: commandRequestContext(command).Clone(),
 	}
 	if command.Steering != nil {
 		item.Command.TurnID = command.Steering.TurnID
@@ -184,19 +190,47 @@ func displayItemForAcceptedInput(command wire.Command) zotigosession.DisplayItem
 	return item
 }
 
-func displayImagesFromCommand(images []wire.CommandImageData) []sessionlog.MessageImage {
-	result := make([]sessionlog.MessageImage, 0, len(images))
+func MessageImagesFromCommand(images []wire.CommandImageData) []MessageImage {
+	result := make([]MessageImage, 0, len(images))
 	for _, image := range images {
-		result = append(result, sessionlog.MessageImage{
+		result = append(result, MessageImage{
 			MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath,
 		})
 	}
 	return result
 }
 
-func storeRoot(store any) string {
+func StoreRoot(store any) string {
 	if rooted, ok := store.(interface{ RootDir() string }); ok {
 		return rooted.RootDir()
 	}
 	return ""
+}
+
+// Recheck at admission as an approval can appear after the dispatcher observed
+// the active turn. Callback data must not act as a human approval response.
+func ValidateCompletionSteering(ctx context.Context, source ItemSource, id string, command wire.Command) error {
+	if !strings.HasPrefix(command.ID, "completion:") {
+		return nil
+	}
+	items, _, err := source.LoadItems(ctx, id)
+	if err != nil {
+		return err
+	}
+	if HasPendingHumanRequest(items) {
+		return ErrActiveTurn
+	}
+	return nil
+}
+
+func equalStrings(left []string, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for index := range left {
+		if left[index] != right[index] {
+			return false
+		}
+	}
+	return true
 }

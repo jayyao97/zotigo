@@ -55,9 +55,9 @@ func (h *handler) handleSessionPause(w http.ResponseWriter, r *http.Request, id 
 			writeAPIErrorCode(w, http.StatusGatewayTimeout, "input_stop_timeout", "timed out waiting for in-flight input to stop")
 		case errors.Is(err, errApprovalPending):
 			writeAPIErrorCode(w, http.StatusConflict, "approval_pending", "pause rejected while approval is pending")
-		case errors.Is(err, errTurnMismatch):
+		case errors.Is(err, sessionlog.ErrTurnMismatch):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "pause turn_id does not match active turn")
-		case errors.Is(err, errNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
+		case errors.Is(err, sessionlog.ErrNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "pause requires an active turn")
 		case errors.Is(err, errWorkerOffline):
 			writeAPIError(w, http.StatusServiceUnavailable, "pause requires an online worker")
@@ -81,10 +81,10 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 	}
 	turnID := sessionlog.LastOpenTurnID(items)
 	if turnID == "" {
-		return wire.Command{}, errNoActiveTurn
+		return wire.Command{}, sessionlog.ErrNoActiveTurn
 	}
 	if requestedTurnID != "" && requestedTurnID != turnID {
-		return wire.Command{}, errTurnMismatch
+		return wire.Command{}, sessionlog.ErrTurnMismatch
 	}
 	if sessionlog.HasPendingApprovalForTurn(items, turnID) {
 		return wire.Command{}, errApprovalPending
@@ -97,7 +97,7 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 		return wire.Command{}, fmt.Errorf("reload display items: %w", err)
 	}
 	if sessionlog.LastOpenTurnID(items) != turnID {
-		return wire.Command{}, errNoActiveTurn
+		return wire.Command{}, sessionlog.ErrNoActiveTurn
 	}
 	if sessionlog.HasPendingApprovalForTurn(items, turnID) {
 		return wire.Command{}, errApprovalPending
@@ -150,7 +150,7 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 	if err != nil {
 		return wire.Command{}, err
 	}
-	command := pauseCommandFromItem(item)
+	command := sessionlog.PauseCommandFromItem(item)
 	h.sendCommand(ctx, id, command)
 	return command, nil
 }
@@ -223,17 +223,17 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_stopping", "the active turn is stopping")
-		case errors.Is(err, errNoActiveTurn):
+		case errors.Is(err, sessionlog.ErrNoActiveTurn):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
-		case errors.Is(err, errActiveTurn):
+		case errors.Is(err, sessionlog.ErrActiveTurn):
 			writeAPIErrorCode(w, http.StatusConflict, "active_turn", err.Error())
-		case errors.Is(err, errInputPolicyMismatch):
+		case errors.Is(err, sessionlog.ErrInputPolicyMismatch):
 			writeAPIErrorCode(w, http.StatusConflict, "input_policy_mismatch", err.Error())
 		case errors.Is(err, errWorkerOffline):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
-		case errors.Is(err, errTurnMismatch):
+		case errors.Is(err, sessionlog.ErrTurnMismatch):
 			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "expected_turn_id does not match active turn")
-		case errors.Is(err, errCommandIDConflict):
+		case errors.Is(err, sessionlog.ErrCommandIDConflict):
 			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
 		case errors.Is(err, errSessionNotFound):
 			writeAPIError(w, http.StatusNotFound, "session not found")

@@ -2,11 +2,9 @@ package zotigod
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -18,6 +16,7 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -45,7 +44,7 @@ func (r *workerRuntime) pauseTurn(ctx context.Context, command *wire.PauseComman
 
 func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command wire.Command) error {
 	payload := command.Steering
-	msg, err := userMessageFromCommand(payload.Text, payload.Images, "steering")
+	msg, err := sessionlog.UserMessageFromCommand(payload.Text, payload.Images, "steering")
 	if err != nil {
 		return err
 	}
@@ -130,7 +129,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		// rejecting input that arrives while the agent is still unwinding.
 		if r.agent == nil || (r.agent.Snapshot().State != agent.StateIdle && !r.turnStopping) || r.turnDone == nil {
 			r.mu.Unlock()
-			return errActiveTurn
+			return sessionlog.ErrActiveTurn
 		}
 		done := r.turnDone
 		r.mu.Unlock()
@@ -313,7 +312,7 @@ func (r *workerRuntime) snapshotAfterTurn(turnID string) agent.Snapshot {
 }
 
 func messageFromCommand(commandID string, command *wire.MessageCommandPayload) (protocol.Message, error) {
-	message, err := userMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
+	message, err := sessionlog.UserMessageFromCommand(command.Text, command.Images, fmt.Sprintf("message command %q", commandID))
 	if err != nil {
 		return protocol.Message{}, err
 	}
@@ -324,37 +323,6 @@ func messageFromCommand(commandID string, command *wire.MessageCommandPayload) (
 		message.Metadata.RequestContext = command.RequestContext.Clone()
 	}
 	return message, nil
-}
-
-func userMessageFromCommand(text string, images []wire.CommandImageData, label string) (protocol.Message, error) {
-	msg := protocol.Message{
-		Role:      protocol.RoleUser,
-		Content:   make([]protocol.ContentPart, 0, 1+len(images)),
-		CreatedAt: time.Now(),
-	}
-	if text = strings.TrimSpace(text); text != "" {
-		msg.Content = append(msg.Content, protocol.ContentPart{
-			Type: protocol.ContentTypeText,
-			Text: text,
-		})
-	}
-	for idx, img := range images {
-		if img.DataBase64 == "" {
-			return protocol.Message{}, fmt.Errorf("%s image payload unavailable for image %d", label, idx)
-		}
-		data, err := base64.StdEncoding.Strict().DecodeString(img.DataBase64)
-		if err != nil {
-			return protocol.Message{}, fmt.Errorf("decode %s image %d: %w", label, idx, err)
-		}
-		msg.Content = append(msg.Content, protocol.ContentPart{
-			Type: protocol.ContentTypeImage,
-			Image: &protocol.MediaPart{
-				Data:      data,
-				MediaType: img.MimeType,
-			},
-		})
-	}
-	return msg, nil
 }
 
 func (r *workerRuntime) cancelCurrentTurn() {

@@ -117,11 +117,11 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
 
-	interaction, err := newUserInputInteraction(created.ID, "turn-1", "item-1", wire.InteractionRequester{Agent: "codex", Name: "Subagent"}, []wire.InteractionQuestion{{ID: "mode", Question: "Choose", Options: []wire.InteractionOption{{Label: "Safe"}}}}, true, nil)
+	interaction, err := sessionlog.NewUserInputInteraction(created.ID, "turn-1", "item-1", wire.InteractionRequester{Agent: "codex", Name: "Subagent"}, []wire.InteractionQuestion{{ID: "mode", Question: "Choose", Options: []wire.InteractionOption{{Label: "Safe"}}}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := source.AppendItem(context.Background(), created.ID, interactionDisplayItem(interaction, false)); err != nil {
+	if _, err := source.AppendItem(context.Background(), created.ID, sessionlog.InteractionItem(interaction, false)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := registry.Pause(created.ID); err != nil {
@@ -140,10 +140,10 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 		}
 		resolvedAt := time.Now().UTC()
 		resolved := interaction
-		resolved.Status = interactionStatusResolved
+		resolved.Status = sessionlog.InteractionStatusResolved
 		resolved.Answers = message.InteractionResponse.Answers
 		resolved.ResolvedAt = &resolvedAt
-		if _, err := source.AppendItem(context.Background(), created.ID, interactionDisplayItem(resolved, true)); err != nil {
+		if _, err := source.AppendItem(context.Background(), created.ID, sessionlog.InteractionItem(resolved, true)); err != nil {
 			done <- err
 			return
 		}

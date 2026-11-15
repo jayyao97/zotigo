@@ -15,6 +15,7 @@ import (
 	session "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 var errForkOutcomeUnknown = errors.New("fork outcome_unknown: creation may have started; do not retry with a new request ID")
@@ -106,7 +107,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 			return nil, err
 		}
 		if prior.SourceID != sourceID || prior.RequestedTurnID != throughTurnID || prior.Title != title {
-			return nil, errCommandIDConflict
+			return nil, sessionlog.ErrCommandIDConflict
 		}
 		if !prior.Complete {
 			return nil, errForkOutcomeUnknown

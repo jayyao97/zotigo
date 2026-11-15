@@ -133,7 +133,7 @@ func (h *handler) withRefreshedBoundChannelPrompt(ctx context.Context, sessionID
 			// A prompt cannot change inside an active turn. Admit only as
 			// steering; if the turn ended at this boundary, reconcile once more
 			// before allowing a new turn to start.
-			if err := admit(true); !errors.Is(err, errNoActiveTurn) {
+			if err := admit(true); !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 				return err
 			}
 		}
@@ -268,7 +268,7 @@ func (h *handler) StopChannelTask(parent context.Context, task channels.Task, pr
 	if _, err := h.pauseActiveSession(ctx, task.SessionID, session, ""); err != nil {
 		completeAdmission()
 		switch {
-		case errors.Is(err, errNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
+		case errors.Is(err, sessionlog.ErrNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
 			return channels.TaskResult{Text: "There is no active task to stop."}, nil
 		case errors.Is(err, errWorkerInputStopping):
 			return channels.TaskResult{Text: "A stop is already in progress."}, nil
@@ -366,7 +366,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: channelPolicy, promptRevision: desired.Revision, requestContext: requestContext})
 	if err != nil {
-		if errors.Is(err, errActiveTurn) || errors.Is(err, errSessionBusy) {
+		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, errSessionBusy) {
 			return channels.TaskResult{}, errors.New("the bound session already has an active turn")
 		}
 		return channels.TaskResult{}, err

@@ -12,6 +12,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -85,7 +86,7 @@ func TestNativeForkExactPrefixAndIsolation(t *testing.T) {
 	if org.WorkspacePosition == nil || *org.WorkspacePosition != 1234 {
 		t.Fatal("retry overwrote manually chosen position")
 	}
-	if _, err := h.forkSession(ctx, "branch", source.ID, "other", "Branch"); !errors.Is(err, errCommandIDConflict) {
+	if _, err := h.forkSession(ctx, "branch", source.ID, "other", "Branch"); !errors.Is(err, sessionlog.ErrCommandIDConflict) {
 		t.Fatalf("conflict: %v", err)
 	}
 	after, _ := h.store.Get(ctx, source.ID)

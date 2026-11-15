@@ -432,7 +432,7 @@ func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
 		modes = append(modes, steeringOnly)
 		if steeringOnly {
 			handler.registry.MarkIdle(session.ID)
-			return errNoActiveTurn
+			return sessionlog.ErrNoActiveTurn
 		}
 		return nil
 	}); err != nil {

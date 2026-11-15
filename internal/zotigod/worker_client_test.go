@@ -804,7 +804,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append profile command: %v", err)
 	}
-	if err := runtime.HandleCommand(context.Background(), profileCommandFromItem(commandItem)); err != nil {
+	if err := runtime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(commandItem)); err != nil {
 		t.Fatalf("handle profile command: %v", err)
 	}
 
@@ -843,7 +843,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("append newer profile command: %v", err)
 	}
-	if err := runtime.HandleCommand(context.Background(), profileCommandFromItem(newerCommand)); err != nil {
+	if err := runtime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(newerCommand)); err != nil {
 		t.Fatalf("handle newer profile command: %v", err)
 	}
 	deadline = time.Now().Add(time.Second)
@@ -1374,13 +1374,13 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		display:   sessionlog.NewLog("sess-profile-uncertain", source),
 		fatalCh:   make(chan error, 1),
 	}
-	messageResponse, err := messageCommandFromItem(messageCommand, "")
+	messageResponse, err := sessionlog.MessageCommandFromItem(messageCommand, "")
 	if err != nil {
 		t.Fatalf("build message command: %v", err)
 	}
 	commandServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		data, marshalErr := sonic.Marshal(wire.CommandsPage{
-			Commands:   []wire.Command{profileCommandFromItem(command), messageResponse},
+			Commands:   []wire.Command{sessionlog.ProfileCommandFromItem(command), messageResponse},
 			NextOffset: 2,
 		})
 		if marshalErr != nil {
@@ -1440,7 +1440,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		agent:     newAgent,
 		display:   sessionlog.NewLog("sess-profile-uncertain", source),
 	}
-	if err := secondRuntime.HandleCommand(context.Background(), profileCommandFromItem(command)); err != nil {
+	if err := secondRuntime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(command)); err != nil {
 		t.Fatalf("replay uncertain profile command: %v", err)
 	}
 	deadline := time.Now().Add(time.Second)
@@ -2031,7 +2031,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 func TestStartMessageTurnRejectsUnrelatedActiveTurn(t *testing.T) {
 	runtime := &workerRuntime{turnActive: true, turnDone: make(chan struct{})}
 	err := runtime.startMessageTurn(context.Background(), "message", 1, &wire.MessageCommandPayload{Text: "queued"})
-	if !errors.Is(err, errActiveTurn) {
+	if !errors.Is(err, sessionlog.ErrActiveTurn) {
 		t.Fatalf("start message error = %v, want active_turn", err)
 	}
 }

@@ -21,7 +21,7 @@ func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.Input
 	result := wire.InputResult{RequestID: request.RequestID}
 	command, err := r.acceptInput(ctx, request, boundResults, notifications, workerChannels...)
 	if err != nil {
-		result.ErrorCode, result.Error = workerInputErrorDetails(err)
+		result.ErrorCode, result.Error = sessionlog.InputErrorDetails(err)
 		return result
 	}
 	result.Command = &command
@@ -30,17 +30,17 @@ func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.Input
 
 func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) (wire.Command, error) {
 	source := sessionlog.StoredItemSource{Store: r.store}
-	if existing, found, err := findExistingSessionInput(ctx, source, r.cfg.SessionID, request.Command, r.cfg.SessionStoreRoot); err != nil {
+	if existing, found, err := sessionlog.FindExistingInput(ctx, source, r.cfg.SessionID, request.Command, r.cfg.SessionStoreRoot); err != nil {
 		return wire.Command{}, err
 	} else if found {
 		if request.SteeringOnly && existing.Type != wire.CommandSteering {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		if request.StartOnly && existing.Type != wire.CommandMessage {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		return existing, nil
 	}
@@ -59,28 +59,28 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 		}
 		if (request.RequiredApprovalPolicy != "" && policy != request.RequiredApprovalPolicy) ||
 			(request.RequirePromptRevision && stored.PromptConfig.Revision != request.RequiredPromptRevision) {
-			return wire.Command{}, errInputPolicyMismatch
+			return wire.Command{}, sessionlog.ErrInputPolicyMismatch
 		}
 	}
-	if err := validateCompletionSteering(ctx, source, r.cfg.SessionID, request.Command); err != nil {
+	if err := sessionlog.ValidateCompletionSteering(ctx, source, r.cfg.SessionID, request.Command); err != nil {
 		return wire.Command{}, err
 	}
 	activeTurnID := r.activeTurnID
 	if request.StartOnly && activeTurnID != "" {
-		return wire.Command{}, errActiveTurn
+		return wire.Command{}, sessionlog.ErrActiveTurn
 	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != activeTurnID {
-		return wire.Command{}, errTurnMismatch
+		return wire.Command{}, sessionlog.ErrTurnMismatch
 	}
 	if request.SteeringOnly {
 		if activeTurnID == "" {
-			return wire.Command{}, errNoActiveTurn
+			return wire.Command{}, sessionlog.ErrNoActiveTurn
 		}
-		command := steeringCommandForRequest(request, activeTurnID)
+		command := sessionlog.SteeringCommandForRequest(request, activeTurnID)
 		if err := r.callTurnSteer(ctx, command, activeTurnID); err != nil {
 			return wire.Command{}, r.classifyTurnSteerError(ctx, activeTurnID, err)
 		}
-		stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, command)
+		stored, err := sessionlog.AppendAcceptedInput(ctx, source, r.cfg.SessionID, command)
 		if err != nil {
 			return wire.Command{}, err
 		}
@@ -90,14 +90,14 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 		r.acknowledgeCommand(stored.Sequence)
 		return stored, nil
 	}
-	message := messageCommandForRequest(request)
+	message := sessionlog.MessageCommandForRequest(request)
 	turnID, runtime, err := r.callTurnStart(ctx, message, boundResults)
 	if err != nil {
 		return wire.Command{}, err
 	}
 	if activeTurnID != "" && turnID == activeTurnID {
-		steering := steeringCommandForRequest(request, activeTurnID)
-		stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, steering)
+		steering := sessionlog.SteeringCommandForRequest(request, activeTurnID)
+		stored, err := sessionlog.AppendAcceptedInput(ctx, source, r.cfg.SessionID, steering)
 		if err != nil {
 			return wire.Command{}, err
 		}
@@ -116,7 +116,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 			return wire.Command{}, err
 		}
 	}
-	stored, err := appendAcceptedSessionInput(ctx, source, r.cfg.SessionID, message)
+	stored, err := sessionlog.AppendAcceptedInput(ctx, source, r.cfg.SessionID, message)
 	if err != nil {
 		return wire.Command{}, err
 	}
@@ -143,10 +143,10 @@ func (r *codexWorkerRuntime) classifyTurnSteerError(ctx context.Context, expecte
 		}
 	}
 	if activeTurnID == "" {
-		return errNoActiveTurn
+		return sessionlog.ErrNoActiveTurn
 	}
 	if activeTurnID != expectedTurnID {
-		return errTurnMismatch
+		return sessionlog.ErrTurnMismatch
 	}
 	return steerErr
 }
@@ -207,7 +207,7 @@ func (r *codexWorkerRuntime) callTurnSteer(ctx context.Context, command wire.Com
 		return err
 	}
 	if response.TurnID != "" && response.TurnID != turnID {
-		return errTurnMismatch
+		return sessionlog.ErrTurnMismatch
 	}
 	return nil
 }
@@ -255,7 +255,7 @@ func (r *codexWorkerRuntime) persistSteering(command wire.Command, turnID string
 			})
 		}
 	}
-	images := displayImagesFromCommand(command.Steering.Images)
+	images := sessionlog.MessageImagesFromCommand(command.Steering.Images)
 	item := sessionlog.MessageItem(zotigosession.DisplayItemSteeringMessage, command.Steering.Text, images)
 	item.ID = command.ID
 	item.CreatedAt = command.CreatedAt

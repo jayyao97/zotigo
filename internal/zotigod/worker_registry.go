@@ -801,15 +801,15 @@ func (e *workerInputError) Is(target error) bool {
 	switch target {
 	case errSessionBusy:
 		return e.Code == "command_pending"
-	case errNoActiveTurn:
+	case sessionlog.ErrNoActiveTurn:
 		return e.Code == "no_active_turn"
-	case errActiveTurn:
+	case sessionlog.ErrActiveTurn:
 		return e.Code == "active_turn"
-	case errTurnMismatch:
+	case sessionlog.ErrTurnMismatch:
 		return e.Code == "turn_mismatch"
-	case errCommandIDConflict:
+	case sessionlog.ErrCommandIDConflict:
 		return e.Code == "command_id_conflict"
-	case errInputPolicyMismatch:
+	case sessionlog.ErrInputPolicyMismatch:
 		return e.Code == "input_policy_mismatch"
 	default:
 		return false

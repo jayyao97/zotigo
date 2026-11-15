@@ -28,24 +28,6 @@ func (s *failTerminalAppendStore) AppendDisplayItem(ctx context.Context, id stri
 	return s.Store.AppendDisplayItem(ctx, id, item)
 }
 
-func TestInteractionDisplayRedactsSecretAnswers(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{Agent: "codex"}, []wire.InteractionQuestion{
-		{ID: "visible", Question: "Visible?"},
-		{ID: "secret", Question: "Secret?", IsSecret: true},
-	}, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Answers = map[string][]string{"visible": {"yes"}, "secret": {"credential"}}
-	item := interactionDisplayItem(req, true)
-	if got := item.Interaction.Answers["visible"]; !reflect.DeepEqual(got, []string{"yes"}) {
-		t.Fatalf("visible answer = %#v", got)
-	}
-	if got := item.Interaction.Answers["secret"]; !reflect.DeepEqual(got, []string{"[redacted]"}) {
-		t.Fatalf("secret answer was persisted: %#v", got)
-	}
-}
-
 func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-question", rpc)
@@ -79,86 +61,8 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 		t.Fatalf("response = %#v", rpc.response)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-question")
-	if err != nil || len(items) != 2 || items[0].Interaction == nil || items[1].Interaction == nil || items[1].Interaction.Status != interactionStatusResolved {
+	if err != nil || len(items) != 2 || items[0].Interaction == nil || items[1].Interaction == nil || items[1].Interaction.Status != sessionlog.InteractionStatusResolved {
 		t.Fatalf("display items = %#v, err=%v", items, err)
-	}
-}
-
-func TestInteractionAnswersRejectUnknownChoice(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{}, []wire.InteractionQuestion{{
-		ID: "choice", Question: "Choose", Options: []wire.InteractionOption{{Label: "A"}},
-	}}, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := validateInteractionAnswers(req, map[string][]string{"choice": {"B"}}); err == nil {
-		t.Fatal("unknown choice was accepted")
-	}
-}
-
-func TestInteractionAnswersAcceptExactlyOneOptionOrUserNote(t *testing.T) {
-	req, err := newUserInputInteraction("session", "turn", "item", wire.InteractionRequester{}, []wire.InteractionQuestion{{
-		ID: "choice", Question: "Choose", IsOther: true, Options: []wire.InteractionOption{{Label: "A"}},
-	}}, true, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, answers := range []map[string][]string{
-		{"choice": {"A"}},
-		{"choice": {"A", "user_note: context"}},
-		{"choice": {"user_note: custom answer"}},
-		{"choice": {"None of the above", "user_note: custom answer"}},
-		{"choice": {}},
-	} {
-		if err := validateInteractionAnswers(req, answers); err != nil {
-			t.Fatalf("valid answers %#v rejected: %v", answers, err)
-		}
-	}
-	for _, answers := range []map[string][]string{
-		{"choice": {"unknown", "user_note: custom answer"}},
-		{"choice": {"None of the above", "not a note"}},
-		{"choice": {"user_note:   "}},
-		{"choice": {"unknown"}},
-	} {
-		if err := validateInteractionAnswers(req, answers); err == nil {
-			t.Fatalf("invalid answers %#v accepted", answers)
-		}
-	}
-}
-
-func TestPendingHumanRequestsResolveOnlyAfterLastBlockingRequest(t *testing.T) {
-	requestItems := []zotigosession.DisplayItem{
-		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-root"}},
-		{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "approval", TurnID: "turn-child", Pending: []zotigosession.DisplayPendingApproval{{ToolCallID: "call", ToolName: "shell"}}}},
-		{Type: zotigosession.DisplayItemInteractionRequest, Interaction: &zotigosession.DisplayInteraction{ID: "interaction", TurnID: "turn-child-2", IsBlocking: true}},
-	}
-	approvalResolved := zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalDecision, Approval: &zotigosession.DisplayApproval{ID: "approval", TurnID: "turn-child"}}
-	interactionResolved := zotigosession.DisplayItem{Type: zotigosession.DisplayItemInteractionResponse, Interaction: &zotigosession.DisplayInteraction{ID: "interaction", TurnID: "turn-child-2", IsBlocking: true, Status: interactionStatusResolved}}
-	for _, order := range [][]zotigosession.DisplayItem{{approvalResolved, interactionResolved}, {interactionResolved, approvalResolved}} {
-		items := append([]zotigosession.DisplayItem(nil), requestItems...)
-		if !sessionlog.HasPendingHumanRequest(items) {
-			t.Fatal("two blocking requests were not detected")
-		}
-		items = append(items, order[0])
-		if !sessionlog.HasPendingHumanRequest(items) {
-			t.Fatal("resolving the first request resumed too early")
-		}
-		items = append(items, order[1])
-		if sessionlog.HasPendingHumanRequest(items) {
-			t.Fatal("final request did not release the pause")
-		}
-	}
-}
-
-func TestCompletedTurnDoesNotRetainStaleHumanRequest(t *testing.T) {
-	items := []zotigosession.DisplayItem{
-		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "old"}},
-		{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "stale", TurnID: "old"}},
-		{Type: zotigosession.DisplayItemTurnInterrupted, Turn: &zotigosession.DisplayTurn{ID: "old"}},
-		{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "current"}},
-	}
-	if sessionlog.HasPendingHumanRequest(items) {
-		t.Fatal("stale request from completed turn blocked the current turn")
 	}
 }
 
@@ -353,7 +257,7 @@ func TestCodexResolvedRequestPersistenceFailureCannotBeAnsweredTwice(t *testing.
 	rpc := &codexWorkerRPC{}
 	runtime, _ := newCodexInputTestRuntime(t, "session-resolve-fatal", rpc)
 	runtime.interactions = make(map[string]codexPendingInteraction)
-	req, err := newUserInputInteraction("session-resolve-fatal", "turn", "item", wire.InteractionRequester{Agent: "codex"}, []wire.InteractionQuestion{{ID: "q", Question: "Answer?"}}, true, nil)
+	req, err := sessionlog.NewUserInputInteraction("session-resolve-fatal", "turn", "item", wire.InteractionRequester{Agent: "codex"}, []wire.InteractionQuestion{{ID: "q", Question: "Answer?"}}, true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -330,7 +330,7 @@ func TestSessionToolsCreateRecoversSameSessionAndConflictingCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = h.writeToolSession(ctx, caller, wire.RuntimeToolRequest{Name: "send_message", CallID: "call", Arguments: json.RawMessage(`{"session_id":"target","text":"changed"}`)})
-	if !errors.Is(err, errCommandIDConflict) {
+	if !errors.Is(err, sessionlog.ErrCommandIDConflict) {
 		t.Fatalf("conflicting retry err=%v", err)
 	}
 }
@@ -393,7 +393,7 @@ func TestSessionToolsSendDurableAdmissionAndRetry(t *testing.T) {
 				workerDone <- errors.New("delegated input was not start-only")
 				return
 			}
-			accepted, err := appendAcceptedSessionInput(ctx, h.items, target.ID, request.Command)
+			accepted, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, request.Command)
 			if err != nil {
 				workerDone <- err
 				return
@@ -497,7 +497,7 @@ func TestSessionToolsDelegatedReplayRevalidatesDurableOrigin(t *testing.T) {
 	if err := saveSessionToolOperation(dir, filepath.Join(dir, callKey+".json"), operation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := appendAcceptedSessionInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work"}}); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work"}}); err != nil {
 		t.Fatal(err)
 	}
 	// Original source turn has ended; replay authority must not depend on it.
@@ -541,11 +541,11 @@ func TestSessionToolOriginEqualitySurvivesPersistence(t *testing.T) {
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if !sameRequestContext(original, &restored) {
+	if !sessionlog.SameRequestContext(original, &restored) {
 		t.Fatal("equal durable origin rejected after decode")
 	}
 	restored.Actor.ID = "other"
-	if sameRequestContext(original, &restored) {
+	if sessionlog.SameRequestContext(original, &restored) {
 		t.Fatal("different actor accepted")
 	}
 }
@@ -590,7 +590,7 @@ func TestSessionToolReplayRejectsRevokedChannelOwner(t *testing.T) {
 	if err := saveSessionToolOperation(dir, filepath.Join(dir, callKey+".json"), operation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := appendAcceptedSessionInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work", RequestContext: origin}}); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work", RequestContext: origin}}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(map[string]string{"command_id": commandID})

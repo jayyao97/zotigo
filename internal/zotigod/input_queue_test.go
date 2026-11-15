@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -158,8 +159,8 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		if input.InputRequest == nil {
 			t.Fatal("retry input missing")
 		}
-		command := steeringCommandForRequest(*input.InputRequest, "old")
-		accepted, err := appendAcceptedSessionInput(ctx, source, sessionID, command)
+		command := sessionlog.SteeringCommandForRequest(*input.InputRequest, "old")
+		accepted, err := sessionlog.AppendAcceptedInput(ctx, source, sessionID, command)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -229,7 +230,7 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		t.Fatalf("input=%+v", input)
 	}
 	command := input.InputRequest.Command
-	accepted, err := appendAcceptedSessionInput(ctx, source, sessionID, command)
+	accepted, err := sessionlog.AppendAcceptedInput(ctx, source, sessionID, command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -302,7 +303,7 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if merged.Message.Text != "first\n\nsecond" || !equalStrings(merged.Message.Skills, []string{"review", "writing"}) {
+	if merged.Message.Text != "first\n\nsecond" || !slices.Equal(merged.Message.Skills, []string{"review", "writing"}) {
 		t.Fatalf("merge=%+v", merged.Message)
 	}
 	if err := h.hydrateQueuedImages(&merged); err != nil {
@@ -312,9 +313,9 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 		t.Fatal("image was not rehydrated")
 	}
 	if steering {
-		merged = steeringCommandForRequest(wire.InputRequest{Command: merged}, "active")
+		merged = sessionlog.SteeringCommandForRequest(wire.InputRequest{Command: merged}, "active")
 	}
-	if _, err := appendAcceptedSessionInput(ctx, source, "s", merged); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, source, "s", merged); err != nil {
 		t.Fatal(err)
 	}
 	if err := catalog.RecoverQueuedInputs(ctx); err != nil {

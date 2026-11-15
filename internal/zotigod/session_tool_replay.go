@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -43,7 +44,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if err != nil {
 			return "", err
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
+		_, found, err := sessionlog.FindExistingInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
 		if err != nil {
 			return "", err
 		}
@@ -105,7 +106,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if operation.Name == "create_session" {
 			text = operation.Input.InitialMessage
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
+		_, found, err := sessionlog.FindExistingInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
 		if err != nil {
 			return err
 		}

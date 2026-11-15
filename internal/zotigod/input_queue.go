@@ -98,8 +98,8 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 					writeAPIError(w, 500, err.Error())
 					return
 				}
-				if !sameCommandInput(command, incoming) {
-					writeAPIError(w, 409, errCommandIDConflict.Error())
+				if !sessionlog.SameCommandInput(command, incoming) {
+					writeAPIError(w, 409, sessionlog.ErrCommandIDConflict.Error())
 					return
 				}
 				result := publicCommandFromCommand(command)
@@ -378,7 +378,7 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 	turnActive := sessionlog.LastOpenTurnID(items) != ""
 	if hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) || (turnActive && resume) {
 		if resume {
-			return errActiveTurn
+			return sessionlog.ErrActiveTurn
 		}
 		return nil
 	}
@@ -478,7 +478,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 					trigger, err = h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(command.ID, "completion:"))
 					request.StartOnly = trigger.DeliveryMode != "steer"
 					if err == nil && !request.StartOnly {
-						err = validateCompletionSteering(ctx, h.items, id, command)
+						err = sessionlog.ValidateCompletionSteering(ctx, h.items, id, command)
 					}
 					request.RequiredApprovalPolicy = stored.ApprovalPolicy
 					request.RequiredPromptRevision = stored.PromptConfig.Revision
@@ -527,7 +527,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 		releaseErr := h.catalog.ReleaseQueuedBatch(context.Background(), id, rows[0].BatchID)
 		// A concurrent ordinary send may win the idle boundary. Leave the queue
 		// eligible for that turn's completion instead of treating it as failure.
-		if (startOnly || strings.HasPrefix(command.ID, "completion:")) && (errors.Is(err, errActiveTurn) || errors.Is(err, errWorkerInputStopping)) && releaseErr == nil {
+		if (startOnly || strings.HasPrefix(command.ID, "completion:")) && (errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, errWorkerInputStopping)) && releaseErr == nil {
 			return nil
 		}
 		return errors.Join(err, releaseErr)
@@ -545,7 +545,7 @@ func (h *handler) hydrateQueuedImages(command *wire.Command) error {
 		images = append(images, zotigosession.DisplayCommandImage{MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath})
 	}
 	var err error
-	command.Message.Images, err = commandImagesFromDisplay(images, h.sessionStoreRoot())
+	command.Message.Images, err = sessionlog.CommandImagesFromDisplay(images, h.sessionStoreRoot())
 	return err
 }
 

@@ -150,11 +150,11 @@ func (r *codexWorkerRuntime) registerCodexUserInput(ctx context.Context, message
 	for _, item := range params.Questions {
 		questions = append(questions, wire.InteractionQuestion(item))
 	}
-	req, err := newUserInputInteraction(r.cfg.SessionID, params.TurnID, params.ItemID, requester, questions, blocking, params.AutoResolutionMS)
+	req, err := sessionlog.NewUserInputInteraction(r.cfg.SessionID, params.TurnID, params.ItemID, requester, questions, blocking, params.AutoResolutionMS)
 	if err != nil {
 		return err
 	}
-	if err := r.append(interactionDisplayItem(req, false)); err != nil {
+	if err := r.append(sessionlog.InteractionItem(req, false)); err != nil {
 		return fmt.Errorf("record Codex user input request: %w", err)
 	}
 	r.interactions[req.ID] = codexPendingInteraction{request: req, rpcID: append(json.RawMessage(nil), message.ID...)}
@@ -170,7 +170,7 @@ func (r *codexWorkerRuntime) resolveInteraction(response wire.InteractionRespons
 	if !ok {
 		return wire.InteractionResult{RequestID: response.RequestID, Error: "interaction is not pending"}, nil
 	}
-	if err := validateInteractionAnswers(pending.request, response.Answers); err != nil {
+	if err := sessionlog.ValidateInteractionAnswers(pending.request, response.Answers); err != nil {
 		return wire.InteractionResult{RequestID: response.RequestID, Error: err.Error()}, nil
 	}
 	responder, ok := r.app.(interface {
@@ -190,14 +190,14 @@ func (r *codexWorkerRuntime) resolveInteraction(response wire.InteractionRespons
 	resolvedAt := time.Now().UTC()
 	delete(r.interactions, response.InteractionID)
 	req := pending.request
-	req.Status = interactionStatusResolved
+	req.Status = sessionlog.InteractionStatusResolved
 	req.Answers = response.Answers
 	req.ResolvedAt = &resolvedAt
-	if err := r.append(interactionDisplayItem(req, true)); err != nil {
+	if err := r.append(sessionlog.InteractionItem(req, true)); err != nil {
 		result := wire.InteractionResult{RequestID: response.RequestID, Error: fmt.Sprintf("record interaction response: %v", err)}
 		return result, fmt.Errorf("codex interaction resolved but could not be recorded: %w", err)
 	}
-	req.Answers = displayInteractionAnswers(req)
+	req.Answers = sessionlog.DisplayInteractionAnswers(req)
 	return wire.InteractionResult{RequestID: response.RequestID, Interaction: &req}, nil
 }
 
@@ -351,9 +351,9 @@ func codexSimpleApprovalDecisions(method string, available []json.RawMessage) (s
 
 func (r *codexWorkerRuntime) expireInteraction(req wire.InteractionRequest) error {
 	now := time.Now().UTC()
-	req.Status = interactionStatusExpired
+	req.Status = sessionlog.InteractionStatusExpired
 	req.ResolvedAt = &now
-	return r.append(interactionDisplayItem(req, true))
+	return r.append(sessionlog.InteractionItem(req, true))
 }
 
 func (r *codexWorkerRuntime) expireApproval(req sessionlog.ApprovalRequest, reason string) error {

@@ -636,7 +636,7 @@ func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) 
 	case <-time.After(50 * time.Millisecond):
 	}
 
-	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, input.InputRequest.Command)
+	accepted, err := sessionlog.AppendAcceptedInput(context.Background(), source, created.ID, input.InputRequest.Command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -902,7 +902,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source sessionlog
 			request := *message.InputRequest
 			requests <- request
 			result := wire.InputResult{RequestID: request.RequestID}
-			existing, found, err := findExistingSessionInput(context.Background(), source, sessionID, request.Command, "")
+			existing, found, err := sessionlog.FindExistingInput(context.Background(), source, sessionID, request.Command, "")
 			if err == nil && found {
 				result.Command = &existing
 				if err := conn.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &result}); err != nil {
@@ -918,29 +918,29 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source sessionlog
 				turnID := sessionlog.LastOpenTurnID(items)
 				switch {
 				case request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID:
-					err = errTurnMismatch
+					err = sessionlog.ErrTurnMismatch
 				case request.SteeringOnly && turnID == "":
-					err = errNoActiveTurn
+					err = sessionlog.ErrNoActiveTurn
 				case turnID != "":
-					command := steeringCommandForRequest(request, turnID)
+					command := sessionlog.SteeringCommandForRequest(request, turnID)
 					var stored wire.Command
-					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					stored, err = sessionlog.AppendAcceptedInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
 					}
 				case hasPendingMessageCommand(items):
 					err = errSessionBusy
 				default:
-					command := messageCommandForRequest(request)
+					command := sessionlog.MessageCommandForRequest(request)
 					var stored wire.Command
-					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					stored, err = sessionlog.AppendAcceptedInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
 					}
 				}
 			}
 			if err != nil {
-				result.ErrorCode, result.Error = workerInputErrorDetails(err)
+				result.ErrorCode, result.Error = sessionlog.InputErrorDetails(err)
 				if errors.Is(err, errSessionBusy) {
 					result.ErrorCode = "command_pending"
 				}
@@ -968,18 +968,18 @@ func serveTestWorkerConnectionInputs(connection *workerConnection, source sessio
 				items, _, err := source.LoadItems(context.Background(), sessionID)
 				if err == nil {
 					turnID := sessionlog.LastOpenTurnID(items)
-					command := messageCommandForRequest(request)
+					command := sessionlog.MessageCommandForRequest(request)
 					if turnID != "" {
-						command = steeringCommandForRequest(request, turnID)
+						command = sessionlog.SteeringCommandForRequest(request, turnID)
 					}
 					var stored wire.Command
-					stored, err = appendAcceptedSessionInput(context.Background(), source, sessionID, command)
+					stored, err = sessionlog.AppendAcceptedInput(context.Background(), source, sessionID, command)
 					if err == nil {
 						result.Command = &stored
 					}
 				}
 				if err != nil {
-					result.ErrorCode, result.Error = workerInputErrorDetails(err)
+					result.ErrorCode, result.Error = sessionlog.InputErrorDetails(err)
 				}
 				connection.resolveInput(result)
 			}

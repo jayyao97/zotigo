@@ -189,7 +189,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval policy command: %v", err))
 		return
 	}
-	command := approvalPolicyCommandFromItem(item)
+	command := sessionlog.ApprovalPolicyCommandFromItem(item)
 	unlockOperation()
 	operationLocked = false
 	h.sendCommand(r.Context(), id, command)

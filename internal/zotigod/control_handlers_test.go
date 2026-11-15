@@ -173,7 +173,7 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 		t.Fatal(err)
 	}
 
-	accepted, err := appendAcceptedSessionInput(context.Background(), source, sessionID, input.InputRequest.Command)
+	accepted, err := sessionlog.AppendAcceptedInput(context.Background(), source, sessionID, input.InputRequest.Command)
 	if err != nil {
 		t.Fatalf("append accepted input: %v", err)
 	}
@@ -240,7 +240,7 @@ func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
 		time.Sleep(time.Millisecond)
 	}
 
-	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, input.InputRequest.Command)
+	accepted, err := sessionlog.AppendAcceptedInput(context.Background(), source, created.ID, input.InputRequest.Command)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1069,7 +1069,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 		t.Fatalf("late message status = %d: %s", late.Code, late.Body.String())
 	}
 
-	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
+	accepted, err := sessionlog.AppendAcceptedInput(context.Background(), source, created.ID, sessionlog.SteeringCommandForRequest(*input.InputRequest, "turn-1"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1137,7 +1137,7 @@ func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
 		t.Fatalf("timeout replaced worker or left stop gate set")
 	}
 
-	accepted, err := appendAcceptedSessionInput(context.Background(), source, created.ID, steeringCommandForRequest(*input.InputRequest, "turn-1"))
+	accepted, err := sessionlog.AppendAcceptedInput(context.Background(), source, created.ID, sessionlog.SteeringCommandForRequest(*input.InputRequest, "turn-1"))
 	if err != nil {
 		t.Fatal(err)
 	}

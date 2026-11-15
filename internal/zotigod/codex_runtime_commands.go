@@ -7,6 +7,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -18,7 +19,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Com
 			return err
 		}
 		if r.activeTurnID != "" {
-			return errActiveTurn
+			return sessionlog.ErrActiveTurn
 		}
 		turnID, runtime, err := r.callTurnStart(ctx, command, boundResults)
 		if err != nil {

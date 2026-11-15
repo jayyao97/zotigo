@@ -3,6 +3,8 @@ package zotigod
 import (
 	"fmt"
 	"net/http"
+
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type submitInteractionResponseRequest struct {
@@ -28,16 +30,16 @@ func (h *handler) handleInteractionResponse(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load interaction: %v", err))
 		return
 	}
-	interaction, ok := interactionFromDisplayItems(sessionID, interactionID, items)
+	interaction, ok := sessionlog.InteractionFromItems(sessionID, interactionID, items)
 	if !exists || !ok {
 		writeAPIError(w, http.StatusNotFound, "interaction request not found")
 		return
 	}
-	if interaction.Status != interactionStatusPending {
+	if interaction.Status != sessionlog.InteractionStatusPending {
 		writeAPIError(w, http.StatusConflict, "interaction request already resolved")
 		return
 	}
-	if err := validateInteractionAnswers(interaction, body.Answers); err != nil {
+	if err := sessionlog.ValidateInteractionAnswers(interaction, body.Answers); err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}

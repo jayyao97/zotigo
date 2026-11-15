@@ -1,31 +1,29 @@
-package zotigod
+package sessionlog
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
 	interactionKindUserInput  = "user_input"
-	interactionStatusPending  = "pending"
-	interactionStatusResolved = "resolved"
-	interactionStatusExpired  = "expired"
+	InteractionStatusPending  = "pending"
+	InteractionStatusResolved = "resolved"
+	InteractionStatusExpired  = "expired"
 )
 
 var errInvalidInteraction = errors.New("invalid interaction")
 
-func newUserInputInteraction(sessionID, turnID, itemID string, requester wire.InteractionRequester, questions []wire.InteractionQuestion, blocking bool, autoResolveMS *uint64) (wire.InteractionRequest, error) {
+func NewUserInputInteraction(sessionID, turnID, itemID string, requester wire.InteractionRequester, questions []wire.InteractionQuestion, blocking bool, autoResolveMS *uint64) (wire.InteractionRequest, error) {
 	req := wire.InteractionRequest{
-		ID: sessionlog.NewID("interaction"), SessionID: strings.TrimSpace(sessionID),
+		ID: NewID("interaction"), SessionID: strings.TrimSpace(sessionID),
 		TurnID: strings.TrimSpace(turnID), ItemID: strings.TrimSpace(itemID),
-		Kind: interactionKindUserInput, Status: interactionStatusPending,
+		Kind: interactionKindUserInput, Status: InteractionStatusPending,
 		Requester: requester, Questions: questions, IsBlocking: blocking,
 		AutoResolveMS: autoResolveMS, CreatedAt: time.Now().UTC(),
 	}
@@ -55,7 +53,7 @@ func validateInteraction(req wire.InteractionRequest) error {
 	return nil
 }
 
-func validateInteractionAnswers(req wire.InteractionRequest, answers map[string][]string) error {
+func ValidateInteractionAnswers(req wire.InteractionRequest, answers map[string][]string) error {
 	if len(answers) != len(req.Questions) {
 		return fmt.Errorf("%w: every question requires an answer", errInvalidInteraction)
 	}
@@ -109,7 +107,7 @@ func hasInteractionOption(options []wire.InteractionOption, answer string) bool 
 	return false
 }
 
-func interactionDisplayItem(req wire.InteractionRequest, resolved bool) zotigosession.DisplayItem {
+func InteractionItem(req wire.InteractionRequest, resolved bool) zotigosession.DisplayItem {
 	itemType := zotigosession.DisplayItemInteractionRequest
 	if resolved {
 		itemType = zotigosession.DisplayItemInteractionResponse
@@ -131,12 +129,12 @@ func interactionDisplayItem(req wire.InteractionRequest, resolved bool) zotigose
 		Interaction: &zotigosession.DisplayInteraction{
 			ID: req.ID, Kind: req.Kind, Status: req.Status, TurnID: req.TurnID, ItemID: req.ItemID,
 			Requester: &zotigosession.DisplayInteractionRequester{Agent: req.Requester.Agent, ThreadID: req.Requester.ThreadID, Name: req.Requester.Name},
-			Questions: questions, Answers: displayInteractionAnswers(req), IsBlocking: req.IsBlocking, AutoResolveMS: req.AutoResolveMS,
+			Questions: questions, Answers: DisplayInteractionAnswers(req), IsBlocking: req.IsBlocking, AutoResolveMS: req.AutoResolveMS,
 		},
 	}
 }
 
-func displayInteractionAnswers(req wire.InteractionRequest) map[string][]string {
+func DisplayInteractionAnswers(req wire.InteractionRequest) map[string][]string {
 	if len(req.Answers) == 0 {
 		return nil
 	}
@@ -155,7 +153,7 @@ func displayInteractionAnswers(req wire.InteractionRequest) map[string][]string 
 	return answers
 }
 
-func interactionFromDisplayItems(sessionID, interactionID string, items []zotigosession.DisplayItem) (wire.InteractionRequest, bool) {
+func InteractionFromItems(sessionID, interactionID string, items []zotigosession.DisplayItem) (wire.InteractionRequest, bool) {
 	var req wire.InteractionRequest
 	for _, item := range items {
 		value := item.Interaction
@@ -163,12 +161,12 @@ func interactionFromDisplayItems(sessionID, interactionID string, items []zotigo
 			continue
 		}
 		if item.Type == zotigosession.DisplayItemInteractionRequest {
-			req = interactionRequestFromDisplay(sessionID, item)
+			req = InteractionRequestFromItem(sessionID, item)
 		}
 		if item.Type == zotigosession.DisplayItemInteractionResponse && req.ID != "" {
 			req.Status = value.Status
 			if req.Status == "" {
-				req.Status = interactionStatusResolved
+				req.Status = InteractionStatusResolved
 			}
 			req.Answers = value.Answers
 			resolvedAt := item.CreatedAt
@@ -178,7 +176,7 @@ func interactionFromDisplayItems(sessionID, interactionID string, items []zotigo
 	return req, req.ID != ""
 }
 
-func interactionRequestFromDisplay(sessionID string, item zotigosession.DisplayItem) wire.InteractionRequest {
+func InteractionRequestFromItem(sessionID string, item zotigosession.DisplayItem) wire.InteractionRequest {
 	value := item.Interaction
 	questions := make([]wire.InteractionQuestion, 0, len(value.Questions))
 	for _, question := range value.Questions {
@@ -192,73 +190,5 @@ func interactionRequestFromDisplay(sessionID string, item zotigosession.DisplayI
 	if value.Requester != nil {
 		requester = wire.InteractionRequester{Agent: value.Requester.Agent, ThreadID: value.Requester.ThreadID, Name: value.Requester.Name}
 	}
-	return wire.InteractionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, Kind: value.Kind, Status: interactionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
-}
-
-func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID string) error {
-	items, exists, err := h.items.LoadItems(ctx, sessionID)
-	if err != nil || !exists {
-		return err
-	}
-	pendingApprovals := make(map[string]sessionlog.ApprovalRequest)
-	pendingInteractions := make(map[string]wire.InteractionRequest)
-	for _, item := range items {
-		if item.Approval != nil && item.Approval.ID != "" {
-			switch item.Type {
-			case zotigosession.DisplayItemApprovalRequest:
-				req, ok := sessionlog.ApprovalFromItems(sessionID, item.Approval.ID, []zotigosession.DisplayItem{item})
-				if ok && isCodexApproval(req) {
-					pendingApprovals[req.ID] = req
-				}
-			case zotigosession.DisplayItemApprovalDecision:
-				delete(pendingApprovals, item.Approval.ID)
-			}
-		}
-		if item.Interaction != nil && item.Interaction.ID != "" {
-			switch item.Type {
-			case zotigosession.DisplayItemInteractionRequest:
-				req := interactionRequestFromDisplay(sessionID, item)
-				if req.Requester.Agent == "codex" {
-					pendingInteractions[req.ID] = req
-				}
-			case zotigosession.DisplayItemInteractionResponse:
-				delete(pendingInteractions, item.Interaction.ID)
-			}
-		}
-	}
-	now := time.Now().UTC()
-	for _, req := range pendingApprovals {
-		decisions := make([]zotigosession.DisplayApprovalDecision, 0, len(req.Pending))
-		for _, pending := range req.Pending {
-			decisions = append(decisions, zotigosession.DisplayApprovalDecision{
-				ToolCallID: pending.ToolCallID, Approved: false, Reason: "Codex request expired after worker disconnect",
-			})
-		}
-		if _, err := h.items.AppendItem(ctx, sessionID, zotigosession.DisplayItem{
-			Type: zotigosession.DisplayItemApprovalDecision, Turn: &zotigosession.DisplayTurn{ID: req.TurnID},
-			Approval: &zotigosession.DisplayApproval{ID: req.ID, TurnID: req.TurnID, Decisions: decisions},
-		}); err != nil {
-			return err
-		}
-	}
-	for _, req := range pendingInteractions {
-		req.Status = interactionStatusExpired
-		req.ResolvedAt = &now
-		if _, err := h.items.AppendItem(ctx, sessionID, interactionDisplayItem(req, true)); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func isCodexApproval(req sessionlog.ApprovalRequest) bool {
-	if len(req.Pending) == 0 {
-		return false
-	}
-	for _, pending := range req.Pending {
-		if !strings.HasPrefix(pending.Source, "codex") {
-			return false
-		}
-	}
-	return true
+	return wire.InteractionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, Kind: value.Kind, Status: InteractionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
 }

@@ -12,6 +12,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -24,7 +25,7 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputReque
 	result := wire.InputResult{RequestID: request.RequestID}
 	command, err := r.acceptInput(ctx, request)
 	if err != nil {
-		result.ErrorCode, result.Error = workerInputErrorDetails(err)
+		result.ErrorCode, result.Error = sessionlog.InputErrorDetails(err)
 		return result
 	}
 	result.Command = &command
@@ -32,17 +33,17 @@ func (r *workerRuntime) AcceptInput(ctx context.Context, request wire.InputReque
 }
 
 func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputRequest) (wire.Command, error) {
-	if existing, found, err := findExistingSessionInput(ctx, r.display.Items, r.sessionID, request.Command, storeRoot(r.store)); err != nil {
+	if existing, found, err := sessionlog.FindExistingInput(ctx, r.display.Items, r.sessionID, request.Command, sessionlog.StoreRoot(r.store)); err != nil {
 		return wire.Command{}, err
 	} else if found {
 		if request.SteeringOnly && existing.Type != wire.CommandSteering {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		if request.StartOnly && existing.Type != wire.CommandMessage {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		if request.ExpectedTurnID != "" && (existing.Steering == nil || existing.Steering.TurnID != request.ExpectedTurnID) {
-			return wire.Command{}, errCommandIDConflict
+			return wire.Command{}, sessionlog.ErrCommandIDConflict
 		}
 		return existing, nil
 	}
@@ -51,7 +52,7 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 	compacting := r.turnCompacting
 	r.mu.Unlock()
 	if compacting {
-		return wire.Command{}, fmt.Errorf("%w: context compaction is in progress", errActiveTurn)
+		return wire.Command{}, fmt.Errorf("%w: context compaction is in progress", sessionlog.ErrActiveTurn)
 	}
 	if request.RequiredApprovalPolicy != "" || request.RequirePromptRevision {
 		r.mu.Lock()
@@ -60,17 +61,17 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 		if request.RequiredApprovalPolicy != "" {
 			policy, err := r.agent.RequestedApprovalPolicyForInput()
 			if errors.Is(err, agent.ErrCompacting) {
-				return wire.Command{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+				return wire.Command{}, fmt.Errorf("%w: %v", sessionlog.ErrActiveTurn, err)
 			}
 			if err != nil {
 				return wire.Command{}, err
 			}
 			if policy != request.RequiredApprovalPolicy {
-				return wire.Command{}, errInputPolicyMismatch
+				return wire.Command{}, sessionlog.ErrInputPolicyMismatch
 			}
 		}
 		if request.RequirePromptRevision && promptRevision != request.RequiredPromptRevision {
-			return wire.Command{}, errInputPolicyMismatch
+			return wire.Command{}, sessionlog.ErrInputPolicyMismatch
 		}
 	}
 	turnID := r.display.CurrentTurnID()
@@ -79,20 +80,20 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 		turnActive := r.turnActive
 		r.mu.Unlock()
 		if turnID != "" || turnActive {
-			return wire.Command{}, errActiveTurn
+			return wire.Command{}, sessionlog.ErrActiveTurn
 		}
 	}
 	if request.ExpectedTurnID != "" && request.ExpectedTurnID != turnID {
-		return wire.Command{}, errTurnMismatch
+		return wire.Command{}, sessionlog.ErrTurnMismatch
 	}
 	if request.SteeringOnly && turnID == "" {
-		return wire.Command{}, errNoActiveTurn
+		return wire.Command{}, sessionlog.ErrNoActiveTurn
 	}
-	if isCompactCommand(messageCommandForRequest(request).Message) && turnID != "" {
-		return wire.Command{}, fmt.Errorf("%w: wait for the current turn to finish before /compact", errActiveTurn)
+	if isCompactCommand(sessionlog.MessageCommandForRequest(request).Message) && turnID != "" {
+		return wire.Command{}, fmt.Errorf("%w: wait for the current turn to finish before /compact", sessionlog.ErrActiveTurn)
 	}
 
-	message, err := inputMessageFromRequest(request)
+	message, err := sessionlog.InputMessageFromRequest(request)
 	if err != nil {
 		return wire.Command{}, err
 	}
@@ -103,19 +104,19 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 		}
 		if !ready {
 			if request.SteeringOnly {
-				return wire.Command{}, errNoActiveTurn
+				return wire.Command{}, sessionlog.ErrNoActiveTurn
 			}
 			turnID = ""
 		}
 	}
 	if turnID != "" {
-		steering := steeringCommandForRequest(request, turnID)
+		steering := sessionlog.SteeringCommandForRequest(request, turnID)
 		r.display.QueueSteering(steering)
 		err := r.agent.QueueTurnUserMessageWithAdmission(message, func() error {
-			if err := validateCompletionSteering(ctx, r.display.Items, r.sessionID, request.Command); err != nil {
+			if err := sessionlog.ValidateCompletionSteering(ctx, r.display.Items, r.sessionID, request.Command); err != nil {
 				return err
 			}
-			stored, appendErr := appendAcceptedSessionInput(ctx, r.display.Items, r.sessionID, steering)
+			stored, appendErr := sessionlog.AppendAcceptedInput(ctx, r.display.Items, r.sessionID, steering)
 			if appendErr == nil {
 				steering = stored
 			}
@@ -130,18 +131,18 @@ func (r *workerRuntime) acceptInput(ctx context.Context, request wire.InputReque
 		}
 		r.display.DiscardSteering(steering.ID)
 		if errors.Is(err, agent.ErrCompacting) {
-			return wire.Command{}, fmt.Errorf("%w: %v", errActiveTurn, err)
+			return wire.Command{}, fmt.Errorf("%w: %v", sessionlog.ErrActiveTurn, err)
 		}
 		if request.SteeringOnly || !isStaleTurnUserInputError(err) {
 			if isStaleTurnUserInputError(err) {
-				return wire.Command{}, errNoActiveTurn
+				return wire.Command{}, sessionlog.ErrNoActiveTurn
 			}
 			return wire.Command{}, err
 		}
 	}
 
-	messageCommand := messageCommandForRequest(request)
-	stored, err := appendAcceptedSessionInput(ctx, r.display.Items, r.sessionID, messageCommand)
+	messageCommand := sessionlog.MessageCommandForRequest(request)
+	stored, err := sessionlog.AppendAcceptedInput(ctx, r.display.Items, r.sessionID, messageCommand)
 	if err != nil {
 		return wire.Command{}, err
 	}

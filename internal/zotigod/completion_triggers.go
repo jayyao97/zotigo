@@ -30,22 +30,6 @@ func completionOrigin(value workspace.CompletionTrigger) *protocol.RequestContex
 	return &protocol.RequestContext{Source: "completion_trigger", ExternalMessageID: value.ID, ConversationName: value.Title, Actor: protocol.RequestActor{ID: value.ID, Role: "automation"}}
 }
 
-// Recheck at admission as an approval can appear after the dispatcher observed
-// the active turn. Callback data must not act as a human approval response.
-func validateCompletionSteering(ctx context.Context, source sessionlog.ItemSource, id string, command wire.Command) error {
-	if !strings.HasPrefix(command.ID, "completion:") {
-		return nil
-	}
-	items, _, err := source.LoadItems(ctx, id)
-	if err != nil {
-		return err
-	}
-	if sessionlog.HasPendingHumanRequest(items) {
-		return errActiveTurn
-	}
-	return nil
-}
-
 // JSON quoting keeps callback data structurally separate even when it contains
 // newlines or apparent prompt delimiters. This is provenance, not a sandbox.
 func completionPrompt(instruction, callbackText string) string {
@@ -128,7 +112,7 @@ func (h *handler) validateCompletionTarget(ctx context.Context, value workspace.
 		return nil, err
 	}
 	if pending, _, ok := pendingApprovalPolicyIntent(items); ok && pending != stored.ApprovalPolicy {
-		return nil, errInputPolicyMismatch
+		return nil, sessionlog.ErrInputPolicyMismatch
 	}
 	organization, err := h.catalog.GetSessionOrganization(ctx, value.SessionID)
 	if err != nil {

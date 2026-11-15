@@ -12,6 +12,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -218,7 +219,7 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append profile command: %v", err))
 		return
 	}
-	h.sendCommand(r.Context(), id, profileCommandFromItem(item))
+	h.sendCommand(r.Context(), id, sessionlog.ProfileCommandFromItem(item))
 	writeAPIJSON(w, http.StatusAccepted, changeProfileResponse{Profile: target, Status: "pending", CommandID: item.ID})
 }
 

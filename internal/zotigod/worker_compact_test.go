@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -49,7 +50,7 @@ func TestCompactingInputRejectionIsStructured(t *testing.T) {
 			if input.InputRequest == nil {
 				t.Fatal("missing input request")
 			}
-			code, message := workerInputErrorDetails(fmt.Errorf("%w: context compaction is in progress", errActiveTurn))
+			code, message := sessionlog.InputErrorDetails(fmt.Errorf("%w: context compaction is in progress", sessionlog.ErrActiveTurn))
 			if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 				RequestID: input.InputRequest.RequestID, ErrorCode: code, Error: message,
 			}}); err != nil {
@@ -189,7 +190,7 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 	if _, err := runtime.acceptInput(ctx, request); err == nil || !strings.Contains(err.Error(), "before /compact") {
 		t.Fatalf("active compact: %v", err)
 	}
-	request.Command = steeringCommandForRequest(request, runtime.display.CurrentTurnID())
+	request.Command = sessionlog.SteeringCommandForRequest(request, runtime.display.CurrentTurnID())
 	request.SteeringOnly = true
 	if _, err := runtime.acceptInput(ctx, request); err == nil || !strings.Contains(err.Error(), "before /compact") {
 		t.Fatalf("explicit steering compact: %v", err)
@@ -200,7 +201,7 @@ func TestNativeCompactCommandPersistsLLMSummary(t *testing.T) {
 	runtime.mu.Unlock()
 	request.Command = wire.Command{ID: "during-compact", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "please continue"}}
 	request.RequiredApprovalPolicy = "auto"
-	if _, err := runtime.acceptInput(ctx, request); !errors.Is(err, errActiveTurn) {
+	if _, err := runtime.acceptInput(ctx, request); !errors.Is(err, sessionlog.ErrActiveTurn) {
 		t.Fatalf("input during compact: %v", err)
 	}
 	items, _, err = store.ListDisplayItems(ctx, id)
@@ -288,7 +289,7 @@ func TestAutomaticCompactRejectsSteeringAndAllowsStop(t *testing.T) {
 		go func() { _, err := runtime.acceptInput(ctx, request); rejected <- err }()
 		select {
 		case err := <-rejected:
-			if !errors.Is(err, errActiveTurn) {
+			if !errors.Is(err, sessionlog.ErrActiveTurn) {
 				t.Fatalf("expected rejection: %v", err)
 			}
 		case <-time.After(time.Second):

@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -155,7 +156,7 @@ func TestCompletionRejectsPendingApprovalChange(t *testing.T) {
 	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{ID: "pending-policy", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandApprovalPolicy, ApprovalPolicy: string(target)}}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.validateCompletionTarget(ctx, value); err != errInputPolicyMismatch {
+	if _, err := h.validateCompletionTarget(ctx, value); err != sessionlog.ErrInputPolicyMismatch {
 		t.Fatalf("pending policy authorized: %v", err)
 	}
 }
@@ -187,7 +188,7 @@ func TestCompletionModeValidationAndHumanInputDeferral(t *testing.T) {
 	if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{Type: session.DisplayItemApprovalRequest, Approval: &session.DisplayApproval{ID: "approval", TurnID: caller.TurnID}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := validateCompletionSteering(ctx, h.items, caller.SessionID, command); err != errActiveTurn {
+	if err := sessionlog.ValidateCompletionSteering(ctx, h.items, caller.SessionID, command); err != sessionlog.ErrActiveTurn {
 		t.Fatalf("approval not fenced: %v", err)
 	}
 	if err := h.dispatchQueuedInputs(caller.SessionID, false, false); err != nil {
@@ -328,9 +329,9 @@ func testCompletionCallbackDelivery(t *testing.T, callbackText, mode string, act
 	}
 	acceptedCommand := command
 	if active {
-		acceptedCommand = steeringCommandForRequest(*input.InputRequest, caller.TurnID)
+		acceptedCommand = sessionlog.SteeringCommandForRequest(*input.InputRequest, caller.TurnID)
 	}
-	accepted, err := appendAcceptedSessionInput(ctx, h.items, caller.SessionID, acceptedCommand)
+	accepted, err := sessionlog.AppendAcceptedInput(ctx, h.items, caller.SessionID, acceptedCommand)
 	if err != nil {
 		t.Fatal(err)
 	}

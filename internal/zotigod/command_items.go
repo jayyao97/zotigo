@@ -2,14 +2,9 @@ package zotigod
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
-	"fmt"
-	"os"
-	"path/filepath"
 	"strconv"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
@@ -29,9 +24,9 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 			appended := false
 			switch item.Command.Type {
 			case wire.CommandMessage:
-				command, err := messageCommandFromItem(item, rootDir)
+				command, err := sessionlog.MessageCommandFromItem(item, rootDir)
 				if err != nil {
-					if errors.Is(err, errCommandImageUnavailable) {
+					if errors.Is(err, sessionlog.ErrCommandImageUnavailable) {
 						continue
 					}
 					return wire.CommandsPage{}, err
@@ -42,9 +37,9 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 				if item.Type != zotigosession.DisplayItemSessionCommand {
 					break
 				}
-				command, err := steeringCommandFromItem(item, rootDir)
+				command, err := sessionlog.SteeringCommandFromItem(item, rootDir)
 				if err != nil {
-					if errors.Is(err, errCommandImageUnavailable) {
+					if errors.Is(err, sessionlog.ErrCommandImageUnavailable) {
 						continue
 					}
 					return wire.CommandsPage{}, err
@@ -52,13 +47,13 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 				resp.Commands = append(resp.Commands, command)
 				appended = true
 			case wire.CommandPause:
-				resp.Commands = append(resp.Commands, pauseCommandFromItem(item))
+				resp.Commands = append(resp.Commands, sessionlog.PauseCommandFromItem(item))
 				appended = true
 			case wire.CommandProfile:
-				resp.Commands = append(resp.Commands, profileCommandFromItem(item))
+				resp.Commands = append(resp.Commands, sessionlog.ProfileCommandFromItem(item))
 				appended = true
 			case wire.CommandApprovalPolicy:
-				resp.Commands = append(resp.Commands, approvalPolicyCommandFromItem(item))
+				resp.Commands = append(resp.Commands, sessionlog.ApprovalPolicyCommandFromItem(item))
 				appended = true
 			}
 			if appended && len(resp.Commands) >= query.Limit {
@@ -101,9 +96,9 @@ func buildCommandsResponseFromOffset(ctx context.Context, source sessionlog.Item
 			return wire.CommandsPage{}, err
 		}
 		for _, item := range items {
-			command, ok, err := commandFromDisplayItem(item, rootDir)
+			command, ok, err := sessionlog.CommandFromItem(item, rootDir)
 			if err != nil {
-				if errors.Is(err, errCommandImageUnavailable) {
+				if errors.Is(err, sessionlog.ErrCommandImageUnavailable) {
 					continue
 				}
 				return wire.CommandsPage{}, err
@@ -131,108 +126,6 @@ func buildCommandsResponseFromOffset(ctx context.Context, source sessionlog.Item
 	resp.NextOffset = offset
 	if len(resp.Commands) > 0 {
 		resp.NextCursor = strconv.FormatUint(resp.Commands[len(resp.Commands)-1].Sequence, 10)
-	}
-	return resp, nil
-}
-
-func commandFromDisplayItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, bool, error) {
-	if item.Command == nil {
-		return wire.Command{}, false, nil
-	}
-	switch item.Command.Type {
-	case wire.CommandMessage:
-		command, err := messageCommandFromItem(item, rootDir)
-		return command, err == nil, err
-	case wire.CommandPause:
-		return pauseCommandFromItem(item), true, nil
-	case wire.CommandProfile:
-		return profileCommandFromItem(item), true, nil
-	case wire.CommandApprovalPolicy:
-		return approvalPolicyCommandFromItem(item), true, nil
-	default:
-		return wire.Command{}, false, nil
-	}
-}
-
-func messageCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
-	command := wire.Command{
-		ID:        item.ID,
-		Sequence:  item.Sequence,
-		Type:      wire.CommandMessage,
-		CreatedAt: item.CreatedAt,
-		Message:   &wire.MessageCommandPayload{},
-	}
-	if item.Command != nil {
-		command.Message.Text = item.Command.Text
-		command.Message.Skills = append([]string(nil), item.Command.Skills...)
-		command.Message.RequestContext = item.Command.RequestContext.Clone()
-		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
-		if err != nil {
-			return wire.Command{}, err
-		}
-		command.Message.Images = images
-	}
-	return command, nil
-}
-
-func sessionInputCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
-	if item.Command != nil && item.Command.Type == wire.CommandSteering {
-		return steeringCommandFromItem(item, rootDir)
-	}
-	return messageCommandFromItem(item, rootDir)
-}
-
-func steeringCommandFromItem(item zotigosession.DisplayItem, rootDir string) (wire.Command, error) {
-	command := wire.Command{
-		ID:        item.ID,
-		Sequence:  item.Sequence,
-		Type:      wire.CommandSteering,
-		CreatedAt: item.CreatedAt,
-		Steering:  &wire.SteeringCommandPayload{},
-	}
-	if item.Command != nil {
-		command.Steering.Text = item.Command.Text
-		command.Steering.RequestContext = item.Command.RequestContext.Clone()
-		command.Steering.TurnID = item.Command.TurnID
-		command.Steering.Skills = append([]string(nil), item.Command.Skills...)
-		images, err := commandImagesFromDisplay(item.Command.Images, rootDir)
-		if err != nil {
-			return wire.Command{}, err
-		}
-		command.Steering.Images = images
-	}
-	return command, nil
-}
-
-func commandImagesFromDisplay(images []zotigosession.DisplayCommandImage, rootDir string) ([]wire.CommandImageData, error) {
-	if len(images) == 0 {
-		return nil, nil
-	}
-	resp := make([]wire.CommandImageData, 0, len(images))
-	for idx, img := range images {
-		part := wire.CommandImageData{
-			MimeType:  img.MimeType,
-			SizeBytes: img.SizeBytes,
-			Width:     img.Width,
-			Height:    img.Height,
-			BlobPath:  img.BlobPath,
-		}
-		if len(img.Data) > 0 {
-			part.DataBase64 = base64.StdEncoding.EncodeToString(img.Data)
-		} else if img.BlobPath != "" {
-			if rootDir == "" {
-				return nil, fmt.Errorf("%w: image persistence is not configured", errCommandImageUnavailable)
-			}
-			data, err := os.ReadFile(filepath.Join(rootDir, img.BlobPath))
-			if err != nil {
-				return nil, fmt.Errorf("%w: read command image %d: %v", errCommandImageUnavailable, idx, err)
-			}
-			part.DataBase64 = base64.StdEncoding.EncodeToString(data)
-		}
-		if part.DataBase64 == "" {
-			return nil, fmt.Errorf("%w: command image %d payload is unavailable", errCommandImageUnavailable, idx)
-		}
-		resp = append(resp, part)
 	}
 	return resp, nil
 }
@@ -289,49 +182,6 @@ func publicCommandImages(images []wire.CommandImageData) []publicCommandImageRes
 		}
 	}
 	return resp
-}
-
-func pauseCommandFromItem(item zotigosession.DisplayItem) wire.Command {
-	command := wire.Command{
-		ID:        item.ID,
-		Sequence:  item.Sequence,
-		Type:      wire.CommandPause,
-		CreatedAt: item.CreatedAt,
-		Pause:     &wire.PauseCommandPayload{},
-	}
-	if item.Command != nil {
-		command.Pause.TurnID = item.Command.TurnID
-		command.Pause.Reason = item.Command.Reason
-	}
-	return command
-}
-
-func profileCommandFromItem(item zotigosession.DisplayItem) wire.Command {
-	command := wire.Command{
-		ID:        item.ID,
-		Sequence:  item.Sequence,
-		Type:      wire.CommandProfile,
-		CreatedAt: item.CreatedAt,
-		Profile:   &wire.ProfileCommandPayload{},
-	}
-	if item.Command != nil {
-		command.Profile.Name = item.Command.Profile
-	}
-	return command
-}
-
-func approvalPolicyCommandFromItem(item zotigosession.DisplayItem) wire.Command {
-	command := wire.Command{
-		ID:             item.ID,
-		Sequence:       item.Sequence,
-		Type:           wire.CommandApprovalPolicy,
-		CreatedAt:      item.CreatedAt,
-		ApprovalPolicy: &wire.ApprovalPolicyCommandPayload{},
-	}
-	if item.Command != nil {
-		command.ApprovalPolicy.Policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
-	}
-	return command
 }
 
 func hasPendingMessageCommand(items []zotigosession.DisplayItem) bool {

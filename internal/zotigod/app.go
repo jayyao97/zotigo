@@ -293,13 +293,13 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 				handler.reconcileHumanRequestState(sessionID)
 			}
 		case wire.MessageInteractionRequest:
-			if msg.InteractionRequest != nil && msg.InteractionRequest.Status == interactionStatusPending && msg.InteractionRequest.IsBlocking {
+			if msg.InteractionRequest != nil && msg.InteractionRequest.Status == sessionlog.InteractionStatusPending && msg.InteractionRequest.IsBlocking {
 				unlock := handler.sessionOps.lockWorkerCallback(sessionID)
 				_, _ = handler.registry.Pause(sessionID)
 				unlock()
 			}
 		case wire.MessageInteractionResult:
-			if msg.InteractionResult != nil && msg.InteractionResult.Error == "" && msg.InteractionResult.Interaction != nil && msg.InteractionResult.Interaction.Status != interactionStatusPending && msg.InteractionResult.Interaction.IsBlocking {
+			if msg.InteractionResult != nil && msg.InteractionResult.Error == "" && msg.InteractionResult.Interaction != nil && msg.InteractionResult.Interaction.Status != sessionlog.InteractionStatusPending && msg.InteractionResult.Interaction.IsBlocking {
 				handler.reconcileHumanRequestState(sessionID)
 			}
 		case wire.MessageConversationBound:

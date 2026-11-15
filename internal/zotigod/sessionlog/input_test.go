@@ -1,4 +1,4 @@
-package zotigod
+package sessionlog
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 )
 
 func TestInputMessageKeepsCommandIDForSteeringAcknowledgement(t *testing.T) {
-	message, err := inputMessageFromRequest(wire.InputRequest{Command: wire.Command{
+	message, err := InputMessageFromRequest(wire.InputRequest{Command: wire.Command{
 		ID: "steering-command", Type: wire.CommandMessage,
 		Message: &wire.MessageCommandPayload{Text: "change direction"},
 	}})
@@ -23,14 +23,14 @@ func TestInputMessageKeepsCommandIDForSteeringAcknowledgement(t *testing.T) {
 func TestInputMessageAndDisplayItemKeepRequestContext(t *testing.T) {
 	requestContext := &protocol.RequestContext{Source: "feishu", ConversationName: "Shadow Test", Actor: protocol.RequestActor{ID: "ou_owner", Role: "owner"}}
 	command := wire.Command{ID: "channel-message", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "run", RequestContext: requestContext}}
-	message, err := inputMessageFromRequest(wire.InputRequest{Command: command})
+	message, err := InputMessageFromRequest(wire.InputRequest{Command: command})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if message.Metadata == nil || message.Metadata.RequestContext == nil || message.Metadata.RequestContext.Actor.Role != "owner" {
 		t.Fatalf("message=%+v", message)
 	}
-	item := displayItemForAcceptedInput(command)
+	item := itemForAcceptedInput(command)
 	if item.Command == nil || item.Command.RequestContext == nil || item.Command.RequestContext.ConversationName != "Shadow Test" {
 		t.Fatalf("item=%+v", item)
 	}
@@ -43,15 +43,15 @@ func TestInputMessageAndDisplayItemKeepRequestContext(t *testing.T) {
 func TestSteeringPreservesTrustedOriginThroughReplay(t *testing.T) {
 	origin := &protocol.RequestContext{Source: "feishu", ConnectionID: "bot", Actor: protocol.RequestActor{ID: "owner"}}
 	command := wire.Command{ID: "channel:bot:steer", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "continue", RequestContext: origin}}
-	steering := steeringCommandForRequest(wire.InputRequest{Command: command}, "turn")
-	item := displayItemForAcceptedInput(steering)
-	restored, err := steeringCommandFromItem(item, t.TempDir())
+	steering := SteeringCommandForRequest(wire.InputRequest{Command: command}, "turn")
+	item := itemForAcceptedInput(steering)
+	restored, err := SteeringCommandFromItem(item, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	message := messageCommandForRequest(wire.InputRequest{Command: restored})
+	message := MessageCommandForRequest(wire.InputRequest{Command: restored})
 	for _, got := range []*protocol.RequestContext{commandRequestContext(steering), item.Command.RequestContext, commandRequestContext(restored), commandRequestContext(message)} {
-		if !sameRequestContext(origin, got) || got == origin {
+		if !SameRequestContext(origin, got) || got == origin {
 			t.Fatalf("origin lost or aliased: %+v", got)
 		}
 	}

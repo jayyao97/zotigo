@@ -201,8 +201,8 @@ func TestCodexInputRejectsChangedRequiredPolicy(t *testing.T) {
 func TestWorkerInputErrorMatchesActiveTurn(t *testing.T) {
 	t.Parallel()
 	err := &workerInputError{Code: "active_turn", Message: "a turn is already active"}
-	if !errors.Is(err, errActiveTurn) {
-		t.Fatalf("worker input error %v did not match errActiveTurn", err)
+	if !errors.Is(err, sessionlog.ErrActiveTurn) {
+		t.Fatalf("worker input error %v did not match sessionlog.ErrActiveTurn", err)
 	}
 }
 
