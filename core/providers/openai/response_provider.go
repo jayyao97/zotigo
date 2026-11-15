@@ -242,6 +242,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 			// blockType check to avoid firing on indexes we never saw
 			// reasoning on).
 			case "response.output_item.done":
+				// As with output_item.added, this fires for every item and
+				// all of them carry an ID; only reasoning items are reasoning.
+				if evt.Item.Type != "reasoning" {
+					continue
+				}
 				rs := evt.Item.AsReasoning()
 				if rs.ID == "" && rs.EncryptedContent == "" {
 					continue
