@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
@@ -31,7 +33,7 @@ func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
 	}
 	handler := &handler{
 		registry:   registry,
-		items:      &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		items:      &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		events:     sessionlog.NewEventBroker(),
 		sessionOps: newSessionOperationLocks(),
 	}
@@ -56,7 +58,7 @@ func TestStaleWorkerDisconnectDoesNotResetRestartedSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	handler := &handler{
-		registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		registry: registry, items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		events: sessionlog.NewEventBroker(), sessionOps: newSessionOperationLocks(),
 	}
 
@@ -132,7 +134,7 @@ func TestDisconnectedRunningSessionRejectsRemovedProfile(t *testing.T) {
 }
 
 func TestWorkerConnectTimeoutCanRetryWithMessage(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	var launches atomic.Int32
 	workerReady := make(chan *websocket.Conn, 1)
@@ -191,7 +193,7 @@ func TestWorkerConnectTimeoutDoesNotFailNewActivation(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("HOME", t.TempDir())
 			workDir := t.TempDir()
-			writeTestProfileConfig(t, workDir)
+			sessionlogtest.WriteProfileConfig(t, workDir)
 			launchStarted := make(chan struct{})
 			releaseLaunch := make(chan struct{})
 			launcher := workerLauncherFunc(func(context.Context, string, string) error {
@@ -201,7 +203,7 @@ func TestWorkerConnectTimeoutDoesNotFailNewActivation(t *testing.T) {
 			})
 			registry := newSessionRegistry()
 			const connectTimeout = 20 * time.Millisecond
-			handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+			handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 				launcher:             launcher,
 				workerConnectTimeout: connectTimeout,
 			})
@@ -249,8 +251,8 @@ func TestWorkerConnectTimeoutDoesNotFailNewActivation(t *testing.T) {
 func TestConnectedWorkerDisconnectBeforeReadyCanRetry(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	sessionlogtest.WriteProfileConfig(t, workDir)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	connected := make(chan *websocket.Conn, 2)
 	var launches atomic.Int32
 	var server *httptest.Server
@@ -342,7 +344,7 @@ func unmatchedWorkerAttachRequest(t *testing.T, sessionID string) *http.Request 
 
 func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 	registry := newSessionRegistry()
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		launcher: workerLauncherFunc(func(context.Context, string, string) error { return nil }),
 	})
 	created := registry.Add(newSession("", ""))
@@ -363,7 +365,7 @@ func TestWorkerAttachRequiresActiveConnection(t *testing.T) {
 func TestWorkerAttachRejectsStaleGeneration(t *testing.T) {
 	registry := newSessionRegistry()
 	workers := newWorkerRegistry()
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	created := registry.Add(Session{ID: "sess-stale-ready", State: SessionStateStarting})
@@ -455,7 +457,7 @@ func TestWorkerAttachTransitionsToRunning(t *testing.T) {
 }
 
 func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -485,7 +487,7 @@ func TestWorkerConnectTransitionsToRunningAndReceivesCommands(t *testing.T) {
 }
 
 func TestWorkerHeartbeatUnregistersUnresponsiveConnection(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	workers.pingInterval = 10 * time.Millisecond
 	workers.pongWait = 30 * time.Millisecond
@@ -556,7 +558,7 @@ func TestWorkerSessionLockRejectsReuse(t *testing.T) {
 }
 
 func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -568,7 +570,7 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
-	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+	source.AppendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Command != nil && item.Command.Type == wire.CommandMessage {
 			close(appendStarted)
 			<-releaseAppend
@@ -610,7 +612,7 @@ func TestWorkerFinishSerializesWithMessageAppend(t *testing.T) {
 }
 
 func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	if _, err := source.AppendItem(context.Background(), "sess-restart", zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: "turn-stale"},
@@ -622,7 +624,7 @@ func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
 		t.Fatalf("interrupt open turn: %v", err)
 	}
 
-	items := source.items["sess-restart"]
+	items := source.Items["sess-restart"]
 	if len(items) != 2 {
 		t.Fatalf("expected start and interrupt items, got %#v", items)
 	}
@@ -635,7 +637,7 @@ func TestWorkerDisplayLogInterruptsOpenTurnAfterRestart(t *testing.T) {
 }
 
 func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
@@ -656,7 +658,7 @@ func TestWorkerAttachDoesNotResumePausedApproval(t *testing.T) {
 }
 
 func TestWorkerDisconnectReconcilesDurablePendingApproval(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -695,7 +697,7 @@ func TestWorkerDisconnectReconcilesDurablePendingApproval(t *testing.T) {
 }
 
 func TestWorkerDisconnectReconcilesResolvedApproval(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -742,7 +744,7 @@ func TestWorkerDisconnectReconcilesResolvedApproval(t *testing.T) {
 }
 
 func TestWorkerDisconnectKeepsPendingApprovalPaused(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -786,7 +788,7 @@ func TestWorkerFinishTransitionsToEnded(t *testing.T) {
 }
 
 func TestWorkerFinishClosesRegisteredWorker(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	handler := newHandler(newSessionRegistry(), source, handlerOptions{workers: workers})
 	server := httptest.NewServer(handler)

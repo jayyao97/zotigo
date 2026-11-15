@@ -13,6 +13,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -165,7 +167,7 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 
 func TestWorkerApprovalRequestMessagePausesSession(t *testing.T) {
 	registry := newSessionRegistry()
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 	created := createSession(t, handler)
@@ -194,7 +196,7 @@ func TestWorkerApprovalRequestMessagePausesSession(t *testing.T) {
 }
 
 func TestWorkerApprovalRequestBeforeReadyKeepsSessionPaused(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -260,7 +262,7 @@ func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	workers := newWorkerRegistry()
 	var server *httptest.Server
@@ -328,8 +330,8 @@ func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
 }
 
 func TestWorkerApprovalRequestSurvivesTurnPausedHintAppendFailure(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	source.appendErr = func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	source.AppendErr = func(_ string, item zotigosession.DisplayItem) error {
 		if item.Type == zotigosession.DisplayItemTurnPaused {
 			return errors.New("write failed")
 		}
@@ -352,7 +354,7 @@ func TestWorkerApprovalRequestSurvivesTurnPausedHintAppendFailure(t *testing.T) 
 }
 
 func TestApprovalWaitDoesNotBlockAnotherSessionFinish(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	workers := newWorkerRegistry()
 	handler := newHandler(registry, source, handlerOptions{workers: workers})
@@ -411,7 +413,7 @@ func TestApprovalWaitDoesNotBlockAnotherSessionFinish(t *testing.T) {
 }
 
 func TestApprovalDecisionTimesOutWaitingForWorkerAcknowledgement(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	workers := newWorkerRegistry()
 	workers.approvalWait = 20 * time.Millisecond
@@ -436,7 +438,7 @@ func TestApprovalDecisionTimesOutWaitingForWorkerAcknowledgement(t *testing.T) {
 
 func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	registry := newSessionRegistry()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -446,7 +448,7 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 	defer worker.Close()
 	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
-	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+	source.AppendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalDecision {
 			_, _ = registry.End(created.ID)
 		}
@@ -473,12 +475,12 @@ func TestApprovalDecisionSucceedsWhenRegistryResumeLosesRace(t *testing.T) {
 
 func TestPersistedApprovalRemainsReadableWhenSessionEnds(t *testing.T) {
 	registry := newSessionRegistry()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
 	approvalID := sessionlog.NewID("apr")
-	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
+	source.AppendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalRequest {
 			_, _ = registry.End(created.ID)
 		}
@@ -576,7 +578,7 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 }
 
 func TestApprovalDecisionRejectsIncompleteOrUnknownDecisions(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)

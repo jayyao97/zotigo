@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/compaction"
@@ -60,7 +62,7 @@ func TestHealth(t *testing.T) {
 }
 
 func TestDecorateSessionDoesNotReportInactiveSessionWorking(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		"sess-failed": {
 			{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 			{Type: zotigosession.DisplayItemToolExecutionStarted, ToolExecution: &zotigosession.DisplayToolExecution{ToolCallID: "call-1", ToolName: "shell"}},
@@ -88,7 +90,7 @@ func TestSessionsCreateAndList(t *testing.T) {
 	}
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
@@ -155,7 +157,7 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 	}
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(fmt.Sprintf(`{"working_directory":%q}`, workDir)))
@@ -316,11 +318,11 @@ func TestSessionsCreateRejectsInvalidWorkingDirectory(t *testing.T) {
 
 func TestSessionsCreateDoesNotRegisterWhenPersistenceFails(t *testing.T) {
 	registry := newSessionRegistry()
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		store: unavailableSessionStore{err: errors.New("store unavailable")},
 	})
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 
 	rec := httptest.NewRecorder()
 	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
@@ -387,7 +389,7 @@ func TestSessionsGetLiveFallsBackToRegistryWhenStoreFails(t *testing.T) {
 		ProfileName: "registry-profile",
 		CreatedAt:   time.Now().UTC(),
 	})
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		store: unavailableSessionStore{err: errors.New("store unavailable")},
 	})
 
@@ -411,7 +413,7 @@ func TestSessionsGetReturnsStoredSessionOffline(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	workDir := t.TempDir()
-	putStoredSession(t, store, "sess-stored", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", workDir)
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
@@ -437,7 +439,7 @@ func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	workDir := t.TempDir()
-	putStoredSession(t, store, "sess-stored", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", workDir)
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	created := createSession(t, handler)
 
@@ -470,8 +472,8 @@ func TestSessionsListDoesNotLoadSessionHistories(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "sess-live", State: SessionStateRunning, Working: true, ActiveTool: "shell"})
 	handler := newHandler(registry, source, handlerOptions{store: store})
@@ -481,7 +483,7 @@ func TestSessionsListDoesNotLoadSessionHistories(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected status %d, got %d: %s", http.StatusOK, rec.Code, rec.Body.String())
 	}
-	if got := source.loadCalls.Load(); got != 0 {
+	if got := source.LoadCalls.Load(); got != 0 {
 		t.Fatalf("session list loaded %d display histories, want 0", got)
 	}
 	var list sessionListResponse
@@ -500,7 +502,7 @@ func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
 	var launches atomic.Int32
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store,
@@ -524,7 +526,7 @@ func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
 }
 
 func TestSessionItemsRejectMissingSession(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/missing/items", nil))
@@ -535,10 +537,10 @@ func TestSessionItemsRejectMissingSession(t *testing.T) {
 }
 
 func TestSessionItemsDefaultLimitReturnsRecentItemsAscending(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = makeDisplayItems(60)
+	source.Items[created.ID] = makeDisplayItems(60)
 
 	resp := getItems(t, handler, "/sessions/"+created.ID+"/items")
 
@@ -554,10 +556,10 @@ func TestSessionItemsDefaultLimitReturnsRecentItemsAscending(t *testing.T) {
 }
 
 func TestSessionItemsLimitMax(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = makeDisplayItems(210)
+	source.Items[created.ID] = makeDisplayItems(210)
 
 	resp := getItems(t, handler, "/sessions/"+created.ID+"/items?limit=200")
 
@@ -573,10 +575,10 @@ func TestSessionItemsLimitMax(t *testing.T) {
 }
 
 func TestSessionItemsCursorPagination(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = makeDisplayItems(5)
+	source.Items[created.ID] = makeDisplayItems(5)
 
 	after := getItems(t, handler, "/sessions/"+created.ID+"/items?after=2&limit=2")
 	assertItemSequences(t, after.Items, []uint64{3, 4})
@@ -586,7 +588,7 @@ func TestSessionItemsCursorPagination(t *testing.T) {
 }
 
 func TestSessionItemsRejectInvalidCursor(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 
 	tests := []string{
 		"/sessions/missing/items?after=abc",
@@ -606,10 +608,10 @@ func TestSessionItemsRejectInvalidCursor(t *testing.T) {
 }
 
 func TestSessionItemsPublicResponseDoesNotExposeInternalSession(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = makeDisplayItems(1)
+	source.Items[created.ID] = makeDisplayItems(1)
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID+"/items", nil))
@@ -625,10 +627,10 @@ func TestSessionItemsPublicResponseDoesNotExposeInternalSession(t *testing.T) {
 }
 
 func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = []zotigosession.DisplayItem{{
+	source.Items[created.ID] = []zotigosession.DisplayItem{{
 		ID:       "item_tool_result",
 		Sequence: 1,
 		Type:     zotigosession.DisplayItemAssistantMessage,
@@ -715,10 +717,10 @@ func TestSessionItemsReturnsStructuredToolResult(t *testing.T) {
 }
 
 func TestSessionItemsReturnsContextCompaction(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = []zotigosession.DisplayItem{{
+	source.Items[created.ID] = []zotigosession.DisplayItem{{
 		ID: "item_compacted", Sequence: 1, Type: zotigosession.DisplayItemContextCompacted,
 		ContextCompaction: &zotigosession.DisplayContextCompaction{
 			OriginalTokens: 1200, CompressedTokens: 300, MessagesBefore: 20, MessagesAfter: 6,
@@ -736,10 +738,10 @@ func TestSessionItemsReturnsContextCompaction(t *testing.T) {
 }
 
 func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = []zotigosession.DisplayItem{{
+	source.Items[created.ID] = []zotigosession.DisplayItem{{
 		ID:       "item_tool_call",
 		Sequence: 1,
 		Type:     zotigosession.DisplayItemAssistantMessage,
@@ -770,10 +772,10 @@ func TestSessionItemsReturnsStructuredToolCall(t *testing.T) {
 }
 
 func TestSessionItemsNormalizesHistoricalCodexFileChangeArguments(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
-	source.items[created.ID] = []zotigosession.DisplayItem{{
+	source.Items[created.ID] = []zotigosession.DisplayItem{{
 		ID: "item_file_change", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage,
 		Content: []zotigosession.DisplayContentPart{{
 			Type: string(protocol.ContentTypeToolCall),
@@ -799,8 +801,8 @@ func TestSessionItemsNormalizesHistoricalCodexFileChangeArguments(t *testing.T) 
 }
 
 func TestSessionItemsReadsStoredSessionWithoutRegistryEntry(t *testing.T) {
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{
 			"sess-stored": makeDisplayItems(2),
 		},
 	}
@@ -873,7 +875,7 @@ func TestSessionStartTransitionsToStarting(t *testing.T) {
 }
 
 func TestSessionStartLaunchesWorkerAndWaitsForReady(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 2)
@@ -910,7 +912,7 @@ func TestSessionStartLaunchesWorkerAndWaitsForReady(t *testing.T) {
 }
 
 func TestSessionStartPassesWorkingDirectoryToWorkerLauncher(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 2)
@@ -958,7 +960,7 @@ func TestSessionStartResumesStoredSession(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	workDir := t.TempDir()
-	putStoredSession(t, store, "sess-stored", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", workDir)
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
@@ -1003,7 +1005,7 @@ func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 2)
@@ -1069,7 +1071,7 @@ func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
@@ -1135,7 +1137,7 @@ func TestSessionStartOwnerCancellationDoesNotFailSharedLaunch(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	defer store.Close()
-	putStoredSession(t, store, "sess-owner-cancel", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-owner-cancel", t.TempDir())
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
@@ -1202,7 +1204,7 @@ func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	defer store.Close()
-	putStoredSession(t, store, "sess-owner-timeout", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-owner-timeout", t.TempDir())
 	launchStarted := make(chan struct{})
 	releaseLaunch := make(chan struct{})
 	launcher := workerLauncherFunc(func(context.Context, string, string) error {
@@ -1254,7 +1256,7 @@ func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	defer store.Close()
-	putStoredSession(t, store, "sess-launch-cancel", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-launch-cancel", t.TempDir())
 	launcherCanceled := make(chan struct{})
 	launcher := workerLauncherFunc(func(ctx context.Context, _, _ string) error {
 		<-ctx.Done()
@@ -1276,7 +1278,7 @@ func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
 }
 
 func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source, handlerOptions{
 		launcher:             workerLauncherFunc(func(context.Context, string, string) error { return nil }),
 		workerConnectTimeout: 10 * time.Millisecond,
@@ -1294,7 +1296,7 @@ func TestSessionStartFailsWhenWorkerDoesNotConnect(t *testing.T) {
 }
 
 func TestSessionStartConnectTimeoutBeginsAfterLauncherReturns(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workerReady := make(chan *websocket.Conn, 1)
 	const connectTimeout = 250 * time.Millisecond
@@ -1346,7 +1348,7 @@ func TestOccupiedRuntimeFailureIsConflictAndRetryable(t *testing.T) {
 		ID: "sess-occupied", State: SessionStateFailed, Agent: "codex",
 		Error: "thread already has an active writer", ErrorCode: "runtime_occupied", CreatedAt: time.Now().UTC(),
 	})
-	handler := &handler{registry: registry, workers: newWorkerRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}}
+	handler := &handler{registry: registry, workers: newWorkerRegistry(), items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}}
 
 	recorder := httptest.NewRecorder()
 	handler.writeEnsureRunningError(recorder, fmt.Errorf("%w: thread already has an active writer", workerbase.ErrRuntimeOccupied))
@@ -1403,7 +1405,7 @@ func TestSessionRejectsUnknownAction(t *testing.T) {
 func TestSessionRouteRejectsEscapedSlashInID(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "sess/escape"})
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/sess%2Fescape", nil))
@@ -1429,7 +1431,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	createdIDs := make([]string, 0, 11)
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
 
 	for i := 0; i < 11; i++ {
@@ -1577,7 +1579,7 @@ func TestLiveSessionGetUsesStoredChannelToolCapability(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: stored.ID, State: SessionStateRunning, Live: true, Agent: "codex", CreatedAt: now})
-	handler := &handler{registry: registry, store: store, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{stored.ID: {}}}}
+	handler := &handler{registry: registry, store: store, items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{stored.ID: {}}}}
 	recorder := httptest.NewRecorder()
 	handler.handleSessionGet(recorder, httptest.NewRequest(http.MethodGet, "/sessions/"+stored.ID, nil), stored.ID)
 	if recorder.Code != http.StatusOK {
@@ -1595,7 +1597,7 @@ func TestLiveSessionGetUsesStoredChannelToolCapability(t *testing.T) {
 func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 	root := t.TempDir()
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	compressor := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize: 100_000, TriggerRatio: 0.7, PreserveRatio: 0.3,
 		TokenCounter: func(text string) int { return (len(text) + 3) / 4 },

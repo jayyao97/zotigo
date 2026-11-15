@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -164,9 +166,9 @@ func TestCodexSessionSyncFallsBackWhenItemsListUnsupportedWhileRuntimeActive(t *
 }
 
 func TestSyncCompletedCodexTurnsDoesNotExposePartialTurnOnAppendFailure(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	appendCount := 0
-	source.appendErr = func(string, zotigosession.DisplayItem) error {
+	source.AppendErr = func(string, zotigosession.DisplayItem) error {
 		appendCount++
 		if appendCount == 2 {
 			return errors.New("injected batch failure")
@@ -189,18 +191,18 @@ func TestSyncCompletedCodexTurnsDoesNotExposePartialTurnOnAppendFailure(t *testi
 }
 
 func TestSyncCompletedCodexTurnsRejectsConcurrentLiveAppend(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	injected := false
-	source.appendErr = func(sessionID string, _ zotigosession.DisplayItem) error {
+	source.AppendErr = func(sessionID string, _ zotigosession.DisplayItem) error {
 		if injected {
 			return nil
 		}
 		injected = true
-		source.mu.Lock()
-		source.items[sessionID] = append(source.items[sessionID], zotigosession.DisplayItem{
+		source.Mu.Lock()
+		source.Items[sessionID] = append(source.Items[sessionID], zotigosession.DisplayItem{
 			ID: "live-item", Sequence: 1, Type: zotigosession.DisplayItemAssistantMessage,
 		})
-		source.mu.Unlock()
+		source.Mu.Unlock()
 		return nil
 	}
 	completedAt := time.Now().Unix()
@@ -400,7 +402,7 @@ func TestCodexSessionSyncProcessesOlderBackendActivityFirst(t *testing.T) {
 		return sonic.Unmarshal(encoded, result)
 	}}
 	var appendOrder []string
-	items := &fakeDisplayItemSource{items: make(map[string][]zotigosession.DisplayItem), appendHook: func(sessionID string, item zotigosession.DisplayItem) {
+	items := &sessionlogtest.ItemSource{Items: make(map[string][]zotigosession.DisplayItem), AppendHook: func(sessionID string, item zotigosession.DisplayItem) {
 		if item.Type == zotigosession.DisplayItemTurnStarted {
 			appendOrder = append(appendOrder, sessionID)
 		}

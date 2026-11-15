@@ -6,11 +6,13 @@ import (
 	"net/url"
 	"path/filepath"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
 )
 
 func TestCatalogSessionPageAndMetadataOnlySnapshot(t *testing.T) {
 	handler, _, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	ids := []string{}
 	for range 5 {
 		response := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)

@@ -15,6 +15,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -786,7 +788,7 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	}
 	defer store.Close()
 	const sessionID = "codex-steering-order"
-	putStoredSession(t, store, sessionID, t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, sessionID, t.TempDir())
 	writer := workerbase.NewUnstartedWriter(nil, 32)
 	runtime := &codexWorkerRuntime{
 		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}},

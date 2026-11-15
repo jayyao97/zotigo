@@ -9,6 +9,8 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
@@ -20,7 +22,7 @@ func TestWorkspaceFilesStayOnDaemonAndRejectConflicts(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = catalog.Close() }()
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
 	capabilities := requestCatalog(t, handler, http.MethodGet, "/files/capabilities", "")
 	var fileCapabilities map[string]bool
 	decodeCatalogData(t, capabilities, &fileCapabilities)
@@ -207,7 +209,7 @@ func TestWorkspaceImageMediaTypes(t *testing.T) {
 }
 
 func TestExplicitFilePreviewOutsideWorkspace(t *testing.T) {
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	outside := filepath.Join(t.TempDir(), "outside.png")
 	if err := os.WriteFile(outside, []byte("\x89PNG\r\n\x1a\npreview"), 0600); err != nil {
 		t.Fatal(err)
@@ -244,7 +246,7 @@ func TestExplicitFilePreviewOutsideWorkspace(t *testing.T) {
 }
 
 func TestExplicitOutsideTextPreviewIsReadOnly(t *testing.T) {
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	name := filepath.Join(t.TempDir(), "outside.txt")
 	if err := os.WriteFile(name, []byte("read me"), 0600); err != nil {
 		t.Fatal(err)
@@ -271,7 +273,7 @@ func TestVideoPreviewOptInAndLimits(t *testing.T) {
 	if err := os.WriteFile(file, data, 0600); err != nil {
 		t.Fatal(err)
 	}
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{})
 	for _, tc := range []struct {
 		extra  string
 		status int

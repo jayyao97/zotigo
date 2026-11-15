@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -45,17 +47,17 @@ func TestTranslationDoesNotCreateSessionOrHistory(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: session.ID, WorkingDirectory: cwd, ProfileName: "translate"}}); err != nil {
 		t.Fatal(err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(registry, source, handlerOptions{store: store})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+session.ID+"/translate", strings.NewReader(`{"text":"hello","target_language":"zh-CN"}`)))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "你好") {
 		t.Fatalf("response: %d %s", rec.Code, rec.Body.String())
 	}
-	if len(source.items) != 0 {
+	if len(source.Items) != 0 {
 		t.Fatal("translation wrote conversation history")
 	}
-	if calls := source.loadCalls.Load(); calls != 0 {
+	if calls := source.LoadCalls.Load(); calls != 0 {
 		t.Fatalf("translation loaded conversation history %d times", calls)
 	}
 	messages, ok := input["messages"].([]any)
@@ -68,7 +70,7 @@ func TestTranslationDoesNotCreateSessionOrHistory(t *testing.T) {
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "你好") {
 		t.Fatalf("offline response: %d %s", rec.Code, rec.Body.String())
 	}
-	if calls := source.loadCalls.Load(); calls != 0 {
+	if calls := source.LoadCalls.Load(); calls != 0 {
 		t.Fatalf("offline translation loaded conversation history %d times", calls)
 	}
 	list := httptest.NewRecorder()
@@ -102,7 +104,7 @@ func TestTranslationExplicitProfileUsesGlobalConfig(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	session := registry.Add(newSession(cwd, "stale-session-profile"))
-	handler := newHandler(registry, &fakeDisplayItemSource{})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/"+session.ID+"/translate", strings.NewReader(`{"text":"hello","target_language":"zh-CN","profile":"fast"}`)))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"profile":"fast"`) || !strings.Contains(rec.Body.String(), `"model":"global-model"`) {
@@ -138,7 +140,7 @@ func TestTranslationFailureCategoriesDoNotExposeProviderBodies(t *testing.T) {
 }
 
 func TestTranslationRejectsInvalidRequest(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{})
 	for _, body := range []string{`{}`, `{"text":"hello","target_language":"de"}`, `{"text":"hello","target_language":"en","extra":true}`} {
 		rec := httptest.NewRecorder()
 		handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/missing/translate", strings.NewReader(body)))

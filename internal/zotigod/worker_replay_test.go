@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -34,7 +36,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 			}
 			defer store.Close()
 			const sessionID = "replay-gap"
-			putStoredSession(t, store, sessionID, workDir)
+			sessionlogtest.PutStoredSession(t, store, sessionID, workDir)
 			ctx := context.Background()
 			for _, item := range []zotigosession.DisplayItem{
 				{ID: "gap", Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: gapType, TurnID: "old-turn"}},
@@ -65,7 +67,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 				gap.Steering = &wire.SteeringCommandPayload{TurnID: "old-turn", Text: "stale"}
 			}
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
+				writeWorkerTestJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
 					gap,
 					{ID: "message", Sequence: 2, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "already executed"}},
 				}, NextOffset: 1})
@@ -96,7 +98,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 				t.Fatal(err)
 			}
 			pendingServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-				writeJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
+				writeWorkerTestJSON(w, http.StatusOK, wire.CommandsPage{Commands: []wire.Command{
 					gap,
 					{ID: "message", Sequence: 2, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "already executed"}},
 					{ID: pending.ID, Sequence: pending.Sequence, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "execute once"}},

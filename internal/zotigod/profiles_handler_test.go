@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
@@ -200,7 +202,7 @@ func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, store, "sess-offline-profile", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-offline-profile", workDir)
 	stored, err := store.Get(context.Background(), "sess-offline-profile")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -260,7 +262,7 @@ func TestSessionProfileChangeRejectsOfflineSessionLockedByWorker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, store, "sess-locked-profile", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-locked-profile", workDir)
 	stored, err := store.Get(context.Background(), "sess-locked-profile")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -296,7 +298,7 @@ func TestSessionProfileChangeReportsRollbackFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, baseStore, "sess-rollback-profile", workDir)
+	sessionlogtest.PutStoredSession(t, baseStore, "sess-rollback-profile", workDir)
 	stored, err := baseStore.Get(context.Background(), "sess-rollback-profile")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -307,12 +309,12 @@ func TestSessionProfileChangeReportsRollbackFailure(t *testing.T) {
 	}
 	store := &rollbackFailingProfileStore{Store: baseStore}
 	var markerAttempts atomic.Int32
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{"sess-rollback-profile": {
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{"sess-rollback-profile": {
 			{ID: "old-to-new", Sequence: 1, Type: zotigosession.DisplayItemProfileChanged, Profile: &zotigosession.DisplayProfileChange{From: "old", To: "new"}},
 			{ID: "new-to-old", Sequence: 2, Type: zotigosession.DisplayItemProfileChanged, Profile: &zotigosession.DisplayProfileChange{From: "new", To: "old"}},
 		}},
-		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+		AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Type == zotigosession.DisplayItemProfileChanged && markerAttempts.Add(1) == 1 {
 				return errors.New("display log unavailable")
 			}
@@ -360,7 +362,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, store, "sess-repair-different-profile", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-repair-different-profile", workDir)
 	stored, err := store.Get(context.Background(), "sess-repair-different-profile")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -387,7 +389,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 		Type:     zotigosession.DisplayItemSessionCommand,
 		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-b"},
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		"sess-repair-different-profile": {commandA, pause, commandB},
 	}}
 	handler := newHandler(newSessionRegistry(), source, handlerOptions{store: store})
@@ -454,7 +456,7 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, store, "sess-partial-profile-repair", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-partial-profile-repair", workDir)
 	stored, err := store.Get(context.Background(), "sess-partial-profile-repair")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -466,9 +468,9 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	commandA := zotigosession.DisplayItem{ID: "profile-a", Sequence: 1, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-a"}}
 	commandC := zotigosession.DisplayItem{ID: "profile-c", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "profile-c"}}
 	var failCOnce atomic.Bool
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{"sess-partial-profile-repair": {commandA, commandC}},
-		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{"sess-partial-profile-repair": {commandA, commandC}},
+		AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Type == zotigosession.DisplayItemProfileFailed && item.Profile != nil && item.Profile.CommandID == commandC.ID && !failCOnce.Swap(true) {
 				return errors.New("profile-c marker unavailable")
 			}
@@ -521,7 +523,7 @@ func TestSessionProfileChangeReportsUnlockFailure(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	putStoredSession(t, baseStore, "sess-unlock-profile", workDir)
+	sessionlogtest.PutStoredSession(t, baseStore, "sess-unlock-profile", workDir)
 	stored, err := baseStore.Get(context.Background(), "sess-unlock-profile")
 	if err != nil {
 		t.Fatalf("load stored session: %v", err)
@@ -548,7 +550,7 @@ func TestSessionProfileChangeQueuesCommandForRunningWorker(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
 		t.Fatalf("write project config: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()

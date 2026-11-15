@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -661,7 +663,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 	const sessionID = "sess-retirement-backpressure"
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	broker := sessionlog.NewEventBroker()
 	server := httptest.NewServer(newHandler(registry, source, handlerOptions{events: broker}))
 	defer server.Close()

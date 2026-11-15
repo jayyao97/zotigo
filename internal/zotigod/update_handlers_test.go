@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/update"
 )
@@ -44,7 +46,7 @@ func TestUpdateDrainClosesAdmissionAndWaitsForTurns(t *testing.T) {
 			m := testUpdater(t)
 			registry := newSessionRegistry()
 			registry.Add(Session{ID: "session", State: SessionStateRunning, Working: busy})
-			h := &handler{updater: m, registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}}
+			h := &handler{updater: m, registry: registry, items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}}
 			rec := httptest.NewRecorder()
 			h.handleUpdateDrain(rec, httptest.NewRequest("POST", "/updates/drain", nil))
 			if rec.Code != 200 || !strings.Contains(rec.Body.String(), map[bool]string{true: `"data":false`, false: `"data":true`}[busy]) {
@@ -67,7 +69,7 @@ func TestUpdateDrainWaitsForDurableHumanRequest(t *testing.T) {
 	m := testUpdater(t)
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "session", State: SessionStateRunning})
-	h := &handler{updater: m, registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{"session": {{ID: "turn", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn"}}}}}}
+	h := &handler{updater: m, registry: registry, items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{"session": {{ID: "turn", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn"}}}}}}
 	rec := httptest.NewRecorder()
 	h.handleUpdateDrain(rec, httptest.NewRequest("POST", "/updates/drain", nil))
 	if rec.Code != 200 || !strings.Contains(rec.Body.String(), `"data":false`) {
@@ -76,7 +78,7 @@ func TestUpdateDrainWaitsForDurableHumanRequest(t *testing.T) {
 }
 
 func TestUpdateAPIRejectsWorkerTokenAndUnmanagedInstall(t *testing.T) {
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{}, handlerOptions{publicAuthToken: "owner", workerAuthToken: "worker"})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{}, handlerOptions{publicAuthToken: "owner", workerAuthToken: "worker"})
 	for token, want := range map[string]int{"worker": 401, "owner": 501} {
 		req := httptest.NewRequest("GET", "/updates", nil)
 		req.Header.Set("Authorization", "Bearer "+token)

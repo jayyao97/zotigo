@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
@@ -17,7 +19,7 @@ func TestRepositoryCatalogHTTP(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
 	remote := t.TempDir()
 	runCatalogGit(t, remote, "init", "-b", "trunk")
 	runCatalogGit(t, remote, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--allow-empty", "-m", "initial")
@@ -88,7 +90,7 @@ func TestRepositoryCatalogRequiresAuthentication(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog, publicAuthToken: "secret"})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog, publicAuthToken: "secret"})
 	for _, method := range []string{http.MethodGet, http.MethodPost} {
 		recorder := httptest.NewRecorder()
 		handler.ServeHTTP(recorder, httptest.NewRequest(method, "/repositories", nil))

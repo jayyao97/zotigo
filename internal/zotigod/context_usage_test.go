@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
@@ -45,7 +47,7 @@ func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
 
 func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	cfg, err := config.NewManager().LoadForDir(workDir)
 	if err != nil {
 		t.Fatal(err)
@@ -106,7 +108,7 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 
 func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	cfg, err := config.NewManager().LoadForDir(workDir)
 	if err != nil {
 		t.Fatal(err)
@@ -120,7 +122,7 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 		window = config.DefaultContextWindow
 	}
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("live", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -138,11 +140,11 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 		t.Fatalf("live usage = %+v", got)
 	}
 	// A new model/profile must never reuse an old model's progress.
-	source.items["live"][1].ContextUsage.ProfileKey = "other"
+	source.Items["live"][1].ContextUsage.ProfileKey = "other"
 	if got := get(); got.Status != "unavailable" {
 		t.Fatalf("stale usage = %+v", got)
 	}
-	source.items["live"][1].ContextUsage.ProfileKey = progress.ProfileKey
+	source.Items["live"][1].ContextUsage.ProfileKey = progress.ProfileKey
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}

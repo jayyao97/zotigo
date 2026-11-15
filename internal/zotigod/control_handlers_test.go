@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -21,63 +23,10 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
-	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
-	serverConnReady := make(chan *websocket.Conn, 1)
-	releaseServerConn := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := workerUpgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		serverConnReady <- conn
-		<-releaseServerConn
-		_ = conn.Close()
-	}))
-	defer server.Close()
-	defer close(releaseServerConn)
-
-	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	clientConn, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		t.Fatalf("dial worker websocket: %v", err)
-	}
-	defer clientConn.Close()
-	serverConn := <-serverConnReady
-	defer serverConn.Close()
-
-	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
-	for idx := uint64(1); idx <= workerbase.CommandBufferSize+1; idx++ {
-		msg := wire.Message{
-			Type: wire.MessageCommand,
-			Command: &wire.Command{
-				ID:       fmt.Sprintf("cmd-%d", idx),
-				Sequence: idx,
-				Type:     wire.CommandPause,
-			},
-		}
-		if err := serverConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
-			t.Fatalf("set write deadline: %v", err)
-		}
-		if err := serverConn.WriteJSON(msg); err != nil {
-			t.Fatalf("write command %d: %v", idx, err)
-		}
-	}
-
-	select {
-	case err := <-errCh:
-		if err == nil || !strings.Contains(err.Error(), "buffer full") {
-			t.Fatalf("expected buffer full error, got %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("expected worker command reader to fail")
-	}
-}
-
 func TestSessionMessageCreatesDisplayItemAndWorkerCommand(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -205,7 +154,7 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 }
 
 func TestSessionMessageAllowsApprovalCallbackBeforeInputResult(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -261,7 +210,7 @@ func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	workDir := t.TempDir()
-	putStoredSession(t, store, "sess-stored", workDir)
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", workDir)
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
@@ -314,7 +263,7 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
 	if _, err := store.AppendDisplayItem(context.Background(), "sess-stored", zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: "turn-stale"},
@@ -651,7 +600,7 @@ func TestSessionMessageRejectsEmptyTextWithoutImages(t *testing.T) {
 }
 
 func TestSessionMessageRejectsImageInputWithoutBlobPersistence(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -837,7 +786,7 @@ func TestSessionMessageRejectsInvalidImages(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 			handler := newHandler(newSessionRegistry(), source)
 			server := httptest.NewServer(handler)
 			defer server.Close()
@@ -858,7 +807,7 @@ func TestSessionMessageRejectsInvalidImages(t *testing.T) {
 }
 
 func TestSessionMessageRejectsOversizedRequestBody(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -954,7 +903,7 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 }
 
 func TestSessionSteeringRejectsOversizedRequestBody(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -973,7 +922,7 @@ func TestSessionSteeringRejectsOversizedRequestBody(t *testing.T) {
 }
 
 func TestSessionMessageDoesNotReturnAcceptedWhenWorkerDisconnectsBeforeAdmission(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source, handlerOptions{workers: workers})
@@ -1010,7 +959,7 @@ func TestSessionMessageDoesNotReturnAcceptedWhenWorkerDisconnectsBeforeAdmission
 }
 
 func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -1106,7 +1055,7 @@ func TestSessionPauseInterruptsAndDrainsPendingInput(t *testing.T) {
 }
 
 func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	handler := newHandler(newSessionRegistry(), source, handlerOptions{workers: workers, inputStopTimeout: 20 * time.Millisecond})
 	server := httptest.NewServer(handler)
@@ -1157,7 +1106,7 @@ func TestSessionPauseTimeoutKeepsPendingInputAndWorker(t *testing.T) {
 }
 
 func TestSessionMessageSteersActiveTurn(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1190,7 +1139,7 @@ func TestSessionMessageSteersActiveTurn(t *testing.T) {
 }
 
 func TestSessionMessageRejectsPendingMessageCommand(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1226,9 +1175,9 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 	var appendCalls atomic.Int32
 	appendEntered := make(chan struct{})
 	releaseAppend := make(chan struct{})
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{},
-		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{},
+		AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Command == nil || item.Command.Type != wire.CommandMessage {
 				return nil
 			}
@@ -1289,7 +1238,7 @@ func TestSessionMessageAdmissionIsSerialized(t *testing.T) {
 }
 
 func TestSessionMessageClientIDIsIdempotent(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -1338,7 +1287,7 @@ func TestSessionMessageClientIDIsIdempotent(t *testing.T) {
 }
 
 func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -1407,7 +1356,7 @@ func TestSessionPauseCreatesWorkerCommand(t *testing.T) {
 }
 
 func TestMessageWhileTurnIsStoppingBecomesDurableSteering(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -1448,9 +1397,9 @@ func TestMessageWhileTurnIsStoppingBecomesDurableSteering(t *testing.T) {
 }
 
 func TestSessionPauseAcceptsTurnCompletedDuringAdmission(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var completed atomic.Bool
-	source.appendErr = func(sessionID string, item zotigosession.DisplayItem) error {
+	source.AppendErr = func(sessionID string, item zotigosession.DisplayItem) error {
 		if item.Command == nil || item.Command.Type != wire.CommandPause || !completed.CompareAndSwap(false, true) {
 			return nil
 		}
@@ -1483,7 +1432,7 @@ func TestSessionPauseAcceptsTurnCompletedDuringAdmission(t *testing.T) {
 }
 
 func TestSessionPauseRejectsPendingApprovalBeforeRegistryPause(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1510,7 +1459,7 @@ func TestSessionPauseRejectsPendingApprovalBeforeRegistryPause(t *testing.T) {
 }
 
 func TestSessionPauseLaunchesMissingWorker(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	var server *httptest.Server
 	workers := newWorkerRegistry()
 	workerReady := make(chan *websocket.Conn, 1)
@@ -1565,7 +1514,7 @@ func TestSessionPauseLaunchesMissingWorker(t *testing.T) {
 }
 
 func TestWorkerTurnInterruptedConfirmsPauseLifecycle(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1618,7 +1567,7 @@ func TestWorkerTurnInterruptedConfirmsPauseLifecycle(t *testing.T) {
 }
 
 func TestWorkerTurnInterruptedRejectsMissingOrStaleTurn(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
@@ -1651,7 +1600,7 @@ func TestWorkerTurnInterruptedRejectsMissingOrStaleTurn(t *testing.T) {
 }
 
 func TestSessionSteeringPersistsAndForwardsCommand(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1693,7 +1642,7 @@ func TestSessionSteeringPersistsAndForwardsCommand(t *testing.T) {
 }
 
 func TestSessionSteeringRequiresActiveTurn(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1709,7 +1658,7 @@ func TestSessionSteeringRequiresActiveTurn(t *testing.T) {
 }
 
 func TestSessionSteeringExpectedTurnMismatchDoesNotDeliver(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1730,7 +1679,7 @@ func TestSessionSteeringExpectedTurnMismatchDoesNotDeliver(t *testing.T) {
 }
 
 func TestSessionMessageSteersPausedApprovalTurn(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	server := httptest.NewServer(handler)
@@ -1760,7 +1709,7 @@ func TestSessionMessageSteersPausedApprovalTurn(t *testing.T) {
 }
 
 func TestWorkerCommandsDoNotReplayAppliedSteeringItems(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1840,7 +1789,7 @@ func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
 }
 
 func TestWorkerCommandsOffsetScansInBatches(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
 	for idx := 0; idx < 20; idx++ {
@@ -1862,11 +1811,11 @@ func TestWorkerCommandsOffsetScansInBatches(t *testing.T) {
 	if len(commands.Commands) != 1 || commands.Commands[0].Message == nil || commands.Commands[0].Message.Text != "batched" {
 		t.Fatalf("expected command after batched scan, got %#v", commands)
 	}
-	if got := source.offsetCalls.Load(); got != 1 {
+	if got := source.OffsetCalls.Load(); got != 1 {
 		t.Fatalf("expected one batched offset read, got %d", got)
 	}
-	if len(source.offsetMaxLines) != 1 || source.offsetMaxLines[0] != commandOffsetScanLines {
-		t.Fatalf("expected maxLines %d, got %#v", commandOffsetScanLines, source.offsetMaxLines)
+	if len(source.OffsetMaxLines) != 1 || source.OffsetMaxLines[0] != commandOffsetScanLines {
+		t.Fatalf("expected maxLines %d, got %#v", commandOffsetScanLines, source.OffsetMaxLines)
 	}
 }
 
@@ -1921,7 +1870,7 @@ func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	putStoredSession(t, store, "sess-stored", t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, "sess-stored", t.TempDir())
 	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()

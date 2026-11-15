@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
@@ -14,7 +16,7 @@ import (
 )
 
 func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-runtime", source)
 	runtime := zotigosession.DisplayRuntime{Agent: "zotigo", ProfileName: "main", Model: "gemini-test"}
 	if _, err := display.StartTurnWithRuntime(context.Background(), runtime); err != nil {
@@ -27,7 +29,7 @@ func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-usage", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
@@ -52,7 +54,7 @@ func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
 func TestWorkerUsageProgressSurvivesTerminalAndApproval(t *testing.T) {
 	for _, terminal := range []string{"completed", "failed", "interrupted"} {
 		t.Run(terminal, func(t *testing.T) {
-			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 			display := sessionlog.NewLog("progress", source)
 			ctx := context.Background()
 			if _, err := display.StartTurn(ctx); err != nil {
@@ -94,7 +96,7 @@ func TestWorkerUsageProgressSurvivesTerminalAndApproval(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsFailedTurnUsage(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-failed-usage", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
@@ -117,7 +119,7 @@ func TestWorkerDisplayLogPersistsFailedTurnUsage(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	display := sessionlog.NewLog("sess-tool-stream", source)
 	ctx := context.Background()
@@ -212,7 +214,7 @@ func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *test
 }
 
 func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-tool-progress", source)
 	var deltas []wire.DisplayDelta
 	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
@@ -241,7 +243,7 @@ func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
 }
 
 func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	display := sessionlog.NewLog("sess-subagent-stream", source)
 	var deltas []wire.DisplayDelta
@@ -339,7 +341,7 @@ func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-compaction", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
@@ -371,7 +373,7 @@ func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
 }
 
 func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-text-stream", source)
 	var deltas []wire.DisplayDelta
 	display.Delta = func(delta wire.DisplayDelta) {
@@ -423,7 +425,7 @@ func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T
 }
 
 func TestWorkerDisplayLogDropsUnfinishedVolatileBlockOnFailure(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-failed-stream", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
@@ -451,7 +453,7 @@ func TestWorkerDisplayLogDropsUnfinishedVolatileBlockOnFailure(t *testing.T) {
 
 func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("session-steering", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -531,7 +533,7 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 	}
 	defer store.Close()
 	const id = "steering-boundary"
-	putStoredSession(t, store, id, t.TempDir())
+	sessionlogtest.PutStoredSession(t, store, id, t.TempDir())
 	source := sessionlog.StoredItemSource{Store: store}
 	display := sessionlog.NewLog(id, source)
 	turn, err := display.StartTurn(ctx)
@@ -600,7 +602,7 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 
 func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("session-barrier-failure", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -635,7 +637,7 @@ func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 
 func TestWorkerDisplayLogMutesPreviewAfterReliableSteeringWakeFailure(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("session-steering-wake-failure", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)

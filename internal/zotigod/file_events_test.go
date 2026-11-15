@@ -12,6 +12,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
 )
 
 func TestFileEventsFollowAtomicSaveAndRecreation(t *testing.T) {
@@ -20,7 +22,7 @@ func TestFileEventsFollowAtomicSaveAndRecreation(t *testing.T) {
 	if err := os.WriteFile(file, []byte("initial"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{}, handlerOptions{})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{}, handlerOptions{})
 	server := httptest.NewServer(h)
 	defer server.Close()
 	ctx, cancel := context.WithCancel(context.Background())
@@ -101,7 +103,7 @@ func TestFileEventsFollowAtomicSaveAndRecreation(t *testing.T) {
 }
 
 func TestFileEventsValidateScopeAndMissingPaths(t *testing.T) {
-	h := newHandler(newSessionRegistry(), &fakeDisplayItemSource{}, handlerOptions{})
+	h := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{}, handlerOptions{})
 	for _, body := range []string{`{"files":[]}`, `{"files":[{"path":"relative"}]}`} {
 		response := requestCatalog(t, h, "POST", "/files/events", body)
 		if response.Code != 400 {

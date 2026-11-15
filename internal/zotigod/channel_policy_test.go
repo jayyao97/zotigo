@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/internal/channels"
 )
@@ -16,7 +18,7 @@ func TestChannelPolicyChangesOnlyAtIdleBoundary(t *testing.T) {
 	if err := h.persistSession(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	h.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	h.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 	for _, policy := range []string{"bypass_permissions", "auto"} {
 		h.registry.Add(Session{ID: session.ID, State: SessionStateRunning, Working: true})
 		if _, err := h.EnsureChannelSessionPrompt(ctx, session.ID, channels.SessionPromptConfig{ApprovalPolicy: policy}); !errors.Is(err, errSessionBusy) {

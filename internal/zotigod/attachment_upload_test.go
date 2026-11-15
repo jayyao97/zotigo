@@ -12,6 +12,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
@@ -24,7 +26,7 @@ func TestScratchSessionsHaveIndependentPersistentDirectories(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	writeTestProfileConfig(t, root)
+	sessionlogtest.WriteProfileConfig(t, root)
 	config, err := os.ReadFile(filepath.Join(root, "zotigo.yaml"))
 	if err != nil {
 		t.Fatal(err)
@@ -60,7 +62,7 @@ func TestAttachmentUploadConfinesFilesAndRetriesWithoutOverwriting(t *testing.T)
 	cwd := t.TempDir()
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "session-1", WorkingDirectory: cwd})
-	handler := newHandler(registry, &fakeDisplayItemSource{}, handlerOptions{publicAuthToken: "test-token"})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{}, handlerOptions{publicAuthToken: "test-token"})
 	upload := func(name string, body io.Reader, authorized bool) *httptest.ResponseRecorder {
 		req := httptest.NewRequest(http.MethodPost, "/files/upload?sessionId=session-1&name="+url.QueryEscape(name), body)
 		if authorized {
@@ -179,7 +181,7 @@ func TestAttachmentUploadAllowsLifecycleChangesWhileReceiving(t *testing.T) {
 	for _, action := range []string{"archive", "delete-workspace"} {
 		t.Run(action, func(t *testing.T) {
 			handler, _, _, workspace := newCatalogSessionFixture(t)
-			writeTestProfileConfig(t, workspace.RootPath)
+			sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 			created := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 			if created.Code != http.StatusCreated {
 				t.Fatalf("create: %d %s", created.Code, created.Body)

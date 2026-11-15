@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -71,7 +73,7 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -110,7 +112,7 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -176,7 +178,7 @@ func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -232,7 +234,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{idleTimeout: 100 * time.Millisecond}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -301,7 +303,7 @@ func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -344,7 +346,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 		ID: "sess-codex-duplicate-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
 		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		session.ID: {
 			{ID: "command-1", Sequence: 1, Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "hello"}},
 			{Sequence: 2, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},

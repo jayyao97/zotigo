@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/executor"
@@ -23,7 +25,7 @@ import (
 
 func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T) {
 	const sessionID = "sess-event-driven-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -95,7 +97,7 @@ func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T)
 
 func TestWorkerRuntimeRoutesSubagentApprovalWithRequester(t *testing.T) {
 	const sessionID = "sess-subagent-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatal(err)
@@ -175,7 +177,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 
 func TestWorkerRuntimeSteeringWinsBeforeApprovalRegistration(t *testing.T) {
 	const sessionID = "sess-steering-before-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -209,7 +211,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
 		return &noopProvider{}, nil
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -279,7 +281,7 @@ func TestWorkerRuntimeQueueSteeringWinsDuringApprovalRegistrationWindow(t *testi
 
 func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 	const sessionID = "sess-steering-resolves-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -321,7 +323,7 @@ func TestWorkerRuntimeSteeringResolvesRegisteredApproval(t *testing.T) {
 
 func TestWorkerRuntimeApprovalDecisionIsAppliedOnce(t *testing.T) {
 	const sessionID = "sess-single-decision"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -385,7 +387,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 			Name:       "glob",
 		}},
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -434,7 +436,7 @@ func TestWorkerRuntimeCloseDoesNotCreateApprovalAfterReleaseBeforeAgentResumes(t
 
 func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 	const sessionID = "sess-pause-before-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -467,7 +469,7 @@ func TestWorkerRuntimePauseWinsBeforeApprovalRegistration(t *testing.T) {
 
 func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 	const sessionID = "sess-approval-before-pause"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -496,7 +498,7 @@ func TestWorkerRuntimeApprovalWinsBeforePause(t *testing.T) {
 
 func TestWorkerRuntimeReleasedApprovalDoesNotBlockPauseOrNextTurn(t *testing.T) {
 	const sessionID = "sess-released-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -554,7 +556,7 @@ func TestWorkerRuntimeRepairsPausedAgentWhenPauseWinsApprovalRace(t *testing.T) 
 			Name:       "glob",
 		}},
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-pause-repair", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -578,8 +580,8 @@ func TestWorkerRuntimeApprovalCannotResolveDuringInitialization(t *testing.T) {
 	const sessionID = "sess-approval-initializing"
 	persistedCh := make(chan string, 1)
 	continueCh := make(chan struct{})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	source.appendHook = func(_ string, item zotigosession.DisplayItem) {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	source.AppendHook = func(_ string, item zotigosession.DisplayItem) {
 		if item.Type == zotigosession.DisplayItemApprovalRequest {
 			persistedCh <- item.Approval.ID
 			<-continueCh
@@ -633,7 +635,7 @@ func TestWorkerRuntimeApprovalCannotResolveDuringInitialization(t *testing.T) {
 
 func TestWorkerDisplayLogResolvesPendingApprovalBeforeInterruptingRestartedTurn(t *testing.T) {
 	const sessionID = "sess-restarted-approval"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -765,7 +767,7 @@ func TestWorkerRuntimeCloseLeavesPendingApprovalTurnForReplacement(t *testing.T)
 			Decision:   agent.ActionDecision{Reason: "writes files"},
 		}},
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)
@@ -802,8 +804,8 @@ func TestWorkerRuntimeCloseLeavesPendingApprovalTurnForReplacement(t *testing.T)
 }
 
 func TestWorkerRuntimeApprovalClearsInMemoryStateWhenPersistenceFails(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	source.appendErr = func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	source.AppendErr = func(_ string, item zotigosession.DisplayItem) error {
 		if item.Type == zotigosession.DisplayItemApprovalRequest {
 			return context.Canceled
 		}
@@ -828,7 +830,7 @@ func TestWorkerRuntimeApprovalClearsInMemoryStateWhenPersistenceFails(t *testing
 
 func TestWorkerRuntimeApprovalRegistrationIsIdempotent(t *testing.T) {
 	const sessionID = "sess-idempotent-registration"
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog(sessionID, source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start display turn: %v", err)

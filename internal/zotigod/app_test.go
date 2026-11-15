@@ -9,18 +9,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"path/filepath"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -96,56 +92,6 @@ func (p *noopProvider) StreamChat(context.Context, []protocol.Message, []tools.T
 	return ch, nil
 }
 
-type blockingFinishProvider struct {
-	started chan struct{}
-	release chan struct{}
-}
-
-func (p *blockingFinishProvider) Name() string { return "blocking-finish" }
-
-func (p *blockingFinishProvider) StreamChat(context.Context, []protocol.Message, []tools.Tool, ...providers.StreamChatOption) (<-chan protocol.Event, error) {
-	events := make(chan protocol.Event, 2)
-	go func() {
-		defer close(events)
-		close(p.started)
-		<-p.release
-		events <- protocol.NewTextDeltaEvent("old generation")
-		events <- protocol.NewFinishEvent(protocol.FinishReasonStop)
-	}()
-	return events, nil
-}
-
-type fakeDisplayItemSource struct {
-	mu             sync.Mutex
-	items          map[string][]zotigosession.DisplayItem
-	err            error
-	appendErr      func(sessionID string, item zotigosession.DisplayItem) error
-	appendHook     func(sessionID string, item zotigosession.DisplayItem)
-	offsetCalls    atomic.Int32
-	loadCalls      atomic.Int32
-	offsetMaxLines []int
-}
-
-type blockingProfileUpdateStore struct {
-	zotigosession.Store
-	started chan struct{}
-	release chan struct{}
-	once    sync.Once
-}
-
-func (s *blockingProfileUpdateStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
-	s.once.Do(func() { close(s.started) })
-	<-s.release
-	return s.Store.(interface {
-		UpdateProfile(context.Context, string, string, time.Time) error
-	}).UpdateProfile(ctx, id, profileName, updatedAt)
-}
-
-type rollbackFailingProfileStore struct {
-	zotigosession.Store
-	updates int
-}
-
 type unlockFailingStore struct {
 	zotigosession.Store
 }
@@ -154,212 +100,11 @@ func (s unlockFailingStore) Unlock(context.Context, string) error {
 	return errors.New("unlock unavailable")
 }
 
-func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
-	s.updates++
-	if s.updates == 2 {
-		return errors.New("rollback unavailable")
-	}
-	return s.Store.(interface {
-		UpdateProfile(context.Context, string, string, time.Time) error
-	}).UpdateProfile(ctx, id, profileName, updatedAt)
-}
-
-func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
-	s.loadCalls.Add(1)
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.err != nil {
-		return nil, false, s.err
-	}
-	items, ok := s.items[sessionID]
-	items = append([]zotigosession.DisplayItem(nil), items...)
-	return items, ok, nil
-}
-
-func (s *fakeDisplayItemSource) LoadItemsFromOffset(_ context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.offsetCalls.Add(1)
-	s.offsetMaxLines = append(s.offsetMaxLines, maxLines)
-	if s.err != nil {
-		return nil, false, offset, s.err
-	}
-	items, ok := s.items[sessionID]
-	if !ok {
-		return nil, false, offset, nil
-	}
-	if offset < 0 {
-		return nil, true, offset, fmt.Errorf("offset must be non-negative")
-	}
-	start := int(offset)
-	if start > len(items) {
-		return nil, true, offset, fmt.Errorf("offset exceeds display log size")
-	}
-	end := len(items)
-	if maxLines > 0 && start+maxLines < end {
-		end = start + maxLines
-	}
-	result := append([]zotigosession.DisplayItem(nil), items[start:end]...)
-	for idx := range result {
-		result[idx].LogOffset = int64(start + idx + 1)
-	}
-	return result, true, int64(end), nil
-}
-
-func (s *fakeDisplayItemSource) AppendItem(_ context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
-	if s.err != nil {
-		return zotigosession.DisplayItem{}, s.err
-	}
-	if s.items == nil {
-		s.items = make(map[string][]zotigosession.DisplayItem)
-	}
-	if s.appendErr != nil {
-		if err := s.appendErr(sessionID, item); err != nil {
-			return zotigosession.DisplayItem{}, err
-		}
-	}
-	s.mu.Lock()
-	next := uint64(len(s.items[sessionID]) + 1)
-	item.Sequence = next
-	if item.ID == "" {
-		item.ID = fmt.Sprintf("item_%s_%d", sessionID, next)
-	}
-	if item.CreatedAt.IsZero() {
-		item.CreatedAt = time.Now().UTC()
-	}
-	s.items[sessionID] = append(s.items[sessionID], item)
-	s.mu.Unlock()
-	if s.appendHook != nil {
-		s.appendHook(sessionID, item)
-	}
-	return item, nil
-}
-
-func (s *fakeDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
-	if s.err != nil {
-		return zotigosession.DisplayItem{}, s.err
-	}
-	if s.items == nil {
-		s.items = make(map[string][]zotigosession.DisplayItem)
-	}
-	if s.appendErr != nil {
-		if err := s.appendErr(sessionID, item); err != nil {
-			return zotigosession.DisplayItem{}, err
-		}
-	}
-	s.mu.Lock()
-	items := append([]zotigosession.DisplayItem(nil), s.items[sessionID]...)
-	if condition != nil {
-		if err := condition(items); err != nil {
-			s.mu.Unlock()
-			return zotigosession.DisplayItem{}, err
-		}
-	}
-	next := uint64(len(s.items[sessionID]) + 1)
-	item.Sequence = next
-	if item.ID == "" {
-		item.ID = fmt.Sprintf("item_%s_%d", sessionID, next)
-	}
-	if item.CreatedAt.IsZero() {
-		item.CreatedAt = time.Now().UTC()
-	}
-	s.items[sessionID] = append(s.items[sessionID], item)
-	s.mu.Unlock()
-	if s.appendHook != nil {
-		s.appendHook(sessionID, item)
-	}
-	return item, nil
-}
-
-func (s *fakeDisplayItemSource) AppendItemAtomically(_ context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
-	if s.err != nil {
-		return zotigosession.DisplayItem{}, false, s.err
-	}
-	s.mu.Lock()
-	items := append([]zotigosession.DisplayItem(nil), s.items[sessionID]...)
-	item, appendItem, err := build(items)
-	if err != nil || !appendItem {
-		s.mu.Unlock()
-		return item, false, err
-	}
-	if s.appendErr != nil {
-		if err := s.appendErr(sessionID, item); err != nil {
-			s.mu.Unlock()
-			return zotigosession.DisplayItem{}, false, err
-		}
-	}
-	next := uint64(len(s.items[sessionID]) + 1)
-	item.Sequence = next
-	if item.ID == "" {
-		item.ID = fmt.Sprintf("item_%s_%d", sessionID, next)
-	}
-	if item.CreatedAt.IsZero() {
-		item.CreatedAt = time.Now().UTC()
-	}
-	s.items[sessionID] = append(s.items[sessionID], item)
-	s.mu.Unlock()
-	if s.appendHook != nil {
-		s.appendHook(sessionID, item)
-	}
-	return item, true, nil
-}
-
-func (s *fakeDisplayItemSource) AppendItems(_ context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	return s.appendItemsAfter(sessionID, nil, items)
-}
-
-func (s *fakeDisplayItemSource) AppendItemsAfter(_ context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	return s.appendItemsAfter(sessionID, &expectedSequence, items)
-}
-
-func (s *fakeDisplayItemSource) appendItemsAfter(sessionID string, expectedSequence *uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	if s.err != nil {
-		return nil, s.err
-	}
-	for _, item := range items {
-		if s.appendErr != nil {
-			if err := s.appendErr(sessionID, item); err != nil {
-				return nil, err
-			}
-		}
-	}
-	s.mu.Lock()
-	latest := uint64(0)
-	if existing := s.items[sessionID]; len(existing) > 0 {
-		latest = existing[len(existing)-1].Sequence
-	}
-	if expectedSequence != nil && latest != *expectedSequence {
-		s.mu.Unlock()
-		return nil, zotigosession.ErrDisplayLogChanged
-	}
-	if s.items == nil {
-		s.items = make(map[string][]zotigosession.DisplayItem)
-	}
-	stored := append([]zotigosession.DisplayItem(nil), items...)
-	for index := range stored {
-		stored[index].Sequence = uint64(len(s.items[sessionID]) + 1)
-		if stored[index].ID == "" {
-			stored[index].ID = fmt.Sprintf("item_%s_%d", sessionID, stored[index].Sequence)
-		}
-		if stored[index].CreatedAt.IsZero() {
-			stored[index].CreatedAt = time.Now().UTC()
-		}
-		s.items[sessionID] = append(s.items[sessionID], stored[index])
-	}
-	s.mu.Unlock()
-	if s.appendHook != nil {
-		for _, item := range stored {
-			s.appendHook(sessionID, item)
-		}
-	}
-	return stored, nil
-}
-
 func createSession(t *testing.T, handler http.Handler) Session {
 	t.Helper()
 
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	rec := httptest.NewRecorder()
 	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
@@ -376,7 +121,7 @@ func createSession(t *testing.T, handler http.Handler) Session {
 func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workDir string) Session {
 	t.Helper()
 
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	rec := httptest.NewRecorder()
 	body := fmt.Sprintf(`{"working_directory":%q}`, workDir)
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions", strings.NewReader(body)))
@@ -388,43 +133,6 @@ func createSessionWithWorkingDirectory(t *testing.T, handler http.Handler, workD
 		t.Fatalf("decode create response: %v", err)
 	}
 	return session
-}
-
-func writeTestProfileConfig(t *testing.T, workDir string) {
-	t.Helper()
-
-	configPath := filepath.Join(workDir, config.ProjectConfig)
-	if _, err := os.Stat(configPath); err == nil {
-		return
-	} else if !os.IsNotExist(err) {
-		t.Fatalf("stat project config: %v", err)
-	}
-	const contents = "default_profile: test\nprofiles:\n  test:\n    provider: openai\n    model: test\n"
-	if err := os.WriteFile(configPath, []byte(contents), 0644); err != nil {
-		t.Fatalf("write project config: %v", err)
-	}
-}
-
-func putStoredSession(t *testing.T, store zotigosession.Store, id string, workDir string) {
-	t.Helper()
-	writeTestProfileConfig(t, workDir)
-	now := time.Now().UTC()
-	if err := store.Put(context.Background(), &zotigosession.Session{
-		Metadata: zotigosession.Metadata{
-			ID:               id,
-			WorkingDirectory: workDir,
-			ProfileName:      "test",
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		},
-		AgentSnapshot: agent.Snapshot{
-			State:     agent.StateIdle,
-			CreatedAt: now,
-		},
-		Turns: make([]zotigosession.Turn, 0),
-	}); err != nil {
-		t.Fatalf("put stored session: %v", err)
-	}
 }
 
 func TestActiveToolNameTracksDurableExecution(t *testing.T) {
@@ -516,7 +224,7 @@ func TestCodexWorkerConnectRejectsStaleActivation(t *testing.T) {
 	registry.Add(Session{
 		ID: "sess-stale-activation", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex), workerActivation: 2,
 	})
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -545,7 +253,7 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 	registry := newSessionRegistry()
 	workers := newWorkerRegistry()
 	sessionOps := newSessionOperationLocks()
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers, sessionOps: sessionOps})
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{workers: workers, sessionOps: sessionOps})
 	created := Session{ID: "sess-concurrent-connect", State: SessionStateStarting, WorkingDirectory: t.TempDir(), CreatedAt: time.Now().UTC()}
 	registry.Add(created)
 	server := httptest.NewServer(handler)
@@ -602,7 +310,7 @@ func TestConcurrentWorkerConnectKeepsFirstConnectedWorker(t *testing.T) {
 }
 
 func TestCanceledMessageKeepsLifecycleSerializedUntilWorkerResult(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -1019,7 +727,7 @@ func tooManyImagesBody() string {
 	return `{"text":"hello","images":[` + strings.Join(parts, ",") + `]}`
 }
 
-func appendTurnStarted(t *testing.T, source *fakeDisplayItemSource, sessionID string, turnID string) {
+func appendTurnStarted(t *testing.T, source *sessionlogtest.ItemSource, sessionID string, turnID string) {
 	t.Helper()
 	if _, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
@@ -1029,7 +737,7 @@ func appendTurnStarted(t *testing.T, source *fakeDisplayItemSource, sessionID st
 	}
 }
 
-func appendPendingApprovalTurn(t *testing.T, source *fakeDisplayItemSource, sessionID string, turnID string, approvalID string) {
+func appendPendingApprovalTurn(t *testing.T, source *sessionlogtest.ItemSource, sessionID string, turnID string, approvalID string) {
 	t.Helper()
 	if _, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalRequest,
@@ -1111,4 +819,19 @@ func assertItemSequences(t *testing.T, items []itemResponse, expected []uint64) 
 			t.Fatalf("item %d: expected sequence %d, got %d", idx, sequence, items[idx].Sequence)
 		}
 	}
+}
+
+type rollbackFailingProfileStore struct {
+	zotigosession.Store
+	updates int
+}
+
+func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
+	s.updates++
+	if s.updates == 2 {
+		return errors.New("rollback unavailable")
+	}
+	return s.Store.(interface {
+		UpdateProfile(context.Context, string, string, time.Time) error
+	}).UpdateProfile(ctx, id, profileName, updatedAt)
 }

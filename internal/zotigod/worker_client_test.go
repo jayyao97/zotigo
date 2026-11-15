@@ -14,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
@@ -34,7 +36,7 @@ func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
 	serverConnReady := make(chan *websocket.Conn, 1)
 	releaseServerConn := make(chan struct{})
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := workerUpgrader.Upgrade(w, r, nil)
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
 		if err != nil {
 			return
 		}
@@ -82,13 +84,13 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 					Type:     "noop",
 				})
 			}
-			writeJSON(w, http.StatusOK, wire.CommandsPage{
+			writeWorkerTestJSON(w, http.StatusOK, wire.CommandsPage{
 				Commands:   commands,
 				NextCursor: strconv.Itoa(wire.MaxCommandsLimit),
 				NextOffset: 1,
 			})
 		case "1":
-			writeJSON(w, http.StatusOK, wire.CommandsPage{
+			writeWorkerTestJSON(w, http.StatusOK, wire.CommandsPage{
 				Commands: []wire.Command{{
 					ID:       "cmd-201",
 					Sequence: uint64(wire.MaxCommandsLimit + 1),
@@ -147,7 +149,7 @@ func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		writeJSON(w, http.StatusOK, wire.CommandsPage{
+		writeWorkerTestJSON(w, http.StatusOK, wire.CommandsPage{
 			Commands: []wire.Command{{
 				ID:       "cmd-1",
 				Sequence: 1,
@@ -189,7 +191,7 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 		case r.URL.Path == "/internal/workers/connect":
 			responseHeader := http.Header{}
 			responseHeader.Set(wire.GenerationHeader, "test-generation")
-			conn, err := workerUpgrader.Upgrade(w, r, responseHeader)
+			conn, err := (&websocket.Upgrader{}).Upgrade(w, r, responseHeader)
 			if err != nil {
 				return
 			}
@@ -229,49 +231,6 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 	}
 	if !finished.Load() {
 		t.Fatal("worker did not report runtime initialization failure")
-	}
-}
-
-func TestWorkerClientInitializationFailurePreservesError(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	workDir := t.TempDir()
-	const sessionID = "sess-init-failure"
-	store, err := zotigosession.NewFileStore("")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer store.Close()
-	putStoredSession(t, store, sessionID, workDir)
-	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte("default_profile: ["), 0644); err != nil {
-		t.Fatal(err)
-	}
-
-	registry := newSessionRegistry()
-	registry.Add(Session{ID: sessionID, State: SessionStateStarting, WorkingDirectory: workDir})
-	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
-		store:           store,
-		workerAuthToken: "worker-secret",
-	})
-	server := httptest.NewServer(handler)
-	defer server.Close()
-
-	runErr := runWorkerClient(context.Background(), workerbase.Config{
-		DaemonURL: server.URL,
-		SessionID: sessionID,
-		AuthToken: "worker-secret",
-	})
-	if runErr == nil {
-		t.Fatal("expected worker initialization failure")
-	}
-	failed, ok := registry.Get(sessionID)
-	if !ok {
-		t.Fatal("session missing after worker failure")
-	}
-	if failed.State != SessionStateFailed {
-		t.Fatalf("session state = %q, want %q", failed.State, SessionStateFailed)
-	}
-	if failed.Error != runErr.Error() {
-		t.Fatalf("session error = %q, want %q", failed.Error, runErr.Error())
 	}
 }
 
@@ -322,149 +281,6 @@ func TestResolveWorkerProfile(t *testing.T) {
 	})
 }
 
-func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
-	const oldProviderName = "worker-profile-old"
-	const newProviderName = "worker-profile-new"
-	const newerProviderName = "worker-profile-newer"
-	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	providers.Register(newProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	providers.Register(newerProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	t.Setenv("HOME", t.TempDir())
-	workDir := t.TempDir()
-	projectConfig := fmt.Sprintf("default_profile: old\nprofiles:\n  old:\n    provider: %s\n    model: old\n  new:\n    provider: %s\n    model: new\n  newer:\n    provider: %s\n    model: newer\n", oldProviderName, newProviderName, newerProviderName)
-	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
-		t.Fatalf("write project config: %v", err)
-	}
-	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
-	if err != nil {
-		t.Fatalf("create session store: %v", err)
-	}
-	defer store.Close()
-	now := time.Now().UTC()
-	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{
-		ID:               "sess-worker-profile",
-		WorkingDirectory: workDir,
-		ProfileName:      "old",
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}}); err != nil {
-		t.Fatalf("put session: %v", err)
-	}
-	localExec, err := executor.NewLocalExecutor(workDir)
-	if err != nil {
-		t.Fatalf("create executor: %v", err)
-	}
-	defer localExec.Close()
-	ag, err := agent.New(config.ProfileConfig{Provider: oldProviderName, Model: "old"}, localExec, agent.WithProfileName("old"))
-	if err != nil {
-		t.Fatalf("create agent: %v", err)
-	}
-	display := sessionlog.NewLog("sess-worker-profile", sessionlog.StoredItemSource{Store: store})
-	runtime := &workerRuntime{
-		sessionID: "sess-worker-profile",
-		workDir:   workDir,
-		store:     store,
-		agent:     ag,
-		display:   display,
-	}
-	commandItem, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
-		Type: zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{
-			Type:    wire.CommandProfile,
-			Profile: "new",
-		},
-	})
-	if err != nil {
-		t.Fatalf("append profile command: %v", err)
-	}
-	if err := runtime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(commandItem)); err != nil {
-		t.Fatalf("handle profile command: %v", err)
-	}
-
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		stored, err := store.Get(context.Background(), "sess-worker-profile")
-		items, _, itemsErr := store.ListDisplayItems(context.Background(), "sess-worker-profile")
-		// BeforeApply persists the change before the agent installs it. Wait for
-		// both observations instead of racing the asynchronous runtime switch.
-		if err == nil && stored != nil && stored.ProfileName == "new" && itemsErr == nil && len(items) == 2 && ag.ActiveProfileName() == "new" {
-			break
-		}
-		time.Sleep(time.Millisecond)
-	}
-	stored, err := store.Get(context.Background(), "sess-worker-profile")
-	if err != nil || stored.ProfileName != "new" {
-		t.Fatalf("expected persisted profile new, got session=%#v err=%v", stored, err)
-	}
-	if ag.ActiveProfileName() != "new" {
-		t.Fatalf("expected active profile new, got %q", ag.ActiveProfileName())
-	}
-	items, _, err := store.ListDisplayItems(context.Background(), "sess-worker-profile")
-	if err != nil {
-		t.Fatalf("load display items: %v", err)
-	}
-	if len(items) != 2 || items[1].Type != zotigosession.DisplayItemProfileChanged || items[1].Profile == nil || items[1].Profile.CommandID != commandItem.ID {
-		t.Fatalf("unexpected profile display items: %#v", items)
-	}
-	if cursor := workerbase.RecoverAppliedCommandSequence(items); cursor != commandItem.Sequence {
-		t.Fatalf("expected applied profile command cursor %d, got %d", commandItem.Sequence, cursor)
-	}
-	newerCommand, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
-		Type:    zotigosession.DisplayItemSessionCommand,
-		Command: &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "newer"},
-	})
-	if err != nil {
-		t.Fatalf("append newer profile command: %v", err)
-	}
-	if err := runtime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(newerCommand)); err != nil {
-		t.Fatalf("handle newer profile command: %v", err)
-	}
-	deadline = time.Now().Add(time.Second)
-	for time.Now().Before(deadline) && ag.ActiveProfileName() != "newer" {
-		time.Sleep(time.Millisecond)
-	}
-	items, _, err = store.ListDisplayItems(context.Background(), "sess-worker-profile")
-	if err != nil {
-		t.Fatalf("load consecutive profile items: %v", err)
-	}
-	if len(items) != 4 || items[3].Profile == nil || items[3].Profile.CommandID != newerCommand.ID || items[3].Profile.From != "new" || items[3].Profile.To != "newer" {
-		t.Fatalf("expected consecutive marker new->newer, got %#v", items)
-	}
-	registry := newSessionRegistry()
-	registry.Add(Session{
-		ID:               "sess-worker-profile",
-		State:            SessionStateRunning,
-		WorkingDirectory: workDir,
-		ProfileName:      "old",
-		CreatedAt:        now,
-	})
-	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
-	getRec := httptest.NewRecorder()
-	handler.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/sessions/sess-worker-profile", nil))
-	if getRec.Code != http.StatusOK {
-		t.Fatalf("expected live session status %d, got %d: %s", http.StatusOK, getRec.Code, getRec.Body.String())
-	}
-	var live Session
-	if err := decodeAPIData(t, getRec.Body.Bytes(), &live); err != nil {
-		t.Fatalf("decode live session: %v", err)
-	}
-	if live.ProfileName != "newer" {
-		t.Fatalf("expected durable profile to override stale registry value, got %#v", live)
-	}
-	startRec := httptest.NewRecorder()
-	handler.ServeHTTP(startRec, httptest.NewRequest(http.MethodPost, "/sessions/sess-worker-profile/start", nil))
-	if startRec.Code != http.StatusOK {
-		t.Fatalf("expected idempotent start status %d, got %d: %s", http.StatusOK, startRec.Code, startRec.Body.String())
-	}
-	var started Session
-	if err := decodeAPIData(t, startRec.Body.Bytes(), &started); err != nil {
-		t.Fatalf("decode idempotent start: %v", err)
-	}
-	if started.ProfileName != "newer" {
-		t.Fatalf("expected idempotent start profile new, got %#v", started)
-	}
-}
-
 func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 	const oldProviderName = "worker-profile-failure-old"
 	const newProviderName = "worker-profile-failure-new"
@@ -485,11 +301,11 @@ func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	runtime := &workerRuntime{
 		sessionID: "sess-profile-failure",
 		workDir:   workDir,
-		store:     unavailableSessionStore{err: errors.New("store unavailable")},
+		store:     workerUnavailableStore{err: errors.New("store unavailable")},
 		agent:     ag,
 		display:   sessionlog.NewLog("sess-profile-failure", source),
 	}
@@ -553,7 +369,7 @@ func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	runtime := &workerRuntime{
 		sessionID: "sess-profile-build-failure",
 		workDir:   workDir,
@@ -600,7 +416,7 @@ func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}, appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}, AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 		if item.Type == zotigosession.DisplayItemProfileFailed {
 			return errors.New("display log unavailable")
 		}
@@ -627,7 +443,7 @@ func TestWorkerRuntimeDoesNotCompleteLaterProfileAfterMarkerFailure(t *testing.T
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}, appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}, AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 		if item.Profile != nil && item.Profile.CommandID == "profile-a" {
 			return errors.New("display log unavailable")
 		}
@@ -695,7 +511,7 @@ func TestWorkerRuntimeBrokenLatestProfileSupersedesPendingProfile(t *testing.T) 
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	runtime := &workerRuntime{
 		sessionID: "sess-profile-supersede",
 		workDir:   workDir,
@@ -900,9 +716,9 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		Command:  &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "must not run"},
 	}
 	var markerAttempts atomic.Int32
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{"sess-profile-uncertain": {command, messageCommand}},
-		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{"sess-profile-uncertain": {command, messageCommand}},
+		AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Type == zotigosession.DisplayItemProfileChanged && markerAttempts.Add(1) == 1 {
 				return errors.New("display log unavailable")
 			}
@@ -1044,9 +860,9 @@ func TestWorkerRuntimeRollsBackProfileWhenChangedItemFails(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{},
-		appendErr: func(_ string, item zotigosession.DisplayItem) error {
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{},
+		AppendErr: func(_ string, item zotigosession.DisplayItem) error {
 			if item.Type == zotigosession.DisplayItemProfileChanged {
 				return errors.New("display log unavailable")
 			}
@@ -1127,7 +943,7 @@ func TestMessageFromCommandRejectsMissingImagePayload(t *testing.T) {
 }
 
 func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-close", source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -1142,7 +958,7 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 		t.Fatalf("late finish event should be ignored: %v", err)
 	}
 
-	items := source.items["sess-close"]
+	items := source.Items["sess-close"]
 	if len(items) != 2 {
 		t.Fatalf("expected turn_started and turn_interrupted, got %#v", items)
 	}
@@ -1254,7 +1070,7 @@ func TestWorkerRuntimeCloseWaitsForAgentStreamExit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	transport := zotigotransport.NewChannelTransport(10)
 	defer transport.Close()
 	runtime := &workerRuntime{
@@ -1297,7 +1113,7 @@ func TestWorkerRuntimeSteeringWaitsForTurnReady(t *testing.T) {
 	providers.Register("zotigod-ready-test", func(config.ProfileConfig) (providers.Provider, error) {
 		return &noopProvider{}, nil
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-ready", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -1367,7 +1183,7 @@ func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
 		return &noopProvider{}, nil
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-paused-input", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -1404,7 +1220,7 @@ func TestWorkerRuntimeAcceptsInputWhileAgentIsPaused(t *testing.T) {
 func TestWorkerRuntimeAcceptInputWaitsForNewTurnAdmission(t *testing.T) {
 	const providerName = "zotigod-starting-input-test"
 	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-starting-input", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -1467,7 +1283,7 @@ func TestWorkerRuntimeAcceptInputStartsOnceAfterCompletionBoundary(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-completion-input", source)
 	if _, err := display.StartTurn(context.Background()); err != nil {
 		t.Fatal(err)
@@ -1529,7 +1345,7 @@ func TestWorkerRuntimeIgnoresStaleSteeringAfterAgentStops(t *testing.T) {
 	providers.Register("zotigod-stale-steering-test", func(config.ProfileConfig) (providers.Provider, error) {
 		return &noopProvider{}, nil
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-stale-steering", source)
 	turnID, err := display.StartTurn(context.Background())
 	if err != nil {
@@ -1610,7 +1426,7 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	transport := zotigotransport.NewChannelTransport(4)
 	defer transport.Close()
 	runtime := &workerRuntime{
@@ -1651,5 +1467,57 @@ func TestStartMessageTurnWaitsForCompletingTurnBeforeAcknowledging(t *testing.T)
 	items, _, err := source.LoadItems(context.Background(), runtime.sessionID)
 	if err != nil || len(items) == 0 || items[0].Type != zotigosession.DisplayItemTurnStarted {
 		t.Fatalf("pending message did not produce turn_started: %#v err=%v", items, err)
+	}
+}
+
+func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
+	serverConnReady := make(chan *websocket.Conn, 1)
+	releaseServerConn := make(chan struct{})
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := (&websocket.Upgrader{}).Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		serverConnReady <- conn
+		<-releaseServerConn
+		_ = conn.Close()
+	}))
+	defer server.Close()
+	defer close(releaseServerConn)
+
+	url := "ws" + strings.TrimPrefix(server.URL, "http")
+	clientConn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	if err != nil {
+		t.Fatalf("dial worker websocket: %v", err)
+	}
+	defer clientConn.Close()
+	serverConn := <-serverConnReady
+	defer serverConn.Close()
+
+	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
+	for idx := uint64(1); idx <= workerbase.CommandBufferSize+1; idx++ {
+		msg := wire.Message{
+			Type: wire.MessageCommand,
+			Command: &wire.Command{
+				ID:       fmt.Sprintf("cmd-%d", idx),
+				Sequence: idx,
+				Type:     wire.CommandPause,
+			},
+		}
+		if err := serverConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			t.Fatalf("set write deadline: %v", err)
+		}
+		if err := serverConn.WriteJSON(msg); err != nil {
+			t.Fatalf("write command %d: %v", idx, err)
+		}
+	}
+
+	select {
+	case err := <-errCh:
+		if err == nil || !strings.Contains(err.Error(), "buffer full") {
+			t.Fatalf("expected buffer full error, got %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected worker command reader to fail")
 	}
 }

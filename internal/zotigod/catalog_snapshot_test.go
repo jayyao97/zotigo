@@ -6,12 +6,14 @@ import (
 	"reflect"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
 
 func TestCatalogSnapshotMatchesExistingCatalogReads(t *testing.T) {
 	handler, _, _, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	created := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	if created.Code != http.StatusCreated {
 		t.Fatalf("create session: %s", created.Body.String())

@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -66,7 +68,7 @@ func TestWorkerFinishDispatchesSessionEndAfterTransition(t *testing.T) {
 	registry.Add(Session{
 		ID: "sess-end", State: SessionStateRunning, WorkingDirectory: t.TempDir(), Agent: "zotigo",
 	})
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		"sess-end": {},
 	}}, handlerOptions{hooks: dispatcher})
 	recorder := httptest.NewRecorder()
@@ -86,7 +88,7 @@ func TestWorkerFinishDispatchesSessionEndAfterTransition(t *testing.T) {
 
 func TestSessionEndHookIncludesModelAndUsage(t *testing.T) {
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)

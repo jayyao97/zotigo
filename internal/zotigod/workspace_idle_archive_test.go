@@ -8,6 +8,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
@@ -15,10 +17,10 @@ import (
 func TestWorkspaceArchiveIdleAndBusySessions(t *testing.T) {
 	for _, mode := range []string{"idle", "open turn", "approval", "pending message", "queued input", "starting", "working", "paused", "failed pending message", "failed open turn"} {
 		t.Run(mode, func(t *testing.T) {
-			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 			workers := newWorkerRegistry()
 			api, registry, catalog, workspace := newCatalogSessionFixtureWithRuntime(t, newSessionOperationLocks(), source, workers)
-			writeTestProfileConfig(t, workspace.RootPath)
+			sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 			created := requestCatalog(t, api, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 			var session Session
 			decodeCatalogData(t, created, &session)
@@ -34,12 +36,12 @@ func TestWorkspaceArchiveIdleAndBusySessions(t *testing.T) {
 			workers.workers[session.ID] = worker
 			switch mode {
 			case "open turn", "approval", "failed open turn":
-				source.items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn"}}}
+				source.Items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn"}}}
 				if mode == "approval" {
-					source.items[session.ID] = append(source.items[session.ID], zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "approval"}})
+					source.Items[session.ID] = append(source.Items[session.ID], zotigosession.DisplayItem{Type: zotigosession.DisplayItemApprovalRequest, Approval: &zotigosession.DisplayApproval{ID: "approval"}})
 				}
 			case "pending message", "failed pending message":
-				source.items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "pending"}}}
+				source.Items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "pending"}}}
 			case "queued input":
 				if err := catalog.QueueInput(t.Context(), session.ID, "queued", []byte(`{"text":"pending"}`)); err != nil {
 					t.Fatal(err)
@@ -112,10 +114,10 @@ func (s archiveLockStore) IsLocked(context.Context, string) (bool, error) {
 }
 
 func TestWorkspaceArchiveWaitsForWorkerLock(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	api, registry, catalog, workspace := newCatalogSessionFixtureWithRuntime(t, newSessionOperationLocks(), source, workers)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	created := requestCatalog(t, api, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	var session Session
 	decodeCatalogData(t, created, &session)
@@ -162,10 +164,10 @@ func TestWorkspaceArchiveWaitsForWorkerLock(t *testing.T) {
 func TestWorkspaceArchiveKeepsUnknownLockAndHonorsCancellation(t *testing.T) {
 	for _, owned := range []bool{false, true} {
 		t.Run(map[bool]string{false: "external lock", true: "worker did not release"}[owned], func(t *testing.T) {
-			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 			workers := newWorkerRegistry()
 			api, registry, catalog, workspace := newCatalogSessionFixtureWithRuntime(t, newSessionOperationLocks(), source, workers)
-			writeTestProfileConfig(t, workspace.RootPath)
+			sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 			response := requestCatalog(t, api, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 			var session Session
 			decodeCatalogData(t, response, &session)

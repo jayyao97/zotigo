@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
@@ -15,7 +17,7 @@ import (
 )
 
 func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-tool-order", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
@@ -67,7 +69,7 @@ func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) 
 }
 
 func TestWorkerToolExecutionDoesNotInvokeWhenStartedMarkerFails(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	display := sessionlog.NewLog("sess-tool-marker-failure", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {

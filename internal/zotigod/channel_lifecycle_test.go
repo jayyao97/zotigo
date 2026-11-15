@@ -11,6 +11,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/channels"
 )
@@ -35,7 +37,7 @@ func TestArchiveUnbindsChannelSessionAndClearsPromptOnNextTurn(t *testing.T) {
 			if err = sessions.Put(ctx, stored); err != nil {
 				t.Fatal(err)
 			}
-			h.items.(*fakeDisplayItemSource).items[session.ID] = nil
+			h.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 			channelRoot := t.TempDir()
 			store, err := channels.Open(channelRoot)
 			if err != nil {
@@ -66,7 +68,7 @@ func TestArchiveUnbindsChannelSessionAndClearsPromptOnNextTurn(t *testing.T) {
 			if deleteResponse.Code != http.StatusConflict {
 				t.Fatalf("delete bound connection %d: %s", deleteResponse.Code, deleteResponse.Body.String())
 			}
-			h.items.(*fakeDisplayItemSource).items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "active"}}}
+			h.items.(*sessionlogtest.ItemSource).Items[session.ID] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "active"}}}
 			blocked := httptest.NewRecorder()
 			h.handleSessionOrganizationArchive(blocked, httptest.NewRequest(http.MethodPost, "/sessions/"+session.ID+"/archive", nil), session.ID, true)
 			if blocked.Code != http.StatusConflict {
@@ -75,7 +77,7 @@ func TestArchiveUnbindsChannelSessionAndClearsPromptOnNextTurn(t *testing.T) {
 			if binding, err := store.GetConversationBySession(ctx, session.ID); err != nil || binding.ID != conversation.ID {
 				t.Fatalf("active binding lost: %+v %v", binding, err)
 			}
-			h.items.(*fakeDisplayItemSource).items[session.ID] = nil
+			h.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 			// Fail the actual Channel write after the catalog archive succeeds.
 			faultDB, err := sql.Open("sqlite", filepath.Join(channelRoot, "channels.sqlite"))
 			if err != nil {
