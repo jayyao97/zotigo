@@ -686,3 +686,25 @@ func TestACPLostSubmitResponseThenDisconnectStopsTurn(t *testing.T) {
 		t.Fatalf("turn ended with %s", end.Type)
 	}
 }
+
+// The ACP server only knows the version it is handed: the adapter must pass
+// the build version through, or editors see an empty agentInfo.version.
+func TestACPInitializeReportsBuildVersion(t *testing.T) {
+	fixture := servicetest.New(t)
+	client := startACP(t, connectService(t, fixture), "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var result acp.InitializeResult
+	if _, err := client.conn.Call(ctx, acp.MethodInitialize, acp.InitializeParams{ProtocolVersion: 1}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if buildinfo.Version == "" {
+		t.Fatal("buildinfo.Version is empty; the assertion below would be vacuous")
+	}
+	if result.AgentInfo == nil {
+		t.Fatal("initialize response has no agentInfo")
+	}
+	if result.AgentInfo.Version != buildinfo.Version {
+		t.Fatalf("initialize agentInfo.version = %q, want buildinfo.Version %q", result.AgentInfo.Version, buildinfo.Version)
+	}
+}
