@@ -17,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
@@ -365,7 +366,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		ExternalParentMessageID:  task.Origin.ExternalParentMessageID,
 		Actor:                    protocol.RequestActor{ID: task.Origin.Sender.ID, DisplayName: task.Origin.Sender.DisplayName, Role: task.Origin.ActorRole},
 	}
-	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: channelPolicy, promptRevision: desired.Revision, requestContext: requestContext})
+	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, false, &sessionInputConstraints{approvalPolicy: channelPolicy, promptRevision: desired.Revision, requestContext: requestContext})
 	if err != nil {
 		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, errSessionBusy) {
 			return channels.TaskResult{}, errors.New("the bound session already has an active turn")
@@ -373,6 +374,15 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		return channels.TaskResult{}, err
 	}
 	completeAdmission()
+	if accepted.Type == wire.CommandSteering {
+		// Any original Channel delivery retains ownership of the turn result. A supplement only
+		// acknowledges durable admission; waiting here would duplicate that result
+		// or miss the already emitted turn-start event.
+		if progress != nil {
+			progress(channels.Progress{State: "running", Events: []channels.PublicExecutionEvent{{ID: "channel-steer:" + task.MessageID, Type: channels.ExecutionRunStarted, Timestamp: time.Now().UTC()}}})
+		}
+		return channels.TaskResult{Text: "已补充到当前任务。"}, nil
+	}
 	// Durable display items for this turn are appended after the accepted
 	// channel command. This excludes unrelated turns that completed while the
 	// channel request was waiting for worker admission.
