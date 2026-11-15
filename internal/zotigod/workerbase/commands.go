@@ -43,7 +43,7 @@ func FetchCommands(ctx context.Context, client *http.Client, daemonURL string, s
 }
 
 func LoadCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string) (CommandCursor, error) {
-	data, err := os.ReadFile(CommandCursorPath(sessionID))
+	data, err := os.ReadFile(commandCursorPath(sessionID))
 	if os.IsNotExist(err) {
 		return CommandCursor{}, nil
 	}
@@ -52,16 +52,16 @@ func LoadCommandCursor(ctx context.Context, store zotigosession.Store, sessionID
 	}
 	var cursor CommandCursor
 	if err := sonic.Unmarshal(data, &cursor); err == nil {
-		return ValidateCommandCursor(ctx, store, sessionID, cursor)
+		return validateCommandCursor(ctx, store, sessionID, cursor)
 	}
 	sequence, err := strconv.ParseUint(strings.TrimSpace(string(data)), 10, 64)
 	if err != nil {
 		return RecoverCommandCursor(ctx, store, sessionID)
 	}
-	return ValidateCommandCursor(ctx, store, sessionID, CommandCursor{Sequence: sequence})
+	return validateCommandCursor(ctx, store, sessionID, CommandCursor{Sequence: sequence})
 }
 
-func ValidateCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string, cursor CommandCursor) (CommandCursor, error) {
+func validateCommandCursor(ctx context.Context, store zotigosession.Store, sessionID string, cursor CommandCursor) (CommandCursor, error) {
 	if cursor.Offset < 0 {
 		return RecoverCommandCursor(ctx, store, sessionID)
 	}
@@ -204,7 +204,7 @@ func AppliedCommandSequences(items []zotigosession.DisplayItem) map[uint64]bool 
 }
 
 func SaveCommandCursor(sessionID string, cursor CommandCursor) error {
-	path := CommandCursorPath(sessionID)
+	path := commandCursorPath(sessionID)
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
 		return err
 	}
@@ -244,7 +244,7 @@ func CompactedTranscriptDir() string {
 	return filepath.Join(root, "sessions", "compacted")
 }
 
-func CommandCursorPath(sessionID string) string {
+func commandCursorPath(sessionID string) string {
 	root, err := config.StateDir()
 	if err != nil {
 		return filepath.Join(os.TempDir(), "zotigo-"+sessionID+".cursor")

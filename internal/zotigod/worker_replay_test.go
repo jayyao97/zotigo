@@ -46,7 +46,10 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cursor, err := workerbase.ValidateCommandCursor(ctx, store, sessionID, workerbase.CommandCursor{Sequence: 2})
+			if err := workerbase.SaveCommandCursor(sessionID, workerbase.CommandCursor{Sequence: 2}); err != nil {
+				t.Fatal(err)
+			}
+			cursor, err := workerbase.LoadCommandCursor(ctx, store, sessionID)
 			if err != nil || cursor.Sequence != 0 {
 				t.Fatalf("pending command must remain replayable: cursor=%+v err=%v", cursor, err)
 			}

@@ -697,22 +697,3 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 		t.Fatal("completed prefix retained without subscribers")
 	}
 }
-
-func TestDisplayRetirementWaitStopsWhenWriterCloses(t *testing.T) {
-	writer := workerbase.NewUnstartedWriter(nil, 1)
-	defer writer.Close()
-	writer.SendDisplayWake()
-	sent := make(chan struct{})
-	go func() { writer.SendDisplayItem(zotigosession.DisplayItem{ID: "finished"}); close(sent) }()
-	select {
-	case <-sent:
-		t.Fatal("completion was dropped when the queue was full")
-	case <-time.After(20 * time.Millisecond):
-	}
-	writer.Close()
-	select {
-	case <-sent:
-	case <-time.After(time.Second):
-		t.Fatal("closed writer left completion sender blocked")
-	}
-}

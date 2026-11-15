@@ -254,7 +254,7 @@ func (r *codexWorkerRuntime) registerCodexApproval(ctx context.Context, message 
 	}
 	pending := codexPendingApproval{request: req, rpcID: append(json.RawMessage(nil), message.ID...), kind: kind, permissions: permissionGrant, approve: approve, deny: deny}
 	r.approvals[req.ID] = pending
-	if err := r.writer.SendApprovalRequest(ctx, publicApprovalRequest(req)); err != nil {
+	if err := r.writer.SendApprovalRequest(ctx, sessionlog.PublicApprovalRequest(req)); err != nil {
 		delete(r.approvals, req.ID)
 		return &codexRequestFatalError{err: errors.Join(err, r.expireApproval(req, "Codex approval could not be delivered"))}
 	}
@@ -303,7 +303,7 @@ func (r *codexWorkerRuntime) resolveCodexApproval(decision wire.ApprovalDecision
 		result := wire.ApprovalResult{RequestID: decision.RequestID, Error: fmt.Sprintf("record approval decision: %v", err)}
 		return result, fmt.Errorf("codex approval resolved but could not be recorded: %w", err)
 	}
-	response := publicApprovalRequest(req)
+	response := sessionlog.PublicApprovalRequest(req)
 	return wire.ApprovalResult{RequestID: decision.RequestID, Approval: &response}, nil
 }
 

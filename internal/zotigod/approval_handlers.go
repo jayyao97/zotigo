@@ -7,7 +7,6 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
-	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type submitApprovalDecisionRequest struct {
@@ -100,19 +99,6 @@ func approvalDecisionRequests(items []approvalDecisionRequestDTO) ([]zotigosessi
 		})
 	}
 	return decisions, nil
-}
-
-func publicApprovalRequest(approval sessionlog.ApprovalRequest) wire.ApprovalRequest {
-	return wire.ApprovalRequest{
-		ID:         approval.ID,
-		SessionID:  approval.SessionID,
-		TurnID:     approval.TurnID,
-		Status:     approval.Status,
-		Pending:    publicDisplayPendingApprovals(approval.Pending),
-		Decisions:  publicDisplayApprovalDecisions(approval.Decisions),
-		CreatedAt:  approval.CreatedAt,
-		ResolvedAt: approval.ResolvedAt,
-	}
 }
 
 func (h *handler) loadApproval(r *http.Request, sessionID string, approvalID string) (sessionlog.ApprovalRequest, bool, error) {

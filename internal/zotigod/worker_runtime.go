@@ -206,7 +206,7 @@ func (t *workerRuntimeTransport) registerApproval(ctx context.Context, pending [
 	*t.approval = approval
 	t.display.MarkPaused()
 	if t.notifyApproval != nil {
-		t.notifyApproval(ctx, publicApprovalRequest(approval))
+		t.notifyApproval(ctx, sessionlog.PublicApprovalRequest(approval))
 	}
 	t.approvalMu.Unlock()
 	return approval, decisionCh, nil
@@ -251,7 +251,7 @@ func (t *workerRuntimeTransport) interruptApprovalForSteering(ctx context.Contex
 	t.resolved = true
 	t.released = true
 	if t.notifyApprovalResolved != nil {
-		t.notifyApprovalResolved(ctx, publicApprovalRequest(resolved))
+		t.notifyApprovalResolved(ctx, sessionlog.PublicApprovalRequest(resolved))
 	}
 	return nil
 }
@@ -298,7 +298,7 @@ func (t *workerRuntimeTransport) resolveApproval(ctx context.Context, approvalID
 	if err != nil {
 		return workerApprovalResolution{}, fmt.Errorf("record approval decision: %w", err)
 	}
-	response := publicApprovalRequest(resolved)
+	response := sessionlog.PublicApprovalRequest(resolved)
 	t.resolved = true
 	return workerApprovalResolution{
 		approval:   response,

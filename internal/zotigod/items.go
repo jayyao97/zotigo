@@ -11,6 +11,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -520,8 +521,8 @@ func publicDisplayApproval(approval *zotigosession.DisplayApproval) *itemApprova
 	return &itemApprovalResponse{
 		ID:        approval.ID,
 		TurnID:    approval.TurnID,
-		Pending:   publicDisplayPendingApprovals(approval.Pending),
-		Decisions: publicDisplayApprovalDecisions(approval.Decisions),
+		Pending:   sessionlog.PublicPendingApprovals(approval.Pending),
+		Decisions: sessionlog.PublicApprovalDecisions(approval.Decisions),
 	}
 }
 
@@ -554,42 +555,6 @@ func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []it
 			Width:     img.Width,
 			Height:    img.Height,
 			URL:       publicImageURLFromBlobPath(img.BlobPath),
-		})
-	}
-	return resp
-}
-
-func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []wire.PendingApproval {
-	if len(pending) == 0 {
-		return nil
-	}
-	resp := make([]wire.PendingApproval, 0, len(pending))
-	for _, item := range pending {
-		resp = append(resp, wire.PendingApproval{
-			ToolCallID:       item.ToolCallID,
-			ToolName:         item.ToolName,
-			Arguments:        item.Arguments,
-			Description:      item.Description,
-			Reason:           item.Reason,
-			RiskLevel:        item.RiskLevel,
-			Source:           item.Source,
-			RequiresSnapshot: item.RequiresSnapshot,
-		})
-	}
-	return resp
-}
-
-func publicDisplayApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []wire.ApprovalToolDecision {
-	if len(decisions) == 0 {
-		return nil
-	}
-	resp := make([]wire.ApprovalToolDecision, 0, len(decisions))
-	for _, item := range decisions {
-		resp = append(resp, wire.ApprovalToolDecision{
-			ToolCallID:   item.ToolCallID,
-			Approved:     item.Approved,
-			Reason:       item.Reason,
-			ModifiedArgs: item.ModifiedArgs,
 		})
 	}
 	return resp

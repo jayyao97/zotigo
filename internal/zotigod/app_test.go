@@ -753,7 +753,7 @@ func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, sourc
 	if _, err := registry.Pause(id); err != nil {
 		t.Fatalf("apply worker display wake: %v", err)
 	}
-	return publicApprovalRequest(approval)
+	return sessionlog.PublicApprovalRequest(approval)
 }
 
 func respondToApprovalDecision(conn *websocket.Conn, source sessionlog.ItemSource, sessionID string, approval wire.ApprovalRequest) <-chan error {
@@ -784,7 +784,7 @@ func respondToApprovalDecision(conn *websocket.Conn, source sessionlog.ItemSourc
 		resolvedAt := item.CreatedAt
 		resolved := approval
 		resolved.Status = sessionlog.ApprovalStatusResolved
-		resolved.Decisions = publicDisplayApprovalDecisions(decision.Decisions)
+		resolved.Decisions = sessionlog.PublicApprovalDecisions(decision.Decisions)
 		resolved.ResolvedAt = &resolvedAt
 		if err := conn.WriteJSON(wire.Message{
 			Type: wire.MessageApprovalResult,

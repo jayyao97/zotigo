@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -172,5 +173,24 @@ func TestWorkerClientWriterFailureClosesDoneAndUnblocksApproval(t *testing.T) {
 	case <-notified:
 	case <-time.After(time.Second):
 		t.Fatal("approval notification remained blocked after writer failure")
+	}
+}
+
+func TestDisplayRetirementWaitStopsWhenWriterCloses(t *testing.T) {
+	writer := NewUnstartedWriter(nil, 1)
+	defer writer.Close()
+	writer.SendDisplayWake()
+	sent := make(chan struct{})
+	go func() { writer.SendDisplayItem(zotigosession.DisplayItem{ID: "finished"}); close(sent) }()
+	select {
+	case <-sent:
+		t.Fatal("completion was dropped when the queue was full")
+	case <-time.After(20 * time.Millisecond):
+	}
+	writer.Close()
+	select {
+	case <-sent:
+	case <-time.After(time.Second):
+		t.Fatal("closed writer left completion sender blocked")
 	}
 }

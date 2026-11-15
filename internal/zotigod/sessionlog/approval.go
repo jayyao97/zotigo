@@ -7,6 +7,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
@@ -206,4 +207,56 @@ func CopyApprovalDecisions(items []zotigosession.DisplayApprovalDecision) []zoti
 		copied[idx].ToolCallID = strings.TrimSpace(copied[idx].ToolCallID)
 	}
 	return copied
+}
+
+// PublicApprovalRequest converts an approval request into its wire form.
+func PublicApprovalRequest(approval ApprovalRequest) wire.ApprovalRequest {
+	return wire.ApprovalRequest{
+		ID:         approval.ID,
+		SessionID:  approval.SessionID,
+		TurnID:     approval.TurnID,
+		Status:     approval.Status,
+		Pending:    PublicPendingApprovals(approval.Pending),
+		Decisions:  PublicApprovalDecisions(approval.Decisions),
+		CreatedAt:  approval.CreatedAt,
+		ResolvedAt: approval.ResolvedAt,
+	}
+}
+
+// PublicPendingApprovals converts pending display approvals into their wire form.
+func PublicPendingApprovals(pending []zotigosession.DisplayPendingApproval) []wire.PendingApproval {
+	if len(pending) == 0 {
+		return nil
+	}
+	resp := make([]wire.PendingApproval, 0, len(pending))
+	for _, item := range pending {
+		resp = append(resp, wire.PendingApproval{
+			ToolCallID:       item.ToolCallID,
+			ToolName:         item.ToolName,
+			Arguments:        item.Arguments,
+			Description:      item.Description,
+			Reason:           item.Reason,
+			RiskLevel:        item.RiskLevel,
+			Source:           item.Source,
+			RequiresSnapshot: item.RequiresSnapshot,
+		})
+	}
+	return resp
+}
+
+// PublicApprovalDecisions converts display approval decisions into their wire form.
+func PublicApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []wire.ApprovalToolDecision {
+	if len(decisions) == 0 {
+		return nil
+	}
+	resp := make([]wire.ApprovalToolDecision, 0, len(decisions))
+	for _, item := range decisions {
+		resp = append(resp, wire.ApprovalToolDecision{
+			ToolCallID:   item.ToolCallID,
+			Approved:     item.Approved,
+			Reason:       item.Reason,
+			ModifiedArgs: item.ModifiedArgs,
+		})
+	}
+	return resp
 }

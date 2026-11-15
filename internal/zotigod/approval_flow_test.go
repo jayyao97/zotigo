@@ -203,7 +203,7 @@ func TestWorkerApprovalRequestBeforeReadyKeepsSessionPaused(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker, generation := connectWorker(t, server, created.ID)
 	defer worker.Close()
-	approval := publicApprovalRequest(sessionlog.ApprovalRequest{
+	approval := sessionlog.PublicApprovalRequest(sessionlog.ApprovalRequest{
 		ID:        "apr-before-ready",
 		SessionID: created.ID,
 		TurnID:    "turn-1",

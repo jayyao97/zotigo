@@ -52,7 +52,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			}
 			delete(r.approvals, id)
 			if r.writer != nil {
-				response := publicApprovalRequest(sessionlog.ResolvedApprovalFromDecision(pending.request, []zotigosession.DisplayApprovalDecision{{
+				response := sessionlog.PublicApprovalRequest(sessionlog.ResolvedApprovalFromDecision(pending.request, []zotigosession.DisplayApprovalDecision{{
 					ToolCallID: pending.request.Pending[0].ToolCallID, Approved: false, Reason: "Codex request was resolved elsewhere",
 				}}, time.Now().UTC()))
 				r.writer.SendApprovalResult(ctx, wire.ApprovalResult{Approval: &response})

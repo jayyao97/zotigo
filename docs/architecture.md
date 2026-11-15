@@ -104,7 +104,7 @@ Notes on specific packages:
 | --- | --- | --- |
 | `zotigod` | The session service: HTTP handlers, session registry, worker supervision, display log, input queue, approvals, channels dispatch, and both worker runtimes. | See Processes. |
 | `zotigod/wire` | The daemon↔worker protocol as data: the WebSocket frame and its payloads, the commands delivered to workers, and the bodies and headers of the worker's `/internal/*` calls. It imports only `core`. | The two sides are different processes and can be different builds during an update, so what they exchange should be a compile-time fact with a pinned format (`wire_test.go`). It is the first step of separating daemon and worker. |
-| `zotigod/sessionlog` | The session display log as both processes use it: the item-source interfaces and their store-backed implementation (`ItemSource`, `StoredItemSource`), the eventing wrappers and the live `EventBroker` that carries previews next to the durable log, the durable log writer (`Log`: turns, blocks, tool calls, subagents, steering, approvals), approval requests and their validation (`ApprovalRequest`), session-input acceptance and deduplication with its sentinel errors (`AppendAcceptedInput`, `FindExistingInput`, `ValidateCompletionSteering`, `ErrActiveTurn`, `ErrCommandIDConflict`), interaction requests and answer validation (`NewUserInputInteraction`, `ValidateInteractionAnswers`), the conversion of command items back into `wire.Command` values and user messages (`CommandFromItem`, `UserMessageFromCommand`), the item helpers the writer needs (`MessageItem`, `MessageImage`, `LastOpenTurn`), and ID generation. It imports `core` and `zotigod/wire`, never `zotigod`. | The daemon and the worker processes both run this code. It is the layer that has to exist as a package before the workers can leave `zotigod`. |
+| `zotigod/sessionlog` | The session display log as both processes use it: the item-source interfaces and their store-backed implementation (`ItemSource`, `StoredItemSource`), the eventing wrappers and the live `EventBroker` that carries previews next to the durable log, the durable log writer (`Log`: turns, blocks, tool calls, subagents, steering, approvals), approval requests, their validation and their conversion to the wire form (`ApprovalRequest`, `PublicApprovalRequest`), session-input acceptance and deduplication with its sentinel errors (`AppendAcceptedInput`, `FindExistingInput`, `ValidateCompletionSteering`, `ErrActiveTurn`, `ErrCommandIDConflict`), interaction requests and answer validation (`NewUserInputInteraction`, `ValidateInteractionAnswers`), the conversion of command items back into `wire.Command` values and user messages (`CommandFromItem`, `UserMessageFromCommand`), the item helpers the writer needs (`MessageItem`, `MessageImage`, `LastOpenTurn`), and ID generation. It imports `core` and `zotigod/wire`, never `zotigod`. | The daemon and the worker processes both run this code. It is the layer that has to exist as a package before the workers can leave `zotigod`. |
 | `zotigod/workerbase` | What every worker process is built on: the daemon connection (`Config`, `ConnectURL`, `NewHTTPClient`, `AcquireSessionLock`, `EnsureSession`, `ReportReady`, `ReportFinish`, `IsExpectedClose` and the timing constants), the queued WebSocket writer and display barrier (`Writer`, `DisplayBarrierClient`), command fetch and cursor recovery (`CommandCursor`, `FetchCommands`, `LoadCommandCursor`, `RecoverCommandCursor`, `LatestCommandSequence`), turn hooks (`HookDispatcher`, `DispatchTurnStartHook`, `DispatchTurnEndHook`, `TurnUsageDelta`), the session tool specs and the runtime-tool client that carries tool calls to the daemon (`SessionToolSpecs`, `SessionRuntimeTool`, `RuntimeToolClient`, `ChannelReadMessagesTool`), approval-policy and profile persistence (`PersistSessionApprovalPolicy`, `PersistSessionProfile`, `LowersPermissions`), and the sentinels and reason strings both sides compare (`ErrRuntimeOccupied`, `ProfileStateUncertainError`, `ControlChannelClosedReason`). It imports `core`, `internal/hooks`, `internal/channels`, `zotigod/wire` and `zotigod/sessionlog`, never `zotigod`. | The native worker and the Codex bridge worker both run this code, and the daemon shares a few pieces of it (timeouts, the cursor scan, policy persistence, the hook dispatcher type). It sits below both workers so that each can become a package of its own. |
 | `zotigodclient` | Go client for the public API plus daemon discovery and start. | The TUI and ACP need exactly the same attach, resubmit and stop logic. |
 | `wiring` | Builds an agent the way the product wants it: prompt builders, tool set, observer, classifier. | One place decides "what a Zotigo agent is" so the worker and any future host do not diverge. |
@@ -237,25 +237,20 @@ Changing any of these needs a migration or a version check, not a refactor:
   (`worker_client.go`, `worker_command_replay.go`, `worker_runtime.go`,
   `worker_runtime_commands.go`, `worker_runtime_profile.go`,
   `worker_runtime_setup.go`, `worker_runtime_turn.go`,
-  `worker_runtime_wal.go`, `worker_tool_recovery.go`) use 1 package-level
+  `worker_runtime_wal.go`, `worker_tool_recovery.go`) use no package-level
   symbol defined in the rest of `zotigod`, and the rest uses 1 defined in
-  them. The 1 they use is the approval wire conversion
-  `publicApprovalRequest` (`approval_handlers.go`), which depends on the
-  daemon's display conversions `publicDisplayPendingApprovals` and
-  `publicDisplayApprovalDecisions`; the Codex worker uses it too. The 1 the
-  rest uses is the entry point `runWorkerClient`, called from
-  `daemon_run.go`. Before the native worker can be its own package, three
-  things are left. `publicApprovalRequest` and the two display conversions
-  it needs have to move below the workers (they convert a
-  `sessionlog.ApprovalRequest`, so `sessionlog` is the candidate). The
+  them: the entry point `runWorkerClient`, called from `daemon_run.go`. (The
+  approval wire conversion both workers need now lives below them as
+  `sessionlog.PublicApprovalRequest`.) Before the native worker can be its
+  own package, two things are left. The
   worker entry point in `daemon_run.go` has to import the worker package
   instead of calling into its own. The native worker tests are white-box
   and share daemon fixtures (`newHandler`, HTTP test servers,
   `fakeDisplayItemSource`), so they need test support that both packages can
   import. The Codex worker files (`codex_worker_client.go`,
   `codex_runtime*.go`, `codex_notifications.go`, `codex_thread.go`,
-  `codex_media.go`) are less far along. They use 12 symbols from the
-  rest and the rest uses 16 of theirs: besides `publicApprovalRequest` they
+  `codex_media.go`) are less far along. They use 11 symbols from the
+  rest and the rest uses 16 of theirs: they
   use `errSessionNotFound`, the daemon's message-image storage (`storeMessageImageBlobs`,
   `validateMessageImageData`, `messageImageRefs` and related limits) and the
   Codex session sync (`listCodexThreadTurns`, `codexSyncBuffer`), and the
