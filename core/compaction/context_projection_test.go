@@ -16,7 +16,7 @@ func TestToolProjectionIsStableAcrossRepeatedUseAndRestore(t *testing.T) {
 	c := NewCompressor(DefaultCompressorConfig())
 	for name, text := range map[string]string{
 		"english":        strings.Repeat("word ", 20000),
-		"chinese":        strings.Repeat("中文报告", 2000),
+		"chinese":        cjkText(8000), // same rune count as before, without one repeated phrase
 		"lines":          strings.Repeat("中文日志\n", 2000),
 		"malformed utf8": strings.Repeat("hello\xff\xfe", 2000),
 	} {
