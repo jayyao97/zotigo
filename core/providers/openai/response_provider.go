@@ -527,6 +527,11 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 	case "high":
 		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}
 	}
+	// The API returns no readable reasoning unless a summary is requested,
+	// which left the thinking block empty for these models.
+	if params.Reasoning.Effort != "" {
+		params.Reasoning.Summary = shared.ReasoningSummaryAuto
+	}
 
 	// Convert tools.
 	if len(toolsList) > 0 {
