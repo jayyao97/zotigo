@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"encoding/json"
@@ -70,7 +70,7 @@ func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
 		}
 	}))
 	defer server.Close()
-	err = runCodexWorkerClient(t.Context(), codexWorkerConfig{
+	err = Run(t.Context(), Config{
 		Config:           workerbase.Config{SessionID: sessionID, DaemonURL: server.URL},
 		SessionStoreRoot: root, WorkingDirectory: t.TempDir(),
 		SocketPath: filepath.Join(t.TempDir(), "missing.sock"),

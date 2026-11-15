@@ -81,6 +81,12 @@ var rules = []rule{
 		allow: []string{"internal/zotigod/wire", "internal/zotigod/sessionlog", "internal/zotigod/workerbase"},
 		why:   "the native worker is a client of the daemon and must not depend on the daemon or its clients",
 	},
+	{
+		from:  []string{"internal/zotigod/codexworker"},
+		deny:  []string{"internal/zotigod", "internal/zotigodclient", "internal/cliapp", "internal/acpserver", "cli", "cmd"},
+		allow: []string{"internal/zotigod/wire", "internal/zotigod/sessionlog", "internal/zotigod/workerbase"},
+		why:   "the Codex worker is a client of the daemon and must not depend on the daemon, its clients or the native worker",
+	},
 }
 
 func under(pkg string, roots []string) bool {

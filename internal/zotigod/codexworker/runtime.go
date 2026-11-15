@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -15,8 +15,8 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-type codexWorkerRuntime struct {
-	cfg                  codexWorkerConfig
+type Runtime struct {
+	cfg                  Config
 	store                zotigosession.Store
 	writer               *workerbase.Writer
 	app                  codexapp.RPC
@@ -46,12 +46,44 @@ type codexWorkerRuntime struct {
 	activeRequestContext *protocol.RequestContext
 }
 
+// RuntimeForTest carries the parts NewRuntimeForTest assembles.
+type RuntimeForTest struct {
+	Config       Config
+	Store        zotigosession.Store
+	Writer       *workerbase.Writer
+	ThreadID     string
+	ActiveTurnID string
+	Messages     map[string]string
+}
+
+// NewRuntimeForTest builds a Runtime from already-constructed parts, without a
+// Codex app server or a daemon connection. Test-only: daemon tests in
+// internal/zotigod use it to drive the bridge against the real handler.
+func NewRuntimeForTest(parts RuntimeForTest) *Runtime {
+	return &Runtime{
+		cfg:          parts.Config,
+		store:        parts.Store,
+		writer:       parts.Writer,
+		threadID:     parts.ThreadID,
+		activeTurnID: parts.ActiveTurnID,
+		messages:     parts.Messages,
+	}
+}
+
+// ActiveDisplayItemCountForTest reports how many display items the runtime is
+// tracking for the active turn. Test-only. The map is not guarded by a lock:
+// like every other access to it, this must run on the goroutine that drives
+// the runtime.
+func (r *Runtime) ActiveDisplayItemCountForTest() int {
+	return len(r.displayItems)
+}
+
 type codexActiveDisplayItem struct {
 	partType      string
 	beforeInputID string
 }
 
-func (r *codexWorkerRuntime) trackDisplayItem(id, partType string) {
+func (r *Runtime) trackDisplayItem(id, partType string) {
 	if r.displayItems == nil {
 		r.displayItems = make(map[string]codexActiveDisplayItem)
 	}
@@ -98,46 +130,46 @@ type codexApprovalRequestParams struct {
 	Permissions            json.RawMessage   `json:"permissions"`
 }
 
-type codexThreadItem struct {
-	ID               string               `json:"id"`
-	ClientID         *string              `json:"clientId,omitempty"`
-	Type             string               `json:"type"`
-	Text             string               `json:"text,omitempty"`
-	Summary          []string             `json:"summary,omitempty"`
-	Content          any                  `json:"content,omitempty"`
-	Command          string               `json:"command,omitempty"`
-	CWD              string               `json:"cwd,omitempty"`
-	CommandActions   []codexCommandAction `json:"commandActions,omitempty"`
-	AggregatedOutput *string              `json:"aggregatedOutput,omitempty"`
-	ExitCode         *int                 `json:"exitCode,omitempty"`
-	DurationMS       *int64               `json:"durationMs,omitempty"`
-	Changes          any                  `json:"changes,omitempty"`
-	Status           string               `json:"status,omitempty"`
-	Server           string               `json:"server,omitempty"`
-	Namespace        *string              `json:"namespace,omitempty"`
-	Tool             string               `json:"tool,omitempty"`
-	Arguments        any                  `json:"arguments,omitempty"`
-	Result           any                  `json:"result,omitempty"`
-	RevisedPrompt    *string              `json:"revisedPrompt,omitempty"`
-	SavedPath        *string              `json:"savedPath,omitempty"`
+type ThreadItem struct {
+	ID               string          `json:"id"`
+	ClientID         *string         `json:"clientId,omitempty"`
+	Type             string          `json:"type"`
+	Text             string          `json:"text,omitempty"`
+	Summary          []string        `json:"summary,omitempty"`
+	Content          any             `json:"content,omitempty"`
+	Command          string          `json:"command,omitempty"`
+	CWD              string          `json:"cwd,omitempty"`
+	CommandActions   []CommandAction `json:"commandActions,omitempty"`
+	AggregatedOutput *string         `json:"aggregatedOutput,omitempty"`
+	ExitCode         *int            `json:"exitCode,omitempty"`
+	DurationMS       *int64          `json:"durationMs,omitempty"`
+	Changes          any             `json:"changes,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	Server           string          `json:"server,omitempty"`
+	Namespace        *string         `json:"namespace,omitempty"`
+	Tool             string          `json:"tool,omitempty"`
+	Arguments        any             `json:"arguments,omitempty"`
+	Result           any             `json:"result,omitempty"`
+	RevisedPrompt    *string         `json:"revisedPrompt,omitempty"`
+	SavedPath        *string         `json:"savedPath,omitempty"`
 	Error            *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`
-	ContentItems      any                        `json:"contentItems,omitempty"`
-	Success           *bool                      `json:"success,omitempty"`
-	Prompt            *string                    `json:"prompt,omitempty"`
-	Model             *string                    `json:"model,omitempty"`
-	ReasoningEffort   *string                    `json:"reasoningEffort,omitempty"`
-	ReceiverThreadIDs []string                   `json:"receiverThreadIds,omitempty"`
-	AgentsStates      map[string]codexAgentState `json:"agentsStates,omitempty"`
+	ContentItems      any                   `json:"contentItems,omitempty"`
+	Success           *bool                 `json:"success,omitempty"`
+	Prompt            *string               `json:"prompt,omitempty"`
+	Model             *string               `json:"model,omitempty"`
+	ReasoningEffort   *string               `json:"reasoningEffort,omitempty"`
+	ReceiverThreadIDs []string              `json:"receiverThreadIds,omitempty"`
+	AgentsStates      map[string]AgentState `json:"agentsStates,omitempty"`
 }
 
-type codexAgentState struct {
+type AgentState struct {
 	Status  string  `json:"status"`
 	Message *string `json:"message,omitempty"`
 }
 
-type codexCommandAction struct {
+type CommandAction struct {
 	Type    string  `json:"type"`
 	Command string  `json:"command,omitempty"`
 	Name    string  `json:"name,omitempty"`
@@ -146,12 +178,12 @@ type codexCommandAction struct {
 }
 
 type codexItemNotification struct {
-	ThreadID string          `json:"threadId"`
-	TurnID   string          `json:"turnId"`
-	Item     codexThreadItem `json:"item"`
+	ThreadID string     `json:"threadId"`
+	TurnID   string     `json:"turnId"`
+	Item     ThreadItem `json:"item"`
 }
 
-func (r *codexWorkerRuntime) Close() error {
+func (r *Runtime) Close() error {
 	if r == nil || r.activeTurnID == "" {
 		return nil
 	}
@@ -163,7 +195,7 @@ func (r *codexWorkerRuntime) Close() error {
 		"threadId": r.threadID, "turnId": turnID,
 	}, &response)
 	for _, itemID := range r.messageOrder {
-		if err := r.append(zotigosession.DisplayItem{
+		if err := r.Append(zotigosession.DisplayItem{
 			ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 			Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: r.messages[itemID]}},
 		}); err != nil {
@@ -177,7 +209,7 @@ func (r *codexWorkerRuntime) Close() error {
 	if !r.turnStarted.IsZero() {
 		duration = time.Since(r.turnStarted).Milliseconds()
 	}
-	appendErr := r.append(zotigosession.DisplayItem{
+	appendErr := r.Append(zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted, Error: "codex worker disconnected",
 		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "interrupted", DurationMS: duration},
 	})
@@ -189,7 +221,7 @@ func (r *codexWorkerRuntime) Close() error {
 	return errors.Join(interruptErr, appendErr)
 }
 
-func (r *codexWorkerRuntime) append(item zotigosession.DisplayItem) error {
+func (r *Runtime) Append(item zotigosession.DisplayItem) error {
 	if item.Type == zotigosession.DisplayItemAssistantMessage {
 		item.BeforeInputID = r.displayItems[item.ID].beforeInputID
 		for _, part := range item.Content {

@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -17,7 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message codexapp.Message) error {
+func (r *Runtime) HandleNotification(ctx context.Context, message codexapp.Message) error {
 	switch message.Method {
 	case "serverRequest/resolved":
 		var resolved struct {
@@ -90,7 +90,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			return nil
 		}
 		now := time.Now().UTC()
-		return r.append(zotigosession.DisplayItem{
+		return r.Append(zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemContextUsageUpdated,
 			ContextUsage: &zotigosession.DisplayContextUsage{
 				Tokens: updated.TokenUsage.Last.InputTokens,
@@ -148,7 +148,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		r.toolArguments[started.Item.ID] = arguments
 		r.toolNativeNames[started.Item.ID] = started.Item.Type
 		r.toolOrder = append(r.toolOrder, started.Item.ID)
-		if err := r.append(zotigosession.DisplayItem{
+		if err := r.Append(zotigosession.DisplayItem{
 			ID: started.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 			Content: []zotigosession.DisplayContentPart{{Type: "tool_call", ToolCall: &zotigosession.DisplayToolCall{
 				ID: started.Item.ID, Name: name, Arguments: arguments,
@@ -156,7 +156,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}); err != nil {
 			return err
 		}
-		return r.append(zotigosession.DisplayItem{
+		return r.Append(zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemToolExecutionStarted,
 			ToolExecution: &zotigosession.DisplayToolExecution{
 				TurnID: r.activeTurnID, ToolCallID: started.Item.ID, ToolName: name,
@@ -201,12 +201,12 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			if text == "" {
 				return nil
 			}
-			return r.append(zotigosession.DisplayItem{
+			return r.Append(zotigosession.DisplayItem{
 				ID: completed.Item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeReasoning), Text: text}},
 			})
 		case "contextCompaction":
-			return r.append(zotigosession.DisplayItem{
+			return r.Append(zotigosession.DisplayItem{
 				ID: completed.Item.ID, Type: zotigosession.DisplayItemContextCompacted,
 				Turn: &zotigosession.DisplayTurn{ID: completed.TurnID},
 			})
@@ -217,11 +217,11 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			item, cleanup, err := codexGeneratedImageDisplayItem(context.Background(), r.store, r.cfg.SessionStoreRoot, r.cfg.SessionID, completed.TurnID, completed.Item, time.Now().UTC())
 			if err != nil {
 				if errors.Is(err, errCodexImageUnavailable) {
-					return r.append(codexUnavailableImageDisplayItem(completed.Item.ID, completed.TurnID, time.Now().UTC()))
+					return r.Append(codexUnavailableImageDisplayItem(completed.Item.ID, completed.TurnID, time.Now().UTC()))
 				}
 				return err
 			}
-			if err := r.append(item); err != nil {
+			if err := r.Append(item); err != nil {
 				cleanup()
 				return err
 			}
@@ -238,7 +238,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			if err != nil {
 				return err
 			}
-			if err := r.append(zotigosession.DisplayItem{
+			if err := r.Append(zotigosession.DisplayItem{
 				Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: result}},
 			}); err != nil {
@@ -267,7 +267,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 			return nil
 		}
 		for _, itemID := range r.messageOrder {
-			if err := r.append(zotigosession.DisplayItem{
+			if err := r.Append(zotigosession.DisplayItem{
 				ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 				Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: r.messages[itemID]}},
 			}); err != nil {
@@ -298,7 +298,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if usage != (protocol.Usage{}) {
 			usagePointer = &usage
 		}
-		if err := r.append(zotigosession.DisplayItem{
+		if err := r.Append(zotigosession.DisplayItem{
 			Type: itemType, Error: errorText,
 			Turn: &zotigosession.DisplayTurn{ID: r.activeTurnID, Status: status, DurationMS: duration, Usage: usagePointer},
 		}); err != nil {
@@ -349,7 +349,7 @@ func (u codexTokenUsage) protocolUsage() protocol.Usage {
 	}
 }
 
-func codexReasoningText(item codexThreadItem) string {
+func codexReasoningText(item ThreadItem) string {
 	parts := append([]string(nil), item.Summary...)
 	if content, ok := item.Content.([]any); ok {
 		for _, part := range content {
@@ -361,11 +361,11 @@ func codexReasoningText(item codexThreadItem) string {
 	return strings.TrimSpace(strings.Join(parts, "\n\n"))
 }
 
-func (r *codexWorkerRuntime) matchesActiveItem(threadID, turnID, itemID string) bool {
+func (r *Runtime) matchesActiveItem(threadID, turnID, itemID string) bool {
 	return threadID == r.threadID && turnID == r.activeTurnID && itemID != ""
 }
 
-func (r *codexWorkerRuntime) persistAgentMessage(itemID, text string) error {
+func (r *Runtime) persistAgentMessage(itemID, text string) error {
 	delete(r.messages, itemID)
 	for index, id := range r.messageOrder {
 		if id == itemID {
@@ -376,13 +376,13 @@ func (r *codexWorkerRuntime) persistAgentMessage(itemID, text string) error {
 	if text == "" {
 		return nil
 	}
-	return r.append(zotigosession.DisplayItem{
+	return r.Append(zotigosession.DisplayItem{
 		ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: text}},
 	})
 }
 
-func (r *codexWorkerRuntime) forgetTool(itemID string) {
+func (r *Runtime) forgetTool(itemID string) {
 	delete(r.toolNames, itemID)
 	delete(r.toolArguments, itemID)
 	delete(r.toolNativeNames, itemID)
@@ -394,13 +394,13 @@ func (r *codexWorkerRuntime) forgetTool(itemID string) {
 	}
 }
 
-func (r *codexWorkerRuntime) finishPendingTools(reason string) error {
+func (r *Runtime) finishPendingTools(reason string) error {
 	for _, itemID := range r.toolOrder {
 		name := r.toolNames[itemID]
 		if name == "" {
 			continue
 		}
-		if err := r.append(zotigosession.DisplayItem{
+		if err := r.Append(zotigosession.DisplayItem{
 			Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 			Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: &zotigosession.DisplayToolResult{
 				ToolCallID: itemID, ToolName: name, ResultType: "text", Text: reason, Reason: reason, IsError: true,
@@ -419,7 +419,7 @@ func (r *codexWorkerRuntime) finishPendingTools(reason string) error {
 	return nil
 }
 
-func (r *codexWorkerRuntime) dispatchPostToolUse(ctx context.Context, itemID string, result *zotigosession.DisplayToolResult, status string) {
+func (r *Runtime) dispatchPostToolUse(ctx context.Context, itemID string, result *zotigosession.DisplayToolResult, status string) {
 	if r == nil || r.hooks == nil || result == nil {
 		return
 	}
@@ -459,7 +459,7 @@ func codexToolResultStatus(itemStatus string, result *zotigosession.DisplayToolR
 	return "succeeded"
 }
 
-func codexToolCall(item codexThreadItem) (string, string, bool, error) {
+func codexToolCall(item ThreadItem) (string, string, bool, error) {
 	name := ""
 	arguments := any(nil)
 	switch item.Type {
@@ -497,7 +497,7 @@ func codexCollabToolName(tool string) string {
 	}
 }
 
-func codexCommandTool(item codexThreadItem) (string, any) {
+func codexCommandTool(item ThreadItem) (string, any) {
 	arguments := map[string]any{"command": item.Command, "cwd": item.CWD}
 	if len(item.CommandActions) != 1 {
 		return "shell", arguments
@@ -519,7 +519,7 @@ func codexCommandTool(item codexThreadItem) (string, any) {
 	}
 }
 
-func codexToolResult(item codexThreadItem, name string) (*zotigosession.DisplayToolResult, bool, error) {
+func codexToolResult(item ThreadItem, name string) (*zotigosession.DisplayToolResult, bool, error) {
 	if name == "" {
 		name, _, _, _ = codexToolCall(item)
 	}

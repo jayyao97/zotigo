@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -51,12 +51,12 @@ func TestForkCodexConversationExactBoundary(t *testing.T) {
 					if test.forkError != nil {
 						return test.forkError
 					}
-					payload = codexThreadSnapshot{Thread: codexThread{ID: test.childID}}
+					payload = ThreadSnapshot{Thread: Thread{ID: test.childID}}
 				case "thread/turns/list":
 					if params["threadId"] != "child" || params["limit"] != 1 || params["sortDirection"] != "desc" || params["itemsView"] != "notLoaded" {
 						t.Fatalf("verification must only read child tail: %#v", params)
 					}
-					payload = codexTurnList{Data: []codexTurn{{ID: test.lastID, Status: test.status}}}
+					payload = TurnList{Data: []Turn{{ID: test.lastID, Status: test.status}}}
 				default:
 					t.Fatalf("unexpected mutation %q", method)
 				}
@@ -66,7 +66,7 @@ func TestForkCodexConversationExactBoundary(t *testing.T) {
 				}
 				return sonic.Unmarshal(encoded, result)
 			}}}
-			childID, err := forkCodexConversation(context.Background(), host, source, "turn-2")
+			childID, err := ForkConversation(context.Background(), host, source, "turn-2")
 			if test.wantError != "" {
 				if err == nil || !strings.Contains(err.Error(), test.wantError) || childID != "" {
 					t.Fatalf("result = %q, %v", childID, err)
@@ -86,7 +86,7 @@ func TestForkCodexConversationExactBoundary(t *testing.T) {
 
 func TestForkCodexConversationRequiresBoundary(t *testing.T) {
 	host := &codexSyncHost{}
-	if _, err := forkCodexConversation(context.Background(), host, &zotigosession.Session{}, ""); err == nil || host.acquires != 0 {
+	if _, err := ForkConversation(context.Background(), host, &zotigosession.Session{}, ""); err == nil || host.acquires != 0 {
 		t.Fatalf("invalid source invoked host: %v", err)
 	}
 }

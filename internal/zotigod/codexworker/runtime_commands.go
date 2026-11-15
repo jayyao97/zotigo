@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -12,7 +12,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) error {
+func (r *Runtime) handleCommand(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) error {
 	switch command.Type {
 	case wire.CommandMessage:
 		client := &workerbase.RuntimeToolClient{Writer: r.writer, Results: r.runtimeToolResults}
@@ -62,7 +62,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Com
 		if err := r.callTurnSteer(ctx, command, targetTurnID); err != nil {
 			return err
 		}
-		if err := r.persistSteering(command, targetTurnID); err != nil {
+		if err := r.PersistSteering(command, targetTurnID); err != nil {
 			return err
 		}
 		r.acknowledgeCommand(command.Sequence)
@@ -81,7 +81,7 @@ func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Com
 	}
 }
 
-func (r *codexWorkerRuntime) codexTurnIsTerminal(ctx context.Context, turnID string) (bool, error) {
+func (r *Runtime) codexTurnIsTerminal(ctx context.Context, turnID string) (bool, error) {
 	turns, err := listCodexThreadTurns(ctx, r.app, r.threadID, "notLoaded")
 	if err != nil {
 		return false, err
@@ -99,14 +99,14 @@ func (r *codexWorkerRuntime) codexTurnIsTerminal(ctx context.Context, turnID str
 	return false, nil
 }
 
-func (r *codexWorkerRuntime) sendIdleAfterPause(ctx context.Context, commandSequence uint64) error {
+func (r *Runtime) sendIdleAfterPause(ctx context.Context, commandSequence uint64) error {
 	if r.writer == nil || r.messagePending {
 		return nil
 	}
 	return r.writer.SendIdle(ctx, wire.Idle{CommandSequence: commandSequence})
 }
 
-func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
+func (r *Runtime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
 	target, err := workerbase.NormalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err
@@ -131,7 +131,7 @@ func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID st
 	if !loweringPermissions {
 		r.cfg.ApprovalPolicy = string(target)
 	}
-	if err := r.append(zotigosession.DisplayItem{
+	if err := r.Append(zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemApprovalPolicyChanged,
 		ApprovalPolicy: &zotigosession.DisplayApprovalPolicyChange{
 			CommandID: commandID, From: string(from), To: string(target),
@@ -142,11 +142,11 @@ func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID st
 	return nil
 }
 
-func (r *codexWorkerRuntime) canApplyCommand(command wire.Command) bool {
+func (r *Runtime) canApplyCommand(command wire.Command) bool {
 	return command.Type != wire.CommandMessage || r.activeTurnID == ""
 }
 
-func (r *codexWorkerRuntime) acknowledgeCommand(sequence uint64) {
+func (r *Runtime) acknowledgeCommand(sequence uint64) {
 	if sequence > r.commandSequence {
 		r.commandSequence = sequence
 	}

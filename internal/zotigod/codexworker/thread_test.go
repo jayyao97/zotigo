@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -11,7 +11,7 @@ import (
 
 func TestResumeUnboundCodexClearsChannelOverrides(t *testing.T) {
 	rpc := &codexWorkerRPC{}
-	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
+	err := resumeCodexThread(context.Background(), rpc, Config{
 		ThreadID: "thread", WorkingDirectory: t.TempDir(), Model: "model", ChannelToolsVersion: channels.RuntimeToolsVersion,
 	})
 	if err != nil {
@@ -28,7 +28,7 @@ func TestResumeUnboundCodexClearsChannelOverrides(t *testing.T) {
 
 func TestCodexThreadIdentityOnStartAndResume(t *testing.T) {
 	for _, dynamic := range []bool{false, true} {
-		params := codexThreadParams(codexWorkerConfig{
+		params := codexThreadParams(Config{
 			Config:      workerbase.Config{SessionID: "sess_child"},
 			WorkspaceID: "workspace_current", DeveloperInstructions: "Existing instructions.",
 		}, dynamic)

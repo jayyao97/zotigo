@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -34,7 +34,7 @@ type codexWorkerRPC struct {
 	err            error
 	methodErrors   map[string]error
 	activeTurnID   string
-	turns          []codexTurn
+	turns          []Turn
 	responseID     string
 	response       any
 	responseCalls  int
@@ -73,7 +73,7 @@ func (r *blockingCodexTurnStartRPC) Call(ctx context.Context, method string, _ a
 
 func (r *blockingCodexTurnStartRPC) Notify(string, any) error { return nil }
 
-func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*codexWorkerRuntime, *zotigosession.FileStore) {
+func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRPC) (*Runtime, *zotigosession.FileStore) {
 	t.Helper()
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
@@ -86,8 +86,8 @@ func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRP
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	return &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}, SessionStoreRoot: store.RootDir()},
+	return &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: sessionID}, SessionStoreRoot: store.RootDir()},
 		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string), toolNames: make(map[string]string),
 		toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
 	}, store
@@ -323,8 +323,8 @@ func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpc := &codexWorkerRPC{}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-1"}},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-1"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now,
 		messages: map[string]string{"message-1": "partial"}, messageOrder: []string{"message-1"},
 	}
@@ -362,8 +362,8 @@ func TestCodexWorkerCloseCompletesPendingToolAsInterrupted(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-pending"}}, store: store, app: &codexWorkerRPC{},
+	runtime := &Runtime{
+		cfg: Config{Config: workerbase.Config{SessionID: "session-pending"}}, store: store, app: &codexWorkerRPC{},
 		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string),
 		toolNames: map[string]string{"tool-1": "shell"}, toolOrder: []string{"tool-1"},
 	}
@@ -394,8 +394,8 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+	runtime := &Runtime{cfg: Config{Config: workerbase.Config{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{
 		Method: "thread/tokenUsage/updated",
 		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000,"inputTokens":6500,"cachedInputTokens":4000,"cacheWriteInputTokens":500,"outputTokens":1500},"last":{"totalTokens":2400,"inputTokens":2200,"outputTokens":200},"modelContextWindow":128000}}`),
 	}); err != nil {
@@ -423,12 +423,12 @@ func TestCodexWorkerMissingUsageFieldsDoNotReplaceLastValidSnapshot(t *testing.T
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage-stable", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-usage-stable"}}, store: store, threadID: "thread-1"}
+	runtime := &Runtime{cfg: Config{Config: workerbase.Config{SessionID: "session-usage-stable"}}, store: store, threadID: "thread-1"}
 	for _, params := range []string{
 		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":900,"inputTokens":800,"outputTokens":100},"modelContextWindow":512000}}`,
 		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":200},"modelContextWindow":null}}`,
 	} {
-		if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "thread/tokenUsage/updated", Params: []byte(params)}); err != nil {
+		if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "thread/tokenUsage/updated", Params: []byte(params)}); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -450,13 +450,13 @@ func TestCodexWorkerExternalizesDynamicToolImageContent(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-tool-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-tool-image"}, SessionStoreRoot: root},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-tool-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-1": "image_tool"},
 	}
 	dataURL := "data:image/png;base64," + tinyPNGBase64()
 	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"tool-1","type":"dynamicToolCall","tool":"image_tool","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":%q}]}}`, dataURL)
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-tool-image")
@@ -488,12 +488,12 @@ func TestCodexWorkerExternalizesMCPImageContent(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-mcp-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-mcp-image"}, SessionStoreRoot: root},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-mcp-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"mcp-1": "image_tool"},
 	}
 	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"mcp-1","type":"mcpToolCall","tool":"image_tool","status":"completed","result":{"content":[{"type":"image","data":%q,"mimeType":"image/png"}],"isError":false}}}`, tinyPNGBase64())
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-mcp-image")
@@ -516,7 +516,7 @@ func TestCodexWorkerExternalizesMCPImageContent(t *testing.T) {
 func TestCodexImagePayloadsRejectOversizedBase64(t *testing.T) {
 	t.Parallel()
 	oversized := strings.Repeat("A", base64.StdEncoding.EncodedLen(sessionlog.MaxMessageTotalImageBytes+1))
-	if _, err := codexGeneratedImageBytes(codexThreadItem{ID: "large-image", Result: oversized}); err == nil {
+	if _, err := codexGeneratedImageBytes(ThreadItem{ID: "large-image", Result: oversized}); err == nil {
 		t.Fatal("imageGeneration accepted oversized encoded payload")
 	}
 	content, err := codexMCPToolResultContent(map[string]any{"content": []any{
@@ -543,16 +543,16 @@ func TestCodexWorkerContinuesPastUnavailableDynamicToolImage(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-bad-tool-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-bad-tool-image"}, SessionStoreRoot: root},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-bad-tool-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-bad-image": "image_tool"},
 	}
 	badTool := `{"threadId":"thread-1","turnId":"turn-1","item":{"id":"tool-bad-image","type":"dynamicToolCall","tool":"image_tool","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,not-valid!"}]}}`
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(badTool)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(badTool)}); err != nil {
 		t.Fatal(err)
 	}
 	later := `{"threadId":"thread-1","turnId":"turn-1","item":{"id":"after-bad-image","type":"agentMessage","text":"still running"}}`
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(later)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(later)}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-bad-tool-image")
@@ -576,16 +576,16 @@ func TestCodexWorkerContinuesPastUnavailableGeneratedImage(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-image-missing", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-image-missing"}},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-image-missing"}},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1",
 	}
 	missingPath := filepath.Join(t.TempDir(), "missing.png")
 	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-missing","type":"imageGeneration","status":"completed","savedPath":%q}}`, missingPath)
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
 		t.Fatal(err)
 	}
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-no-source","type":"imageGeneration","status":"completed"}}`)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-no-source","type":"imageGeneration","status":"completed"}}`)}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-image-missing")
@@ -596,8 +596,8 @@ func TestCodexWorkerContinuesPastUnavailableGeneratedImage(t *testing.T) {
 
 func TestCodexWorkerDoesNotAttributeUsageFromAnotherTurn(t *testing.T) {
 	t.Parallel()
-	runtime := &codexWorkerRuntime{threadID: "thread-1", activeTurnID: "turn-active"}
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+	runtime := &Runtime{threadID: "thread-1", activeTurnID: "turn-active"}
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{
 		Method: "thread/tokenUsage/updated",
 		Params: []byte(`{"threadId":"thread-1","turnId":"turn-stale","tokenUsage":{"total":{"totalTokens":20,"inputTokens":15,"outputTokens":5},"last":{"totalTokens":20,"inputTokens":15,"outputTokens":5}}}`),
 	}); err != nil {
@@ -625,8 +625,8 @@ func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing
 		t.Fatal(err)
 	}
 	hookDispatcher := &capturingHookDispatcher{}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
 		store: store, app: &codexWorkerRPC{}, threadID: "thread-1", messages: make(map[string]string), hooks: hookDispatcher,
 	}
 	if err := runtime.handleCommand(context.Background(), wire.Command{
@@ -667,8 +667,8 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpc := &codexWorkerRPC{}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-steering"}},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-steering"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
 	}
 	command := wire.Command{
@@ -715,8 +715,8 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	}
 	writer := workerbase.NewUnstartedWriter(nil, 16)
 	hookDispatcher := &capturingHookDispatcher{}
-	runtime := &codexWorkerRuntime{
-		cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-items"}}, store: store, writer: writer,
+	runtime := &Runtime{
+		cfg: Config{Config: workerbase.Config{SessionID: "session-items"}}, store: store, writer: writer,
 		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string), hooks: hookDispatcher,
 	}
 	notifications := []codexapp.Message{
@@ -732,7 +732,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		{Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-1","status":"completed","durationMs":20}}`)},
 	}
 	for _, notification := range notifications {
-		if err := runtime.handleNotification(context.Background(), notification); err != nil {
+		if err := runtime.HandleNotification(context.Background(), notification); err != nil {
 			t.Fatalf("handle %s: %v", notification.Method, err)
 		}
 	}
@@ -808,25 +808,25 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name       string
-		item       codexThreadItem
+		item       ThreadItem
 		toolName   string
 		isError    bool
 		hookStatus string
 	}{
-		{name: "file change", item: codexThreadItem{ID: "file-1", Type: "fileChange", Status: "completed", Changes: []any{map[string]any{"path": "a.go"}}}, toolName: "apply_patch"},
-		{name: "file change declined", item: codexThreadItem{ID: "file-declined", Type: "fileChange", Status: "declined"}, toolName: "apply_patch", isError: true, hookStatus: "denied"},
-		{name: "command failed without exit", item: codexThreadItem{ID: "command-1", Type: "commandExecution", Status: "failed"}, toolName: "shell", isError: true},
-		{name: "command declined", item: codexThreadItem{ID: "command-2", Type: "commandExecution", Status: "declined"}, toolName: "shell", isError: true, hookStatus: "denied"},
-		{name: "mcp", item: codexThreadItem{ID: "mcp-1", Type: "mcpToolCall", Tool: "search", Status: "completed", Arguments: map[string]any{"query": "zotigo"}, Result: map[string]any{"content": []any{"ok"}}}, toolName: "search"},
-		{name: "mcp declined", item: codexThreadItem{ID: "mcp-declined", Type: "mcpToolCall", Tool: "search", Status: "declined"}, toolName: "search", isError: true, hookStatus: "denied"},
-		{name: "mcp failed with result", item: codexThreadItem{ID: "mcp-failed", Type: "mcpToolCall", Tool: "search", Status: "failed", Result: map[string]any{"content": []any{"error"}}}, toolName: "search", isError: true},
-		{name: "mcp error", item: codexThreadItem{ID: "mcp-2", Type: "mcpToolCall", Tool: "fetch", Error: &struct {
+		{name: "file change", item: ThreadItem{ID: "file-1", Type: "fileChange", Status: "completed", Changes: []any{map[string]any{"path": "a.go"}}}, toolName: "apply_patch"},
+		{name: "file change declined", item: ThreadItem{ID: "file-declined", Type: "fileChange", Status: "declined"}, toolName: "apply_patch", isError: true, hookStatus: "denied"},
+		{name: "command failed without exit", item: ThreadItem{ID: "command-1", Type: "commandExecution", Status: "failed"}, toolName: "shell", isError: true},
+		{name: "command declined", item: ThreadItem{ID: "command-2", Type: "commandExecution", Status: "declined"}, toolName: "shell", isError: true, hookStatus: "denied"},
+		{name: "mcp", item: ThreadItem{ID: "mcp-1", Type: "mcpToolCall", Tool: "search", Status: "completed", Arguments: map[string]any{"query": "zotigo"}, Result: map[string]any{"content": []any{"ok"}}}, toolName: "search"},
+		{name: "mcp declined", item: ThreadItem{ID: "mcp-declined", Type: "mcpToolCall", Tool: "search", Status: "declined"}, toolName: "search", isError: true, hookStatus: "denied"},
+		{name: "mcp failed with result", item: ThreadItem{ID: "mcp-failed", Type: "mcpToolCall", Tool: "search", Status: "failed", Result: map[string]any{"content": []any{"error"}}}, toolName: "search", isError: true},
+		{name: "mcp error", item: ThreadItem{ID: "mcp-2", Type: "mcpToolCall", Tool: "fetch", Error: &struct {
 			Message string `json:"message"`
 		}{Message: "unavailable"}}, toolName: "fetch", isError: true},
-		{name: "dynamic", item: codexThreadItem{ID: "dynamic-1", Type: "dynamicToolCall", Tool: "lookup", Arguments: map[string]any{"id": 1}, Success: boolPointer(false)}, toolName: "lookup", isError: true},
-		{name: "dynamic declined", item: codexThreadItem{ID: "dynamic-declined", Type: "dynamicToolCall", Tool: "lookup", Status: "declined"}, toolName: "lookup", isError: true, hookStatus: "denied"},
-		{name: "dynamic failed without success", item: codexThreadItem{ID: "dynamic-2", Type: "dynamicToolCall", Tool: "lookup", Status: "failed"}, toolName: "lookup", isError: true},
-		{name: "spawn subagent thread", item: codexThreadItem{ID: "spawn-1", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed", Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"}, AgentsStates: map[string]codexAgentState{"thread-child": {Status: "running"}}}, toolName: "spawn_agent"},
+		{name: "dynamic", item: ThreadItem{ID: "dynamic-1", Type: "dynamicToolCall", Tool: "lookup", Arguments: map[string]any{"id": 1}, Success: boolPointer(false)}, toolName: "lookup", isError: true},
+		{name: "dynamic declined", item: ThreadItem{ID: "dynamic-declined", Type: "dynamicToolCall", Tool: "lookup", Status: "declined"}, toolName: "lookup", isError: true, hookStatus: "denied"},
+		{name: "dynamic failed without success", item: ThreadItem{ID: "dynamic-2", Type: "dynamicToolCall", Tool: "lookup", Status: "failed"}, toolName: "lookup", isError: true},
+		{name: "spawn subagent thread", item: ThreadItem{ID: "spawn-1", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed", Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"}, AgentsStates: map[string]AgentState{"thread-child": {Status: "running"}}}, toolName: "spawn_agent"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -853,10 +853,10 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 			}
 		})
 	}
-	spawn := codexThreadItem{
+	spawn := ThreadItem{
 		ID: "spawn-details", Type: "collabAgentToolCall", Tool: "spawnAgent", Status: "completed",
 		Prompt: stringPointer("review code"), ReceiverThreadIDs: []string{"thread-child"},
-		AgentsStates: map[string]codexAgentState{"thread-child": {Status: "completed"}},
+		AgentsStates: map[string]AgentState{"thread-child": {Status: "completed"}},
 	}
 	_, arguments, _, err := codexToolCall(spawn)
 	if err != nil || !strings.Contains(arguments, `"description":"review code"`) {
@@ -874,7 +874,7 @@ func TestCodexToolAdaptersCoverFileAndExternalTools(t *testing.T) {
 
 func TestCodexFileChangePreservesStructuredChanges(t *testing.T) {
 	t.Parallel()
-	item := codexThreadItem{
+	item := ThreadItem{
 		ID: "file-1", Type: "fileChange",
 		Changes: []any{
 			map[string]any{"path": "a.go", "kind": map[string]any{"type": "update"}, "diff": "*** Begin Patch\n*** Update File: a.go\n@@\n-old\n+new\n*** End Patch"},
@@ -944,11 +944,11 @@ func (r *codexWorkerRPC) Call(_ context.Context, method string, params any, resu
 		}
 	}
 	if method == "thread/turns/list" {
-		turns := append([]codexTurn(nil), r.turns...)
+		turns := append([]Turn(nil), r.turns...)
 		if turns == nil && r.activeTurnID != "" {
-			turns = []codexTurn{{ID: r.activeTurnID, Status: "inProgress"}}
+			turns = []Turn{{ID: r.activeTurnID, Status: "inProgress"}}
 		}
-		payload, err := sonic.Marshal(codexTurnList{Data: turns})
+		payload, err := sonic.Marshal(TurnList{Data: turns})
 		if err != nil {
 			return err
 		}
@@ -963,7 +963,7 @@ func TestCodexPauseAcknowledgesAlreadyInterruptedTurn(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{
 		methodErrors: map[string]error{"turn/interrupt": &codexapp.RPCError{Code: -32600, Message: "turn is not active"}},
-		turns:        []codexTurn{{ID: "turn-old", Status: "interrupted"}},
+		turns:        []Turn{{ID: "turn-old", Status: "interrupted"}},
 	}
 	runtime, _ := newCodexInputTestRuntime(t, "session-pause-terminal", rpc)
 	runtime.activeTurnID = "turn-old"
@@ -993,8 +993,8 @@ func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testin
 		t.Fatal(err)
 	}
 	rpc := &codexWorkerRPC{turnID: "turn-new"}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-pause-message"}},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-pause-message"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-old", turnStarted: now,
 		messages: make(map[string]string), toolNames: make(map[string]string), toolArguments: make(map[string]string),
 		toolNativeNames: make(map[string]string),
@@ -1008,7 +1008,7 @@ func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testin
 		t.Fatalf("message applied before turn barrier: runtime=%#v", runtime)
 	}
 	runtime.messagePending = true
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{
 		Method: "turn/completed",
 		Params: []byte(`{"turn":{"id":"turn-old","status":"interrupted","durationMs":10}}`),
 	}); err != nil {
@@ -1074,8 +1074,8 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpc := &codexWorkerRPC{turnID: "turn-new"}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-replay"}},
+	runtime := &Runtime{
+		cfg:   Config{Config: workerbase.Config{SessionID: "session-replay"}},
 		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string),
 		toolNames: make(map[string]string), toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
 	}
@@ -1090,7 +1090,7 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 		t.Fatal("replayed message bypassed open turn barrier")
 	}
 	runtime.messagePending = true
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{
 		Method: "turn/completed", Params: []byte(`{"turn":{"id":"turn-old","status":"interrupted"}}`),
 	}); err != nil {
 		t.Fatal(err)
@@ -1106,7 +1106,7 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 func TestResumeCodexThreadClassifiesAnotherAppOwnership(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{err: &codexapp.RPCError{Code: -32600, Message: "thread thread-1 already has an active writer"}}
-	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
+	err := resumeCodexThread(context.Background(), rpc, Config{
 		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 	})
 	if !errors.Is(err, workerbase.ErrRuntimeOccupied) {
@@ -1126,7 +1126,7 @@ func (r *codexWorkerRPC) RespondResult(id json.RawMessage, result any) error {
 func TestResumeCodexThreadUsesCWDWithoutUpdatingProject(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{}
-	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
+	err := resumeCodexThread(context.Background(), rpc, Config{
 		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 	})
 	if err != nil {
@@ -1149,7 +1149,7 @@ func TestResumeCodexThreadInjectsChannelDeveloperInstructions(t *testing.T) {
 		ReviewAllTools:       true,
 		Revision:             1,
 	}
-	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
+	err := resumeCodexThread(context.Background(), rpc, Config{
 		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 		DeveloperInstructions: codexDeveloperInstructions(prompt), AutoReview: prompt.ReviewAllTools, AutoReviewPolicy: codexAutoReviewPolicy(prompt),
 	})
@@ -1236,7 +1236,7 @@ func TestCodexAutoReviewPolicyKeepsMandatoryBaselineWithoutOwnerRestrictions(t *
 func TestStartCodexThreadAppliesAutoReview(t *testing.T) {
 	t.Parallel()
 	policy := codexAutoReviewPolicy(zotigosession.PromptConfig{ReviewAllTools: true, Revision: 1})
-	cfg := codexWorkerConfig{
+	cfg := Config{
 		WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 		AutoReview: true, AutoReviewPolicy: policy,
 	}
@@ -1261,7 +1261,7 @@ func TestStartCodexThreadAppliesAutoReview(t *testing.T) {
 
 func TestCodexThreadInstallsChannelToolsOnlyOnStart(t *testing.T) {
 	t.Parallel()
-	cfg := codexWorkerConfig{WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna", ChannelToolsVersion: 1}
+	cfg := Config{WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna", ChannelToolsVersion: 1}
 	startRPC := &codexWorkerRPC{}
 	if _, err := startCodexThread(context.Background(), startRPC, cfg); err != nil {
 		t.Fatal(err)
@@ -1289,8 +1289,8 @@ func TestCodexChannelToolCallUsesWorkerRPC(t *testing.T) {
 	t.Parallel()
 	rpc := &codexWorkerRPC{}
 	results := make(chan wire.RuntimeToolResult, 1)
-	runtime := &codexWorkerRuntime{
-		cfg: codexWorkerConfig{ChannelToolsVersion: 1}, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
+	runtime := &Runtime{
+		cfg: Config{ChannelToolsVersion: 1}, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
 		writer:               workerbase.NewUnstartedWriter(nil, 1),
 		runtimeToolResults:   results,
 		activeRequestContext: &protocol.RequestContext{Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1"},

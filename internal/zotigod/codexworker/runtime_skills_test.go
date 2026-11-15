@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"os"
@@ -10,7 +10,7 @@ import (
 func TestCodexRuntimeBuildsTextAndStructuredSkillInputs(t *testing.T) {
 	workspace := t.TempDir()
 	path := writeDaemonTestSkill(t, filepath.Join(workspace, ".agents", "skills"), "review-taste", "review", "review carefully")
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{WorkingDirectory: workspace}}
+	runtime := &Runtime{cfg: Config{WorkingDirectory: workspace}}
 	inputs, err := runtime.codexInputs("review this", nil, []string{"review-taste"})
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +31,7 @@ func TestCodexRuntimeBuildsTextAndStructuredSkillInputs(t *testing.T) {
 }
 
 func TestCodexRuntimeMaterializesBuiltinSkill(t *testing.T) {
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{WorkingDirectory: t.TempDir()}}
+	runtime := &Runtime{cfg: Config{WorkingDirectory: t.TempDir()}}
 	inputs, err := runtime.codexInputs("create a skill", nil, []string{"skill-creator"})
 	if err != nil {
 		t.Fatal(err)

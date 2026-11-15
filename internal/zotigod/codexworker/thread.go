@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-chan wire.ConversationBoundResult) error {
+func (r *Runtime) startThread(ctx context.Context, boundResults <-chan wire.ConversationBoundResult) error {
 	threadID, err := startCodexThread(ctx, r.app, r.cfg)
 	if err != nil {
 		return err
@@ -46,7 +46,7 @@ func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-cha
 	}
 }
 
-func startCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) (string, error) {
+func startCodexThread(ctx context.Context, app codexapp.RPC, cfg Config) (string, error) {
 	params := codexThreadParams(cfg, true)
 	var response struct {
 		Thread struct {
@@ -136,7 +136,7 @@ func applyCodexAutoReview(params map[string]any, enabled bool, policy string) {
 	params["config"] = config
 }
 
-func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[string]any {
+func codexThreadParams(cfg Config, includeDynamicTools bool) map[string]any {
 	params := map[string]any{
 		"cwd": cfg.WorkingDirectory, "model": cfg.Model,
 		"approvalPolicy": codexApprovalPolicy(cfg.ApprovalPolicy),

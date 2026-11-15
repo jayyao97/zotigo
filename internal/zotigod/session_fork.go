@@ -15,6 +15,7 @@ import (
 	session "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
@@ -176,7 +177,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	child.LastPrompt = ""
 	child.Capabilities.ChannelToolsVersion = 0
 	if source.Agent == "codex" {
-		child.ConversationID, err = forkCodexConversation(ctx, h.codexSync.host, source, throughTurnID)
+		child.ConversationID, err = codexworker.ForkConversation(ctx, h.codexSync.host, source, throughTurnID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 		}
@@ -199,12 +200,12 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		if acquireErr != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, acquireErr)
 		}
-		turns, readErr := readCodexThreadHistory(ctx, lease.RPC, child.ConversationID)
+		turns, readErr := codexworker.ReadThreadHistory(ctx, lease.RPC, child.ConversationID)
 		_ = lease.Release()
 		if readErr != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, readErr)
 		}
-		if err := syncCompletedCodexTurns(ctx, h.items, targetID, turns); err != nil {
+		if err := codexworker.SyncCompletedTurns(ctx, h.items, targetID, turns); err != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 		}
 	} else {

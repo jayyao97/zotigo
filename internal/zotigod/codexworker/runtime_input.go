@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) wire.InputResult {
+func (r *Runtime) AcceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) wire.InputResult {
 	result := wire.InputResult{RequestID: request.RequestID}
 	command, err := r.acceptInput(ctx, request, boundResults, notifications, workerChannels...)
 	if err != nil {
@@ -29,7 +29,7 @@ func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.Input
 	return result
 }
 
-func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) (wire.Command, error) {
+func (r *Runtime) acceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) (wire.Command, error) {
 	source := sessionlog.StoredItemSource{Store: r.store}
 	if existing, found, err := sessionlog.FindExistingInput(ctx, source, r.cfg.SessionID, request.Command, r.cfg.SessionStoreRoot); err != nil {
 		return wire.Command{}, err
@@ -85,7 +85,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 		if err != nil {
 			return wire.Command{}, err
 		}
-		if err := r.persistSteering(stored, activeTurnID); err != nil {
+		if err := r.PersistSteering(stored, activeTurnID); err != nil {
 			return wire.Command{}, err
 		}
 		r.acknowledgeCommand(stored.Sequence)
@@ -102,7 +102,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 		if err != nil {
 			return wire.Command{}, err
 		}
-		if err := r.persistSteering(stored, activeTurnID); err != nil {
+		if err := r.PersistSteering(stored, activeTurnID); err != nil {
 			return wire.Command{}, err
 		}
 		r.acknowledgeCommand(stored.Sequence)
@@ -127,7 +127,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 	return stored, nil
 }
 
-func (r *codexWorkerRuntime) classifyTurnSteerError(ctx context.Context, expectedTurnID string, steerErr error) error {
+func (r *Runtime) classifyTurnSteerError(ctx context.Context, expectedTurnID string, steerErr error) error {
 	var rpcErr *codexapp.RPCError
 	if !errors.As(steerErr, &rpcErr) || rpcErr.Code != -32600 {
 		return steerErr
@@ -152,7 +152,7 @@ func (r *codexWorkerRuntime) classifyTurnSteerError(ctx context.Context, expecte
 	return steerErr
 }
 
-func (r *codexWorkerRuntime) callTurnStart(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) (string, zotigosession.DisplayRuntime, error) {
+func (r *Runtime) callTurnStart(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) (string, zotigosession.DisplayRuntime, error) {
 	if command.Message == nil {
 		return "", zotigosession.DisplayRuntime{}, fmt.Errorf("codex message payload is missing")
 	}
@@ -193,7 +193,7 @@ func (r *codexWorkerRuntime) callTurnStart(ctx context.Context, command wire.Com
 	return response.Turn.ID, zotigosession.DisplayRuntime{Agent: "codex", Model: stored.Model, ReasoningEffort: stored.ReasoningEffort}, nil
 }
 
-func (r *codexWorkerRuntime) callTurnSteer(ctx context.Context, command wire.Command, turnID string) error {
+func (r *Runtime) callTurnSteer(ctx context.Context, command wire.Command, turnID string) error {
 	if command.Steering == nil {
 		return fmt.Errorf("codex steering payload is missing")
 	}
@@ -213,7 +213,7 @@ func (r *codexWorkerRuntime) callTurnSteer(ctx context.Context, command wire.Com
 	return nil
 }
 
-func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command wire.Command, turnID string, runtime zotigosession.DisplayRuntime) error {
+func (r *Runtime) recordTurnStarted(ctx context.Context, command wire.Command, turnID string, runtime zotigosession.DisplayRuntime) error {
 	r.activeTurnID = turnID
 	r.turnStarted = time.Now()
 	r.turnModel = runtime.Model
@@ -224,7 +224,7 @@ func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command wire
 	} else {
 		r.activeRequestContext = nil
 	}
-	if err := r.append(zotigosession.DisplayItem{
+	if err := r.Append(zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "in_progress", Runtime: &runtime},
 	}); err != nil {
@@ -240,7 +240,7 @@ func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command wire
 	return nil
 }
 
-func (r *codexWorkerRuntime) persistSteering(command wire.Command, turnID string) error {
+func (r *Runtime) PersistSteering(command wire.Command, turnID string) error {
 	// turn/steer acknowledges admission, not an item/generation boundary.
 	// Anchor only items already in flight; later item/started notifications
 	// belong after this input. Keep the first boundary for repeated steering.
@@ -265,10 +265,10 @@ func (r *codexWorkerRuntime) persistSteering(command wire.Command, turnID string
 		Type: wire.CommandSteering, Text: command.Steering.Text, Images: sessionlog.CommandImages(images), Skills: append([]string(nil), command.Steering.Skills...), TurnID: turnID,
 	}
 	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Steering.Text)
-	return r.append(item)
+	return r.Append(item)
 }
 
-func (r *codexWorkerRuntime) consumeThroughTurnCompletion(ctx context.Context, turnID string, channels codexWorkerChannels, notifications <-chan codexapp.Message) error {
+func (r *Runtime) consumeThroughTurnCompletion(ctx context.Context, turnID string, channels codexWorkerChannels, notifications <-chan codexapp.Message) error {
 	for r.activeTurnID == turnID {
 		select {
 		case <-ctx.Done():
@@ -310,7 +310,7 @@ func (r *codexWorkerRuntime) consumeThroughTurnCompletion(ctx context.Context, t
 				}
 				continue
 			}
-			if err := r.handleNotification(ctx, message); err != nil {
+			if err := r.HandleNotification(ctx, message); err != nil {
 				return err
 			}
 		}
@@ -323,7 +323,7 @@ func codexInputs(text string, images []wire.CommandImageData) []map[string]any {
 	return inputs
 }
 
-func (r *codexWorkerRuntime) codexInputs(text string, images []wire.CommandImageData, names []string) ([]map[string]any, error) {
+func (r *Runtime) codexInputs(text string, images []wire.CommandImageData, names []string) ([]map[string]any, error) {
 	if len(names) == 0 {
 		return codexInputs(text, images), nil
 	}
@@ -383,7 +383,7 @@ func buildCodexInputs(text string, images []wire.CommandImageData, selected []*s
 	return inputs, nil
 }
 
-func (r *codexWorkerRuntime) codexSkillPath(skill *skills.SkillDefinition) (string, error) {
+func (r *Runtime) codexSkillPath(skill *skills.SkillDefinition) (string, error) {
 	if filepath.IsAbs(skill.Path) {
 		return skill.Path, nil
 	}
@@ -413,7 +413,7 @@ func (r *codexWorkerRuntime) codexSkillPath(skill *skills.SkillDefinition) (stri
 	return path, nil
 }
 
-func (r *codexWorkerRuntime) cleanupSkillFiles() error {
+func (r *Runtime) cleanupSkillFiles() error {
 	if r == nil || r.skillTempDir == "" {
 		return nil
 	}

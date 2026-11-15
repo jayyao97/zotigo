@@ -16,6 +16,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
@@ -32,17 +33,17 @@ func TestCodexWorkerPersistsGeneratedImageAcrossReload(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-image", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-image"}, SessionStoreRoot: root},
-		store: store, threadID: "thread-1", activeTurnID: "turn-1",
-	}
+	runtime := codexworker.NewRuntimeForTest(codexworker.RuntimeForTest{
+		Config: codexworker.Config{Config: workerbase.Config{SessionID: "session-image"}, SessionStoreRoot: root},
+		Store:  store, ThreadID: "thread-1", ActiveTurnID: "turn-1",
+	})
 	generatedPath := filepath.Join(t.TempDir(), "codex-generated.png")
 	generatedBytes, _ := base64.StdEncoding.DecodeString(tinyPNGBase64())
 	if err := os.WriteFile(generatedPath, generatedBytes, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"image-1","type":"imageGeneration","status":"completed","savedPath":%q,"revisedPrompt":"a blue circle"}}`, generatedPath)
-	if err := runtime.handleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
+	if err := runtime.HandleNotification(context.Background(), codexapp.Message{Method: "item/completed", Params: []byte(params)}); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-image")
@@ -100,13 +101,13 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	const sessionID = "codex-steering-order"
 	sessionlogtest.PutStoredSession(t, store, sessionID, t.TempDir())
 	writer := workerbase.NewUnstartedWriter(nil, 32)
-	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}},
-		store: store, threadID: "thread-1", activeTurnID: "turn-1", writer: writer, messages: make(map[string]string),
-	}
+	runtime := codexworker.NewRuntimeForTest(codexworker.RuntimeForTest{
+		Config: codexworker.Config{Config: workerbase.Config{SessionID: sessionID}},
+		Store:  store, ThreadID: "thread-1", ActiveTurnID: "turn-1", Writer: writer, Messages: make(map[string]string),
+	})
 	notify := func(method, item string) {
 		t.Helper()
-		if err := runtime.handleNotification(t.Context(), codexapp.Message{
+		if err := runtime.HandleNotification(t.Context(), codexapp.Message{
 			Method: method, Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","item":` + item + `}`),
 		}); err != nil {
 			t.Fatal(err)
@@ -116,13 +117,13 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	notify("item/started", `{"id":"answer","type":"agentMessage"}`)
 	notify("item/started", `{"id":"shell","type":"commandExecution","command":"echo hello","cwd":"/tmp"}`)
 	for _, id := range []string{"steer-1", "steer-2"} {
-		if err := runtime.persistSteering(wire.Command{
+		if err := runtime.PersistSteering(wire.Command{
 			ID: id, Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: id},
 		}, "turn-1"); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := runtime.handleNotification(t.Context(), codexapp.Message{
+	if err := runtime.HandleNotification(t.Context(), codexapp.Message{
 		Method: "item/agentMessage/delta", Params: []byte(`{"turnId":"turn-1","itemId":"answer","delta":"tail"}`),
 	}); err != nil {
 		t.Fatal(err)
@@ -166,8 +167,8 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 			t.Fatal("new output incorrectly moved before steering")
 		}
 	}
-	if marked != 3 || len(runtime.displayItems) != 0 {
-		t.Fatalf("marked=%d active items=%+v", marked, runtime.displayItems)
+	if marked != 3 || runtime.ActiveDisplayItemCountForTest() != 0 {
+		t.Fatalf("marked=%d active items=%+v", marked, runtime.ActiveDisplayItemCountForTest())
 	}
 }
 

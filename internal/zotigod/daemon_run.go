@@ -26,6 +26,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/update"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/worker"
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
@@ -99,7 +100,7 @@ func Run(args []string) (exitCode int) {
 		}
 		workerAuthToken := os.Getenv(workerAuthTokenEnv)
 		_ = os.Unsetenv(workerAuthTokenEnv)
-		if err := runCodexWorkerClient(context.Background(), codexWorkerConfig{
+		if err := codexworker.Run(context.Background(), codexworker.Config{
 			Config:           workerbase.Config{DaemonURL: daemonURL, SessionID: *workerSessionID, Activation: *workerActivation, AuthToken: workerAuthToken},
 			SocketPath:       *codexSocket,
 			WorkingDirectory: *codexWorkingDirectory, Model: *codexModel,

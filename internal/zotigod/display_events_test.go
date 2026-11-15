@@ -16,6 +16,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 	"github.com/jayyao97/zotigo/internal/zotigod/worker"
@@ -639,8 +640,8 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}}, store: store, writer: writer}
-				if err := runtime.append(item); err != nil {
+				runtime := codexworker.NewRuntimeForTest(codexworker.RuntimeForTest{Config: codexworker.Config{Config: workerbase.Config{SessionID: sessionID}}, Store: store, Writer: writer})
+				if err := runtime.Append(item); err != nil {
 					t.Fatal(err)
 				}
 			}

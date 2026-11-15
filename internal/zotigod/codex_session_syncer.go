@@ -11,6 +11,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
@@ -76,7 +77,7 @@ func (s *codexSessionSyncer) Sync(ctx context.Context) error {
 		return fmt.Errorf("acquire Codex metadata connection: %w", err)
 	}
 	defer func() { _ = lease.Release() }()
-	activity, err := listCodexThreadActivity(ctx, lease.RPC, candidates)
+	activity, err := codexworker.ListThreadActivity(ctx, lease.RPC, candidates)
 	if err != nil {
 		return err
 	}
@@ -122,7 +123,7 @@ func (s *codexSessionSyncer) syncCandidate(ctx context.Context, rpc codexapp.RPC
 }
 
 func (s *codexSessionSyncer) syncSession(ctx context.Context, rpc codexapp.RPC, meta zotigosession.Metadata) error {
-	var history codexThreadSnapshot
+	var history codexworker.ThreadSnapshot
 	if err := rpc.Call(ctx, "thread/read", map[string]any{
 		"threadId": meta.ConversationID, "includeTurns": false,
 	}, &history); err != nil {
@@ -135,11 +136,11 @@ func (s *codexSessionSyncer) syncSession(ctx context.Context, rpc codexapp.RPC, 
 		return fmt.Errorf("read changed thread: missing updatedAt")
 	}
 	snapshotUpdatedAt := time.Unix(history.Thread.UpdatedAt, 0).UTC()
-	turns, err := readCodexThreadHistory(ctx, rpc, meta.ConversationID)
+	turns, err := codexworker.ReadThreadHistory(ctx, rpc, meta.ConversationID)
 	if err != nil {
 		return err
 	}
-	if err := syncCompletedCodexTurns(ctx, s.items, meta.ID, turns); err != nil {
+	if err := codexworker.SyncCompletedTurns(ctx, s.items, meta.ID, turns); err != nil {
 		return err
 	}
 	updater, ok := s.store.(backendActivityUpdater)

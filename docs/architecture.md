@@ -102,11 +102,12 @@ Notes on specific packages:
 
 | Package | What it is | Why it is separate |
 | --- | --- | --- |
-| `zotigod` | The session service: HTTP handlers, session registry, worker supervision, display log, input queue, approvals, channels dispatch, the entry point that dispatches a process to the daemon or a worker, and the Codex bridge worker. | See Processes. |
+| `zotigod` | The daemon: HTTP handlers, the session and worker registries, worker supervision, the input queue, approvals, channels dispatch, the Codex history syncer, and the entry point that dispatches a process to the daemon or to one of the worker packages. | See Processes. |
 | `zotigod/wire` | The daemon↔worker protocol as data: the WebSocket frame and its payloads, the commands delivered to workers, and the bodies and headers of the worker's `/internal/*` calls. It imports only `core`. | The two sides are different processes and can be different builds during an update, so what they exchange should be a compile-time fact with a pinned format (`wire_test.go`). It is the first step of separating daemon and worker. |
 | `zotigod/sessionlog` | The session display log as both processes use it: the item-source interfaces and their store-backed implementation (`ItemSource`, `StoredItemSource`), the eventing wrappers and the live `EventBroker` that carries previews next to the durable log, the durable log writer (`Log`: turns, blocks, tool calls, subagents, steering, approvals), approval requests, their validation and their conversion to the wire form (`ApprovalRequest`, `PublicApprovalRequest`), session-input acceptance and deduplication with its sentinel errors (`AppendAcceptedInput`, `FindExistingInput`, `ValidateCompletionSteering`, `ErrActiveTurn`, `ErrCommandIDConflict`), interaction requests and answer validation (`NewUserInputInteraction`, `ValidateInteractionAnswers`), the conversion of command items back into `wire.Command` values and user messages (`CommandFromItem`, `UserMessageFromCommand`), the item helpers the writer needs (`MessageItem`, `MessageImage`, `LastOpenTurn`), message-image blob storage and validation with its limits (`StoreMessageImageBlobs`, `CleanupMessageImageBlobs`, `ValidateMessageImageData`, `IsAllowedMessageImageMimeType`, `MessageImageRefs`, `PublicImageURLFromBlobPath`, `MaxMessageImageBytes`), and ID generation. It imports `core` and `zotigod/wire`, never `zotigod`. | The daemon and the worker processes both run this code. It sits below the daemon and the workers so that a worker package does not need the daemon. |
-| `zotigod/workerbase` | What every worker process is built on: the daemon connection (`Config`, `ConnectURL`, `NewHTTPClient`, `AcquireSessionLock`, `EnsureSession`, `ReportReady`, `ReportFinish`, `IsExpectedClose` and the timing constants), the queued WebSocket writer and display barrier (`Writer`, `DisplayBarrierClient`), command fetch and cursor recovery (`CommandCursor`, `FetchCommands`, `LoadCommandCursor`, `RecoverCommandCursor`, `LatestCommandSequence`), turn hooks (`HookDispatcher`, `DispatchTurnStartHook`, `DispatchTurnEndHook`, `TurnUsageDelta`), the session tool specs and the runtime-tool client that carries tool calls to the daemon (`SessionToolSpecs`, `SessionRuntimeTool`, `RuntimeToolClient`, `ChannelReadMessagesTool`), approval-policy and profile persistence (`PersistSessionApprovalPolicy`, `PersistSessionProfile`, `LowersPermissions`), and the sentinels and reason strings both sides compare (`ErrRuntimeOccupied`, `ErrSessionNotFound`, `ProfileStateUncertainError`, `ControlChannelClosedReason`). It imports `core`, `internal/hooks`, `internal/channels`, `zotigod/wire` and `zotigod/sessionlog`, never `zotigod`. | The native worker and the Codex bridge worker both run this code, and the daemon shares a few pieces of it (timeouts, the cursor scan, policy persistence, the hook dispatcher type). It sits below both workers so that each can be a package of its own (the native worker is; the Codex worker is not yet). |
+| `zotigod/workerbase` | What every worker process is built on: the daemon connection (`Config`, `ConnectURL`, `NewHTTPClient`, `AcquireSessionLock`, `EnsureSession`, `ReportReady`, `ReportFinish`, `IsExpectedClose` and the timing constants), the queued WebSocket writer and display barrier (`Writer`, `DisplayBarrierClient`), command fetch and cursor recovery (`CommandCursor`, `FetchCommands`, `LoadCommandCursor`, `RecoverCommandCursor`, `LatestCommandSequence`), turn hooks (`HookDispatcher`, `DispatchTurnStartHook`, `DispatchTurnEndHook`, `TurnUsageDelta`), the session tool specs and the runtime-tool client that carries tool calls to the daemon (`SessionToolSpecs`, `SessionRuntimeTool`, `RuntimeToolClient`, `ChannelReadMessagesTool`), approval-policy and profile persistence (`PersistSessionApprovalPolicy`, `PersistSessionProfile`, `LowersPermissions`), and the sentinels and reason strings both sides compare (`ErrRuntimeOccupied`, `ErrSessionNotFound`, `ProfileStateUncertainError`, `ControlChannelClosedReason`). It imports `core`, `internal/hooks`, `internal/channels`, `zotigod/wire` and `zotigod/sessionlog`, never `zotigod`. | The native worker and the Codex bridge worker both run this code, and the daemon shares a few pieces of it (timeouts, the cursor scan, policy persistence, the hook dispatcher type). It sits below both workers so that each is a package of its own. |
 | `zotigod/worker` | The native worker process, one per session: it connects to the daemon through `workerbase`, builds the agent runtime, applies the commands the daemon delivers, runs turns and writes the session log. The daemon binary enters it through `worker.Run`; `Runtime` is the per-session runtime. Its blank imports register the model providers. It imports `core`, `internal/wiring`, `zotigod/wire`, `zotigod/sessionlog` and `zotigod/workerbase`, never `zotigod`. | The worker is a separate process and a client of the daemon. As a package it cannot reach daemon state, and its tests run without the daemon's fixtures. |
+| `zotigod/codexworker` | The Codex bridge worker process, one per Codex-backed session: it connects to the daemon through `workerbase` and to a Codex app server, and translates Codex threads, turns and items into the session log. The daemon binary enters it through `codexworker.Run` with a `codexworker.Config`; `Runtime` is the per-session bridge. It also holds the Codex thread reading and conversion the daemon uses for history sync and fork (`ReadThreadHistory`, `ListThreadActivity`, `SyncCompletedTurns`, `ForkConversation`, `ErrHistoryAPIUnsupported` and the thread data types `ThreadSnapshot`, `Thread`, `Turn`, `ThreadItem`). It imports `core`, `internal/codexapp`, `internal/hooks`, `internal/channels`, `internal/wiring`, `zotigod/wire`, `zotigod/sessionlog` and `zotigod/workerbase`, never `zotigod` or `zotigod/worker`. | The bridge is a separate process and a client of the daemon, and it shares no code with the native worker beyond `workerbase`. As a package it cannot reach daemon state, and its tests run without the daemon's fixtures. |
 | `zotigodclient` | Go client for the public API plus daemon discovery and start. | The TUI and ACP need exactly the same attach, resubmit and stop logic. |
 | `wiring` | Builds an agent the way the product wants it: prompt builders, tool set, observer, classifier. | One place decides "what a Zotigo agent is" so the worker and any future host do not diverge. |
 | `sessionadapter` | Maps `agent.Snapshot` to and from `session.Session`. | Keeps persistence mapping out of both the agent and the store. |
@@ -127,9 +128,14 @@ package reads as groups:
   `input_queue.go`, `approval*`, `interaction_handlers.go`, `codex_request_expiry.go`: the command surface
 - `worker_attach_handlers.go`, `worker_registry.go`, `worker_process.go`,
   `worker_display_log.go`: the daemon's side of the worker link
-- `codex_*`: the Codex worker process
-- `worker_client_daemon_test.go`: daemon tests that drive the native worker
-  (`internal/zotigod/worker`) against the real handler
+- `codex_session_syncer.go`, `codex_input_images.go`,
+  `codex_request_expiry.go`, `codex_settings_handler.go`: the daemon's own
+  Codex code (history sync under the session registry and operation locks,
+  and handlers)
+- `worker_client_daemon_test.go`, `codex_worker_client_daemon_test.go`,
+  `codex_session_syncer_daemon_test.go`: daemon tests that drive the native
+  worker (`internal/zotigod/worker`) or the Codex bridge
+  (`internal/zotigod/codexworker`) against the real handler
 - `channel_*`, `catalog_handlers.go`, `file_*`, `*_handler.go`: feature APIs
 
 ### cli
@@ -166,6 +172,13 @@ scans the imports of every production Go file against a small rule table:
     `internal/zotigod/workerbase` are the allowed exceptions under
     `internal/zotigod`. Rules 7 to 9 keep those three from importing
     `internal/zotigod/worker`.
+11. `internal/zotigod/codexworker` must not import `internal/zotigod`,
+    `internal/zotigodclient`, `internal/cliapp`, `internal/acpserver`, `cli` or
+    `cmd`, with the same three exceptions as rule 10. Because
+    `internal/zotigod/worker` and `internal/zotigod/codexworker` are both
+    under `internal/zotigod` and neither is an exception, rules 10 and 11
+    keep the two workers from importing each other, and rules 7 to 9 keep
+    `wire`, `sessionlog` and `workerbase` from importing either.
 
 Tests are exempt: a test may import upward to build a fixture. When adding a
 package, decide its level and add it to the table.
@@ -235,31 +248,11 @@ Changing any of these needs a migration or a version check, not a refactor:
 
 ## Known debt
 
-- `internal/zotigod` still holds the daemon and the Codex bridge worker in
-  one package. The native worker is its own package
-  (`internal/zotigod/worker`), above the protocol data
-  (`internal/zotigod/wire`), the shared session-log logic
-  (`internal/zotigod/sessionlog`) and the plumbing both workers are built on
-  (`internal/zotigod/workerbase`). The Codex files that are to become
-  `internal/zotigod/codexworker` (`codex_worker_client.go`,
-  `codex_runtime.go`, `codex_runtime_commands.go`, `codex_runtime_input.go`,
-  `codex_runtime_requests.go`, `codex_notifications.go`, `codex_thread.go`,
-  `codex_media.go`, `codex_session_sync.go`, `codex_fork.go`) use no
-  package-level symbol from the rest of `zotigod`; the rest uses 8 of
-  theirs: the entry point and its configuration (`runCodexWorkerClient`,
-  `codexWorkerConfig`), thread history and its sync into the display log
-  (`codexThreadSnapshot`, `listCodexThreadActivity`,
-  `readCodexThreadHistory`, `syncCompletedCodexTurns`,
-  `errCodexHistoryAPIUnsupported`) and `forkCodexConversation`. The daemon's
-  own Codex code stays in `zotigod`: the session syncer
-  (`codex_session_syncer.go`), which holds the session registry and the
-  operation locks, and the handlers in `codex_input_images.go`,
-  `codex_request_expiry.go` and `codex_settings_handler.go`. Three daemon
-  tests (`codex_session_syncer_daemon_test.go`,
-  `codex_worker_client_daemon_test.go`, and one test each in
-  `display_events_test.go` and `session_fork_test.go`) build Codex thread
-  values or a `codexWorkerRuntime` directly, so the move will export those
-  for tests.
+- `internal/zotigod` is the daemon only, but it is still one flat package of
+  about 14,800 non-test lines in 63 files. Its largest files are
+  `worker_registry.go` (923 lines), `catalog_handlers.go` (822),
+  `session_tools.go` (714), `input_queue.go` (611) and `channel_dispatch.go`
+  (610). Nothing inside it is enforced: any handler can reach any registry.
 - Some names are exported only for tests in another package, because daemon
   tests in `internal/zotigod` drive a real worker runtime in-process against
   the real handler: `worker.NewRuntimeForTest`, `worker.ReadMessages`,
@@ -267,7 +260,14 @@ Changing any of these needs a migration or a version check, not a refactor:
   `(*Writer).Queue`, `(*Writer).Run`, `workerbase.DeltaBufferSize`,
   `workerbase.RecoverAppliedCommandSequence`;
   `sessionlog.(*EventBroker).SubscriberCount`, `(*Log).HasToolCallWaiter`,
-  `(*Log).AppendItem`. None has a production caller outside its own package.
+  `(*Log).AppendItem`; `codexworker.NewRuntimeForTest` with
+  `codexworker.RuntimeForTest`, `(*Runtime).ActiveDisplayItemCountForTest`,
+  the type name `codexworker.Runtime`, and the Codex thread data types that
+  only test fixtures name (`ThreadItem`, `ThreadItemEntry`, `ThreadItemList`,
+  `ThreadList`, `TurnList`). None has a production caller outside its own
+  package. Three `codexworker.Runtime` methods are used in production inside
+  the package and are exported only because tests in another package call
+  them: `HandleNotification`, `PersistSteering` and `Append`.
 - `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
 - `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
   writes a "user approved action" audit event that the production path

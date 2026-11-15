@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -14,50 +14,50 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
-var errCodexHistoryAPIUnsupported = errors.New("codex history API is unsupported")
+var ErrHistoryAPIUnsupported = errors.New("codex history API is unsupported")
 
-type codexThreadSnapshot struct {
-	Thread codexThread `json:"thread"`
+type ThreadSnapshot struct {
+	Thread Thread `json:"thread"`
 }
 
-type codexThread struct {
-	ID        string      `json:"id"`
-	UpdatedAt int64       `json:"updatedAt"`
-	Turns     []codexTurn `json:"turns"`
+type Thread struct {
+	ID        string `json:"id"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Turns     []Turn `json:"turns"`
 }
 
-type codexTurnList struct {
-	Data       []codexTurn `json:"data"`
-	NextCursor *string     `json:"nextCursor"`
+type TurnList struct {
+	Data       []Turn  `json:"data"`
+	NextCursor *string `json:"nextCursor"`
 }
 
-type codexThreadItemEntry struct {
-	TurnID string          `json:"turnId"`
-	Item   codexThreadItem `json:"item"`
+type ThreadItemEntry struct {
+	TurnID string     `json:"turnId"`
+	Item   ThreadItem `json:"item"`
 }
 
-type codexThreadItemList struct {
-	Data       []codexThreadItemEntry `json:"data"`
-	NextCursor *string                `json:"nextCursor"`
+type ThreadItemList struct {
+	Data       []ThreadItemEntry `json:"data"`
+	NextCursor *string           `json:"nextCursor"`
 }
 
-type codexThreadList struct {
-	Data       []codexThread `json:"data"`
-	NextCursor *string       `json:"nextCursor"`
+type ThreadList struct {
+	Data       []Thread `json:"data"`
+	NextCursor *string  `json:"nextCursor"`
 }
 
-type codexTurn struct {
-	ID          string            `json:"id"`
-	Status      string            `json:"status"`
-	StartedAt   *int64            `json:"startedAt"`
-	CompletedAt *int64            `json:"completedAt"`
-	DurationMS  *int64            `json:"durationMs"`
-	Error       *codexTurnError   `json:"error"`
-	Items       []codexThreadItem `json:"items"`
-	ItemsView   string            `json:"itemsView,omitempty"`
+type Turn struct {
+	ID          string       `json:"id"`
+	Status      string       `json:"status"`
+	StartedAt   *int64       `json:"startedAt"`
+	CompletedAt *int64       `json:"completedAt"`
+	DurationMS  *int64       `json:"durationMs"`
+	Error       *TurnError   `json:"error"`
+	Items       []ThreadItem `json:"items"`
+	ItemsView   string       `json:"itemsView,omitempty"`
 }
 
-type codexTurnError struct {
+type TurnError struct {
 	Message string `json:"message"`
 }
 
@@ -68,12 +68,12 @@ type codexUserInput struct {
 	Path string `json:"path,omitempty"`
 }
 
-func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID string) ([]codexTurn, error) {
+func ReadThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID string) ([]Turn, error) {
 	turns, err := listCodexThreadTurns(ctx, rpc, threadID, "notLoaded")
 	if err != nil {
 		return nil, err
 	}
-	turnByID := make(map[string]*codexTurn, len(turns))
+	turnByID := make(map[string]*Turn, len(turns))
 	for index := range turns {
 		turnByID[turns[index].ID] = &turns[index]
 		turns[index].Items = nil
@@ -84,7 +84,7 @@ func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID stri
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		var response codexThreadItemList
+		var response ThreadItemList
 		if err := rpc.Call(ctx, "thread/items/list", params, &response); err != nil {
 			if isCodexMethodUnsupported(err) {
 				return listCodexThreadTurns(ctx, rpc, threadID, "full")
@@ -105,18 +105,18 @@ func readCodexThreadHistory(ctx context.Context, rpc codexapp.RPC, threadID stri
 	}
 }
 
-func listCodexThreadTurns(ctx context.Context, rpc codexapp.RPC, threadID string, itemsView string) ([]codexTurn, error) {
-	turns := make([]codexTurn, 0)
+func listCodexThreadTurns(ctx context.Context, rpc codexapp.RPC, threadID string, itemsView string) ([]Turn, error) {
+	turns := make([]Turn, 0)
 	var cursor string
 	for {
 		params := map[string]any{"threadId": threadID, "limit": 100, "sortDirection": "asc", "itemsView": itemsView}
 		if cursor != "" {
 			params["cursor"] = cursor
 		}
-		var response codexTurnList
+		var response TurnList
 		if err := rpc.Call(ctx, "thread/turns/list", params, &response); err != nil {
 			if isCodexMethodUnsupported(err) {
-				return nil, fmt.Errorf("%w: thread/turns/list", errCodexHistoryAPIUnsupported)
+				return nil, fmt.Errorf("%w: thread/turns/list", ErrHistoryAPIUnsupported)
 			}
 			return nil, fmt.Errorf("list Codex thread turns: %w", err)
 		}
@@ -133,7 +133,7 @@ func isCodexMethodUnsupported(err error) bool {
 	return errors.As(err, &rpcErr) && rpcErr.Code == -32601
 }
 
-func listCodexThreadActivity(ctx context.Context, rpc codexapp.RPC, candidates []zotigosession.Metadata) (map[string]time.Time, error) {
+func ListThreadActivity(ctx context.Context, rpc codexapp.RPC, candidates []zotigosession.Metadata) (map[string]time.Time, error) {
 	wanted := make(map[string]bool, len(candidates))
 	for _, meta := range candidates {
 		wanted[meta.ConversationID] = true
@@ -148,7 +148,7 @@ func listCodexThreadActivity(ctx context.Context, rpc codexapp.RPC, candidates [
 			if cursor != "" {
 				params["cursor"] = cursor
 			}
-			var response codexThreadList
+			var response ThreadList
 			if err := rpc.Call(ctx, "thread/list", params, &response); err != nil {
 				return nil, fmt.Errorf("list Codex thread activity: %w", err)
 			}
@@ -249,7 +249,7 @@ func (s codexTerminalState) matches(desired codexTerminalState) bool {
 	return !desired.hasCompletedAt || s.completedAt == desired.completedAt
 }
 
-func syncCompletedCodexTurns(ctx context.Context, items sessionlog.ItemSource, sessionID string, turns []codexTurn) error {
+func SyncCompletedTurns(ctx context.Context, items sessionlog.ItemSource, sessionID string, turns []Turn) error {
 	existing, _, err := items.LoadItems(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("load display items: %w", err)
@@ -369,7 +369,7 @@ func indexCodexDisplayItems(items []zotigosession.DisplayItem) codexDisplayIndex
 	return index
 }
 
-func associatePendingCodexUsers(index *codexDisplayIndex, turns []codexTurn) {
+func associatePendingCodexUsers(index *codexDisplayIndex, turns []Turn) {
 	usedTurns := make(map[string]bool)
 	for pendingIndex := len(index.pendingLocalUserKeys) - 1; pendingIndex >= 0; pendingIndex-- {
 		key := index.pendingLocalUserKeys[pendingIndex]
@@ -408,7 +408,7 @@ func (i *codexDisplayIndex) addLocalUserKey(turnID string, key string) {
 	i.localUserKeysByTurn[turnID][key] = true
 }
 
-func syncCompletedCodexItem(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
+func syncCompletedCodexItem(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item ThreadItem, seen *codexDisplayIndex) error {
 	if item.ID == "" {
 		return nil
 	}
@@ -525,7 +525,7 @@ func codexUserContentKey(content []zotigosession.DisplayContentPart) string {
 	return strings.Join(parts, "\x1e")
 }
 
-func syncCompletedCodexTool(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
+func syncCompletedCodexTool(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item ThreadItem, seen *codexDisplayIndex) error {
 	name, arguments, ok, err := codexToolCall(item)
 	if err != nil || !ok {
 		return err

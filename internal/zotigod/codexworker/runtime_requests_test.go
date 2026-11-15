@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"

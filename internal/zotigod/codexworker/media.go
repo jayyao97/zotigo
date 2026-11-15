@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -28,11 +28,11 @@ type codexStoreRoot interface {
 
 var errCodexImageUnavailable = errors.New("codex image media unavailable")
 
-func codexImageGenerationCompleted(item codexThreadItem) bool {
+func codexImageGenerationCompleted(item ThreadItem) bool {
 	return strings.EqualFold(strings.TrimSpace(item.Status), "completed")
 }
 
-func codexGeneratedImageDisplayItem(ctx context.Context, store zotigosession.Store, rootDir, sessionID, turnID string, item codexThreadItem, createdAt time.Time) (zotigosession.DisplayItem, func(), error) {
+func codexGeneratedImageDisplayItem(ctx context.Context, store zotigosession.Store, rootDir, sessionID, turnID string, item ThreadItem, createdAt time.Time) (zotigosession.DisplayItem, func(), error) {
 	media, cleanup, err := persistCodexImage(ctx, store, rootDir, sessionID, item)
 	if err != nil {
 		return zotigosession.DisplayItem{}, func() {}, err
@@ -44,7 +44,7 @@ func codexGeneratedImageDisplayItem(ctx context.Context, store zotigosession.Sto
 	}, cleanup, nil
 }
 
-func persistCodexImage(ctx context.Context, store zotigosession.Store, rootDir, sessionID string, item codexThreadItem) (*zotigosession.DisplayMediaPart, func(), error) {
+func persistCodexImage(ctx context.Context, store zotigosession.Store, rootDir, sessionID string, item ThreadItem) (*zotigosession.DisplayMediaPart, func(), error) {
 	data, err := codexGeneratedImageBytes(item)
 	if err != nil {
 		return nil, func() {}, err
@@ -88,7 +88,7 @@ func persistCodexImage(ctx context.Context, store zotigosession.Store, rootDir, 
 	}, cleanup, nil
 }
 
-func codexGeneratedImageBytes(item codexThreadItem) ([]byte, error) {
+func codexGeneratedImageBytes(item ThreadItem) ([]byte, error) {
 	var savedPathErr error
 	if item.SavedPath != nil && strings.TrimSpace(*item.SavedPath) != "" {
 		file, err := os.Open(*item.SavedPath)
@@ -230,7 +230,7 @@ func persistCodexToolResultMedia(ctx context.Context, store zotigosession.Store,
 		if media == nil || len(media.Data) == 0 && !strings.HasPrefix(media.URL, "data:") {
 			continue
 		}
-		item := codexThreadItem{ID: result.ToolCallID, Result: media.URL}
+		item := ThreadItem{ID: result.ToolCallID, Result: media.URL}
 		if len(media.Data) > 0 {
 			item.Result = base64.StdEncoding.EncodeToString(media.Data)
 		}

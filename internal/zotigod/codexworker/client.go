@@ -1,4 +1,4 @@
-package zotigod
+package codexworker
 
 import (
 	"context"
@@ -18,7 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-type codexWorkerConfig struct {
+type Config struct {
 	workerbase.Config
 	SocketPath            string
 	WorkingDirectory      string
@@ -47,7 +47,7 @@ type codexWorkerChannels struct {
 	errors       <-chan error
 }
 
-func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr error) {
+func Run(ctx context.Context, cfg Config) (returnErr error) {
 	if cfg.SocketPath == "" || cfg.WorkingDirectory == "" {
 		return fmt.Errorf("codex worker requires socket and working directory")
 	}
@@ -80,7 +80,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	var generation string
 	var writer *workerbase.Writer
 	var appClient *codexapp.Client
-	var runtime *codexWorkerRuntime
+	var runtime *Runtime
 	runErr := error(nil)
 	httpClient := workerbase.NewHTTPClient(cfg.AuthToken)
 	defer func() {
@@ -177,7 +177,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		defer workerbase.CloseHookDispatcher(ownedHookDispatcher)
 	}
 
-	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), interactions: make(map[string]codexPendingInteraction), approvals: make(map[string]codexPendingApproval), hooks: hookDispatcher, runtimeToolResults: channels.runtimeTools}
+	runtime = &Runtime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), interactions: make(map[string]codexPendingInteraction), approvals: make(map[string]codexPendingApproval), hooks: hookDispatcher, runtimeToolResults: channels.runtimeTools}
 	runtime.toolNames = make(map[string]string)
 	runtime.toolArguments = make(map[string]string)
 	runtime.toolNativeNames = make(map[string]string)
@@ -277,7 +277,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 				}
 				continue
 			}
-			if err := runtime.handleNotification(ctx, message); err != nil {
+			if err := runtime.HandleNotification(ctx, message); err != nil {
 				runErr = err
 				return err
 			}
@@ -316,7 +316,7 @@ func enqueueCodexCommand(pending []wire.Command, appliedSequence uint64, command
 	return append(pending, command)
 }
 
-func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerConfig) error {
+func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg Config) error {
 	params := codexThreadParams(cfg, false)
 	params["threadId"] = cfg.ThreadID
 	var resumed any

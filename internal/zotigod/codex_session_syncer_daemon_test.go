@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
@@ -38,11 +39,11 @@ func TestCodexSessionSyncFallsBackWhenItemsListUnsupportedWhileRuntimeActive(t *
 	t.Cleanup(func() { _ = store.Unlock(context.Background(), meta.ID) })
 	completedAt := now.Add(time.Minute).Unix()
 	startedAt := now.Unix()
-	rpc := &codexSyncRPC{itemsUnsupported: true, thread: codexThread{
+	rpc := &codexSyncRPC{itemsUnsupported: true, thread: codexworker.Thread{
 		ID: meta.ConversationID, UpdatedAt: completedAt,
-		Turns: []codexTurn{{
+		Turns: []codexworker.Turn{{
 			ID: "turn-latest", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
-			Items: []codexThreadItem{{ID: "latest-message", Type: "agentMessage", Text: "latest history"}},
+			Items: []codexworker.ThreadItem{{ID: "latest-message", Type: "agentMessage", Text: "latest history"}},
 		}},
 	}}
 	registry := newSessionRegistry()
@@ -100,7 +101,7 @@ func TestCodexSessionSyncReportsConcurrentHistoryCommitInsteadOfFalseSuccess(t *
 		t.Fatal(err)
 	}
 	t.Cleanup(unlock)
-	rpc := &codexSyncRPC{thread: codexThread{ID: meta.ConversationID, UpdatedAt: now.Add(time.Minute).Unix()}}
+	rpc := &codexSyncRPC{thread: codexworker.Thread{ID: meta.ConversationID, UpdatedAt: now.Add(time.Minute).Unix()}}
 	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, sessionlog.StoredItemSource{Store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
@@ -130,12 +131,12 @@ func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 	completedAt := createdAt.Add(time.Minute).Unix()
 	startedAt := createdAt.Unix()
 	output := "ok\n"
-	rpc := &codexSyncRPC{thread: codexThread{
+	rpc := &codexSyncRPC{thread: codexworker.Thread{
 		ID:        "thread-1",
 		UpdatedAt: completedAt,
-		Turns: []codexTurn{{
+		Turns: []codexworker.Turn{{
 			ID: "turn-1", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
-			Items: []codexThreadItem{
+			Items: []codexworker.ThreadItem{
 				{ID: "user-1", Type: "userMessage", Content: []any{map[string]any{"type": "text", "text": "fix it"}}},
 				{ID: "assistant-1", Type: "agentMessage", Text: "Done."},
 				{ID: "command-1", Type: "commandExecution", Command: "go test ./...", CWD: "/tmp", Status: "completed", AggregatedOutput: &output},
@@ -147,7 +148,7 @@ func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 	if err != nil || meta == nil {
 		t.Fatalf("load session: %#v %v", meta, err)
 	}
-	_, err = listCodexThreadActivity(context.Background(), rpc, []zotigosession.Metadata{meta.Metadata})
+	_, err = codexworker.ListThreadActivity(context.Background(), rpc, []zotigosession.Metadata{meta.Metadata})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +181,7 @@ func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 	}
 
 	rpc.calls = nil
-	activity, err := listCodexThreadActivity(context.Background(), rpc, []zotigosession.Metadata{stored.Metadata})
+	activity, err := codexworker.ListThreadActivity(context.Background(), rpc, []zotigosession.Metadata{stored.Metadata})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +209,7 @@ func TestCodexSessionSyncOrchestratesAndThrottlesSuccessfulRefresh(t *testing.T)
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix(), Turns: []codexTurn{{ID: "turn-1", Status: "completed"}}}}
+	rpc := &codexSyncRPC{thread: codexworker.Thread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix(), Turns: []codexworker.Turn{{ID: "turn-1", Status: "completed"}}}}
 	host := &codexSyncHost{rpc: rpc}
 	syncer := newCodexSessionSyncer(host, store, sessionlog.StoredItemSource{Store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
 	if err := syncer.Sync(context.Background()); err != nil {
@@ -251,15 +252,15 @@ func TestCodexSessionSyncProcessesOlderBackendActivityFirst(t *testing.T) {
 		var payload any
 		switch method {
 		case "thread/list":
-			payload = codexThreadList{Data: []codexThread{{ID: "thread-newer", UpdatedAt: updatedAt["thread-newer"]}, {ID: "thread-older", UpdatedAt: updatedAt["thread-older"]}}}
+			payload = codexworker.ThreadList{Data: []codexworker.Thread{{ID: "thread-newer", UpdatedAt: updatedAt["thread-newer"]}, {ID: "thread-older", UpdatedAt: updatedAt["thread-older"]}}}
 		case "thread/read":
 			threadID := request["threadId"].(string)
-			payload = codexThreadSnapshot{Thread: codexThread{ID: threadID, UpdatedAt: updatedAt[threadID]}}
+			payload = codexworker.ThreadSnapshot{Thread: codexworker.Thread{ID: threadID, UpdatedAt: updatedAt[threadID]}}
 		case "thread/turns/list":
 			threadID := request["threadId"].(string)
-			payload = codexTurnList{Data: []codexTurn{{ID: "turn-" + threadID, Status: "completed"}}}
+			payload = codexworker.TurnList{Data: []codexworker.Turn{{ID: "turn-" + threadID, Status: "completed"}}}
 		case "thread/items/list":
-			payload = codexThreadItemList{}
+			payload = codexworker.ThreadItemList{}
 		default:
 			return fmt.Errorf("unexpected method %s", method)
 		}
@@ -303,13 +304,13 @@ func TestCodexSyncCandidateHoldsOperationAndHistorySyncLocks(t *testing.T) {
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-			payload, _ := sonic.Marshal(codexThreadSnapshot{Thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Second).Unix()}})
+			payload, _ := sonic.Marshal(codexworker.ThreadSnapshot{Thread: codexworker.Thread{ID: "thread-1", UpdatedAt: now.Add(time.Second).Unix()}})
 			return sonic.Unmarshal(payload, result)
 		case "thread/turns/list":
-			payload, _ := sonic.Marshal(codexTurnList{})
+			payload, _ := sonic.Marshal(codexworker.TurnList{})
 			return sonic.Unmarshal(payload, result)
 		case "thread/items/list":
-			payload, _ := sonic.Marshal(codexThreadItemList{})
+			payload, _ := sonic.Marshal(codexworker.ThreadItemList{})
 			return sonic.Unmarshal(payload, result)
 		default:
 			return fmt.Errorf("unexpected method %s", method)
@@ -363,7 +364,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenDisplayMergeFails(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
 		t.Fatal(err)
 	}
-	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
+	rpc := &codexSyncRPC{thread: codexworker.Thread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
 	syncer := &codexSessionSyncer{store: store, items: sessionlog.FailingItemSource{Err: errors.New("display unavailable")}}
 	if err := syncer.syncSession(context.Background(), rpc, meta); err == nil {
 		t.Fatal("expected display merge failure")
@@ -394,7 +395,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenCatalogActivityFails(t *testing.T)
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
 		t.Fatal(err)
 	}
-	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
+	rpc := &codexSyncRPC{thread: codexworker.Thread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
 	syncer := &codexSessionSyncer{store: store, items: sessionlog.StoredItemSource{Store: store}, catalog: catalog}
 	if err := syncer.syncSession(context.Background(), rpc, meta); !errors.Is(err, zotigoworkspace.ErrNotFound) {
 		t.Fatalf("catalog error = %v, want not found", err)
@@ -410,7 +411,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenCatalogActivityFails(t *testing.T)
 
 func TestCodexSyncDiagnosticsIdentifyUnsupportedHistoryAPIBySession(t *testing.T) {
 	diagnostics := codexSyncErrorDiagnostics(errors.Join(
-		&codexSessionSyncFailure{sessionID: "session-unsupported", err: fmt.Errorf("read history: %w", errCodexHistoryAPIUnsupported)},
+		&codexSessionSyncFailure{sessionID: "session-unsupported", err: fmt.Errorf("read history: %w", codexworker.ErrHistoryAPIUnsupported)},
 		&codexSessionSyncFailure{sessionID: "session-failed", err: errors.New("connection closed")},
 	))
 	if len(diagnostics) != 2 {
@@ -442,11 +443,11 @@ func TestCodexSessionSyncContinuesPastUnavailableHistoricalImage(t *testing.T) {
 	missingPath := filepath.Join(root, "already-deleted.png")
 	completedAt := now.Add(time.Minute).Unix()
 	startedAt := now.Unix()
-	rpc := &codexSyncRPC{thread: codexThread{
+	rpc := &codexSyncRPC{thread: codexworker.Thread{
 		ID: meta.ConversationID, UpdatedAt: completedAt,
-		Turns: []codexTurn{{
+		Turns: []codexworker.Turn{{
 			ID: "turn-1", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
-			Items: []codexThreadItem{
+			Items: []codexworker.ThreadItem{
 				{ID: "missing-image", Type: "imageGeneration", Status: "completed", SavedPath: &missingPath},
 				{ID: "no-source-image", Type: "imageGeneration", Status: "completed"},
 				{ID: "bad-tool-image", Type: "dynamicToolCall", Tool: "image_tool", Status: "completed", ContentItems: []any{
@@ -583,7 +584,7 @@ func TestCodexSessionSyncWithTypedNilHostReturnsError(t *testing.T) {
 }
 
 type codexSyncRPC struct {
-	thread           codexThread
+	thread           codexworker.Thread
 	calls            []string
 	itemsUnsupported bool
 }
@@ -595,7 +596,7 @@ func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result
 		r.calls = append(r.calls, "list")
 		thread := r.thread
 		thread.Turns = nil
-		payload = codexThreadList{Data: []codexThread{thread}}
+		payload = codexworker.ThreadList{Data: []codexworker.Thread{thread}}
 	case "thread/read":
 		request, ok := params.(map[string]any)
 		if !ok || request["includeTurns"] != false {
@@ -604,29 +605,29 @@ func (r *codexSyncRPC) Call(_ context.Context, method string, params any, result
 		r.calls = append(r.calls, "read")
 		thread := r.thread
 		thread.Turns = nil
-		payload = codexThreadSnapshot{Thread: thread}
+		payload = codexworker.ThreadSnapshot{Thread: thread}
 	case "thread/turns/list":
 		r.calls = append(r.calls, "turns")
-		turns := append([]codexTurn(nil), r.thread.Turns...)
+		turns := append([]codexworker.Turn(nil), r.thread.Turns...)
 		request := params.(map[string]any)
 		if request["itemsView"] != "full" {
 			for index := range turns {
 				turns[index].Items = nil
 			}
 		}
-		payload = codexTurnList{Data: turns}
+		payload = codexworker.TurnList{Data: turns}
 	case "thread/items/list":
 		r.calls = append(r.calls, "items")
 		if r.itemsUnsupported {
 			return &codexapp.RPCError{Code: -32601, Message: "thread/items/list is not supported yet"}
 		}
-		entries := make([]codexThreadItemEntry, 0)
+		entries := make([]codexworker.ThreadItemEntry, 0)
 		for _, turn := range r.thread.Turns {
 			for _, item := range turn.Items {
-				entries = append(entries, codexThreadItemEntry{TurnID: turn.ID, Item: item})
+				entries = append(entries, codexworker.ThreadItemEntry{TurnID: turn.ID, Item: item})
 			}
 		}
-		payload = codexThreadItemList{Data: entries}
+		payload = codexworker.ThreadItemList{Data: entries}
 	default:
 		return fmt.Errorf("unexpected method %s", method)
 	}
