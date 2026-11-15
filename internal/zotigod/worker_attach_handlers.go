@@ -157,16 +157,22 @@ func (h *handler) handleWorkerDisconnect(id string, generation string) {
 // still the session's current one, so no replacement has been started. The
 // process is stopped first: a worker that lost its connection but kept running
 // would otherwise keep writing into a turn already recorded as interrupted.
+// When the daemon does not own the worker process it cannot do that, so the
+// turn is left open.
 // The next worker still repairs the agent history on startup and finds no open
 // turn to interrupt.
 func (h *handler) interruptTurnOfLostWorker(ctx context.Context, id string) error {
-	if stopper, ok := h.launcher.(workerStopper); ok {
-		stopCtx, cancel := context.WithTimeout(ctx, workerbase.HTTPTimeout)
-		err := stopper.Stop(stopCtx, id)
-		cancel()
-		if err != nil {
-			return fmt.Errorf("stop worker process: %w", err)
-		}
+	stopper, ok := h.launcher.(workerStopper)
+	if !ok {
+		// Without a way to stop the process the turn cannot be closed safely.
+		// It is left to the next worker, which interrupts it on startup.
+		return nil
+	}
+	stopCtx, cancel := context.WithTimeout(ctx, workerbase.HTTPTimeout)
+	err := stopper.Stop(stopCtx, id)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("stop worker process: %w", err)
 	}
 	items, _, err := h.items.LoadItems(ctx, id)
 	if err != nil {

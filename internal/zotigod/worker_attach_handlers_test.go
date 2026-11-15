@@ -66,6 +66,7 @@ func TestWorkerDisconnectInterruptsItsOpenTurn(t *testing.T) {
 		agent           string
 		items           []zotigosession.DisplayItem
 		staleGeneration bool
+		noStopper       bool
 		wantInterrupted bool
 	}{
 		{name: "open turn", items: []zotigosession.DisplayItem{turnStarted}, wantInterrupted: true},
@@ -73,6 +74,7 @@ func TestWorkerDisconnectInterruptsItsOpenTurn(t *testing.T) {
 		{name: "turn waiting for approval is left to the next worker", items: []zotigosession.DisplayItem{turnStarted, approvalRequest}},
 		{name: "a replaced worker is not the session's worker any more", items: []zotigosession.DisplayItem{turnStarted}, staleGeneration: true},
 		{name: "codex sessions close their own turns", agent: "codex", items: []zotigosession.DisplayItem{turnStarted}},
+		{name: "a worker the daemon cannot stop keeps its turn", items: []zotigosession.DisplayItem{turnStarted}, noStopper: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			const id = "sess-lost-worker"
@@ -91,6 +93,9 @@ func TestWorkerDisconnectInterruptsItsOpenTurn(t *testing.T) {
 			handler := &handler{
 				registry: registry, items: source, launcher: stopper,
 				events: sessionlog.NewEventBroker(), sessionOps: newSessionOperationLocks(),
+			}
+			if tc.noStopper {
+				handler.launcher = nil
 			}
 
 			handler.handleWorkerDisconnect(id, "worker-1")
