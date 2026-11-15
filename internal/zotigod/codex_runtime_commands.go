@@ -9,13 +9,14 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *codexWorkerRuntime) handleCommand(ctx context.Context, command wire.Command, boundResults <-chan wire.ConversationBoundResult) error {
 	switch command.Type {
 	case wire.CommandMessage:
-		client := &workerRuntimeToolClient{writer: r.writer, results: r.runtimeToolResults}
-		if err := authorizeRuntimeToolReplay(ctx, client, command.ID); err != nil {
+		client := &workerbase.RuntimeToolClient{Writer: r.writer, Results: r.runtimeToolResults}
+		if err := workerbase.AuthorizeRuntimeToolReplay(ctx, client, command.ID); err != nil {
 			return err
 		}
 		if r.activeTurnID != "" {
@@ -106,25 +107,25 @@ func (r *codexWorkerRuntime) sendIdleAfterPause(ctx context.Context, commandSequ
 }
 
 func (r *codexWorkerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
-	target, err := normalizeSessionApprovalPolicy(command.Policy, false)
+	target, err := workerbase.NormalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err
 	}
-	sess, err := ensureWorkerSession(ctx, r.store, r.cfg.SessionID, r.cfg.WorkingDirectory)
+	sess, err := workerbase.EnsureSession(ctx, r.store, r.cfg.SessionID, r.cfg.WorkingDirectory)
 	if err != nil {
 		return err
 	}
-	from, err := normalizeSessionApprovalPolicy(sess.ApprovalPolicy, true)
+	from, err := workerbase.NormalizeSessionApprovalPolicy(sess.ApprovalPolicy, true)
 	if err != nil {
 		return err
 	}
 	sess.ApprovalPolicy = target
 	sess.UpdatedAt = time.Now().UTC()
-	loweringPermissions := lowersPermissions(from, target)
+	loweringPermissions := workerbase.LowersPermissions(from, target)
 	if loweringPermissions {
 		r.cfg.ApprovalPolicy = string(target)
 	}
-	if err := persistSessionApprovalPolicy(ctx, r.store, sess); err != nil {
+	if err := workerbase.PersistSessionApprovalPolicy(ctx, r.store, sess); err != nil {
 		return fmt.Errorf("persist approval policy: %w", err)
 	}
 	if !loweringPermissions {

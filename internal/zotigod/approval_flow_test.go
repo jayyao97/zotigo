@@ -18,6 +18,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
@@ -268,7 +269,7 @@ func TestPausedApprovalCanStartReplacementWorker(t *testing.T) {
 	launcher := workerLauncherFunc(func(_ context.Context, sessionID string, _ string) error {
 		if launches.Add(1) == 2 {
 			display := sessionlog.NewLog(sessionID, source)
-			if _, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), approvalWorkerRestartedReason); err != nil {
+			if _, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), workerbase.ApprovalWorkerRestartedReason); err != nil {
 				return err
 			}
 			if err := display.InterruptOpenTurn(context.Background(), sessionlog.WorkerRestartedReason); err != nil {

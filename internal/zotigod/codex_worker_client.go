@@ -15,10 +15,11 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type codexWorkerConfig struct {
-	workerClientConfig
+	workerbase.Config
 	SocketPath            string
 	WorkingDirectory      string
 	WorkspaceID           string
@@ -27,7 +28,7 @@ type codexWorkerConfig struct {
 	ApprovalPolicy        string
 	ThreadID              string
 	SessionStoreRoot      string
-	HookDispatcher        hookEventDispatcher
+	HookDispatcher        workerbase.HookDispatcher
 	DeveloperInstructions string
 	AutoReview            bool
 	AutoReviewPolicy      string
@@ -54,7 +55,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	if err != nil {
 		return fmt.Errorf("open session store: %w", err)
 	}
-	unlock, err := acquireWorkerSessionLock(ctx, store, cfg.SessionID)
+	unlock, err := workerbase.AcquireSessionLock(ctx, store, cfg.SessionID)
 	if err != nil {
 		_ = store.Close()
 		return err
@@ -77,11 +78,11 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	cfg.SessionToolsVersion = storedSession.Capabilities.SessionToolsVersion
 	var workerConn *websocket.Conn
 	var generation string
-	var writer *workerClientWriter
+	var writer *workerbase.Writer
 	var appClient *codexapp.Client
 	var runtime *codexWorkerRuntime
 	runErr := error(nil)
-	httpClient := newWorkerHTTPClient(cfg.AuthToken)
+	httpClient := workerbase.NewHTTPClient(cfg.AuthToken)
 	defer func() {
 		if runtime != nil {
 			returnErr = errors.Join(returnErr, runtime.Close())
@@ -101,9 +102,9 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		// Preserve structured startup failures before closing the worker socket.
 		// Otherwise the daemon can observe the disconnect first and replace the
 		// useful error with "worker disconnected before becoming ready".
-		if runErr != nil && !isExpectedWorkerClose(runErr) {
-			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-			_ = reportWorkerFinish(finishCtx, httpClient, strings.TrimRight(cfg.DaemonURL, "/"), cfg.SessionID, generation, runErr)
+		if runErr != nil && !workerbase.IsExpectedClose(runErr) {
+			finishCtx, cancel := context.WithTimeout(context.Background(), workerbase.HTTPTimeout)
+			_ = workerbase.ReportFinish(finishCtx, httpClient, strings.TrimRight(cfg.DaemonURL, "/"), cfg.SessionID, generation, runErr)
 			cancel()
 		}
 		if writer != nil {
@@ -116,7 +117,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	}()
 
 	daemonURL := strings.TrimRight(cfg.DaemonURL, "/")
-	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
+	wsURL, err := workerbase.ConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
 	if err != nil {
 		return err
 	}
@@ -127,7 +128,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	var response *http.Response
 	workerConn, response, err = websocket.DefaultDialer.DialContext(ctx, wsURL, headers)
 	if err != nil {
-		return fmt.Errorf("connect codex worker websocket: %w", workerWebSocketDialError(err, response))
+		return fmt.Errorf("connect codex worker websocket: %w", workerbase.WebSocketDialError(err, response))
 	}
 	if response != nil {
 		generation = strings.TrimSpace(response.Header.Get(wire.GenerationHeader))
@@ -136,7 +137,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		return fmt.Errorf("connect codex worker websocket: missing worker generation")
 	}
 	cfg.WorkspaceID = response.Header.Get(wire.WorkspaceHeader)
-	writer = newWorkerClientWriter(workerConn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
+	writer = workerbase.NewWriter(workerConn, workerbase.DefaultPingInterval, workerbase.DefaultPongWait)
 	channels := readCodexWorkerMessages(workerConn)
 
 	appClient, err = codexapp.Dial(ctx, cfg.SocketPath)
@@ -158,7 +159,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 			return err
 		}
 	}
-	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
+	if err := workerbase.ReportReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
 		return fmt.Errorf("report codex worker ready: %w", err)
 	}
 	hookDispatcher := cfg.HookDispatcher
@@ -173,7 +174,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		}
 	}
 	if ownedHookDispatcher != nil {
-		defer closeHookDispatcher(ownedHookDispatcher)
+		defer workerbase.CloseHookDispatcher(ownedHookDispatcher)
 	}
 
 	runtime = &codexWorkerRuntime{cfg: cfg, store: store, writer: writer, app: appClient, threadID: cfg.ThreadID, messages: make(map[string]string), interactions: make(map[string]codexPendingInteraction), approvals: make(map[string]codexPendingApproval), hooks: hookDispatcher, runtimeToolResults: channels.runtimeTools}
@@ -188,7 +189,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		}
 		runtime.activeTurnID, runtime.turnStarted = sessionlog.LastOpenTurn(items)
 	}
-	cursor, err := recoverWorkerCommandCursor(ctx, store, cfg.SessionID)
+	cursor, err := workerbase.RecoverCommandCursor(ctx, store, cfg.SessionID)
 	if err != nil {
 		return err
 	}
@@ -211,7 +212,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 		select {
 		case err := <-channels.errors:
 			runErr = err
-			if isExpectedWorkerClose(err) {
+			if workerbase.IsExpectedClose(err) {
 				return nil
 			}
 			return err
@@ -286,10 +287,10 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 
 func loadCodexPendingCommands(ctx context.Context, client *http.Client, daemonURL, sessionID string, appliedSequence uint64) ([]wire.Command, error) {
 	pending := make([]wire.Command, 0)
-	cursor := workerCommandCursor{}
+	cursor := workerbase.CommandCursor{}
 	for {
 		previousOffset := cursor.Offset
-		commands, err := fetchWorkerCommands(ctx, client, daemonURL, sessionID, cursor)
+		commands, err := workerbase.FetchCommands(ctx, client, daemonURL, sessionID, cursor)
 		if err != nil {
 			return nil, fmt.Errorf("load Codex worker commands: %w", err)
 		}
@@ -322,7 +323,7 @@ func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerCon
 	if err := app.Call(ctx, "thread/resume", params, &resumed); err != nil {
 		var rpcErr *codexapp.RPCError
 		if errors.As(err, &rpcErr) && rpcErr.Code == -32600 && strings.Contains(strings.ToLower(rpcErr.Message), "active writer") {
-			return fmt.Errorf("%w: %s", errRuntimeOccupied, rpcErr.Message)
+			return fmt.Errorf("%w: %s", workerbase.ErrRuntimeOccupied, rpcErr.Message)
 		}
 		return fmt.Errorf("resume codex thread: %w", err)
 	}
@@ -330,13 +331,13 @@ func resumeCodexThread(ctx context.Context, app codexapp.RPC, cfg codexWorkerCon
 }
 
 func readCodexWorkerMessages(conn *websocket.Conn) codexWorkerChannels {
-	commands := make(chan wire.Command, workerCommandBufferSize)
-	inputs := make(chan wire.InputRequest, workerCommandBufferSize)
-	approvals := make(chan wire.ApprovalDecision, workerCommandBufferSize)
-	interactions := make(chan wire.InteractionResponse, workerCommandBufferSize)
+	commands := make(chan wire.Command, workerbase.CommandBufferSize)
+	inputs := make(chan wire.InputRequest, workerbase.CommandBufferSize)
+	approvals := make(chan wire.ApprovalDecision, workerbase.CommandBufferSize)
+	interactions := make(chan wire.InteractionResponse, workerbase.CommandBufferSize)
 	boundResults := make(chan wire.ConversationBoundResult, 1)
 	interrupts := make(chan wire.InterruptTurn, 1)
-	runtimeTools := make(chan wire.RuntimeToolResult, workerCommandBufferSize)
+	runtimeTools := make(chan wire.RuntimeToolResult, workerbase.CommandBufferSize)
 	errorsCh := make(chan error, 1)
 	go func() {
 		defer close(commands)
@@ -406,7 +407,7 @@ func serveCodexWorkerInterrupts(ctx context.Context, app codexapp.RPC, interrupt
 			if !ok {
 				return
 			}
-			interruptCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+			interruptCtx, cancel := context.WithTimeout(ctx, workerbase.HTTPTimeout)
 			var response any
 			_ = app.Call(interruptCtx, "turn/interrupt", map[string]any{
 				"threadId": interrupt.ThreadID,

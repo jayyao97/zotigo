@@ -29,6 +29,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/wiring"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type workerRuntimeConfig struct {
@@ -45,7 +46,7 @@ type workerRuntimeConfig struct {
 	NotifyIdle             func(context.Context, wire.Idle) error
 	NotifyWorking          func(context.Context) error
 	HookDispatcher         *hooks.Dispatcher
-	RuntimeTools           *workerRuntimeToolClient
+	RuntimeTools           *workerbase.RuntimeToolClient
 }
 
 type workerRuntime struct {
@@ -72,9 +73,9 @@ type workerRuntime struct {
 	fatalErr         error
 	notifyIdle       func(context.Context, wire.Idle) error
 	notifyWorking    func(context.Context) error
-	hooks            hookEventDispatcher
-	channelTools     *channelRuntimeToolState
-	runtimeTools     *workerRuntimeToolClient
+	hooks            workerbase.HookDispatcher
+	channelTools     *workerbase.ChannelRuntimeToolState
+	runtimeTools     *workerbase.RuntimeToolClient
 
 	mu                  sync.Mutex
 	turnCancel          context.CancelFunc
@@ -94,11 +95,11 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, fmt.Errorf("resolve workdir: %w", err)
 	}
-	sess, err := ensureWorkerSession(ctx, cfg.Store, cfg.SessionID, cwd)
+	sess, err := workerbase.EnsureSession(ctx, cfg.Store, cfg.SessionID, cwd)
 	if err != nil {
 		return nil, err
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "ensure_session", stepStarted)
+	workerbase.LogRuntimeStep(cfg.SessionID, "ensure_session", stepStarted)
 	if strings.TrimSpace(sess.WorkingDirectory) != "" {
 		cwd = sess.WorkingDirectory
 	}
@@ -113,18 +114,18 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	if err != nil {
 		return nil, err
 	}
-	approvalPolicy, err := normalizeSessionApprovalPolicy(sess.ApprovalPolicy, true)
+	approvalPolicy, err := workerbase.NormalizeSessionApprovalPolicy(sess.ApprovalPolicy, true)
 	if err != nil {
 		return nil, fmt.Errorf("load approval policy: %w", err)
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "config", stepStarted)
+	workerbase.LogRuntimeStep(cfg.SessionID, "config", stepStarted)
 
 	stepStarted = time.Now()
 	localExec, err := executor.NewLocalExecutor(cwd)
 	if err != nil {
 		return nil, fmt.Errorf("create executor: %w", err)
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "executor", stepStarted)
+	workerbase.LogRuntimeStep(cfg.SessionID, "executor", stepStarted)
 
 	stepStarted = time.Now()
 	skills, err := wiring.NewSkillManager(cwd)
@@ -132,8 +133,8 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("load skills: %w", err)
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "skills", stepStarted)
-	transcriptDir := compactedTranscriptDir()
+	workerbase.LogRuntimeStep(cfg.SessionID, "skills", stepStarted)
+	transcriptDir := workerbase.CompactedTranscriptDir()
 	observer := wiring.NewObserver(appConfig.Observability, cfg.SessionID, map[string]any{
 		"zotigo_session": cfg.SessionID,
 		"process_start":  time.Now().UTC().Format(time.RFC3339),
@@ -169,14 +170,14 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover unanswered tool calls: %w", err)
 	}
-	_, err = display.ResolvePendingApprovalsForOpenTurn(ctx, approvalWorkerRestartedReason)
+	_, err = display.ResolvePendingApprovalsForOpenTurn(ctx, workerbase.ApprovalWorkerRestartedReason)
 	if err != nil {
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("recover pending approval: %w", err)
 	}
 	if sess.AgentSnapshot.State == agent.StatePaused {
-		sess.AgentSnapshot = agent.InterruptPendingSnapshot(sess.AgentSnapshot, approvalWorkerRestartedReason)
+		sess.AgentSnapshot = agent.InterruptPendingSnapshot(sess.AgentSnapshot, workerbase.ApprovalWorkerRestartedReason)
 		sessionadapter.ApplySnapshot(sess, sess.AgentSnapshot, sessionadapter.LastUserPrompt(sess.AgentSnapshot.History))
 		if err := cfg.Store.Put(ctx, sess); err != nil {
 			_ = observer.Close(context.Background())
@@ -232,13 +233,13 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 	})
 	if err != nil {
 		if ownsHookDispatcher {
-			closeHookDispatcher(hookDispatcher)
+			workerbase.CloseHookDispatcher(hookDispatcher)
 		}
 		_ = observer.Close(context.Background())
 		_ = localExec.Close()
 		return nil, fmt.Errorf("create agent: %w", err)
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "agent", stepStarted)
+	workerbase.LogRuntimeStep(cfg.SessionID, "agent", stepStarted)
 	durabilityRecorder := &workerDurabilityRecorder{display: display, wal: runtimeWAL}
 	if runtimeWAL != nil {
 		agent.WithDurabilityRecorder(durabilityRecorder)(ag)
@@ -260,28 +261,28 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		SpawnApprovalRequester: transport,
 	}); err != nil {
 		if ownsHookDispatcher {
-			closeHookDispatcher(hookDispatcher)
+			workerbase.CloseHookDispatcher(hookDispatcher)
 		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
 		_ = localExec.Close()
 		return nil, fmt.Errorf("register tools: %w", err)
 	}
-	var channelTools *channelRuntimeToolState
+	var channelTools *workerbase.ChannelRuntimeToolState
 	if sess.Capabilities.SessionToolsVersion >= 1 && cfg.RuntimeTools != nil {
-		for _, spec := range sessionToolSpecs() {
-			ag.RegisterTool(&sessionRuntimeTool{spec: spec, client: cfg.RuntimeTools, turnID: display.CurrentTurnID})
+		for _, spec := range workerbase.SessionToolSpecs() {
+			ag.RegisterTool(&workerbase.SessionRuntimeTool{Spec: spec, Client: cfg.RuntimeTools, TurnID: display.CurrentTurnID})
 		}
 	}
 	if sess.Capabilities.ChannelToolsVersion >= channels.RuntimeToolsVersion && cfg.RuntimeTools != nil {
-		channelTools = &channelRuntimeToolState{client: cfg.RuntimeTools}
-		ag.RegisterTool(&channelReadMessagesTool{state: channelTools})
+		channelTools = &workerbase.ChannelRuntimeToolState{Client: cfg.RuntimeTools}
+		ag.RegisterTool(&workerbase.ChannelReadMessagesTool{State: channelTools})
 	}
-	logWorkerRuntimeStep(cfg.SessionID, "tools", stepStarted)
+	workerbase.LogRuntimeStep(cfg.SessionID, "tools", stepStarted)
 
 	if err := display.InterruptOpenTurn(ctx, sessionlog.WorkerRestartedReason); err != nil {
 		if ownsHookDispatcher {
-			closeHookDispatcher(hookDispatcher)
+			workerbase.CloseHookDispatcher(hookDispatcher)
 		}
 		_ = observer.Close(context.Background())
 		_ = lspManager.StopAll()
@@ -330,7 +331,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 
 	runtime.cleanup = func() {
 		if ownsHookDispatcher {
-			closeHookDispatcher(hookDispatcher)
+			workerbase.CloseHookDispatcher(hookDispatcher)
 		}
 		closeCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
@@ -339,15 +340,6 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		_ = localExec.Close()
 	}
 	return runtime, nil
-}
-
-func closeHookDispatcher(dispatcher *hooks.Dispatcher) {
-	if dispatcher == nil {
-		return
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
-	_ = dispatcher.Close(ctx)
 }
 
 func resolveWorkerProfile(sess *zotigosession.Session, appConfig *config.Config) (string, config.ProfileConfig, error) {
@@ -385,7 +377,7 @@ func (r *workerRuntime) Close() {
 	if active && !preserveApprovalTurn && r.transport != nil && r.display != nil {
 		turnID := r.display.CurrentTurnID()
 		if turnID != "" {
-			interrupted, _ := r.transport.interruptTurn(context.Background(), turnID, controlChannelClosedReason, cancelTurn)
+			interrupted, _ := r.transport.interruptTurn(context.Background(), turnID, workerbase.ControlChannelClosedReason, cancelTurn)
 			interruptedThroughTransport = interrupted
 			preserveApprovalTurn = !interrupted
 		}
@@ -394,7 +386,7 @@ func (r *workerRuntime) Close() {
 		cancelTurn()
 	}
 	if active && !preserveApprovalTurn && !interruptedThroughTransport && r.display != nil {
-		_ = r.display.Interrupt(context.Background(), controlChannelClosedReason)
+		_ = r.display.Interrupt(context.Background(), workerbase.ControlChannelClosedReason)
 	}
 	if r.transport != nil {
 		_ = r.transport.Close()

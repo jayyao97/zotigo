@@ -14,6 +14,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *workerRuntime) HandleCommand(ctx context.Context, command wire.Command) error {
@@ -207,7 +208,7 @@ func (r *workerRuntime) handleCommand(ctx context.Context, command wire.Command)
 	}
 	switch command.Type {
 	case wire.CommandMessage:
-		if err := authorizeRuntimeToolReplay(ctx, r.runtimeTools, command.ID); err != nil {
+		if err := workerbase.AuthorizeRuntimeToolReplay(ctx, r.runtimeTools, command.ID); err != nil {
 			return nil, err
 		}
 		return nil, r.startMessageTurn(ctx, command.ID, command.Sequence, command.Message)
@@ -264,7 +265,7 @@ func validateWorkerCommand(command wire.Command) error {
 		if command.ApprovalPolicy == nil || payloads != 1 {
 			return fmt.Errorf("invalid approval policy command payload")
 		}
-		if _, err := normalizeSessionApprovalPolicy(command.ApprovalPolicy.Policy, false); err != nil {
+		if _, err := workerbase.NormalizeSessionApprovalPolicy(command.ApprovalPolicy.Policy, false); err != nil {
 			return fmt.Errorf("invalid approval policy command payload: %w", err)
 		}
 	default:
@@ -274,26 +275,26 @@ func validateWorkerCommand(command wire.Command) error {
 }
 
 func (r *workerRuntime) setApprovalPolicy(ctx context.Context, commandID string, command *wire.ApprovalPolicyCommandPayload) error {
-	target, err := normalizeSessionApprovalPolicy(command.Policy, false)
+	target, err := workerbase.NormalizeSessionApprovalPolicy(command.Policy, false)
 	if err != nil {
 		return err
 	}
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
-	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, r.workDir)
+	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, r.workDir)
 	if err != nil {
 		return err
 	}
 	from := sess.ApprovalPolicy
 	sess.ApprovalPolicy = target
 	sess.UpdatedAt = time.Now().UTC()
-	loweringPermissions := lowersPermissions(from, target)
+	loweringPermissions := workerbase.LowersPermissions(from, target)
 	if loweringPermissions {
 		// Stop bypassing approval before publishing the safer persisted value.
 		// If persistence fails, keeping the Agent on Auto is the safe outcome.
 		r.agent.SetApprovalPolicy(target)
 	}
-	if err := persistSessionApprovalPolicy(ctx, r.store, sess); err != nil {
+	if err := workerbase.PersistSessionApprovalPolicy(ctx, r.store, sess); err != nil {
 		return fmt.Errorf("persist approval policy: %w", err)
 	}
 	if !loweringPermissions {

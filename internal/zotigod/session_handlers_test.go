@@ -25,6 +25,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestHealth(t *testing.T) {
@@ -1348,7 +1349,7 @@ func TestOccupiedRuntimeFailureIsConflictAndRetryable(t *testing.T) {
 	handler := &handler{registry: registry, workers: newWorkerRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}}
 
 	recorder := httptest.NewRecorder()
-	handler.writeEnsureRunningError(recorder, fmt.Errorf("%w: thread already has an active writer", errRuntimeOccupied))
+	handler.writeEnsureRunningError(recorder, fmt.Errorf("%w: thread already has an active writer", workerbase.ErrRuntimeOccupied))
 	if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), `"code":"runtime_occupied"`) {
 		t.Fatalf("occupied response = %d: %s", recorder.Code, recorder.Body.String())
 	}

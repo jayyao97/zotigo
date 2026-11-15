@@ -22,6 +22,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/update"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 const defaultAddr = "127.0.0.1:8766"
@@ -57,7 +58,7 @@ type handler struct {
 	codexSync            *codexSessionSyncer
 	codexUnavailable     error
 	logger               *log.Logger
-	hooks                hookEventDispatcher
+	hooks                workerbase.HookDispatcher
 	channels             *channels.Service
 	skillsMu             sync.Mutex
 	skillManagers        map[string]*skills.SkillManager
@@ -98,7 +99,7 @@ type handlerOptions struct {
 	codexHost            codexapp.HostProvider
 	codexUnavailable     error
 	logger               *log.Logger
-	hooks                hookEventDispatcher
+	hooks                workerbase.HookDispatcher
 	channels             *channels.Service
 }
 
@@ -196,7 +197,7 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 		options.workerLaunchTimeout = defaultWorkerLaunchTimeout
 	}
 	if options.inputStopTimeout == 0 {
-		options.inputStopTimeout = workerHTTPTimeout
+		options.inputStopTimeout = workerbase.HTTPTimeout
 	}
 	if options.runtimes == nil {
 		options.runtimes = newRuntimeRegistry(nativeRuntimeAdapter{launcher: options.launcher})

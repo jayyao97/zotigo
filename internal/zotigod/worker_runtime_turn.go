@@ -18,6 +18,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *workerRuntime) pauseTurn(ctx context.Context, command *wire.PauseCommandPayload) error {
@@ -92,7 +93,7 @@ func (r *workerRuntime) queueTurnUserInput(ctx context.Context, command wire.Com
 }
 
 func (r *workerRuntime) afterTurnUserInputQueued(ctx context.Context, turnID string, text string) error {
-	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, text)
+	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, text)
 	snapshot := r.agent.Snapshot()
 	if snapshot.State == agent.StatePaused && len(snapshot.PendingActions) > 0 {
 		if err := r.beginRuntimeWAL(ctx); err != nil {
@@ -150,7 +151,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 	r.doneDone = false
 	r.turnCommandSequence = commandSequence
 	if r.channelTools != nil {
-		r.channelTools.setRequestContext(command.RequestContext)
+		r.channelTools.SetRequestContext(command.RequestContext)
 	}
 	r.mu.Unlock()
 
@@ -168,8 +169,8 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 		_ = r.notifyWorking(ctx)
 	}
 	usageBefore := r.agent.Snapshot().CumulativeUsage
-	dispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
-	dispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
+	workerbase.DispatchTurnStartHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, model)
+	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, command.Text)
 	go func() {
 		var runErr error
 		if isCompactCommand(command) {
@@ -195,7 +196,7 @@ func (r *workerRuntime) startMessageTurn(ctx context.Context, commandID string, 
 			if !terminal {
 				r.fail(fmt.Errorf("terminal display state missing for turn %s", turnID))
 			} else {
-				dispatchTurnEndHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, status, model, turnUsageDelta(usageBefore, snapshot.CumulativeUsage))
+				workerbase.DispatchTurnEndHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, status, model, workerbase.TurnUsageDelta(usageBefore, snapshot.CumulativeUsage))
 			}
 		}
 		sequence := r.turnSequence()
@@ -344,7 +345,7 @@ func (r *workerRuntime) finishTurn() {
 	r.turnCompacting = false
 	r.turnStopping = false
 	if r.channelTools != nil {
-		r.channelTools.setRequestContext(nil)
+		r.channelTools.SetRequestContext(nil)
 	}
 	r.turnReady = nil
 	r.turnDone = nil
@@ -375,7 +376,7 @@ func (r *workerRuntime) closeTurnDoneLocked() {
 func (r *workerRuntime) saveSnapshot(ctx context.Context, snap agent.Snapshot, completedTurnIDs ...string) error {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
-	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, "")
+	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, "")
 	if err != nil {
 		return err
 	}
@@ -399,7 +400,7 @@ func (r *workerRuntime) beginRuntimeWAL(ctx context.Context) error {
 	}
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
-	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, "")
+	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, "")
 	if err != nil {
 		return err
 	}

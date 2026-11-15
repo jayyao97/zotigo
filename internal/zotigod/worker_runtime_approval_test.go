@@ -18,6 +18,7 @@ import (
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestWorkerRuntimeApprovalIsPersistedAndResolvedWithoutPolling(t *testing.T) {
@@ -648,7 +649,7 @@ func TestWorkerDisplayLogResolvesPendingApprovalBeforeInterruptingRestartedTurn(
 	if _, err := display.ApprovalRequested(context.Background(), approval); err != nil {
 		t.Fatalf("record approval request: %v", err)
 	}
-	recovered, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), approvalWorkerRestartedReason)
+	recovered, err := display.ResolvePendingApprovalsForOpenTurn(context.Background(), workerbase.ApprovalWorkerRestartedReason)
 	if err != nil {
 		t.Fatalf("resolve restarted approval: %v", err)
 	}
@@ -666,7 +667,7 @@ func TestWorkerDisplayLogResolvesPendingApprovalBeforeInterruptingRestartedTurn(
 		t.Fatalf("unexpected recovery items: %#v", items)
 	}
 	decision := items[3].Approval.Decisions[0]
-	if decision.Approved || decision.Reason != approvalWorkerRestartedReason {
+	if decision.Approved || decision.Reason != workerbase.ApprovalWorkerRestartedReason {
 		t.Fatalf("unexpected recovery decision: %#v", decision)
 	}
 }

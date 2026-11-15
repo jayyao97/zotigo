@@ -16,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/wiring"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, command *wire.ProfileCommandPayload) (<-chan error, error) {
@@ -58,7 +59,7 @@ func (r *workerRuntime) switchProfile(ctx context.Context, commandID string, com
 			return err
 		}
 		from := r.agent.ActiveProfileName()
-		commitCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
+		commitCtx, cancel := context.WithTimeout(context.Background(), workerbase.HTTPTimeout)
 		defer cancel()
 		return r.commitLatestProfileSwitch(commitCtx, epoch, commandID, from, target, profile.Model)
 	}
@@ -101,7 +102,7 @@ func (r *workerRuntime) commitLatestProfileSwitch(ctx context.Context, epoch uin
 	if err == nil {
 		r.hookModel = model
 	}
-	var uncertain *profileStateUncertainError
+	var uncertain *workerbase.ProfileStateUncertainError
 	if errors.As(err, &uncertain) {
 		r.fail(uncertain)
 	}
@@ -123,7 +124,7 @@ func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered
 		completion <- fatalErr
 		return
 	}
-	var uncertain *profileStateUncertainError
+	var uncertain *workerbase.ProfileStateUncertainError
 	if errors.As(err, &uncertain) {
 		r.fail(uncertain)
 		completion <- uncertain
@@ -134,7 +135,7 @@ func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered
 	if errors.Is(err, agent.ErrRuntimeProfileSuperseded) {
 		err = r.recordProfileFailure(ctx, commandID, target, agent.ErrRuntimeProfileSuperseded)
 		if err != nil {
-			err = &profileCompletionUncertainError{cause: err}
+			err = &workerbase.ProfileCompletionUncertainError{Cause: err}
 			r.fail(err)
 		}
 		completion <- err
@@ -143,7 +144,7 @@ func (r *workerRuntime) finishProfileSwitch(predecessor <-chan struct{}, ordered
 	if err != nil {
 		err = r.recordProfileFailure(ctx, commandID, target, err)
 		if err != nil {
-			err = &profileCompletionUncertainError{cause: err}
+			err = &workerbase.ProfileCompletionUncertainError{Cause: err}
 			r.fail(err)
 		}
 		completion <- err
@@ -164,27 +165,11 @@ func (r *workerRuntime) completeProfileFailure(predecessor <-chan struct{}, orde
 	defer cancel()
 	err := r.recordProfileFailure(ctx, commandID, target, cause)
 	if err != nil {
-		err = &profileCompletionUncertainError{cause: err}
+		err = &workerbase.ProfileCompletionUncertainError{Cause: err}
 		r.fail(err)
 	}
 	completion <- err
 }
-
-type profileStateUncertainError struct {
-	cause error
-}
-
-func (e *profileStateUncertainError) Error() string {
-	return "profile state is uncertain: " + e.cause.Error()
-}
-func (e *profileStateUncertainError) Unwrap() error { return e.cause }
-
-type profileCompletionUncertainError struct{ cause error }
-
-func (e *profileCompletionUncertainError) Error() string {
-	return "profile command completion is uncertain: " + e.cause.Error()
-}
-func (e *profileCompletionUncertainError) Unwrap() error { return e.cause }
 
 func (r *workerRuntime) fail(err error) {
 	if err == nil {
@@ -214,7 +199,7 @@ func (r *workerRuntime) currentFatalError() error {
 func (r *workerRuntime) commitProfileSwitch(ctx context.Context, commandID string, from string, target string) error {
 	r.storeMu.Lock()
 	defer r.storeMu.Unlock()
-	sess, err := ensureWorkerSession(ctx, r.store, r.sessionID, r.workDir)
+	sess, err := workerbase.EnsureSession(ctx, r.store, r.sessionID, r.workDir)
 	if err != nil {
 		return err
 	}
@@ -222,17 +207,17 @@ func (r *workerRuntime) commitProfileSwitch(ctx context.Context, commandID strin
 	previousUpdatedAt := sess.UpdatedAt
 	sess.ProfileName = target
 	sess.UpdatedAt = time.Now().UTC()
-	if err := persistSessionProfile(ctx, r.store, sess); err != nil {
+	if err := workerbase.PersistSessionProfile(ctx, r.store, sess); err != nil {
 		if errors.Is(err, zotigosession.ErrProfileStateUncertain) {
-			return &profileStateUncertainError{cause: err}
+			return &workerbase.ProfileStateUncertainError{Cause: err}
 		}
 		return err
 	}
 	if err := r.display.ProfileChanged(ctx, commandID, from, target); err != nil {
 		sess.ProfileName = previousProfile
 		sess.UpdatedAt = previousUpdatedAt
-		if rollbackErr := persistSessionProfile(ctx, r.store, sess); rollbackErr != nil {
-			return &profileStateUncertainError{cause: errors.Join(
+		if rollbackErr := workerbase.PersistSessionProfile(ctx, r.store, sess); rollbackErr != nil {
+			return &workerbase.ProfileStateUncertainError{Cause: errors.Join(
 				fmt.Errorf("append profile changed: %w", err),
 				fmt.Errorf("rollback session profile: %w", rollbackErr),
 			)}

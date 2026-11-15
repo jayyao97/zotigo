@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func respondCodexRequestError(app any, message codexapp.Message, code int, reason string) {
@@ -58,7 +59,7 @@ func (r *codexWorkerRuntime) executeCodexRuntimeTool(ctx context.Context, messag
 	}
 	sessionTool := false
 	if params.Namespace != nil && *params.Namespace == "zotigo" && r.cfg.SessionToolsVersion >= 1 {
-		for _, spec := range sessionToolSpecs() {
+		for _, spec := range workerbase.SessionToolSpecs() {
 			if spec.Name == params.Tool {
 				sessionTool = true
 			}

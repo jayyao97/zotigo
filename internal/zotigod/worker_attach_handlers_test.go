@@ -20,6 +20,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
@@ -534,18 +535,18 @@ func TestWorkerSessionLockRejectsReuse(t *testing.T) {
 	}
 	defer store.Close()
 
-	unlock, err := acquireWorkerSessionLock(context.Background(), store, "sess-lock")
+	unlock, err := workerbase.AcquireSessionLock(context.Background(), store, "sess-lock")
 	if err != nil {
 		t.Fatalf("acquire first lock: %v", err)
 	}
-	if _, err := acquireWorkerSessionLock(context.Background(), store, "sess-lock"); err == nil {
+	if _, err := workerbase.AcquireSessionLock(context.Background(), store, "sess-lock"); err == nil {
 		t.Fatal("expected second lock to fail")
 	}
 	if err := unlock(); err != nil {
 		t.Fatalf("release first lock: %v", err)
 	}
 
-	unlock, err = acquireWorkerSessionLock(context.Background(), store, "sess-lock")
+	unlock, err = workerbase.AcquireSessionLock(context.Background(), store, "sess-lock")
 	if err != nil {
 		t.Fatalf("expected lock after unlock: %v", err)
 	}

@@ -21,6 +21,7 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
@@ -48,7 +49,7 @@ func TestWorkerCommandReaderFailsWhenBufferIsFull(t *testing.T) {
 	defer serverConn.Close()
 
 	_, _, _, _, errCh := readWorkerMessages(clientConn, nil)
-	for idx := uint64(1); idx <= workerCommandBufferSize+1; idx++ {
+	for idx := uint64(1); idx <= workerbase.CommandBufferSize+1; idx++ {
 		msg := wire.Message{
 			Type: wire.MessageCommand,
 			Command: &wire.Command{

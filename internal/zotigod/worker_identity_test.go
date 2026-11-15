@@ -9,13 +9,14 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestCodexThreadIdentityOnStartAndResume(t *testing.T) {
 	for _, dynamic := range []bool{false, true} {
 		params := codexThreadParams(codexWorkerConfig{
-			workerClientConfig: workerClientConfig{SessionID: "sess_child"},
-			WorkspaceID:        "workspace_current", DeveloperInstructions: "Existing instructions.",
+			Config:      workerbase.Config{SessionID: "sess_child"},
+			WorkspaceID: "workspace_current", DeveloperInstructions: "Existing instructions.",
 		}, dynamic)
 		text, _ := params["developerInstructions"].(string)
 		for _, want := range []string{"Existing instructions.", "session_id: sess_child", "workspace_id: workspace_current"} {

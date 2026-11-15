@@ -21,6 +21,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestProfilesReturnsMergedRedactedConfig(t *testing.T) {
@@ -407,7 +408,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 	if len(items) != 6 || items[3].Type != zotigosession.DisplayItemProfileChanged || items[3].Profile == nil || items[3].Profile.To != "profile-b" || items[4].Type != zotigosession.DisplayItemProfileFailed || items[4].Profile == nil || items[4].Profile.CommandID != commandA.ID || items[5].Type != zotigosession.DisplayItemProfileFailed || items[5].Profile == nil || items[5].Profile.CommandID != commandB.ID {
 		t.Fatalf("expected offline intent followed by correlated failures, got %#v", items)
 	}
-	if cursor := recoverAppliedCommandSequence(items); cursor != commandA.Sequence {
+	if cursor := workerbase.RecoverAppliedCommandSequence(items); cursor != commandA.Sequence {
 		t.Fatalf("expected cursor to stop at ordinary command after %d, got %d", commandA.Sequence, cursor)
 	}
 
@@ -432,7 +433,7 @@ func TestSessionProfileChangeRepairsPendingCommandWhenSelectingDifferentProfile(
 		})
 	}))
 	defer commandServer.Close()
-	cursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{Sequence: commandA.Sequence})
+	cursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{Sequence: commandA.Sequence})
 	if err != nil {
 		t.Fatalf("replay repaired commands: %v", err)
 	}
@@ -487,7 +488,7 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load partial repair: %v", err)
 	}
-	if cursor := recoverAppliedCommandSequence(partialItems); cursor != commandC.Sequence {
+	if cursor := workerbase.RecoverAppliedCommandSequence(partialItems); cursor != commandC.Sequence {
 		t.Fatalf("expected durable offline intent to protect through command %d, got cursor %d", commandC.Sequence, cursor)
 	}
 
@@ -503,7 +504,7 @@ func TestSessionProfileChangeRetryCompletesPartialPendingRepair(t *testing.T) {
 	if len(items) != 5 || items[2].Type != zotigosession.DisplayItemProfileChanged || items[2].Profile == nil || items[2].Profile.To != "profile-b" || items[3].Type != zotigosession.DisplayItemProfileFailed || items[3].Profile == nil || items[3].Profile.CommandID != commandA.ID || items[4].Type != zotigosession.DisplayItemProfileFailed || items[4].Profile == nil || items[4].Profile.CommandID != commandC.ID {
 		t.Fatalf("expected durable offline intent and both correlated failures, got %#v", items)
 	}
-	if cursor := recoverAppliedCommandSequence(items); cursor != commandC.Sequence {
+	if cursor := workerbase.RecoverAppliedCommandSequence(items); cursor != commandC.Sequence {
 		t.Fatalf("expected repaired cursor %d, got %d", commandC.Sequence, cursor)
 	}
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 var (
@@ -180,7 +181,7 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 				return errWorkerLaunchTimeout
 			}
 			if isRuntimeOccupiedSession(session) {
-				return fmt.Errorf("%w: %s", errRuntimeOccupied, runtimeOccupiedMessage(session))
+				return fmt.Errorf("%w: %s", workerbase.ErrRuntimeOccupied, runtimeOccupiedMessage(session))
 			}
 			if session.Error != "" {
 				return errors.New(session.Error)
@@ -322,7 +323,7 @@ func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusServiceUnavailable, err.Error())
 	case errors.Is(err, errSessionProfileNotFound):
 		writeAPIErrorCode(w, http.StatusConflict, "profile_not_found", err.Error())
-	case errors.Is(err, errRuntimeOccupied):
+	case errors.Is(err, workerbase.ErrRuntimeOccupied):
 		writeAPIErrorCode(w, http.StatusConflict, "runtime_occupied", err.Error())
 	default:
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("start session: %v", err))

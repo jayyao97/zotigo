@@ -16,6 +16,7 @@ import (
 	"github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 var errForkOutcomeUnknown = errors.New("fork outcome_unknown: creation may have started; do not retry with a new request ID")
@@ -150,7 +151,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	switch source.Agent {
 	case "", "zotigo":
 		// Match the native worker's TranscriptDir, including custom-store hosts.
-		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, compactedTranscriptDir())
+		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, workerbase.CompactedTranscriptDir())
 		if err != nil {
 			return nil, err
 		}

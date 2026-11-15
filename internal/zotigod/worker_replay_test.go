@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
@@ -45,7 +46,7 @@ func TestReplayWorkerCommandsSkipsAppliedMessageAfterCursorGap(t *testing.T) {
 					t.Fatal(err)
 				}
 			}
-			cursor, err := validateWorkerCommandCursor(ctx, store, sessionID, workerCommandCursor{Sequence: 2})
+			cursor, err := workerbase.ValidateCommandCursor(ctx, store, sessionID, workerbase.CommandCursor{Sequence: 2})
 			if err != nil || cursor.Sequence != 0 {
 				t.Fatalf("pending command must remain replayable: cursor=%+v err=%v", cursor, err)
 			}

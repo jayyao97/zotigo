@@ -17,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type channelHookDispatcher struct {
@@ -198,7 +199,7 @@ func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {
 func TestTurnUsageDeltaUsesCumulativeLedger(t *testing.T) {
 	before := protocol.Usage{InputTokens: 8, OutputTokens: 2, CacheReadInputTokens: 10}.Normalized()
 	after := before.Add(protocol.Usage{InputTokens: 5, OutputTokens: 3, CacheCreationInputTokens: 4}.Normalized())
-	if got, want := turnUsageDelta(before, after), (protocol.Usage{
+	if got, want := workerbase.TurnUsageDelta(before, after), (protocol.Usage{
 		InputTokens: 5, OutputTokens: 3, TotalTokens: 12, CacheCreationInputTokens: 4,
 	}); got != want {
 		t.Fatalf("usage delta = %#v, want %#v", got, want)
@@ -208,7 +209,7 @@ func TestTurnUsageDeltaUsesCumulativeLedger(t *testing.T) {
 func TestTurnUsageDeltaDoesNotEmitNegativeCounts(t *testing.T) {
 	before := protocol.Usage{InputTokens: 8, OutputTokens: 4, TotalTokens: 12, CacheReadInputTokens: 3}
 	after := protocol.Usage{InputTokens: 2, OutputTokens: 5, TotalTokens: 7, CacheReadInputTokens: 1}
-	if got, want := turnUsageDelta(before, after), (protocol.Usage{OutputTokens: 1}); got != want {
+	if got, want := workerbase.TurnUsageDelta(before, after), (protocol.Usage{OutputTokens: 1}); got != want {
 		t.Fatalf("usage delta = %#v, want %#v", got, want)
 	}
 }

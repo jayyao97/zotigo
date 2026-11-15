@@ -26,6 +26,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/diagnostics"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/update"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 // Run starts zotigod and returns a process exit code.
@@ -79,7 +80,7 @@ func Run(args []string) (exitCode int) {
 		}
 		workerAuthToken := os.Getenv(workerAuthTokenEnv)
 		_ = os.Unsetenv(workerAuthTokenEnv)
-		if err := runWorkerClient(context.Background(), workerClientConfig{
+		if err := runWorkerClient(context.Background(), workerbase.Config{
 			DaemonURL:  daemonURL,
 			SessionID:  *workerSessionID,
 			Activation: *workerActivation,
@@ -98,9 +99,9 @@ func Run(args []string) (exitCode int) {
 		workerAuthToken := os.Getenv(workerAuthTokenEnv)
 		_ = os.Unsetenv(workerAuthTokenEnv)
 		if err := runCodexWorkerClient(context.Background(), codexWorkerConfig{
-			workerClientConfig: workerClientConfig{DaemonURL: daemonURL, SessionID: *workerSessionID, Activation: *workerActivation, AuthToken: workerAuthToken},
-			SocketPath:         *codexSocket,
-			WorkingDirectory:   *codexWorkingDirectory, Model: *codexModel,
+			Config:           workerbase.Config{DaemonURL: daemonURL, SessionID: *workerSessionID, Activation: *workerActivation, AuthToken: workerAuthToken},
+			SocketPath:       *codexSocket,
+			WorkingDirectory: *codexWorkingDirectory, Model: *codexModel,
 			ReasoningEffort: *codexReasoningEffort, ApprovalPolicy: *codexApprovalPolicy, ThreadID: *codexThreadID,
 			SessionStoreRoot: *sessionStoreRoot,
 		}); err != nil {
@@ -165,7 +166,7 @@ func Run(args []string) (exitCode int) {
 		logger.Printf("Hook configuration failed; hooks disabled: %v", hookErr)
 	}
 	if hookDispatcher != nil {
-		defer closeHookDispatcher(hookDispatcher)
+		defer workerbase.CloseHookDispatcher(hookDispatcher)
 	}
 	launcher, err := newProcessWorkerLauncher(workerCallback, workerAuthToken, logger)
 	if err != nil {

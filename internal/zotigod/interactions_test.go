@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type failTerminalAppendStore struct {
@@ -32,16 +33,16 @@ func TestCodexUserInputRequestRoundTrip(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-question", rpc)
 	runtime.interactions = make(map[string]codexPendingInteraction)
-	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	runtime.writer = workerbase.NewUnstartedWriter(nil, 1)
 	request := codexapp.Message{
 		ID: json.RawMessage(`41`), Method: "item/tool/requestUserInput",
 		Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"item-1","isBlocking":true,"questions":[{"id":"choice","header":"Mode","question":"Choose","isOther":false,"isSecret":false,"options":[{"label":"Safe","description":"Recommended"}]}]}`),
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
-	message := <-runtime.writer.sendCh
+	message := <-runtime.writer.Queue()
 	if message.Type == wire.MessageDisplayWake {
-		message = <-runtime.writer.sendCh
+		message = <-runtime.writer.Queue()
 	}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
@@ -91,16 +92,16 @@ func TestCodexSubagentApprovalRoundTrip(t *testing.T) {
 	rpc := &codexWorkerRPC{}
 	runtime, store := newCodexInputTestRuntime(t, "session-approval", rpc)
 	runtime.approvals = make(map[string]codexPendingApproval)
-	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	runtime.writer = workerbase.NewUnstartedWriter(nil, 1)
 	request := codexapp.Message{
 		ID: json.RawMessage(`52`), Method: "item/commandExecution/requestApproval",
 		Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"call-1","reason":"writes files","command":"touch file","cwd":"/tmp"}`),
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
-	message := <-runtime.writer.sendCh
+	message := <-runtime.writer.Queue()
 	if message.Type == wire.MessageDisplayWake {
-		message = <-runtime.writer.sendCh
+		message = <-runtime.writer.Queue()
 	}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
@@ -125,7 +126,7 @@ func TestCodexCommandApprovalPreservesAuthorityAndHonorsOfferedDecision(t *testi
 	rpc := &codexWorkerRPC{}
 	runtime, _ := newCodexInputTestRuntime(t, "session-network-approval", rpc)
 	runtime.approvals = make(map[string]codexPendingApproval)
-	runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	runtime.writer = workerbase.NewUnstartedWriter(nil, 1)
 	request := codexapp.Message{
 		ID: json.RawMessage(`53`), Method: "item/commandExecution/requestApproval",
 		Params: json.RawMessage(`{
@@ -137,9 +138,9 @@ func TestCodexCommandApprovalPreservesAuthorityAndHonorsOfferedDecision(t *testi
 	}
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
-	message := <-runtime.writer.sendCh
+	message := <-runtime.writer.Queue()
 	if message.Type == wire.MessageDisplayWake {
-		message = <-runtime.writer.sendCh
+		message = <-runtime.writer.Queue()
 	}
 	if err := <-errCh; err != nil {
 		t.Fatal(err)
@@ -169,16 +170,16 @@ func TestCodexPermissionApprovalRoundTrip(t *testing.T) {
 			rpc := &codexWorkerRPC{}
 			runtime, _ := newCodexInputTestRuntime(t, "session-permissions", rpc)
 			runtime.approvals = make(map[string]codexPendingApproval)
-			runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+			runtime.writer = workerbase.NewUnstartedWriter(nil, 1)
 			request := codexapp.Message{
 				ID: json.RawMessage(`61`), Method: "item/permissions/requestApproval",
 				Params: json.RawMessage(`{"threadId":"child-thread","turnId":"turn-1","itemId":"call-1","cwd":"/workspace","reason":"write shared files","permissions":{"network":null,"fileSystem":{"write":["/workspace/shared"]}}}`),
 			}
 			errCh := make(chan error, 1)
 			go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
-			message := <-runtime.writer.sendCh
+			message := <-runtime.writer.Queue()
 			if message.Type == wire.MessageDisplayWake {
-				message = <-runtime.writer.sendCh
+				message = <-runtime.writer.Queue()
 			}
 			if err := <-errCh; err != nil {
 				t.Fatal(err)
@@ -214,9 +215,8 @@ func TestCodexRequestDeliveryFailureRecordsTerminalState(t *testing.T) {
 			runtime, store := newCodexInputTestRuntime(t, "session-delivery", &codexWorkerRPC{})
 			runtime.interactions = make(map[string]codexPendingInteraction)
 			runtime.approvals = make(map[string]codexPendingApproval)
-			done := make(chan struct{})
-			close(done)
-			runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message), done: done}
+			runtime.writer = workerbase.NewUnstartedWriter(nil, 0)
+			runtime.writer.Close()
 			params := `{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","command":"touch file","cwd":"/tmp"}`
 			if method == "item/tool/requestUserInput" {
 				params = `{"threadId":"thread-1","turnId":"turn-1","itemId":"call-1","questions":[{"id":"q","question":"Answer?"}]}`
@@ -242,9 +242,8 @@ func TestCodexRequestDeliveryAndTerminalFailureIsFatal(t *testing.T) {
 		runtime.store = &failTerminalAppendStore{Store: runtime.store}
 		runtime.interactions = make(map[string]codexPendingInteraction)
 		runtime.approvals = make(map[string]codexPendingApproval)
-		done := make(chan struct{})
-		close(done)
-		runtime.writer = &workerClientWriter{sendCh: make(chan wire.Message), done: done}
+		runtime.writer = workerbase.NewUnstartedWriter(nil, 0)
+		runtime.writer.Close()
 		err := runtime.handleServerRequest(context.Background(), request)
 		var fatal *codexRequestFatalError
 		if !errors.As(err, &fatal) || !strings.Contains(err.Error(), "append terminal state") {

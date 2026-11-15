@@ -15,6 +15,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) wire.InputResult {
@@ -53,7 +54,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 		if stored == nil {
 			return wire.Command{}, errSessionNotFound
 		}
-		policy, err := normalizeSessionApprovalPolicy(stored.ApprovalPolicy, true)
+		policy, err := workerbase.NormalizeSessionApprovalPolicy(stored.ApprovalPolicy, true)
 		if err != nil {
 			return wire.Command{}, err
 		}
@@ -229,8 +230,8 @@ func (r *codexWorkerRuntime) recordTurnStarted(ctx context.Context, command wire
 	}); err != nil {
 		return err
 	}
-	dispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, runtime.Model)
-	dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Message.Text)
+	workerbase.DispatchTurnStartHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, runtime.Model)
+	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Message.Text)
 	r.acknowledgeCommand(command.Sequence)
 	r.messagePending = false
 	if r.writer != nil {
@@ -263,7 +264,7 @@ func (r *codexWorkerRuntime) persistSteering(command wire.Command, turnID string
 	item.Command = &zotigosession.DisplayCommand{
 		Type: wire.CommandSteering, Text: command.Steering.Text, Images: sessionlog.CommandImages(images), Skills: append([]string(nil), command.Steering.Skills...), TurnID: turnID,
 	}
-	dispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Steering.Text)
+	workerbase.DispatchUserPromptSubmitHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, command.Steering.Text)
 	return r.append(item)
 }
 

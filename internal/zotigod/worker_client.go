@@ -1,50 +1,25 @@
 package zotigod
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
-	"net/url"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
-	"github.com/jayyao97/zotigo/core/agent"
-	"github.com/jayyao97/zotigo/core/debug"
 	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
 	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-const workerHTTPTimeout = 10 * time.Second
-
-const workerDialErrorBodyLimit = 4 * 1024
-
-const (
-	defaultWorkerClientPingInterval = 15 * time.Second
-	defaultWorkerClientPongWait     = 45 * time.Second
-	workerCommandBufferSize         = 32
-	workerDeltaBufferSize           = 256
-)
-
-type workerClientConfig struct {
-	DaemonURL  string
-	SessionID  string
-	Activation uint64
-	AuthToken  string
-}
-
-func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr error) {
+func runWorkerClient(ctx context.Context, cfg workerbase.Config) (returnErr error) {
 	bootStarted := time.Now()
 	if strings.TrimSpace(cfg.SessionID) == "" {
 		return fmt.Errorf("session_id is required")
@@ -59,21 +34,21 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if err != nil {
 		return fmt.Errorf("open session store: %w", err)
 	}
-	logWorkerBootStep(cfg.SessionID, "session_store", stepStarted, bootStarted)
+	workerbase.LogBootStep(cfg.SessionID, "session_store", stepStarted, bootStarted)
 	stepStarted = time.Now()
-	unlock, err := acquireWorkerSessionLock(ctx, store, cfg.SessionID)
+	unlock, err := workerbase.AcquireSessionLock(ctx, store, cfg.SessionID)
 	if err != nil {
 		_ = store.Close()
 		return err
 	}
-	logWorkerBootStep(cfg.SessionID, "session_lock", stepStarted, bootStarted)
+	workerbase.LogBootStep(cfg.SessionID, "session_lock", stepStarted, bootStarted)
 	var runtime *workerRuntime
 	var conn *websocket.Conn
 	var generation string
 	stopKeepalive := func() {}
-	var clientWriter *workerClientWriter
+	var clientWriter *workerbase.Writer
 	var runErr error
-	httpClient := newWorkerHTTPClient(cfg.AuthToken)
+	httpClient := workerbase.NewHTTPClient(cfg.AuthToken)
 	defer func() {
 		if runErr == nil {
 			runErr = returnErr
@@ -89,9 +64,9 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				runErr = wrapped
 			}
 		}
-		if runErr != nil && !isExpectedWorkerClose(runErr) {
-			finishCtx, cancel := context.WithTimeout(context.Background(), workerHTTPTimeout)
-			_ = reportWorkerFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, generation, runErr)
+		if runErr != nil && !workerbase.IsExpectedClose(runErr) {
+			finishCtx, cancel := context.WithTimeout(context.Background(), workerbase.HTTPTimeout)
+			_ = workerbase.ReportFinish(finishCtx, httpClient, daemonURL, cfg.SessionID, generation, runErr)
 			cancel()
 		}
 		if conn != nil {
@@ -100,7 +75,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 		_ = store.Close()
 	}()
 
-	wsURL, err := workerConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
+	wsURL, err := workerbase.ConnectURL(daemonURL, cfg.SessionID, cfg.Activation)
 	if err != nil {
 		return err
 	}
@@ -112,7 +87,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	}
 	conn, resp, err = websocket.DefaultDialer.DialContext(ctx, wsURL, requestHeader)
 	if err != nil {
-		return fmt.Errorf("connect worker websocket: %w", workerWebSocketDialError(err, resp))
+		return fmt.Errorf("connect worker websocket: %w", workerbase.WebSocketDialError(err, resp))
 	}
 	if resp != nil {
 		generation = strings.TrimSpace(resp.Header.Get(wire.GenerationHeader))
@@ -120,12 +95,12 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if generation == "" {
 		return fmt.Errorf("connect worker websocket: missing worker generation")
 	}
-	logWorkerBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
-	clientWriter = newWorkerClientWriter(conn, defaultWorkerClientPingInterval, defaultWorkerClientPongWait)
+	workerbase.LogBootStep(cfg.SessionID, "websocket_connect", stepStarted, bootStarted)
+	clientWriter = workerbase.NewWriter(conn, workerbase.DefaultPingInterval, workerbase.DefaultPongWait)
 	stopKeepalive = clientWriter.Close
-	displayBarrier := newWorkerDisplayBarrierClient(clientWriter)
+	displayBarrier := workerbase.NewDisplayBarrierClient(clientWriter)
 	commandCh, inputCh, approvalCh, runtimeToolResults, readErrCh := readWorkerMessages(conn, displayBarrier.Acknowledge)
-	runtimeToolClient := &workerRuntimeToolClient{writer: clientWriter, results: runtimeToolResults}
+	runtimeToolClient := &workerbase.RuntimeToolClient{Writer: clientWriter, Results: runtimeToolResults}
 
 	stepStarted = time.Now()
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
@@ -150,10 +125,10 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if err != nil {
 		return err
 	}
-	logWorkerBootStep(cfg.SessionID, "runtime", stepStarted, bootStarted)
+	workerbase.LogBootStep(cfg.SessionID, "runtime", stepStarted, bootStarted)
 
 	stepStarted = time.Now()
-	cursor, err := loadWorkerCommandCursor(ctx, store, cfg.SessionID)
+	cursor, err := workerbase.LoadCommandCursor(ctx, store, cfg.SessionID)
 	if err != nil {
 		return err
 	}
@@ -161,7 +136,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	if err != nil {
 		return err
 	}
-	logWorkerBootStep(cfg.SessionID, "command_replay", stepStarted, bootStarted)
+	workerbase.LogBootStep(cfg.SessionID, "command_replay", stepStarted, bootStarted)
 	select {
 	case err := <-readErrCh:
 		runErr = err
@@ -170,10 +145,10 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 	}
 
 	stepStarted = time.Now()
-	if err := reportWorkerReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
+	if err := workerbase.ReportReady(ctx, httpClient, daemonURL, cfg.SessionID, generation); err != nil {
 		return fmt.Errorf("report worker ready: %w", err)
 	}
-	logWorkerBootStep(cfg.SessionID, "ready", stepStarted, bootStarted)
+	workerbase.LogBootStep(cfg.SessionID, "ready", stepStarted, bootStarted)
 	_ = runtime.NotifyIdleIfIdle(context.Background(), cursor.Sequence)
 
 	for {
@@ -183,7 +158,7 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 			return err
 		case err := <-readErrCh:
 			runErr = err
-			if isExpectedWorkerClose(err) {
+			if workerbase.IsExpectedClose(err) {
 				return nil
 			}
 			return runErr
@@ -222,14 +197,14 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 				return runErr
 			}
 			if result.Command != nil {
-				recovered, recoverErr := recoverWorkerCommandCursor(ctx, store, cfg.SessionID)
+				recovered, recoverErr := workerbase.RecoverCommandCursor(ctx, store, cfg.SessionID)
 				if recoverErr != nil {
 					runErr = recoverErr
 					return recoverErr
 				}
 				if recovered.Sequence > cursor.Sequence {
 					cursor = recovered
-					if err := saveWorkerCommandCursor(cfg.SessionID, cursor); err != nil {
+					if err := workerbase.SaveCommandCursor(cfg.SessionID, cursor); err != nil {
 						runErr = err
 						return err
 					}
@@ -265,10 +240,10 @@ func runWorkerClient(ctx context.Context, cfg workerClientConfig) (returnErr err
 }
 
 func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(string)) (<-chan wire.Command, <-chan wire.InputRequest, <-chan wire.ApprovalDecision, <-chan wire.RuntimeToolResult, <-chan error) {
-	commandCh := make(chan wire.Command, workerCommandBufferSize)
-	inputCh := make(chan wire.InputRequest, workerCommandBufferSize)
-	approvalCh := make(chan wire.ApprovalDecision, workerCommandBufferSize)
-	runtimeToolResults := make(chan wire.RuntimeToolResult, workerCommandBufferSize)
+	commandCh := make(chan wire.Command, workerbase.CommandBufferSize)
+	inputCh := make(chan wire.InputRequest, workerbase.CommandBufferSize)
+	approvalCh := make(chan wire.ApprovalDecision, workerbase.CommandBufferSize)
+	runtimeToolResults := make(chan wire.RuntimeToolResult, workerbase.CommandBufferSize)
 	errCh := make(chan error, 1)
 	go func() {
 		defer close(commandCh)
@@ -335,155 +310,4 @@ func readWorkerMessages(conn *websocket.Conn, acknowledgeDisplayBarrier func(str
 		}
 	}()
 	return commandCh, inputCh, approvalCh, runtimeToolResults, errCh
-}
-
-func ensureWorkerSession(ctx context.Context, store zotigosession.Store, sessionID string, cwd string) (*zotigosession.Session, error) {
-	sess, err := store.Get(ctx, sessionID)
-	if err != nil {
-		return nil, fmt.Errorf("load session: %w", err)
-	}
-	if sess != nil {
-		return sess, nil
-	}
-	now := time.Now().UTC()
-	if cwd == "" {
-		cwd, _ = os.Getwd()
-	}
-	sess = &zotigosession.Session{
-		Metadata: zotigosession.Metadata{
-			ID:               sessionID,
-			WorkingDirectory: cwd,
-			CreatedAt:        now,
-			UpdatedAt:        now,
-		},
-		AgentSnapshot: agent.Snapshot{
-			State:     agent.StateIdle,
-			CreatedAt: now,
-		},
-		Turns: make([]zotigosession.Turn, 0),
-	}
-	if err := store.Put(ctx, sess); err != nil {
-		return nil, fmt.Errorf("create session: %w", err)
-	}
-	return sess, nil
-}
-
-func postWorkerJSON(ctx context.Context, client *http.Client, daemonURL string, path string, value any) error {
-	data, err := sonic.Marshal(value)
-	if err != nil {
-		return err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(daemonURL, "/")+path, bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return fmt.Errorf("worker post %s failed: %s", path, resp.Status)
-	}
-	return nil
-}
-
-func reportWorkerFinish(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string, err error) error {
-	body := wire.FinishSessionRequest{Generation: generation}
-	if err != nil && !isExpectedWorkerClose(err) {
-		body.Error = err.Error()
-		if errors.Is(err, errRuntimeOccupied) {
-			body.ErrorCode = "runtime_occupied"
-			body.Error = strings.TrimPrefix(body.Error, errRuntimeOccupied.Error()+": ")
-		}
-	}
-	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/finish", body)
-}
-
-func reportWorkerReady(ctx context.Context, client *http.Client, daemonURL string, sessionID string, generation string) error {
-	return postWorkerJSON(ctx, client, daemonURL, "/internal/sessions/"+url.PathEscape(sessionID)+"/worker/attach", wire.ReadyRequest{Generation: generation})
-}
-
-func workerWebSocketDialError(dialErr error, resp *http.Response) error {
-	if resp == nil {
-		return dialErr
-	}
-	defer func() { _ = resp.Body.Close() }()
-	body, readErr := io.ReadAll(io.LimitReader(resp.Body, workerDialErrorBodyLimit+1))
-	if readErr != nil {
-		return fmt.Errorf("%s (read response body: %v): %w", resp.Status, readErr, dialErr)
-	}
-	truncated := len(body) > workerDialErrorBodyLimit
-	if truncated {
-		body = body[:workerDialErrorBodyLimit]
-	}
-	text := strings.TrimSpace(string(body))
-	if text == "" {
-		return fmt.Errorf("%s: %w", resp.Status, dialErr)
-	}
-	if truncated {
-		text += "…"
-	}
-	return fmt.Errorf("%s body=%q: %w", resp.Status, text, dialErr)
-}
-
-func logWorkerBootStep(sessionID string, step string, started time.Time, bootStarted time.Time) {
-	debug.Logf(
-		"worker boot session=%s step=%s elapsed_ms=%d total_ms=%d",
-		sessionID,
-		step,
-		time.Since(started).Milliseconds(),
-		time.Since(bootStarted).Milliseconds(),
-	)
-}
-
-func logWorkerRuntimeStep(sessionID string, step string, started time.Time) {
-	debug.Logf("worker runtime session=%s step=%s elapsed_ms=%d", sessionID, step, time.Since(started).Milliseconds())
-}
-
-func isExpectedWorkerClose(err error) bool {
-	if err == nil {
-		return true
-	}
-	var uncertain *profileStateUncertainError
-	var completionUncertain *profileCompletionUncertainError
-	return errors.As(err, &uncertain) || errors.As(err, &completionUncertain) ||
-		errors.Is(err, context.Canceled) ||
-		errors.Is(err, context.DeadlineExceeded) ||
-		errors.Is(err, zotigotransport.ErrTransportClosed) ||
-		strings.Contains(err.Error(), "websocket: close") ||
-		strings.Contains(err.Error(), "use of closed network connection") ||
-		strings.Contains(err.Error(), "EOF")
-}
-
-func workerConnectURL(daemonURL string, sessionID string, activation uint64) (string, error) {
-	parsed, err := url.Parse(daemonURL)
-	if err != nil {
-		return "", fmt.Errorf("parse daemon url: %w", err)
-	}
-	switch parsed.Scheme {
-	case "http":
-		parsed.Scheme = "ws"
-	case "https":
-		parsed.Scheme = "wss"
-	case "ws", "wss":
-	default:
-		return "", fmt.Errorf("unsupported daemon url scheme %q", parsed.Scheme)
-	}
-	parsed.Path = "/internal/workers/connect"
-	values := parsed.Query()
-	values.Set("session_id", sessionID)
-	values.Set("activation", strconv.FormatUint(activation, 10))
-	parsed.RawQuery = values.Encode()
-	return parsed.String(), nil
-}
-
-func acquireWorkerSessionLock(ctx context.Context, store zotigosession.Store, sessionID string) (func() error, error) {
-	if err := store.Lock(ctx, sessionID); err != nil {
-		return nil, fmt.Errorf("lock session %s: %w", sessionID, err)
-	}
-	return func() error {
-		return store.Unlock(context.Background(), sessionID)
-	}, nil
 }

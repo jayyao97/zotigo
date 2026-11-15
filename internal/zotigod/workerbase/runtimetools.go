@@ -1,9 +1,12 @@
-package zotigod
+package workerbase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -13,19 +16,19 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-type workerRuntimeToolClient struct {
-	writer   *workerClientWriter
-	results  <-chan wire.RuntimeToolResult
+type RuntimeToolClient struct {
+	Writer   *Writer
+	Results  <-chan wire.RuntimeToolResult
 	gateOnce sync.Once
 	gate     chan struct{}
 }
 
-func (c *workerRuntimeToolClient) call(ctx context.Context, requestContext *protocol.RequestContext, name, arguments string) (string, error) {
+func (c *RuntimeToolClient) call(ctx context.Context, requestContext *protocol.RequestContext, name, arguments string) (string, error) {
 	return c.request(ctx, wire.RuntimeToolRequest{Name: name, Arguments: []byte(arguments), RequestContext: requestContext})
 }
 
-func (c *workerRuntimeToolClient) request(ctx context.Context, request wire.RuntimeToolRequest) (string, error) {
-	if c == nil || c.writer == nil || c.results == nil {
+func (c *RuntimeToolClient) request(ctx context.Context, request wire.RuntimeToolRequest) (string, error) {
+	if c == nil || c.Writer == nil || c.Results == nil {
 		return "", errors.New("channel runtime tool transport is unavailable")
 	}
 	c.gateOnce.Do(func() { c.gate = make(chan struct{}, 1) })
@@ -40,14 +43,14 @@ func (c *workerRuntimeToolClient) request(ctx context.Context, request wire.Runt
 	}
 	requestID := sessionlog.NewID("runtime_tool")
 	request.RequestID = requestID
-	if err := c.writer.SendRuntimeToolRequest(ctx, request); err != nil {
+	if err := c.Writer.SendRuntimeToolRequest(ctx, request); err != nil {
 		return "", err
 	}
 	for {
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case result, ok := <-c.results:
+		case result, ok := <-c.Results:
 			if !ok {
 				return "", errors.New("channel runtime tool transport closed")
 			}
@@ -62,13 +65,13 @@ func (c *workerRuntimeToolClient) request(ctx context.Context, request wire.Runt
 	}
 }
 
-type channelRuntimeToolState struct {
+type ChannelRuntimeToolState struct {
 	mu             sync.RWMutex
 	requestContext *protocol.RequestContext
-	client         *workerRuntimeToolClient
+	Client         *RuntimeToolClient
 }
 
-func (s *channelRuntimeToolState) setRequestContext(value *protocol.RequestContext) {
+func (s *ChannelRuntimeToolState) SetRequestContext(value *protocol.RequestContext) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if value == nil {
@@ -79,7 +82,7 @@ func (s *channelRuntimeToolState) setRequestContext(value *protocol.RequestConte
 	s.requestContext = &copy
 }
 
-func (s *channelRuntimeToolState) currentRequestContext() *protocol.RequestContext {
+func (s *ChannelRuntimeToolState) currentRequestContext() *protocol.RequestContext {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	if s.requestContext == nil {
@@ -89,25 +92,39 @@ func (s *channelRuntimeToolState) currentRequestContext() *protocol.RequestConte
 	return &copy
 }
 
-type channelReadMessagesTool struct{ state *channelRuntimeToolState }
+type ChannelReadMessagesTool struct{ State *ChannelRuntimeToolState }
 
-func (*channelReadMessagesTool) Name() string { return "channel_read_messages" }
-func (*channelReadMessagesTool) Description() string {
+func (*ChannelReadMessagesTool) Name() string { return "channel_read_messages" }
+func (*ChannelReadMessagesTool) Description() string {
 	return "Read recent messages from the Channel conversation for the current request, including message IDs and the provider-fetched message directly referenced by the current request. Use this when the user refers to a quoted/replied-to message or earlier group messages that were not included in the request."
 }
-func (*channelReadMessagesTool) Schema() any {
+func (*ChannelReadMessagesTool) Schema() any {
 	return map[string]any{
 		"type": "object", "additionalProperties": false,
 		"properties": map[string]any{"limit": map[string]any{"type": "integer", "minimum": 1, "maximum": 50, "default": 20}},
 	}
 }
-func (*channelReadMessagesTool) Classify(tools.SafetyCall) tools.SafetyDecision {
+func (*ChannelReadMessagesTool) Classify(tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelSafe, Reason: "reads retained messages from the current authorized Channel conversation"}
 }
-func (t *channelReadMessagesTool) Execute(ctx context.Context, _ executor.Executor, arguments string) (any, error) {
-	requestContext := t.state.currentRequestContext()
+func (t *ChannelReadMessagesTool) Execute(ctx context.Context, _ executor.Executor, arguments string) (any, error) {
+	requestContext := t.State.currentRequestContext()
 	if requestContext == nil {
 		return nil, errors.New("channel_read_messages requires an active Channel request")
 	}
-	return t.state.client.call(ctx, requestContext, channels.RuntimeToolReadMessages, arguments)
+	return t.State.Client.call(ctx, requestContext, channels.RuntimeToolReadMessages, arguments)
+}
+
+// Live admission already holds the source Channel configuration fence. Only
+// durable command replay performs this second RPC, avoiding recursive RLocks
+// while the daemon waits for a live worker admission.
+func AuthorizeRuntimeToolReplay(ctx context.Context, client *RuntimeToolClient, commandID string) error {
+	if !strings.HasPrefix(commandID, "session_tool:") && !strings.HasPrefix(commandID, "completion:") {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	arguments, _ := json.Marshal(map[string]string{"command_id": commandID})
+	_, err := client.request(ctx, wire.RuntimeToolRequest{Namespace: "host", Name: "authorize_input", Arguments: arguments})
+	return err
 }

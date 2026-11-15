@@ -17,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
@@ -349,12 +350,12 @@ func TestCodexSessionToolsStartResumeAndCallback(t *testing.T) {
 	}
 	rpc := &codexWorkerRPC{}
 	results := make(chan wire.RuntimeToolResult, 1)
-	runtime := &codexWorkerRuntime{cfg: cfg, app: rpc, threadID: "thread", activeTurnID: "turn", writer: &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}, runtimeToolResults: results}
+	runtime := &codexWorkerRuntime{cfg: cfg, app: rpc, threadID: "thread", activeTurnID: "turn", writer: workerbase.NewUnstartedWriter(nil, 1), runtimeToolResults: results}
 	done := make(chan error, 1)
 	go func() {
 		done <- runtime.executeCodexRuntimeTool(context.Background(), codexapp.Message{ID: json.RawMessage(`1`), Params: json.RawMessage(`{"threadId":"thread","turnId":"turn","callId":"call","namespace":"zotigo","tool":"list_sessions","arguments":{}}`)})
 	}()
-	message := <-runtime.writer.sendCh
+	message := <-runtime.writer.Queue()
 	if message.RuntimeToolRequest.Namespace != "zotigo" || message.RuntimeToolRequest.TurnID != "turn" || message.RuntimeToolRequest.CallID != "call" {
 		t.Fatalf("request=%+v", message)
 	}
@@ -438,17 +439,6 @@ func TestSessionToolsSendDurableAdmissionAndRetry(t *testing.T) {
 	uncertain, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", request)
 	if err != nil || !strings.Contains(uncertain, `"status":"outcome_unknown"`) {
 		t.Fatalf("first uncertain response=%s err=%v", uncertain, err)
-	}
-}
-
-func TestSessionToolTransportCancellation(t *testing.T) {
-	writer := &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
-	client := &workerRuntimeToolClient{writer: writer, results: make(chan wire.RuntimeToolResult)}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := client.request(ctx, wire.RuntimeToolRequest{Namespace: "zotigo", Name: "list_sessions", CallID: "stable-call"})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancel error=%v", err)
 	}
 }
 

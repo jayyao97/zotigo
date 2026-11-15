@@ -23,6 +23,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type codexWorkerRPC struct {
@@ -87,7 +88,7 @@ func newCodexInputTestRuntime(t *testing.T, sessionID string, rpc *codexWorkerRP
 		t.Fatal(err)
 	}
 	return &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}, SessionStoreRoot: store.RootDir()},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}, SessionStoreRoot: store.RootDir()},
 		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string), toolNames: make(map[string]string),
 		toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
 	}, store
@@ -332,7 +333,7 @@ func TestCodexWorkerCloseInterruptsActiveTurnInDisplayLog(t *testing.T) {
 	}
 	rpc := &codexWorkerRPC{}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-1"}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-1"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now,
 		messages: map[string]string{"message-1": "partial"}, messageOrder: []string{"message-1"},
 	}
@@ -371,7 +372,7 @@ func TestCodexWorkerCloseCompletesPendingToolAsInterrupted(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-pending"}}, store: store, app: &codexWorkerRPC{},
+		cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-pending"}}, store: store, app: &codexWorkerRPC{},
 		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string),
 		toolNames: map[string]string{"tool-1": "shell"}, toolOrder: []string{"tool-1"},
 	}
@@ -402,7 +403,7 @@ func TestCodexWorkerPersistsContextUsageNotification(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
+	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-usage"}}, store: store, threadID: "thread-1"}
 	if err := runtime.handleNotification(context.Background(), codexapp.Message{
 		Method: "thread/tokenUsage/updated",
 		Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":8000,"inputTokens":6500,"cachedInputTokens":4000,"cacheWriteInputTokens":500,"outputTokens":1500},"last":{"totalTokens":2400,"inputTokens":2200,"outputTokens":200},"modelContextWindow":128000}}`),
@@ -431,7 +432,7 @@ func TestCodexWorkerMissingUsageFieldsDoNotReplaceLastValidSnapshot(t *testing.T
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-usage-stable", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-usage-stable"}}, store: store, threadID: "thread-1"}
+	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-usage-stable"}}, store: store, threadID: "thread-1"}
 	for _, params := range []string{
 		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":900,"inputTokens":800,"outputTokens":100},"modelContextWindow":512000}}`,
 		`{"threadId":"thread-1","turnId":"turn-1","tokenUsage":{"total":{"totalTokens":1000},"last":{"totalTokens":200},"modelContextWindow":null}}`,
@@ -458,7 +459,7 @@ func TestCodexWorkerPersistsGeneratedImageAcrossReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-image"}, SessionStoreRoot: root},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1",
 	}
 	generatedPath := filepath.Join(t.TempDir(), "codex-generated.png")
@@ -528,7 +529,7 @@ func TestCodexWorkerExternalizesDynamicToolImageContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-tool-image"}, SessionStoreRoot: root},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-tool-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-1": "image_tool"},
 	}
 	dataURL := "data:image/png;base64," + tinyPNGBase64()
@@ -566,7 +567,7 @@ func TestCodexWorkerExternalizesMCPImageContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-mcp-image"}, SessionStoreRoot: root},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-mcp-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"mcp-1": "image_tool"},
 	}
 	params := fmt.Sprintf(`{"threadId":"thread-1","turnId":"turn-1","item":{"id":"mcp-1","type":"mcpToolCall","tool":"image_tool","status":"completed","result":{"content":[{"type":"image","data":%q,"mimeType":"image/png"}],"isError":false}}}`, tinyPNGBase64())
@@ -621,7 +622,7 @@ func TestCodexWorkerContinuesPastUnavailableDynamicToolImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-bad-tool-image"}, SessionStoreRoot: root},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-bad-tool-image"}, SessionStoreRoot: root},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", toolNames: map[string]string{"tool-bad-image": "image_tool"},
 	}
 	badTool := `{"threadId":"thread-1","turnId":"turn-1","item":{"id":"tool-bad-image","type":"dynamicToolCall","tool":"image_tool","status":"completed","success":true,"contentItems":[{"type":"inputImage","imageUrl":"data:image/png;base64,not-valid!"}]}}`
@@ -654,7 +655,7 @@ func TestCodexWorkerContinuesPastUnavailableGeneratedImage(t *testing.T) {
 		t.Fatal(err)
 	}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-image-missing"}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-image-missing"}},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1",
 	}
 	missingPath := filepath.Join(t.TempDir(), "missing.png")
@@ -703,7 +704,7 @@ func TestCodexWorkerDispatchesPromptHooksForInitialMessageAndSteering(t *testing
 	}
 	hookDispatcher := &capturingHookDispatcher{}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-prompts"}, WorkingDirectory: "/workspace"},
 		store: store, app: &codexWorkerRPC{}, threadID: "thread-1", messages: make(map[string]string), hooks: hookDispatcher,
 	}
 	if err := runtime.handleCommand(context.Background(), wire.Command{
@@ -745,7 +746,7 @@ func TestCodexWorkerPersistsAppliedSteering(t *testing.T) {
 	}
 	rpc := &codexWorkerRPC{}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-steering"}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-steering"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
 	}
 	command := wire.Command{
@@ -786,9 +787,9 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 	defer store.Close()
 	const sessionID = "codex-steering-order"
 	putStoredSession(t, store, sessionID, t.TempDir())
-	writer := &workerClientWriter{sendCh: make(chan wire.Message, 32), done: make(chan struct{})}
+	writer := workerbase.NewUnstartedWriter(nil, 32)
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}},
 		store: store, threadID: "thread-1", activeTurnID: "turn-1", writer: writer, messages: make(map[string]string),
 	}
 	notify := func(method, item string) {
@@ -815,8 +816,8 @@ func TestCodexSteeringAnchorsOnlyAlreadyStartedOutput(t *testing.T) {
 		t.Fatal(err)
 	}
 	boundaryUpdates, textUpdates := 0, 0
-	for len(writer.sendCh) > 0 {
-		message := <-writer.sendCh
+	for len(writer.Queue()) > 0 {
+		message := <-writer.Queue()
 		if message.Delta == nil {
 			continue
 		}
@@ -871,10 +872,10 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	writer := &workerClientWriter{sendCh: make(chan wire.Message, 16), done: make(chan struct{})}
+	writer := workerbase.NewUnstartedWriter(nil, 16)
 	hookDispatcher := &capturingHookDispatcher{}
 	runtime := &codexWorkerRuntime{
-		cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-items"}}, store: store, writer: writer,
+		cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: "session-items"}}, store: store, writer: writer,
 		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string), hooks: hookDispatcher,
 	}
 	notifications := []codexapp.Message{
@@ -938,8 +939,8 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		turnEnd.Turn.Usage.CacheCreationInputTokens != 4 || turnEnd.Turn.Usage.CacheReadInputTokens != 10 {
 		t.Fatalf("TurnEnd event = %#v", turnEnd)
 	}
-	firstDelta := nextWorkerDelta(t, writer.sendCh)
-	secondDelta := nextWorkerDelta(t, writer.sendCh)
+	firstDelta := nextWorkerDelta(t, writer.Queue())
+	secondDelta := nextWorkerDelta(t, writer.Queue())
 	if firstDelta.Delta == nil || firstDelta.Delta.PartType != string(protocol.ContentTypeText) {
 		t.Fatalf("first delta = %#v", firstDelta)
 	}
@@ -1152,7 +1153,7 @@ func TestCodexPauseThenMessageWaitsForCompletedTurnBeforeAcknowledging(t *testin
 	}
 	rpc := &codexWorkerRPC{turnID: "turn-new"}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-pause-message"}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-pause-message"}},
 		store: store, app: rpc, threadID: "thread-1", activeTurnID: "turn-old", turnStarted: now,
 		messages: make(map[string]string), toolNames: make(map[string]string), toolArguments: make(map[string]string),
 		toolNativeNames: make(map[string]string),
@@ -1216,7 +1217,7 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 		}})
 	}))
 	defer server.Close()
-	cursor, err := recoverWorkerCommandCursor(context.Background(), store, "session-replay")
+	cursor, err := workerbase.RecoverCommandCursor(context.Background(), store, "session-replay")
 	if err != nil || cursor.Sequence != 0 {
 		t.Fatalf("recovered cursor = %#v, err=%v", cursor, err)
 	}
@@ -1233,7 +1234,7 @@ func TestCodexRestartReplaysPauseAndMessageAcrossOpenTurn(t *testing.T) {
 	}
 	rpc := &codexWorkerRPC{turnID: "turn-new"}
 	runtime := &codexWorkerRuntime{
-		cfg:   codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: "session-replay"}},
+		cfg:   codexWorkerConfig{Config: workerbase.Config{SessionID: "session-replay"}},
 		store: store, app: rpc, threadID: "thread-1", messages: make(map[string]string),
 		toolNames: make(map[string]string), toolArguments: make(map[string]string), toolNativeNames: make(map[string]string),
 	}
@@ -1267,7 +1268,7 @@ func TestResumeCodexThreadClassifiesAnotherAppOwnership(t *testing.T) {
 	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
 		ThreadID: "thread-1", WorkingDirectory: t.TempDir(), Model: "gpt-5.6-luna",
 	})
-	if !errors.Is(err, errRuntimeOccupied) {
+	if !errors.Is(err, workerbase.ErrRuntimeOccupied) {
 		t.Fatalf("resume error = %v, want runtime occupied", err)
 	}
 }
@@ -1449,14 +1450,14 @@ func TestCodexChannelToolCallUsesWorkerRPC(t *testing.T) {
 	results := make(chan wire.RuntimeToolResult, 1)
 	runtime := &codexWorkerRuntime{
 		cfg: codexWorkerConfig{ChannelToolsVersion: 1}, app: rpc, threadID: "thread-1", activeTurnID: "turn-1",
-		writer:               &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})},
+		writer:               workerbase.NewUnstartedWriter(nil, 1),
 		runtimeToolResults:   results,
 		activeRequestContext: &protocol.RequestContext{Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1"},
 	}
 	request := codexapp.Message{ID: json.RawMessage(`91`), Method: "item/tool/call", Params: json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","callId":"call-1","namespace":"channel","tool":"read_messages","arguments":{"limit":5}}`)}
 	errCh := make(chan error, 1)
 	go func() { errCh <- runtime.handleServerRequest(context.Background(), request) }()
-	message := <-runtime.writer.sendCh
+	message := <-runtime.writer.Queue()
 	if message.RuntimeToolRequest == nil || message.RuntimeToolRequest.Name != "read_messages" || message.RuntimeToolRequest.RequestContext.ConnectionID != "connection-1" {
 		t.Fatalf("runtime tool request = %#v", message.RuntimeToolRequest)
 	}
@@ -1628,7 +1629,7 @@ func TestCodexApprovalPolicyCommandPersistsAndCompletesBeforeNextTurn(t *testing
 	if err != nil || len(items) != 2 || items[1].ApprovalPolicy == nil || items[1].ApprovalPolicy.CommandID != "policy-command" || items[1].ID == "policy-command" {
 		t.Fatalf("policy completion items=%#v err=%v", items, err)
 	}
-	cursor, err := recoverWorkerCommandCursor(context.Background(), store, "session-codex-policy")
+	cursor, err := workerbase.RecoverCommandCursor(context.Background(), store, "session-codex-policy")
 	if err != nil || cursor.Sequence != commandItem.Sequence {
 		t.Fatalf("recovered cursor=%#v err=%v, want %d", cursor, err, commandItem.Sequence)
 	}

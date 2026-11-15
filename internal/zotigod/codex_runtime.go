@@ -12,12 +12,13 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type codexWorkerRuntime struct {
 	cfg                  codexWorkerConfig
 	store                zotigosession.Store
-	writer               *workerClientWriter
+	writer               *workerbase.Writer
 	app                  codexapp.RPC
 	threadID             string
 	activeTurnID         string
@@ -35,7 +36,7 @@ type codexWorkerRuntime struct {
 	toolArguments        map[string]string
 	toolNativeNames      map[string]string
 	toolOrder            []string
-	hooks                hookEventDispatcher
+	hooks                workerbase.HookDispatcher
 	skills               *skills.SkillManager
 	skillTempDir         string
 	skillPaths           map[string]string
@@ -181,7 +182,7 @@ func (r *codexWorkerRuntime) Close() error {
 		Turn: &zotigosession.DisplayTurn{ID: turnID, Status: "interrupted", DurationMS: duration},
 	})
 	if appendErr == nil {
-		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, "interrupted", r.turnModel, r.turnUsage)
+		workerbase.DispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, "interrupted", r.turnModel, r.turnUsage)
 	}
 	r.activeTurnID = ""
 	r.activeRequestContext = nil

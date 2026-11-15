@@ -11,6 +11,7 @@ import (
 	"github.com/gorilla/websocket"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
@@ -70,8 +71,8 @@ func TestCodexWorkerReleasesStorageLockBeforeReportingFailure(t *testing.T) {
 	}))
 	defer server.Close()
 	err = runCodexWorkerClient(t.Context(), codexWorkerConfig{
-		workerClientConfig: workerClientConfig{SessionID: sessionID, DaemonURL: server.URL},
-		SessionStoreRoot:   root, WorkingDirectory: t.TempDir(),
+		Config:           workerbase.Config{SessionID: sessionID, DaemonURL: server.URL},
+		SessionStoreRoot: root, WorkingDirectory: t.TempDir(),
 		SocketPath: filepath.Join(t.TempDir(), "missing.sock"),
 	})
 	if err == nil {

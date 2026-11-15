@@ -22,6 +22,7 @@ import (
 	workspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type sessionToolCaller struct {
@@ -158,8 +159,8 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 	if request.Namespace != "zotigo" || request.CallID == "" || len(request.CallID) > 512 {
 		return "", errors.New("invalid runtime tool identity")
 	}
-	var spec *runtimeToolSpec
-	for _, candidate := range sessionToolSpecs() {
+	var spec *workerbase.RuntimeToolSpec
+	for _, candidate := range workerbase.SessionToolSpecs() {
 		if candidate.Name == request.Name {
 			copy := candidate
 			spec = &copy

@@ -13,6 +13,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 // WorkerSubcommand is the hidden first argument that host binaries embedding
@@ -148,7 +149,7 @@ func (s *EmbeddedService) Close(ctx context.Context) error {
 	}
 	<-s.served
 	s.launcher.Close()
-	closeHookDispatcher(s.hooks)
+	workerbase.CloseHookDispatcher(s.hooks)
 	s.closeStores()
 	return err
 }

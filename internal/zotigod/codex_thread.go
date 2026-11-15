@@ -15,6 +15,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/wiring"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *codexWorkerRuntime) startThread(ctx context.Context, boundResults <-chan wire.ConversationBoundResult) error {
@@ -167,7 +168,7 @@ func codexThreadParams(cfg codexWorkerConfig, includeDynamicTools bool) map[stri
 	}
 	if includeDynamicTools && cfg.SessionToolsVersion >= 1 {
 		dynamicTools, _ := params["dynamicTools"].([]any)
-		params["dynamicTools"] = append(dynamicTools, codexSessionToolNamespace())
+		params["dynamicTools"] = append(dynamicTools, workerbase.CodexSessionToolNamespace())
 	}
 	return params
 }

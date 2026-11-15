@@ -70,7 +70,6 @@ var (
 	errInvalidSessionTransition      = errors.New("invalid session state transition")
 	errSessionProfileNotFound        = errors.New("session profile not found")
 	errWorkerDisconnectedBeforeReady = errors.New("worker disconnected before becoming ready")
-	errRuntimeOccupied               = errors.New("runtime session is open in another application")
 )
 
 const runtimeOccupiedErrorPrefix = "runtime_occupied: "

@@ -136,7 +136,9 @@ type blockingProfileUpdateStore struct {
 func (s *blockingProfileUpdateStore) UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error {
 	s.once.Do(func() { close(s.started) })
 	<-s.release
-	return s.Store.(sessionProfileUpdater).UpdateProfile(ctx, id, profileName, updatedAt)
+	return s.Store.(interface {
+		UpdateProfile(context.Context, string, string, time.Time) error
+	}).UpdateProfile(ctx, id, profileName, updatedAt)
 }
 
 type rollbackFailingProfileStore struct {
@@ -157,7 +159,9 @@ func (s *rollbackFailingProfileStore) UpdateProfile(ctx context.Context, id stri
 	if s.updates == 2 {
 		return errors.New("rollback unavailable")
 	}
-	return s.Store.(sessionProfileUpdater).UpdateProfile(ctx, id, profileName, updatedAt)
+	return s.Store.(interface {
+		UpdateProfile(context.Context, string, string, time.Time) error
+	}).UpdateProfile(ctx, id, profileName, updatedAt)
 }
 
 func (s *fakeDisplayItemSource) LoadItems(_ context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {

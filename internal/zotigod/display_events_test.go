@@ -4,7 +4,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -17,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type receivedDisplayEvent struct {
@@ -247,7 +247,7 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 
 	workerConn, _ := connectWorker(t, server, sessionID)
 	defer workerConn.Close()
-	writer := newWorkerClientWriter(workerConn, 0, 0)
+	writer := workerbase.NewWriter(workerConn, 0, 0)
 	defer writer.Close()
 	resp, reader := openDisplayEventStream(t, server, "/sessions/"+sessionID+"/events", "")
 	defer resp.Body.Close()
@@ -293,12 +293,8 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	defer workerConn.Close()
 	events, unsubscribe := broker.Subscribe(sessionID)
 	defer unsubscribe()
-	writer := &workerClientWriter{
-		conn:   workerConn,
-		sendCh: make(chan wire.Message, workerDeltaBufferSize),
-		done:   make(chan struct{}),
-	}
-	barrierClient := newWorkerDisplayBarrierClient(writer)
+	writer := workerbase.NewUnstartedWriter(workerConn, workerbase.DeltaBufferSize)
+	barrierClient := workerbase.NewDisplayBarrierClient(writer)
 	_, _, _, _, readErrCh := readWorkerMessages(workerConn, barrierClient.Acknowledge)
 	writer.SendDelta(wire.DisplayDelta{ItemID: "old", Role: "assistant", PartType: "text", Delta: "old"})
 	writer.SendDisplayWake()
@@ -307,13 +303,13 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	defer cancelBarrier()
 	go func() { barrierResult <- barrierClient.Wait(barrierCtx) }()
 	deadline := time.Now().Add(time.Second)
-	for len(writer.sendCh) < 3 && time.Now().Before(deadline) {
+	for len(writer.Queue()) < 3 && time.Now().Before(deadline) {
 		time.Sleep(time.Millisecond)
 	}
-	if len(writer.sendCh) < 3 {
+	if len(writer.Queue()) < 3 {
 		t.Fatal("display barrier was not buffered behind old events")
 	}
-	go writer.run()
+	go writer.Run()
 	defer writer.Close()
 	if err := <-barrierResult; err != nil {
 		t.Fatalf("wait for display barrier acknowledgement: %v", err)
@@ -343,125 +339,6 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 		case <-eventDeadline:
 			t.Fatal("timed out waiting for ordered display events")
 		}
-	}
-}
-
-func TestReliableDisplayWakeWaitsForQueueSpace(t *testing.T) {
-	writer := &workerClientWriter{
-		sendCh: make(chan wire.Message, 2),
-		done:   make(chan struct{}),
-	}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
-	result := make(chan error, 1)
-	go func() {
-		result <- writer.SendDisplayWakeReliable(context.Background())
-	}()
-	select {
-	case err := <-result:
-		t.Fatalf("reliable wake returned while queue was full: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	<-writer.sendCh
-	select {
-	case err := <-result:
-		if err != nil {
-			t.Fatalf("reliable wake: %v", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("reliable wake did not use released queue space")
-	}
-	<-writer.sendCh
-	if message := <-writer.sendCh; message.Type != wire.MessageDisplayWake {
-		t.Fatalf("last queued message = %q, want reliable wake", message.Type)
-	}
-}
-
-func TestReliableDisplayWakeTimesOutWhileQueueIsFull(t *testing.T) {
-	writer := &workerClientWriter{
-		displayControlTimeout: 20 * time.Millisecond,
-		sendCh:                make(chan wire.Message, 1),
-		done:                  make(chan struct{}),
-	}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
-	err := writer.SendDisplayWakeReliable(context.Background())
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("reliable wake error = %v, want deadline exceeded", err)
-	}
-	if len(writer.sendCh) != 1 {
-		t.Fatalf("timed-out reliable wake altered full queue: %d", len(writer.sendCh))
-	}
-}
-
-func TestDisplayBarrierQueueWaitStopsOnCancel(t *testing.T) {
-	writer := &workerClientWriter{
-		sendCh: make(chan wire.Message, 1),
-		done:   make(chan struct{}),
-	}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
-	barrier := newWorkerDisplayBarrierClient(writer)
-	ctx, cancel := context.WithCancel(context.Background())
-	result := make(chan error, 1)
-	go func() { result <- barrier.Wait(ctx) }()
-	select {
-	case err := <-result:
-		t.Fatalf("barrier returned before cancellation: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	cancel()
-	select {
-	case err := <-result:
-		if !errors.Is(err, context.Canceled) {
-			t.Fatalf("barrier error = %v, want context canceled", err)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("barrier remained blocked after context cancellation")
-	}
-	barrier.mu.Lock()
-	waiterCount := len(barrier.waiters)
-	barrier.mu.Unlock()
-	if waiterCount != 0 {
-		t.Fatalf("barrier waiters leaked after cancellation: %d", waiterCount)
-	}
-}
-
-func TestDisplayBarrierWaitTimesOutWithoutAcknowledgement(t *testing.T) {
-	writer := &workerClientWriter{
-		sendCh: make(chan wire.Message, 1),
-		done:   make(chan struct{}),
-	}
-	barrier := newWorkerDisplayBarrierClient(writer)
-	barrier.timeout = 20 * time.Millisecond
-	started := time.Now()
-	err := barrier.Wait(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "acknowledgement timed out") {
-		t.Fatalf("barrier error = %v, want acknowledgement timeout", err)
-	}
-	if time.Since(started) > time.Second {
-		t.Fatal("barrier acknowledgement timeout was not bounded")
-	}
-	barrier.mu.Lock()
-	waiterCount := len(barrier.waiters)
-	barrier.mu.Unlock()
-	if waiterCount != 0 {
-		t.Fatalf("barrier waiters leaked after timeout: %d", waiterCount)
-	}
-}
-
-func TestDisplayBarrierWaitTimesOutWhileQueueIsFull(t *testing.T) {
-	writer := &workerClientWriter{
-		sendCh: make(chan wire.Message, 1),
-		done:   make(chan struct{}),
-	}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta}
-	barrier := newWorkerDisplayBarrierClient(writer)
-	barrier.timeout = 20 * time.Millisecond
-	err := barrier.Wait(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "acknowledgement timed out") {
-		t.Fatalf("barrier error = %v, want full-handshake timeout", err)
-	}
-	if len(writer.sendCh) != 1 {
-		t.Fatalf("timed-out barrier altered full queue: %d", len(writer.sendCh))
 	}
 }
 
@@ -750,7 +627,7 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 	for _, kind := range []string{"native", "codex"} {
 		t.Run(kind, func(t *testing.T) {
 			store, _, _, sessionID := newDisplayEventTestServer(t)
-			writer := &workerClientWriter{sendCh: make(chan wire.Message, 4), done: make(chan struct{})}
+			writer := workerbase.NewUnstartedWriter(nil, 4)
 			item := zotigosession.DisplayItem{ID: "finished-block", Type: zotigosession.DisplayItemAssistantMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "body"}}}
 			if kind == "native" {
 				log := sessionlog.NewLog(sessionID, sessionlog.StoredItemSource{Store: store})
@@ -759,13 +636,13 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 					t.Fatal(err)
 				}
 			} else {
-				runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{workerClientConfig: workerClientConfig{SessionID: sessionID}}, store: store, writer: writer}
+				runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{Config: workerbase.Config{SessionID: sessionID}}, store: store, writer: writer}
 				if err := runtime.append(item); err != nil {
 					t.Fatal(err)
 				}
 			}
 			select {
-			case message := <-writer.sendCh:
+			case message := <-writer.Queue():
 				if message.Type != wire.MessageDisplayWake || message.PreviewRetirement == nil || message.PreviewRetirement.ItemID != item.ID {
 					t.Fatalf("completion notification = %#v", message)
 				}
@@ -790,7 +667,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 	defer server.Close()
 	conn, _ := connectWorker(t, server, sessionID)
 	defer conn.Close()
-	writer := &workerClientWriter{conn: conn, sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	writer := workerbase.NewUnstartedWriter(conn, 1)
 	defer writer.Close()
 	broker.PublishDelta(sessionID, wire.DisplayDelta{ItemID: "finished", Role: "assistant", PartType: "text", Delta: "completed body"})
 	stored, err := source.AppendItem(context.Background(), sessionID, zotigosession.DisplayItem{ID: "finished", Type: zotigosession.DisplayItemAssistantMessage})
@@ -805,7 +682,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 		t.Fatal("completion was dropped when the queue was full")
 	case <-time.After(20 * time.Millisecond):
 	}
-	go writer.run()
+	go writer.Run()
 	select {
 	case <-sent:
 	case <-time.After(time.Second):
@@ -822,7 +699,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 }
 
 func TestDisplayRetirementWaitStopsWhenWriterCloses(t *testing.T) {
-	writer := &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	writer := workerbase.NewUnstartedWriter(nil, 1)
 	defer writer.Close()
 	writer.SendDisplayWake()
 	sent := make(chan struct{})

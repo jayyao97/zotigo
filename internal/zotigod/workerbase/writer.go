@@ -1,4 +1,4 @@
-package zotigod
+package workerbase
 
 import (
 	"context"
@@ -8,16 +8,12 @@ import (
 
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
-	_ "github.com/jayyao97/zotigo/core/providers/anthropic"
-	_ "github.com/jayyao97/zotigo/core/providers/deepseek"
-	_ "github.com/jayyao97/zotigo/core/providers/gemini"
-	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
-type workerClientWriter struct {
+type Writer struct {
 	conn                  *websocket.Conn
 	pingEvery             time.Duration
 	displayControlTimeout time.Duration
@@ -26,22 +22,22 @@ type workerClientWriter struct {
 	closeOnce             sync.Once
 }
 
-type workerDisplayBarrierClient struct {
-	writer  *workerClientWriter
+type DisplayBarrierClient struct {
+	writer  *Writer
 	timeout time.Duration
 	mu      sync.Mutex
 	waiters map[string]chan struct{}
 }
 
-func newWorkerDisplayBarrierClient(writer *workerClientWriter) *workerDisplayBarrierClient {
-	return &workerDisplayBarrierClient{
+func NewDisplayBarrierClient(writer *Writer) *DisplayBarrierClient {
+	return &DisplayBarrierClient{
 		writer:  writer,
-		timeout: workerHTTPTimeout,
+		timeout: HTTPTimeout,
 		waiters: make(map[string]chan struct{}),
 	}
 }
 
-func (b *workerDisplayBarrierClient) Wait(ctx context.Context) error {
+func (b *DisplayBarrierClient) Wait(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
 	barrier := wire.DisplayBarrier{ID: sessionlog.NewID("display_barrier")}
@@ -76,7 +72,7 @@ func (b *workerDisplayBarrierClient) Wait(ctx context.Context) error {
 	}
 }
 
-func (b *workerDisplayBarrierClient) Acknowledge(id string) {
+func (b *DisplayBarrierClient) Acknowledge(id string) {
 	b.mu.Lock()
 	acknowledged := b.waiters[id]
 	if acknowledged != nil {
@@ -86,25 +82,25 @@ func (b *workerDisplayBarrierClient) Acknowledge(id string) {
 	b.mu.Unlock()
 }
 
-func newWorkerClientWriter(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) *workerClientWriter {
+func NewWriter(conn *websocket.Conn, pingInterval time.Duration, pongWait time.Duration) *Writer {
 	if pongWait > 0 {
 		_ = conn.SetReadDeadline(time.Now().Add(pongWait))
 		conn.SetPongHandler(func(string) error {
 			return conn.SetReadDeadline(time.Now().Add(pongWait))
 		})
 	}
-	writer := &workerClientWriter{
+	writer := &Writer{
 		conn:                  conn,
 		pingEvery:             pingInterval,
-		displayControlTimeout: workerHTTPTimeout,
-		sendCh:                make(chan wire.Message, workerDeltaBufferSize),
+		displayControlTimeout: HTTPTimeout,
+		sendCh:                make(chan wire.Message, DeltaBufferSize),
 		done:                  make(chan struct{}),
 	}
-	go writer.run()
+	go writer.Run()
 	return writer
 }
 
-func (w *workerClientWriter) SendDelta(delta wire.DisplayDelta) {
+func (w *Writer) SendDelta(delta wire.DisplayDelta) {
 	msg := wire.Message{Type: wire.MessageDelta, Delta: &delta}
 	select {
 	case <-w.done:
@@ -120,7 +116,7 @@ func (w *workerClientWriter) SendDelta(delta wire.DisplayDelta) {
 	}
 }
 
-func (w *workerClientWriter) SendDisplayItem(item zotigosession.DisplayItem) {
+func (w *Writer) SendDisplayItem(item zotigosession.DisplayItem) {
 	retirement := sessionlog.PreviewRetirement(item)
 	// Unlike an ordinary wake, this retires daemon-owned preview memory even
 	// when nobody is reading history. Keep it ordered after earlier deltas and
@@ -133,11 +129,11 @@ func (w *workerClientWriter) SendDisplayItem(item zotigosession.DisplayItem) {
 	}
 }
 
-func (w *workerClientWriter) SendDisplayWake() {
+func (w *Writer) SendDisplayWake() {
 	w.sendDisplayWake(wire.Message{Type: wire.MessageDisplayWake})
 }
 
-func (w *workerClientWriter) sendDisplayWake(msg wire.Message) {
+func (w *Writer) sendDisplayWake(msg wire.Message) {
 	select {
 	case <-w.done:
 		return
@@ -151,10 +147,10 @@ func (w *workerClientWriter) sendDisplayWake(msg wire.Message) {
 	}
 }
 
-func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error {
+func (w *Writer) SendDisplayWakeReliable(ctx context.Context) error {
 	timeout := w.displayControlTimeout
 	if timeout <= 0 {
-		timeout = workerHTTPTimeout
+		timeout = HTTPTimeout
 	}
 	wakeCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -169,8 +165,8 @@ func (w *workerClientWriter) SendDisplayWakeReliable(ctx context.Context) error 
 	}
 }
 
-func (w *workerClientWriter) SendIdle(ctx context.Context, idle wire.Idle) error {
-	idleCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+func (w *Writer) SendIdle(ctx context.Context, idle wire.Idle) error {
+	idleCtx, cancel := context.WithTimeout(ctx, HTTPTimeout)
 	defer cancel()
 	msg := wire.Message{Type: wire.MessageIdle, Idle: &idle}
 	select {
@@ -183,8 +179,8 @@ func (w *workerClientWriter) SendIdle(ctx context.Context, idle wire.Idle) error
 	}
 }
 
-func (w *workerClientWriter) SendWorking(ctx context.Context) error {
-	workingCtx, cancel := context.WithTimeout(ctx, workerHTTPTimeout)
+func (w *Writer) SendWorking(ctx context.Context) error {
+	workingCtx, cancel := context.WithTimeout(ctx, HTTPTimeout)
 	defer cancel()
 	msg := wire.Message{Type: wire.MessageWorking}
 	select {
@@ -197,7 +193,7 @@ func (w *workerClientWriter) SendWorking(ctx context.Context) error {
 	}
 }
 
-func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier wire.DisplayBarrier) error {
+func (w *Writer) SendDisplayBarrier(ctx context.Context, barrier wire.DisplayBarrier) error {
 	msg := wire.Message{Type: wire.MessageDisplayBarrier, DisplayBarrier: &barrier}
 	select {
 	case <-ctx.Done():
@@ -209,7 +205,7 @@ func (w *workerClientWriter) SendDisplayBarrier(ctx context.Context, barrier wir
 	}
 }
 
-func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result wire.ApprovalResult) bool {
+func (w *Writer) SendApprovalResult(ctx context.Context, result wire.ApprovalResult) bool {
 	msg := wire.Message{Type: wire.MessageApprovalResult, ApprovalResult: &result}
 	select {
 	case <-ctx.Done():
@@ -221,7 +217,7 @@ func (w *workerClientWriter) SendApprovalResult(ctx context.Context, result wire
 	}
 }
 
-func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result wire.InteractionResult) bool {
+func (w *Writer) SendInteractionResult(ctx context.Context, result wire.InteractionResult) bool {
 	msg := wire.Message{Type: wire.MessageInteractionResult, InteractionResult: &result}
 	select {
 	case <-ctx.Done():
@@ -233,7 +229,7 @@ func (w *workerClientWriter) SendInteractionResult(ctx context.Context, result w
 	}
 }
 
-func (w *workerClientWriter) SendInputResult(ctx context.Context, result wire.InputResult) bool {
+func (w *Writer) SendInputResult(ctx context.Context, result wire.InputResult) bool {
 	msg := wire.Message{Type: wire.MessageInputResult, InputResult: &result}
 	select {
 	case <-ctx.Done():
@@ -245,7 +241,7 @@ func (w *workerClientWriter) SendInputResult(ctx context.Context, result wire.In
 	}
 }
 
-func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval wire.ApprovalRequest) error {
+func (w *Writer) SendApprovalRequest(ctx context.Context, approval wire.ApprovalRequest) error {
 	msg := wire.Message{Type: wire.MessageApprovalRequest, ApprovalRequest: &approval}
 	select {
 	case <-ctx.Done():
@@ -257,7 +253,7 @@ func (w *workerClientWriter) SendApprovalRequest(ctx context.Context, approval w
 	}
 }
 
-func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interaction wire.InteractionRequest) error {
+func (w *Writer) SendInteractionRequest(ctx context.Context, interaction wire.InteractionRequest) error {
 	msg := wire.Message{Type: wire.MessageInteractionRequest, InteractionRequest: &interaction}
 	select {
 	case <-ctx.Done():
@@ -269,7 +265,7 @@ func (w *workerClientWriter) SendInteractionRequest(ctx context.Context, interac
 	}
 }
 
-func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversationID string) error {
+func (w *Writer) SendConversationBound(ctx context.Context, conversationID string) error {
 	msg := wire.Message{
 		Type:              wire.MessageConversationBound,
 		ConversationBound: &wire.ConversationBound{ConversationID: conversationID},
@@ -284,7 +280,7 @@ func (w *workerClientWriter) SendConversationBound(ctx context.Context, conversa
 	}
 }
 
-func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request wire.RuntimeToolRequest) error {
+func (w *Writer) SendRuntimeToolRequest(ctx context.Context, request wire.RuntimeToolRequest) error {
 	msg := wire.Message{Type: wire.MessageRuntimeToolRequest, RuntimeToolRequest: &request}
 	select {
 	case <-ctx.Done():
@@ -296,11 +292,11 @@ func (w *workerClientWriter) SendRuntimeToolRequest(ctx context.Context, request
 	}
 }
 
-func (w *workerClientWriter) Close() {
+func (w *Writer) Close() {
 	w.closeOnce.Do(func() { close(w.done) })
 }
 
-func (w *workerClientWriter) run() {
+func (w *Writer) Run() {
 	defer w.Close()
 	var ticker *time.Ticker
 	var ticks <-chan time.Time
@@ -327,7 +323,7 @@ func (w *workerClientWriter) run() {
 	}
 }
 
-func (w *workerClientWriter) writeMessage(messageType int, value any) error {
+func (w *Writer) writeMessage(messageType int, value any) error {
 	var data []byte
 	var err error
 	if value != nil {
@@ -336,8 +332,18 @@ func (w *workerClientWriter) writeMessage(messageType int, value any) error {
 			return err
 		}
 	}
-	if err := w.conn.SetWriteDeadline(time.Now().Add(workerWriteWait)); err != nil {
+	if err := w.conn.SetWriteDeadline(time.Now().Add(WriteWait)); err != nil {
 		return err
 	}
 	return w.conn.WriteMessage(messageType, data)
 }
+
+// NewUnstartedWriter returns a Writer with the given queue capacity whose
+// write loop is not running. Test-only: daemon and worker tests in zotigod
+// use it to observe what a runtime queues without a live connection.
+func NewUnstartedWriter(conn *websocket.Conn, queue int) *Writer {
+	return &Writer{conn: conn, sendCh: make(chan wire.Message, queue), done: make(chan struct{})}
+}
+
+// Queue exposes the outgoing queue for reading. Test-only.
+func (w *Writer) Queue() <-chan wire.Message { return w.sendCh }

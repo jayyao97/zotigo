@@ -8,25 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
-
-// Live admission already holds the source Channel configuration fence. Only
-// durable command replay performs this second RPC, avoiding recursive RLocks
-// while the daemon waits for a live worker admission.
-func authorizeRuntimeToolReplay(ctx context.Context, client *workerRuntimeToolClient, commandID string) error {
-	if !strings.HasPrefix(commandID, "session_tool:") && !strings.HasPrefix(commandID, "completion:") {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	arguments, _ := json.Marshal(map[string]string{"command_id": commandID})
-	_, err := client.request(ctx, wire.RuntimeToolRequest{Namespace: "host", Name: "authorize_input", Arguments: arguments})
-	return err
-}
 
 func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string, raw json.RawMessage) (string, error) {
 	var input struct {

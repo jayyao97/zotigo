@@ -15,6 +15,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
@@ -90,7 +91,7 @@ func (h *handler) handleSessions(w http.ResponseWriter, r *http.Request) {
 			defer releaseWorkspace()
 			assignedWorkspaceID = workspaceID
 		}
-		approvalPolicy, err := normalizeSessionApprovalPolicy(req.ApprovalPolicy, true)
+		approvalPolicy, err := workerbase.NormalizeSessionApprovalPolicy(req.ApprovalPolicy, true)
 		if err != nil {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 			return

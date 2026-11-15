@@ -69,6 +69,12 @@ var rules = []rule{
 		allow: []string{"internal/zotigod/wire"},
 		why:   "the session log is run by both the daemon and its workers and must not depend on the daemon or its clients",
 	},
+	{
+		from:  []string{"internal/zotigod/workerbase"},
+		deny:  []string{"internal/zotigod", "internal/zotigodclient", "internal/cliapp", "internal/acpserver", "cli", "cmd"},
+		allow: []string{"internal/zotigod/wire", "internal/zotigod/sessionlog"},
+		why:   "the worker base is linked into every worker process and must not depend on the daemon or its clients",
+	},
 }
 
 func under(pkg string, roots []string) bool {

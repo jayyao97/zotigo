@@ -12,9 +12,9 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
-const workerWriteWait = 10 * time.Second
 const defaultWorkerApprovalWait = 30 * time.Second
 const workerRegistrationWait = time.Second
 
@@ -892,14 +892,14 @@ func (c *workerConnection) writeJSON(msg wire.Message) error {
 	if err != nil {
 		return err
 	}
-	if err := c.conn.SetWriteDeadline(time.Now().Add(workerWriteWait)); err != nil {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(workerbase.WriteWait)); err != nil {
 		return err
 	}
 	return c.conn.WriteMessage(websocket.TextMessage, data)
 }
 
 func (c *workerConnection) writePing() error {
-	if err := c.conn.SetWriteDeadline(time.Now().Add(workerWriteWait)); err != nil {
+	if err := c.conn.SetWriteDeadline(time.Now().Add(workerbase.WriteWait)); err != nil {
 		return err
 	}
 	return c.conn.WriteMessage(websocket.PingMessage, nil)

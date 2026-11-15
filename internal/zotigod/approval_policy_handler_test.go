@@ -19,6 +19,7 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type failingApprovalPolicyStore struct {
@@ -396,11 +397,11 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 			return nil
 		},
 	}
-	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{})
+	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if replayErr == nil || !strings.Contains(replayErr.Error(), "completion marker unavailable") {
 		t.Fatalf("expected completion marker failure, got %v", replayErr)
 	}
-	if cursor != (workerCommandCursor{}) {
+	if cursor != (workerbase.CommandCursor{}) {
 		t.Fatalf("cursor advanced before completion marker: %#v", cursor)
 	}
 	if got := runtime.agent.Describe().ApprovalPolicy; got != agent.ApprovalPolicyAuto {
@@ -412,14 +413,14 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	}
 
 	runtime.display.Items = storedItems
-	cursor, err = replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{})
+	cursor, err = replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay pending policy command: %v", err)
 	}
 	if cursor.Sequence != oppositeCommand.Sequence || cursor.Offset != 1 {
 		t.Fatalf("unexpected replay cursor: %#v", cursor)
 	}
-	savedCursor, err := loadWorkerCommandCursor(context.Background(), nil, runtime.sessionID)
+	savedCursor, err := workerbase.LoadCommandCursor(context.Background(), nil, runtime.sessionID)
 	if err != nil {
 		t.Fatalf("load saved cursor: %v", err)
 	}
@@ -437,14 +438,14 @@ func TestWorkerRuntimeRestoresAndPersistsApprovalPolicy(t *testing.T) {
 	if err != nil || stored.ApprovalPolicy != agent.ApprovalPolicyBypass {
 		t.Fatalf("final stored policy = %#v, err = %v", stored, err)
 	}
-	if got := recoverAppliedCommandSequence(items); got != oppositeCommand.Sequence {
+	if got := workerbase.RecoverAppliedCommandSequence(items); got != oppositeCommand.Sequence {
 		t.Fatalf("recovered cursor = %d, want %d", got, oppositeCommand.Sequence)
 	}
 	if len(items) != 4 || items[2].Type != zotigosession.DisplayItemApprovalPolicyChanged || items[3].Type != zotigosession.DisplayItemApprovalPolicyChanged {
 		t.Fatalf("expected one completion marker per command, got %#v", items)
 	}
 
-	staleCursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerCommandCursor{})
+	staleCursor, err := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, runtime.sessionID, runtime, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay stale cursor: %v", err)
 	}
@@ -547,8 +548,8 @@ func TestLowersPermissionsOrdersPolicies(t *testing.T) {
 		{agent.ApprovalPolicyAuto, agent.ApprovalPolicyAuto, false},
 	}
 	for _, tc := range cases {
-		if got := lowersPermissions(tc.from, tc.to); got != tc.want {
-			t.Errorf("lowersPermissions(%s, %s) = %v", tc.from, tc.to, got)
+		if got := workerbase.LowersPermissions(tc.from, tc.to); got != tc.want {
+			t.Errorf("workerbase.LowersPermissions(%s, %s) = %v", tc.from, tc.to, got)
 		}
 	}
 }

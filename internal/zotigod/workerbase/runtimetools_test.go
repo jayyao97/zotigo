@@ -1,7 +1,8 @@
-package zotigod
+package workerbase
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -10,12 +11,12 @@ import (
 
 func TestChannelReadMessagesToolUsesActiveRequestContext(t *testing.T) {
 	results := make(chan wire.RuntimeToolResult, 1)
-	writer := &workerClientWriter{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
-	state := &channelRuntimeToolState{client: &workerRuntimeToolClient{writer: writer, results: results}}
-	state.setRequestContext(&protocol.RequestContext{
+	writer := &Writer{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	state := &ChannelRuntimeToolState{Client: &RuntimeToolClient{Writer: writer, Results: results}}
+	state.SetRequestContext(&protocol.RequestContext{
 		Source: "feishu", ConnectionID: "connection-1", ConversationID: "conversation-1", ExternalConversation: "chat-1",
 	})
-	tool := &channelReadMessagesTool{state: state}
+	tool := &ChannelReadMessagesTool{State: state}
 
 	resultCh := make(chan any, 1)
 	errCh := make(chan error, 1)
@@ -40,8 +41,19 @@ func TestChannelReadMessagesToolUsesActiveRequestContext(t *testing.T) {
 }
 
 func TestChannelReadMessagesToolRequiresChannelTurn(t *testing.T) {
-	tool := &channelReadMessagesTool{state: &channelRuntimeToolState{}}
+	tool := &ChannelReadMessagesTool{State: &ChannelRuntimeToolState{}}
 	if _, err := tool.Execute(context.Background(), nil, `{}`); err == nil {
 		t.Fatal("tool accepted a call outside a Channel turn")
+	}
+}
+
+func TestSessionToolTransportCancellation(t *testing.T) {
+	writer := &Writer{sendCh: make(chan wire.Message, 1), done: make(chan struct{})}
+	client := &RuntimeToolClient{Writer: writer, Results: make(chan wire.RuntimeToolResult)}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := client.request(ctx, wire.RuntimeToolRequest{Namespace: "zotigo", Name: "list_sessions", CallID: "stable-call"})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancel error=%v", err)
 	}
 }

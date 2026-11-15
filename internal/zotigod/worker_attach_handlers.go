@@ -9,6 +9,7 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id string) {
@@ -99,7 +100,7 @@ func (h *handler) closeReadyWorkerWhenIdle(ctx context.Context, session Session,
 	if err != nil || sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) {
 		return
 	}
-	h.closeWorkerWhenIdle(session.ID, generation, wire.Idle{CommandSequence: latestCommandSequence(items)})
+	h.closeWorkerWhenIdle(session.ID, generation, wire.Idle{CommandSequence: workerbase.LatestCommandSequence(items)})
 }
 
 func (h *handler) closeWorkerWhenIdle(sessionID string, generation string, idle wire.Idle) bool {

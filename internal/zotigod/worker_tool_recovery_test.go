@@ -11,6 +11,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) {
@@ -115,7 +116,7 @@ func TestRecoverInterruptedToolExecutionInjectsOutcomeUnknownHintOnce(t *testing
 	})
 	appendToolRecoveryItem(t, store, sessionID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnInterrupted,
-		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Status: "interrupted", Reason: controlChannelClosedReason},
+		Turn: &zotigosession.DisplayTurn{ID: "turn-1", Status: "interrupted", Reason: workerbase.ControlChannelClosedReason},
 	})
 
 	sess, err := store.Get(context.Background(), sessionID)

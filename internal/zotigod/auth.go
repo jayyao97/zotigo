@@ -115,23 +115,3 @@ func resolveWorkerDaemonURL(addr string, explicit string) (string, error) {
 	}
 	return (&url.URL{Scheme: "http", Host: net.JoinHostPort(host, port)}).String(), nil
 }
-
-type bearerTransport struct {
-	base  http.RoundTripper
-	token string
-}
-
-func (t bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	clone := req.Clone(req.Context())
-	clone.Header = req.Header.Clone()
-	clone.Header.Set("Authorization", "Bearer "+t.token)
-	return t.base.RoundTrip(clone)
-}
-
-func newWorkerHTTPClient(token string) *http.Client {
-	client := &http.Client{Timeout: workerHTTPTimeout}
-	if token != "" {
-		client.Transport = bearerTransport{base: http.DefaultTransport, token: token}
-	}
-	return client
-}

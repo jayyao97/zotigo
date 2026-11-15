@@ -23,10 +23,8 @@ import (
 )
 
 const (
-	controlChannelClosedReason    = "control_channel_closed"
-	approvalWorkerRestartedReason = "worker restarted before approval completed"
-	defaultCommandsLimit          = 200
-	commandOffsetScanLines        = wire.MaxCommandsLimit
+	defaultCommandsLimit   = 200
+	commandOffsetScanLines = wire.MaxCommandsLimit
 )
 
 type pauseSessionRequest struct {

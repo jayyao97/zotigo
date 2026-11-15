@@ -14,6 +14,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message codexapp.Message) error {
@@ -79,7 +80,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		if r.activeTurnID != "" && updated.TurnID == r.activeTurnID {
 			usage := updated.TokenUsage.Last.protocolUsage()
 			if r.hasTotalUsage {
-				usage = turnUsageDelta(r.totalUsage, totalUsage)
+				usage = workerbase.TurnUsageDelta(r.totalUsage, totalUsage)
 			}
 			r.turnUsage = r.turnUsage.Add(usage)
 		}
@@ -303,7 +304,7 @@ func (r *codexWorkerRuntime) handleNotification(ctx context.Context, message cod
 		}); err != nil {
 			return err
 		}
-		dispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, status, r.turnModel, r.turnUsage)
+		workerbase.DispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, status, r.turnModel, r.turnUsage)
 		r.activeTurnID = ""
 		r.activeRequestContext = nil
 		commandSequence := r.commandSequence

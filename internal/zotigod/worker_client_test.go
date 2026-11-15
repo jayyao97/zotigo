@@ -27,6 +27,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
@@ -53,54 +54,11 @@ func TestWorkerClientKeepaliveClosesUnresponsiveDaemon(t *testing.T) {
 	serverConn := <-serverConnReady
 	defer serverConn.Close()
 
-	writer := newWorkerClientWriter(clientConn, 10*time.Millisecond, 30*time.Millisecond)
+	writer := workerbase.NewWriter(clientConn, 10*time.Millisecond, 30*time.Millisecond)
 	defer writer.Close()
 
 	if _, _, err := clientConn.ReadMessage(); err == nil {
 		t.Fatal("expected worker websocket read to fail after pong timeout")
-	}
-}
-
-func TestWorkerClientWriterFailureClosesDoneAndUnblocksApproval(t *testing.T) {
-	releaseServerConn := make(chan struct{})
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		conn, err := workerUpgrader.Upgrade(w, r, nil)
-		if err != nil {
-			return
-		}
-		<-releaseServerConn
-		_ = conn.Close()
-	}))
-	defer server.Close()
-	defer close(releaseServerConn)
-
-	url := "ws" + strings.TrimPrefix(server.URL, "http")
-	clientConn, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err != nil {
-		t.Fatalf("dial worker websocket: %v", err)
-	}
-	writer := newWorkerClientWriter(clientConn, 0, 0)
-	if err := clientConn.Close(); err != nil {
-		t.Fatalf("close worker websocket: %v", err)
-	}
-	writer.sendCh <- wire.Message{Type: wire.MessageDelta, Delta: &wire.DisplayDelta{}}
-	select {
-	case <-writer.done:
-	case <-time.After(time.Second):
-		t.Fatal("writer failure did not close done")
-	}
-	for len(writer.sendCh) < cap(writer.sendCh) {
-		writer.sendCh <- wire.Message{Type: wire.MessageDelta, Delta: &wire.DisplayDelta{}}
-	}
-	notified := make(chan struct{})
-	go func() {
-		writer.SendApprovalRequest(context.Background(), wire.ApprovalRequest{})
-		close(notified)
-	}()
-	select {
-	case <-notified:
-	case <-time.After(time.Second):
-		t.Fatal("approval notification remained blocked after writer failure")
 	}
 }
 
@@ -145,7 +103,7 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-replay", &workerRuntime{}, workerCommandCursor{})
+	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-replay", &workerRuntime{}, workerbase.CommandCursor{})
 	if err != nil {
 		t.Fatalf("replay commands: %v", err)
 	}
@@ -156,7 +114,7 @@ func TestReplayWorkerCommandsFetchesMultiplePages(t *testing.T) {
 		t.Fatalf("unexpected cursor after replay: %#v", cursor)
 	}
 
-	saved, err := loadWorkerCommandCursor(context.Background(), nil, "sess-replay")
+	saved, err := workerbase.LoadCommandCursor(context.Background(), nil, "sess-replay")
 	if err != nil {
 		t.Fatalf("load saved cursor: %v", err)
 	}
@@ -201,14 +159,14 @@ func TestReplayWorkerCommandsDoesNotAdvanceMalformedCommand(t *testing.T) {
 	}))
 	defer server.Close()
 
-	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-malformed", &workerRuntime{}, workerCommandCursor{})
+	cursor, err := replayWorkerCommands(context.Background(), server.Client(), server.URL, "sess-malformed", &workerRuntime{}, workerbase.CommandCursor{})
 	if err == nil || !strings.Contains(err.Error(), "invalid message command payload") {
 		t.Fatalf("expected malformed command error, got %v", err)
 	}
 	if cursor.Sequence != 0 || cursor.Offset != 0 {
 		t.Fatalf("expected cursor not to advance, got %#v", cursor)
 	}
-	saved, err := loadWorkerCommandCursor(context.Background(), nil, "sess-malformed")
+	saved, err := workerbase.LoadCommandCursor(context.Background(), nil, "sess-malformed")
 	if err != nil {
 		t.Fatalf("load saved cursor: %v", err)
 	}
@@ -246,14 +204,14 @@ func TestLoadWorkerCommandCursorDoesNotSkipPendingMessage(t *testing.T) {
 		t.Fatalf("append command item: %v", err)
 	}
 	_ = item
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -296,14 +254,14 @@ func TestLoadWorkerCommandCursorRecoversAppliedMessage(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append turn started: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -352,14 +310,14 @@ func TestLoadWorkerCommandCursorIgnoresPersistedSteering(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append steering command: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -373,14 +331,14 @@ func TestRecoverWorkerCommandCursorTracksDurableSteeringApplication(t *testing.T
 		{Sequence: 1, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 		{ID: "steer-1", Sequence: 2, Type: zotigosession.DisplayItemSessionCommand, Command: &zotigosession.DisplayCommand{Type: wire.CommandSteering, Text: "change", TurnID: "turn-1"}},
 	}
-	if got := recoverAppliedCommandSequence(items); got != 0 {
+	if got := workerbase.RecoverAppliedCommandSequence(items); got != 0 {
 		t.Fatalf("pending steering advanced cursor to %d", got)
 	}
 	items = append(items, zotigosession.DisplayItem{
 		ID: "steer-1", Sequence: 3, Type: zotigosession.DisplayItemSteeringMessage,
 		Command: &zotigosession.DisplayCommand{Type: wire.CommandSteering, Text: "change", TurnID: "turn-1"},
 	})
-	if got := recoverAppliedCommandSequence(items); got != 2 {
+	if got := workerbase.RecoverAppliedCommandSequence(items); got != 2 {
 		t.Fatalf("applied steering cursor = %d, want 2", got)
 	}
 }
@@ -442,14 +400,14 @@ func TestLoadWorkerCommandCursorDoesNotTreatAppliedImageSteeringAsCommand(t *tes
 	}); err != nil {
 		t.Fatalf("append turn completed: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte("{"), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -485,14 +443,14 @@ func TestLoadWorkerCommandCursorDowngradesUnsafeSequence(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append pending command: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte(`{"offset":0,"sequence":999}`), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte(`{"offset":0,"sequence":999}`), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -535,14 +493,14 @@ func TestLoadWorkerCommandCursorDowngradesInvalidOffset(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("append turn started: %v", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte(`{"offset":999999,"sequence":1}`), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte(`{"offset":999999,"sequence":1}`), 0644); err != nil {
 		t.Fatalf("write corrupt cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -585,15 +543,15 @@ func TestLoadWorkerCommandCursorDowngradesOffsetBeforePendingCommand(t *testing.
 	if eofOffset <= 0 {
 		t.Fatalf("expected positive display log offset, got %d", eofOffset)
 	}
-	if err := os.MkdirAll(filepath.Dir(workerCommandCursorPath(sessionID)), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(workerbase.CommandCursorPath(sessionID)), 0755); err != nil {
 		t.Fatalf("create cursor dir: %v", err)
 	}
 	cursorData := fmt.Sprintf(`{"offset":%d,"sequence":0}`, eofOffset)
-	if err := os.WriteFile(workerCommandCursorPath(sessionID), []byte(cursorData), 0644); err != nil {
+	if err := os.WriteFile(workerbase.CommandCursorPath(sessionID), []byte(cursorData), 0644); err != nil {
 		t.Fatalf("write cursor: %v", err)
 	}
 
-	cursor, err := loadWorkerCommandCursor(context.Background(), store, sessionID)
+	cursor, err := workerbase.LoadCommandCursor(context.Background(), store, sessionID)
 	if err != nil {
 		t.Fatalf("load worker command cursor: %v", err)
 	}
@@ -641,7 +599,7 @@ func TestWorkerClientConnectsBeforeRuntimeInitialization(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := runWorkerClient(context.Background(), workerClientConfig{
+	err := runWorkerClient(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: "sess-init-before-connect",
 	})
@@ -682,7 +640,7 @@ func TestWorkerClientInitializationFailurePreservesError(t *testing.T) {
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
-	runErr := runWorkerClient(context.Background(), workerClientConfig{
+	runErr := runWorkerClient(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: sessionID,
 		AuthToken: "worker-secret",
@@ -710,7 +668,7 @@ func TestWorkerClientDialErrorIncludesHTTPResponse(t *testing.T) {
 	}))
 	defer server.Close()
 
-	err := runWorkerClient(context.Background(), workerClientConfig{
+	err := runWorkerClient(context.Background(), workerbase.Config{
 		DaemonURL: server.URL,
 		SessionID: "sess-dial-conflict",
 	})
@@ -833,7 +791,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if len(items) != 2 || items[1].Type != zotigosession.DisplayItemProfileChanged || items[1].Profile == nil || items[1].Profile.CommandID != commandItem.ID {
 		t.Fatalf("unexpected profile display items: %#v", items)
 	}
-	if cursor := recoverAppliedCommandSequence(items); cursor != commandItem.Sequence {
+	if cursor := workerbase.RecoverAppliedCommandSequence(items); cursor != commandItem.Sequence {
 		t.Fatalf("expected applied profile command cursor %d, got %d", commandItem.Sequence, cursor)
 	}
 	newerCommand, err := store.AppendDisplayItem(context.Background(), "sess-worker-profile", zotigosession.DisplayItem{
@@ -899,7 +857,7 @@ func TestRecoverAppliedCommandSequenceWaitsForProfileResult(t *testing.T) {
 		Type:     zotigosession.DisplayItemSessionCommand,
 		Command:  &zotigosession.DisplayCommand{Type: wire.CommandProfile, Profile: "new"},
 	}
-	if cursor := recoverAppliedCommandSequence([]zotigosession.DisplayItem{command}); cursor != 0 {
+	if cursor := workerbase.RecoverAppliedCommandSequence([]zotigosession.DisplayItem{command}); cursor != 0 {
 		t.Fatalf("expected pending profile command cursor 0, got %d", cursor)
 	}
 	failed := zotigosession.DisplayItem{
@@ -907,7 +865,7 @@ func TestRecoverAppliedCommandSequenceWaitsForProfileResult(t *testing.T) {
 		Type:     zotigosession.DisplayItemProfileFailed,
 		Profile:  &zotigosession.DisplayProfileChange{CommandID: command.ID, To: "new"},
 	}
-	if cursor := recoverAppliedCommandSequence([]zotigosession.DisplayItem{command, failed}); cursor != command.Sequence {
+	if cursor := workerbase.RecoverAppliedCommandSequence([]zotigosession.DisplayItem{command, failed}); cursor != command.Sequence {
 		t.Fatalf("expected failed profile command cursor %d, got %d", command.Sequence, cursor)
 	}
 }
@@ -1058,8 +1016,8 @@ func TestWorkerRuntimeTreatsFailureMarkerWriteAsReplayable(t *testing.T) {
 		t.Fatalf("handle profile command: %v", err)
 	}
 	fatalErr := runtime.currentFatalError()
-	var uncertain *profileCompletionUncertainError
-	if !errors.As(fatalErr, &uncertain) || !isExpectedWorkerClose(fatalErr) {
+	var uncertain *workerbase.ProfileCompletionUncertainError
+	if !errors.As(fatalErr, &uncertain) || !workerbase.IsExpectedClose(fatalErr) {
 		t.Fatalf("expected replayable completion uncertainty, got %v", fatalErr)
 	}
 }
@@ -1391,8 +1349,8 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 		_, _ = w.Write(data)
 	}))
 	defer commandServer.Close()
-	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-profile-uncertain", firstRuntime, workerCommandCursor{})
-	var uncertain *profileStateUncertainError
+	cursor, replayErr := replayWorkerCommands(context.Background(), commandServer.Client(), commandServer.URL, "sess-profile-uncertain", firstRuntime, workerbase.CommandCursor{})
+	var uncertain *workerbase.ProfileStateUncertainError
 	if !errors.As(replayErr, &uncertain) {
 		t.Fatalf("expected uncertain replay error, got %v", replayErr)
 	}
@@ -1411,7 +1369,7 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load pending command: %v", err)
 	}
-	if len(items) != 2 || recoverAppliedCommandSequence(items) != 0 {
+	if len(items) != 2 || workerbase.RecoverAppliedCommandSequence(items) != 0 {
 		t.Fatalf("expected uncertain command to remain pending, got %#v", items)
 	}
 	for _, item := range items {
@@ -1446,12 +1404,12 @@ func TestWorkerRuntimeLeavesUncertainProfileCommandForReplay(t *testing.T) {
 	deadline := time.Now().Add(time.Second)
 	for time.Now().Before(deadline) {
 		items, _, _ = source.LoadItems(context.Background(), "sess-profile-uncertain")
-		if recoverAppliedCommandSequence(items) == command.Sequence {
+		if workerbase.RecoverAppliedCommandSequence(items) == command.Sequence {
 			break
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if recoverAppliedCommandSequence(items) != command.Sequence {
+	if workerbase.RecoverAppliedCommandSequence(items) != command.Sequence {
 		t.Fatalf("expected replay to complete uncertain command, got %#v", items)
 	}
 }
@@ -1596,8 +1554,8 @@ func TestWorkerRuntimeCloseInterruptsActiveTurn(t *testing.T) {
 	if items[1].Type != zotigosession.DisplayItemTurnInterrupted || items[1].Turn == nil {
 		t.Fatalf("expected turn_interrupted item, got %#v", items[1])
 	}
-	if items[1].Turn.Reason != controlChannelClosedReason {
-		t.Fatalf("expected reason %q, got %#v", controlChannelClosedReason, items[1].Turn)
+	if items[1].Turn.Reason != workerbase.ControlChannelClosedReason {
+		t.Fatalf("expected reason %q, got %#v", workerbase.ControlChannelClosedReason, items[1].Turn)
 	}
 	if got := sessionlog.LastOpenTurnID(items); got != "" {
 		t.Fatalf("expected no open turn, got %q", got)
