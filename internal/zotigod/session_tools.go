@@ -49,7 +49,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 		return caller, err
 	}
 	if stored == nil {
-		return caller, errSessionNotFound
+		return caller, workerbase.ErrSessionNotFound
 	}
 	items, exists, err := h.items.LoadItems(ctx, id)
 	if err != nil {
@@ -415,7 +415,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 			return nil, err
 		}
 		if !exists {
-			return nil, errSessionNotFound
+			return nil, workerbase.ErrSessionNotFound
 		}
 	} else {
 		if window.Since != nil || window.Until != nil {
@@ -426,7 +426,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 			return nil, loadErr
 		}
 		if !exists {
-			return nil, errSessionNotFound
+			return nil, workerbase.ErrSessionNotFound
 		}
 		page = session.PageDisplayItems(items, query)
 	}
@@ -572,7 +572,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 		return nil, err
 	}
 	if target == nil {
-		return nil, errSessionNotFound
+		return nil, workerbase.ErrSessionNotFound
 	}
 	commandID := "session_tool:" + turnKey + ":" + callKey
 	previous, found, err := sessionlog.FindExistingInput(ctx, h.items, operation.TargetID, wire.Command{ID: commandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)

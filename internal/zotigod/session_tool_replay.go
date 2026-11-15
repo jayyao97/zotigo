@@ -11,6 +11,7 @@ import (
 
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string, raw json.RawMessage) (string, error) {
@@ -67,14 +68,14 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		return "", err
 	}
 	if source == nil {
-		return "", errSessionNotFound
+		return "", workerbase.ErrSessionNotFound
 	}
 	target, err := h.store.Get(ctx, targetID)
 	if err != nil {
 		return "", err
 	}
 	if target == nil {
-		return "", errSessionNotFound
+		return "", workerbase.ErrSessionNotFound
 	}
 	caller := sessionToolCaller{SessionID: source.ID, WorkspaceID: operation.WorkspaceID, Stored: source, Origin: operation.Origin}
 	validate := func() error {

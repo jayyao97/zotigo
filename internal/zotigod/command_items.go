@@ -178,7 +178,7 @@ func publicCommandImages(images []wire.CommandImageData) []publicCommandImageRes
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
-			URL:       publicImageURLFromBlobPath(img.BlobPath),
+			URL:       sessionlog.PublicImageURLFromBlobPath(img.BlobPath),
 		}
 	}
 	return resp

@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestSessionRegistryActivityClearsWhenIdleOrTerminal(t *testing.T) {
@@ -182,7 +184,7 @@ func TestSessionRegistryRejectsInvalidLifecycleTransitions(t *testing.T) {
 func TestSessionRegistryRejectsMissingSession(t *testing.T) {
 	registry := newSessionRegistry()
 
-	if _, err := registry.Start("missing"); !errors.Is(err, errSessionNotFound) {
+	if _, err := registry.Start("missing"); !errors.Is(err, workerbase.ErrSessionNotFound) {
 		t.Fatalf("expected not found error, got %v", err)
 	}
 }

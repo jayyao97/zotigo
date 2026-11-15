@@ -159,7 +159,7 @@ func (h *handler) waitForRunningWorker(ctx context.Context, id string) error {
 	for {
 		session, ok, changed := h.registry.Watch(id)
 		if !ok {
-			return errSessionNotFound
+			return workerbase.ErrSessionNotFound
 		}
 		switch session.State {
 		case SessionStateCreated:
@@ -204,7 +204,7 @@ func (h *handler) ensureSessionStartedLocked(ctx context.Context, id string) (Se
 			return Session{}, false, fmt.Errorf("load session: %w", err)
 		}
 		if !ok {
-			return Session{}, false, errSessionNotFound
+			return Session{}, false, workerbase.ErrSessionNotFound
 		}
 
 		switch session.State {
@@ -307,7 +307,7 @@ func (h *handler) sessionWithStoredMetadata(ctx context.Context, session Session
 
 func (h *handler) writeEnsureRunningError(w http.ResponseWriter, err error) {
 	switch {
-	case errors.Is(err, errSessionNotFound):
+	case errors.Is(err, workerbase.ErrSessionNotFound):
 		writeAPIError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, errInvalidSessionTransition):
 		writeAPIError(w, http.StatusConflict, "invalid session state transition")

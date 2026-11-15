@@ -306,7 +306,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart, commandIma
 	for _, part := range content {
 		image := publicDisplayMediaPart(part.Image)
 		if image != nil && image.URL == "" && imageIdx < len(commandImages) {
-			image.URL = publicImageURLFromBlobPath(commandImages[imageIdx].BlobPath)
+			image.URL = sessionlog.PublicImageURLFromBlobPath(commandImages[imageIdx].BlobPath)
 		}
 		if part.Image != nil {
 			imageIdx++
@@ -554,7 +554,7 @@ func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []it
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
-			URL:       publicImageURLFromBlobPath(img.BlobPath),
+			URL:       sessionlog.PublicImageURLFromBlobPath(img.BlobPath),
 		})
 	}
 	return resp

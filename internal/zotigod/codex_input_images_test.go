@@ -62,7 +62,7 @@ func TestCodexInputImageServesOnlyRecordedBoundedImages(t *testing.T) {
 			t.Fatalf("invalid attachment %s: %d", path, rec.Code)
 		}
 	}
-	for _, content := range [][]byte{[]byte("private non-image content"), make([]byte, maxMessageImageBytes+1)} {
+	for _, content := range [][]byte{[]byte("private non-image content"), make([]byte, sessionlog.MaxMessageImageBytes+1)} {
 		if err := os.WriteFile(imagePath, content, 0600); err != nil {
 			t.Fatal(err)
 		}

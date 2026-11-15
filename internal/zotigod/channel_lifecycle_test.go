@@ -144,20 +144,3 @@ func TestArchiveUnbindsChannelSessionAndClearsPromptOnNextTurn(t *testing.T) {
 		})
 	}
 }
-
-func TestResumeUnboundCodexClearsChannelOverrides(t *testing.T) {
-	rpc := &codexWorkerRPC{}
-	err := resumeCodexThread(context.Background(), rpc, codexWorkerConfig{
-		ThreadID: "thread", WorkingDirectory: t.TempDir(), Model: "model", ChannelToolsVersion: channels.RuntimeToolsVersion,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := rpc.requests["thread/resume"]
-	if value, present := request["developerInstructions"]; !present || value != "" {
-		t.Fatalf("developer instructions not explicitly cleared: %#v", request)
-	}
-	if request["approvalsReviewer"] != "user" {
-		t.Fatalf("reviewer not cleared: %#v", request)
-	}
-}

@@ -8,6 +8,7 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/skills"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type publicSkill struct {
@@ -51,7 +52,7 @@ func (h *handler) handleSkills(w http.ResponseWriter, r *http.Request) {
 	}
 	workspace, err := h.skillsWorkspace(r.Context(), sessionID)
 	if err != nil {
-		if errors.Is(err, errSessionNotFound) {
+		if errors.Is(err, workerbase.ErrSessionNotFound) {
 			writeAPIError(w, http.StatusNotFound, "session not found")
 		} else {
 			h.logSkillsError("load session", sessionID, err)
@@ -112,14 +113,14 @@ func (h *handler) skillsWorkspace(ctx context.Context, sessionID string) (string
 		}
 		if stored != nil {
 			if stored.ID != sessionID {
-				return "", errSessionNotFound
+				return "", workerbase.ErrSessionNotFound
 			}
 			return strings.TrimSpace(stored.WorkingDirectory), nil
 		}
 	}
 	session, ok := h.registry.Get(sessionID)
 	if !ok {
-		return "", errSessionNotFound
+		return "", workerbase.ErrSessionNotFound
 	}
 	return strings.TrimSpace(session.WorkingDirectory), nil
 }

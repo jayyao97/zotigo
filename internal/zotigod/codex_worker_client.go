@@ -69,7 +69,7 @@ func runCodexWorkerClient(ctx context.Context, cfg codexWorkerConfig) (returnErr
 	if storedSession == nil {
 		_ = unlock()
 		_ = store.Close()
-		return errSessionNotFound
+		return workerbase.ErrSessionNotFound
 	}
 	cfg.DeveloperInstructions = codexDeveloperInstructions(storedSession.PromptConfig)
 	cfg.AutoReview = storedSession.PromptConfig.ReviewAllTools

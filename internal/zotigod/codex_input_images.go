@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 // Imported Codex localImage paths belong to the daemon host. Resolve only an
@@ -55,21 +56,21 @@ func (h *handler) handleCodexInputImage(w http.ResponseWriter, r *http.Request, 
 	}
 	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() || info.Size() > maxMessageImageBytes {
+	if err != nil || !info.Mode().IsRegular() || info.Size() > sessionlog.MaxMessageImageBytes {
 		writeAPIError(w, http.StatusNotFound, "image unavailable")
 		return
 	}
-	data, err := io.ReadAll(io.LimitReader(file, maxMessageImageBytes+1))
-	if err != nil || len(data) > maxMessageImageBytes {
+	data, err := io.ReadAll(io.LimitReader(file, sessionlog.MaxMessageImageBytes+1))
+	if err != nil || len(data) > sessionlog.MaxMessageImageBytes {
 		writeAPIError(w, http.StatusNotFound, "image unavailable")
 		return
 	}
 	mimeType := http.DetectContentType(data)
-	if !isAllowedMessageImageMimeType(mimeType) {
+	if !sessionlog.IsAllowedMessageImageMimeType(mimeType) {
 		writeAPIError(w, http.StatusNotFound, "image unavailable")
 		return
 	}
-	if _, _, err := validateMessageImageData(mimeType, data); err != nil {
+	if _, _, err := sessionlog.ValidateMessageImageData(mimeType, data); err != nil {
 		writeAPIError(w, http.StatusNotFound, "image unavailable")
 		return
 	}

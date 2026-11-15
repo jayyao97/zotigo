@@ -132,8 +132,8 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 			}
 		}
 		if err != nil {
-			_ = h.deleteMessageImageRefs(context.Background(), id, imageRefNames(refs))
-			cleanupMessageImageBlobs(storedImages)
+			_ = h.deleteMessageImageRefs(context.Background(), id, sessionlog.ImageRefNames(refs))
+			sessionlog.CleanupMessageImageBlobs(storedImages)
 		}
 		unlock()
 		if err != nil {
@@ -571,7 +571,7 @@ func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []s
 			size += base64.StdEncoding.EncodedLen(image.SizeBytes)
 		}
 	}
-	if count > maxMessageImages || size > maxMessageRequestBytes-4096 {
+	if count > sessionlog.MaxMessageImages || size > maxMessageRequestBytes-4096 {
 		return fmt.Errorf("combined queued input exceeds the message attachment or size limit")
 	}
 	return nil

@@ -11,6 +11,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type SessionState string
@@ -66,7 +67,6 @@ type SessionContextUsage struct {
 }
 
 var (
-	errSessionNotFound               = errors.New("session not found")
 	errInvalidSessionTransition      = errors.New("invalid session state transition")
 	errSessionProfileNotFound        = errors.New("session profile not found")
 	errWorkerDisconnectedBeforeReady = errors.New("worker disconnected before becoming ready")
@@ -367,7 +367,7 @@ func (r *sessionRegistry) SetWorkerGeneration(id string, generation string) erro
 	defer r.mu.Unlock()
 	session, ok := r.sessions[id]
 	if !ok {
-		return errSessionNotFound
+		return workerbase.ErrSessionNotFound
 	}
 	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 		return errInvalidSessionTransition
@@ -409,7 +409,7 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 
 	session, ok := r.sessions[id]
 	if !ok {
-		return Session{}, errSessionNotFound
+		return Session{}, workerbase.ErrSessionNotFound
 	}
 	if !canTransition(session.State, from) {
 		return Session{}, errInvalidSessionTransition

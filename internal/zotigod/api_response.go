@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (h *handler) writeTransition(w http.ResponseWriter, session Session, err error) {
@@ -17,7 +18,7 @@ func (h *handler) writeTransition(w http.ResponseWriter, session Session, err er
 		return
 	}
 	switch {
-	case errors.Is(err, errSessionNotFound):
+	case errors.Is(err, workerbase.ErrSessionNotFound):
 		writeAPIError(w, http.StatusNotFound, "session not found")
 	case errors.Is(err, errInvalidSessionTransition):
 		writeAPIError(w, http.StatusConflict, "invalid session state transition")

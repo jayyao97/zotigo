@@ -50,40 +50,40 @@ func persistCodexImage(ctx context.Context, store zotigosession.Store, rootDir, 
 		return nil, func() {}, err
 	}
 	mimeType := strings.TrimSpace(strings.Split(http.DetectContentType(data), ";")[0])
-	if !isAllowedMessageImageMimeType(mimeType) {
+	if !sessionlog.IsAllowedMessageImageMimeType(mimeType) {
 		return nil, func() {}, fmt.Errorf("%w: generated image %q has unsupported MIME type %q", errCodexImageUnavailable, item.ID, mimeType)
 	}
-	width, height, err := validateMessageImageData(mimeType, data)
+	width, height, err := sessionlog.ValidateMessageImageData(mimeType, data)
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("%w: validate generated image %q: %v", errCodexImageUnavailable, item.ID, err)
 	}
-	stored, err := storeMessageImageBlobs(rootDir, sessionID, []sessionlog.MessageImage{{
+	stored, err := sessionlog.StoreMessageImageBlobs(rootDir, sessionID, []sessionlog.MessageImage{{
 		MimeType: mimeType, Data: data, SizeBytes: len(data), Width: width, Height: height,
 	}})
 	if err != nil {
 		return nil, func() {}, fmt.Errorf("persist Codex generated image %q: %w", item.ID, err)
 	}
-	refs, err := messageImageRefs(sessionID, stored)
+	refs, err := sessionlog.MessageImageRefs(sessionID, stored)
 	if err != nil {
-		cleanupMessageImageBlobs(stored)
+		sessionlog.CleanupMessageImageBlobs(stored)
 		return nil, func() {}, err
 	}
 	imageStore, ok := store.(codexImageStore)
 	if !ok {
-		cleanupMessageImageBlobs(stored)
+		sessionlog.CleanupMessageImageBlobs(stored)
 		return nil, func() {}, errors.New("session store does not support image references")
 	}
 	if err := imageStore.PutImageRefs(ctx, refs); err != nil {
-		cleanupMessageImageBlobs(stored)
+		sessionlog.CleanupMessageImageBlobs(stored)
 		return nil, func() {}, fmt.Errorf("index Codex generated image %q: %w", item.ID, err)
 	}
 	cleanup := func() {
-		_ = imageStore.DeleteImageRefs(context.Background(), sessionID, imageRefNames(refs))
-		cleanupMessageImageBlobs(stored)
+		_ = imageStore.DeleteImageRefs(context.Background(), sessionID, sessionlog.ImageRefNames(refs))
+		sessionlog.CleanupMessageImageBlobs(stored)
 	}
 	image := stored[0]
 	return &zotigosession.DisplayMediaPart{
-		URL: publicImageURLFromBlobPath(image.BlobPath), MediaType: image.MimeType,
+		URL: sessionlog.PublicImageURLFromBlobPath(image.BlobPath), MediaType: image.MimeType,
 		SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height,
 	}, cleanup, nil
 }
@@ -94,12 +94,12 @@ func codexGeneratedImageBytes(item codexThreadItem) ([]byte, error) {
 		file, err := os.Open(*item.SavedPath)
 		if err == nil {
 			defer func() { _ = file.Close() }()
-			data, readErr := io.ReadAll(io.LimitReader(file, maxMessageTotalImageBytes+1))
+			data, readErr := io.ReadAll(io.LimitReader(file, sessionlog.MaxMessageTotalImageBytes+1))
 			if readErr != nil {
 				return nil, fmt.Errorf("%w: read generated image %q: %v", errCodexImageUnavailable, item.ID, readErr)
 			}
-			if len(data) > maxMessageTotalImageBytes {
-				return nil, fmt.Errorf("%w: generated image %q exceeds %d bytes", errCodexImageUnavailable, item.ID, maxMessageTotalImageBytes)
+			if len(data) > sessionlog.MaxMessageTotalImageBytes {
+				return nil, fmt.Errorf("%w: generated image %q exceeds %d bytes", errCodexImageUnavailable, item.ID, sessionlog.MaxMessageTotalImageBytes)
 			}
 			return data, nil
 		}
@@ -128,15 +128,15 @@ func decodeCodexImagePayload(encoded string) ([]byte, error) {
 		encoded = encoded[comma+len(";base64,"):]
 	}
 	encoded = strings.TrimSpace(encoded)
-	if base64.StdEncoding.DecodedLen(len(encoded)) > maxMessageTotalImageBytes {
-		return nil, fmt.Errorf("image exceeds %d bytes", maxMessageTotalImageBytes)
+	if base64.StdEncoding.DecodedLen(len(encoded)) > sessionlog.MaxMessageTotalImageBytes {
+		return nil, fmt.Errorf("image exceeds %d bytes", sessionlog.MaxMessageTotalImageBytes)
 	}
 	data, err := base64.StdEncoding.Strict().DecodeString(encoded)
 	if err != nil || len(data) == 0 {
 		return nil, errors.New("invalid base64 payload")
 	}
-	if len(data) > maxMessageTotalImageBytes {
-		return nil, fmt.Errorf("image exceeds %d bytes", maxMessageTotalImageBytes)
+	if len(data) > sessionlog.MaxMessageTotalImageBytes {
+		return nil, fmt.Errorf("image exceeds %d bytes", sessionlog.MaxMessageTotalImageBytes)
 	}
 	return data, nil
 }

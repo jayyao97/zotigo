@@ -29,7 +29,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 		return
 	}
 	if _, ok := h.registry.Get(id); !ok {
-		h.writeTransition(w, Session{}, errSessionNotFound)
+		h.writeTransition(w, Session{}, workerbase.ErrSessionNotFound)
 		return
 	}
 	if !h.workers.Matches(id, req.Generation) {
@@ -51,7 +51,7 @@ func (h *handler) handleWorkerAttach(w http.ResponseWriter, r *http.Request, id 
 	}()
 	session, ok := h.registry.Get(id)
 	if !ok {
-		h.writeTransition(w, Session{}, errSessionNotFound)
+		h.writeTransition(w, Session{}, workerbase.ErrSessionNotFound)
 		return
 	}
 	if !h.workers.Matches(id, req.Generation) {

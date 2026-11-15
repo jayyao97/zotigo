@@ -720,8 +720,8 @@ func tinyPNGBase64() string {
 }
 
 func tooManyImagesBody() string {
-	parts := make([]string, 0, maxMessageImages+1)
-	for range maxMessageImages + 1 {
+	parts := make([]string, 0, sessionlog.MaxMessageImages+1)
+	for range sessionlog.MaxMessageImages + 1 {
 		parts = append(parts, fmt.Sprintf(`{"mime_type":"image/png","data_base64":%q}`, tinyPNGBase64()))
 	}
 	return `{"text":"hello","images":[` + strings.Join(parts, ",") + `]}`

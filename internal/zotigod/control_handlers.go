@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 const (
@@ -121,7 +122,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 				writeAPIErrorCode(w, http.StatusBadRequest, "skill_"+resolutionErr.Kind, resolutionErr.Error())
 				return
 			}
-			if errors.Is(err, errSessionNotFound) {
+			if errors.Is(err, workerbase.ErrSessionNotFound) {
 				writeAPIError(w, http.StatusNotFound, "session not found")
 				return
 			}
@@ -168,7 +169,7 @@ func (h *handler) handleSessionMessage(w http.ResponseWriter, r *http.Request, i
 			writeAPIErrorCode(w, http.StatusConflict, "command_pending", "a message command is already pending")
 		case errors.Is(err, sessionlog.ErrCommandIDConflict):
 			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
-		case errors.Is(err, errSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
+		case errors.Is(err, workerbase.ErrSessionNotFound), errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			h.writeEnsureRunningError(w, err)
 		case errors.Is(err, errWorkerOffline):
 			writeAPIError(w, http.StatusServiceUnavailable, "message requires an online worker")
@@ -190,7 +191,7 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 		h.handleCodexInputImage(w, r, id, name)
 		return
 	}
-	blobPath, ok := messageImageBlobPath(id, name)
+	blobPath, ok := sessionlog.MessageImageBlobPath(id, name)
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
@@ -216,7 +217,7 @@ func (h *handler) handleSessionImage(w http.ResponseWriter, r *http.Request, id 
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
 	}
-	if !isAllowedMessageImageMimeType(image.MimeType) {
+	if !sessionlog.IsAllowedMessageImageMimeType(image.MimeType) {
 		writeAPIError(w, http.StatusNotFound, "image not found")
 		return
 	}
@@ -247,17 +248,17 @@ var (
 )
 
 func (h *handler) prepareSessionInputCommand(ctx context.Context, id string, commandID string, text string, images []sessionlog.MessageImage, selectedSkills []string, steeringOnly bool) (wire.Command, []sessionlog.MessageImage, []zotigosession.ImageRef, error) {
-	images, err := storeMessageImageBlobs(h.sessionStoreRoot(), id, images)
+	images, err := sessionlog.StoreMessageImageBlobs(h.sessionStoreRoot(), id, images)
 	if err != nil {
 		return wire.Command{}, nil, nil, err
 	}
-	refs, err := messageImageRefs(id, images)
+	refs, err := sessionlog.MessageImageRefs(id, images)
 	if err != nil {
-		cleanupMessageImageBlobs(images)
+		sessionlog.CleanupMessageImageBlobs(images)
 		return wire.Command{}, nil, nil, err
 	}
 	if err := h.putMessageImageRefs(ctx, refs); err != nil {
-		cleanupMessageImageBlobs(images)
+		sessionlog.CleanupMessageImageBlobs(images)
 		return wire.Command{}, nil, nil, err
 	}
 	if commandID == "" {
@@ -311,7 +312,7 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		}
 		session, ok := h.registry.Get(id)
 		if !ok {
-			return errSessionNotFound
+			return workerbase.ErrSessionNotFound
 		}
 		if session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 			return errInvalidSessionTransition
@@ -362,8 +363,8 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 		if cleanupCtx.Err() != nil {
 			cleanupCtx = context.Background()
 		}
-		_ = h.deleteMessageImageRefs(cleanupCtx, id, imageRefNames(refs))
-		cleanupMessageImageBlobs(storedImages)
+		_ = h.deleteMessageImageRefs(cleanupCtx, id, sessionlog.ImageRefNames(refs))
+		sessionlog.CleanupMessageImageBlobs(storedImages)
 		return wire.Command{}, err
 	}
 
@@ -371,14 +372,14 @@ func (h *handler) acceptSessionInputCommand(ctx context.Context, id string, comm
 	if err != nil {
 		var inputErr *workerInputError
 		if errors.As(err, &inputErr) {
-			_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
-			cleanupMessageImageBlobs(storedImages)
+			_ = h.deleteMessageImageRefs(ctx, id, sessionlog.ImageRefNames(refs))
+			sessionlog.CleanupMessageImageBlobs(storedImages)
 		}
 		return wire.Command{}, err
 	}
 	if !sessionlog.SameCommandImagePaths(command, accepted) {
-		_ = h.deleteMessageImageRefs(ctx, id, imageRefNames(refs))
-		cleanupMessageImageBlobs(storedImages)
+		_ = h.deleteMessageImageRefs(ctx, id, sessionlog.ImageRefNames(refs))
+		sessionlog.CleanupMessageImageBlobs(storedImages)
 	}
 	return accepted, nil
 }
@@ -392,7 +393,7 @@ func (h *handler) indexLegacyMessageImageRef(ctx context.Context, store imageRef
 		return zotigosession.ImageRef{}, false, nil
 	}
 	image, ok := referencedMessageImage(items, blobPath)
-	if !ok || !isAllowedMessageImageMimeType(image.MimeType) {
+	if !ok || !sessionlog.IsAllowedMessageImageMimeType(image.MimeType) {
 		return zotigosession.ImageRef{}, false, nil
 	}
 	ref := zotigosession.ImageRef{

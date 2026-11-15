@@ -52,7 +52,7 @@ func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.Input
 			return wire.Command{}, err
 		}
 		if stored == nil {
-			return wire.Command{}, errSessionNotFound
+			return wire.Command{}, workerbase.ErrSessionNotFound
 		}
 		policy, err := workerbase.NormalizeSessionApprovalPolicy(stored.ApprovalPolicy, true)
 		if err != nil {

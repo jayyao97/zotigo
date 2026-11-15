@@ -11,6 +11,7 @@ import (
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func requireIdleSession(items []zotigosession.DisplayItem) error {
@@ -128,7 +129,7 @@ func (h *handler) pauseActiveSession(ctx context.Context, id string, session Ses
 		defer unlock()
 		current, ok := h.registry.Get(id)
 		if !ok {
-			return zotigosession.DisplayItem{}, errSessionNotFound
+			return zotigosession.DisplayItem{}, workerbase.ErrSessionNotFound
 		}
 		if current.State != SessionStateRunning {
 			return zotigosession.DisplayItem{}, errSessionBusy
@@ -235,7 +236,7 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 			writeAPIErrorCode(w, http.StatusConflict, "turn_mismatch", "expected_turn_id does not match active turn")
 		case errors.Is(err, sessionlog.ErrCommandIDConflict):
 			writeAPIErrorCode(w, http.StatusConflict, "command_id_conflict", err.Error())
-		case errors.Is(err, errSessionNotFound):
+		case errors.Is(err, workerbase.ErrSessionNotFound):
 			writeAPIError(w, http.StatusNotFound, "session not found")
 		case errors.Is(err, errInvalidSessionTransition), errors.Is(err, errSessionUnavailable):
 			writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")

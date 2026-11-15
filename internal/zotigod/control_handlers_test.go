@@ -779,7 +779,7 @@ func TestSessionMessageRejectsInvalidImages(t *testing.T) {
 		{
 			name: "image too large",
 			body: fmt.Sprintf(`{"text":"hello","images":[{"mime_type":"image/png","data_base64":%q}]}`,
-				base64.StdEncoding.EncodeToString(make([]byte, maxMessageImageBytes+1))),
+				base64.StdEncoding.EncodeToString(make([]byte, sessionlog.MaxMessageImageBytes+1))),
 			code: http.StatusBadRequest,
 		},
 	}

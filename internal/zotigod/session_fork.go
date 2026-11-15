@@ -129,7 +129,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		return nil, err
 	}
 	if source == nil {
-		return nil, errSessionNotFound
+		return nil, workerbase.ErrSessionNotFound
 	}
 	items, _, err := h.items.LoadItems(ctx, sourceID)
 	if err != nil {

@@ -237,3 +237,7 @@ func (t bearerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	clone.Header.Set("Authorization", "Bearer "+t.token)
 	return t.base.RoundTrip(clone)
 }
+
+// ErrSessionNotFound reports that a session is missing from the registry or
+// the session store.
+var ErrSessionNotFound = errors.New("session not found")
