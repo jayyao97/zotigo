@@ -25,6 +25,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -674,7 +675,7 @@ func TestWorkerClientInitializationFailurePreservesError(t *testing.T) {
 
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateStarting, WorkingDirectory: workDir})
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:           store,
 		workerAuthToken: "worker-secret",
 	})
@@ -785,7 +786,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create agent: %v", err)
 	}
-	display := newWorkerDisplayLog("sess-worker-profile", storedDisplayItemSource{store: store})
+	display := newWorkerDisplayLog("sess-worker-profile", sessionlog.StoredItemSource{Store: store})
 	runtime := &workerRuntime{
 		sessionID: "sess-worker-profile",
 		workDir:   workDir,
@@ -864,7 +865,7 @@ func TestWorkerRuntimeAppliesAndPersistsProfileCommand(t *testing.T) {
 		ProfileName:      "old",
 		CreatedAt:        now,
 	})
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	getRec := httptest.NewRecorder()
 	handler.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/sessions/sess-worker-profile", nil))
 	if getRec.Code != http.StatusOK {
@@ -1256,7 +1257,7 @@ func TestWorkerRuntimeSerializesNewProfileRequestWithDurableCommit(t *testing.T)
 		workDir:   workDir,
 		store:     store,
 		agent:     ag,
-		display:   newWorkerDisplayLog("sess-profile-linear", storedDisplayItemSource{store: store}),
+		display:   newWorkerDisplayLog("sess-profile-linear", sessionlog.StoredItemSource{Store: store}),
 	}
 	if err := runtime.HandleCommand(context.Background(), wire.Command{
 		ID:      "profile-a",

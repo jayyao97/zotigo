@@ -16,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -447,7 +448,7 @@ func TestCodexScratchSessionsUseIndependentPersistentCWD(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
 	fake := &fakeCodexRuntime{launches: make(chan zotigoruntime.WorkerLaunchSpec, 1), connected: make(chan *websocket.Conn, 1)}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, catalog: catalog, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fake), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -524,7 +525,7 @@ func TestCodexSessionUsesWorkspaceCWDWithoutRuntimeProjectBinding(t *testing.T) 
 	fake := &fakeCodexRuntime{
 		launches: make(chan zotigoruntime.WorkerLaunchSpec, 1), connected: make(chan *websocket.Conn, 1),
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, catalog: catalog, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fake),
 		workerConnectTimeout: time.Second,
 	})

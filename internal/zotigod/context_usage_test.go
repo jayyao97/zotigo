@@ -10,6 +10,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
@@ -83,7 +84,7 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &handler{store: store, items: storedDisplayItemSource{store: store}}
+	h := &handler{store: store, items: sessionlog.StoredItemSource{Store: store}}
 	get := func() *SessionContextUsage {
 		return h.decorateSession(ctx, sessionFromMetadata(loaded.Metadata, SessionStateOffline, false), loaded).ContextUsage
 	}

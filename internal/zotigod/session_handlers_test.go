@@ -24,6 +24,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/channels"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestHealth(t *testing.T) {
@@ -84,7 +85,7 @@ func TestSessionsCreateAndList(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
 
@@ -151,7 +152,7 @@ func TestSessionsCreatePersistsWorkingDirectory(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
 
@@ -185,7 +186,7 @@ func TestSessionsCreatePersistsSelectedProfile(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	defer store.Close()
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 	projectConfig := `
 default_profile: project-default
@@ -229,7 +230,7 @@ profiles:
 	if len(listed) != 1 || listed[0].ProfileName != "project-high" {
 		t.Fatalf("expected indexed profile project-high, got %#v", listed)
 	}
-	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	restarted := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	getRec := httptest.NewRecorder()
 	restarted.ServeHTTP(getRec, httptest.NewRequest(http.MethodGet, "/sessions/"+created.ID, nil))
 	if getRec.Code != http.StatusOK {
@@ -251,7 +252,7 @@ func TestSessionsCreatePersistsProjectDefaultProfile(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	defer store.Close()
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 	projectConfig := "default_profile: project-default\nprofiles:\n  project-default:\n    provider: openai\n    model: gpt-default\n"
 	if err := os.WriteFile(filepath.Join(workDir, config.ProjectConfig), []byte(projectConfig), 0644); err != nil {
@@ -281,7 +282,7 @@ func TestSessionsCreateRejectsUnknownProfile(t *testing.T) {
 	}
 	defer store.Close()
 	registry := newSessionRegistry()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 
 	body := fmt.Sprintf(`{"working_directory":%q,"profile":"missing"}`, workDir)
@@ -410,7 +411,7 @@ func TestSessionsGetReturnsStoredSessionOffline(t *testing.T) {
 	}
 	workDir := t.TempDir()
 	putStoredSession(t, store, "sess-stored", workDir)
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/sess-stored", nil))
@@ -436,7 +437,7 @@ func TestSessionsListMergesRegistryAndStoredSessions(t *testing.T) {
 	}
 	workDir := t.TempDir()
 	putStoredSession(t, store, "sess-stored", workDir)
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	created := createSession(t, handler)
 
 	rec := httptest.NewRecorder()
@@ -500,7 +501,7 @@ func TestReadSessionAPIsDoNotLaunchWorker(t *testing.T) {
 	}
 	putStoredSession(t, store, "sess-stored", t.TempDir())
 	var launches atomic.Int32
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store,
 		launcher: workerLauncherFunc(func(context.Context, string, string) error {
 			launches.Add(1)
@@ -835,7 +836,7 @@ func TestStoredDisplayItemSourceReadsDisplayLog(t *testing.T) {
 		t.Fatalf("append display item: %v", err)
 	}
 
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	items, ok, err := source.LoadItems(context.Background(), "sess-store")
 	if err != nil {
 		t.Fatalf("load items: %v", err)
@@ -973,7 +974,7 @@ func TestSessionStartResumesStoredSession(t *testing.T) {
 		}()
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -1023,7 +1024,7 @@ func TestSessionStartConcurrentResumeLaunchesOneWorker(t *testing.T) {
 		}()
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -1087,7 +1088,7 @@ func TestSessionStartObserverTimeoutDoesNotFailActiveLaunch(t *testing.T) {
 		}()
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -1153,7 +1154,7 @@ func TestSessionStartOwnerCancellationDoesNotFailSharedLaunch(t *testing.T) {
 		return nil
 	})
 	registry := newSessionRegistry()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -1209,7 +1210,7 @@ func TestSessionStartDaemonTimeoutSurvivesOwnerCancellation(t *testing.T) {
 		return nil
 	})
 	registry := newSessionRegistry()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:               store,
 		launcher:            launcher,
 		workerLaunchTimeout: 20 * time.Millisecond,
@@ -1259,7 +1260,7 @@ func TestSessionStartDaemonTimeoutCancelsLauncher(t *testing.T) {
 		close(launcherCanceled)
 		return ctx.Err()
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, launcher: launcher, workerLaunchTimeout: 20 * time.Millisecond,
 	})
 
@@ -1424,7 +1425,7 @@ func TestSessionsListUsesCreationOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	createdIDs := make([]string, 0, 11)
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
@@ -1468,7 +1469,7 @@ func TestSessionsListSerializesEmptyArray(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create session store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions", nil))
 	if rec.Code != http.StatusOK {
@@ -1523,7 +1524,7 @@ func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: meta}); err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	h := &handler{store: store, items: source}
 	if got := h.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage; got == nil || got.Status != "unavailable" {
 		t.Fatalf("new session context usage = %#v", got)
@@ -1551,7 +1552,7 @@ func TestSessionContextUsageLifecycleSurvivesReload(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	reloadedHandler := &handler{store: reopened, items: storedDisplayItemSource{store: reopened}}
+	reloadedHandler := &handler{store: reopened, items: sessionlog.StoredItemSource{Store: reopened}}
 	reloaded := reloadedHandler.decorateSession(context.Background(), sessionFromMetadata(meta, SessionStateOffline, false), nil).ContextUsage
 	if reloaded == nil || *reloaded != *got {
 		t.Fatalf("reloaded context usage = %#v, want %#v", reloaded, got)
@@ -1634,7 +1635,7 @@ func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 			t.Fatalf("context usage after compaction = %#v", got)
 		}
 	}
-	assertUsage(&handler{store: store, items: storedDisplayItemSource{store: store}}, stored)
+	assertUsage(&handler{store: store, items: sessionlog.StoredItemSource{Store: store}}, stored)
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1647,5 +1648,5 @@ func TestNativeSessionContextUsageSurvivesCompactionAndReload(t *testing.T) {
 	if err != nil || reloaded == nil {
 		t.Fatalf("reload compacted session: %#v %v", reloaded, err)
 	}
-	assertUsage(&handler{store: reopened, items: storedDisplayItemSource{store: reopened}}, reloaded)
+	assertUsage(&handler{store: reopened, items: sessionlog.StoredItemSource{Store: reopened}}, reloaded)
 }

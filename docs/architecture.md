@@ -104,6 +104,7 @@ Notes on specific packages:
 | --- | --- | --- |
 | `zotigod` | The session service: HTTP handlers, session registry, worker supervision, display log, input queue, approvals, channels dispatch, and both worker runtimes. | See Processes. |
 | `zotigod/wire` | The daemon↔worker protocol as data: the WebSocket frame and its payloads, the commands delivered to workers, and the bodies and headers of the worker's `/internal/*` calls. It imports only `core`. | The two sides are different processes and can be different builds during an update, so what they exchange should be a compile-time fact with a pinned format (`wire_test.go`). It is the first step of separating daemon and worker. |
+| `zotigod/sessionlog` | The session display log as both processes use it: the item-source interfaces and their store-backed implementation (`ItemSource`, `StoredItemSource`), the eventing wrappers and the live `EventBroker` that carries previews next to the durable log, and ID generation. It imports `core` and `zotigod/wire`, never `zotigod`. | The daemon and the worker processes both run this code. It is the layer that has to exist as a package before the workers can leave `zotigod`. |
 | `zotigodclient` | Go client for the public API plus daemon discovery and start. | The TUI and ACP need exactly the same attach, resubmit and stop logic. |
 | `wiring` | Builds an agent the way the product wants it: prompt builders, tool set, observer, classifier. | One place decides "what a Zotigo agent is" so the worker and any future host do not diverge. |
 | `sessionadapter` | Maps `agent.Snapshot` to and from `session.Session`. | Keeps persistence mapping out of both the agent and the store. |
@@ -149,6 +150,10 @@ scans the imports of every production Go file against a small rule table:
 5. `cli` must not import `agent`, `internal/zotigod` or `internal/wiring`.
 6. `internal/testutil` is importable only from tests.
 7. `internal/zotigod/wire` must not import `internal`, `cli` or `cmd`.
+8. `internal/zotigod/sessionlog` must not import `internal/zotigod`,
+   `internal/zotigodclient`, `internal/cliapp`, `internal/acpserver`, `cli` or
+   `cmd`; `internal/zotigod/wire` is the one allowed exception under
+   `internal/zotigod`.
 
 Tests are exempt: a test may import upward to build a fixture. When adding a
 package, decide its level and add it to the table.
@@ -220,18 +225,31 @@ Changing any of these needs a migration or a version check, not a refactor:
 
 - `internal/zotigod` still holds the daemon and both worker runtimes in one
   package. The protocol data they exchange is separate
-  (`internal/zotigod/wire`); the logic is not, and the reason is measurable.
-  After the wire move, the native worker files still use 37 package-level
-  symbols defined in daemon-side files and the daemon uses 31 defined in
-  worker files; for the Codex worker the numbers are 79 and 16. Almost all of
-  it is one shared layer that both processes run: writing the durable display
-  log, accepting and deduplicating session input, building and validating
-  approval requests, image blobs, and hooks. Moving a worker into its own
-  package today would mean exporting that whole layer from `zotigod` with no
-  other consumer. The next step is therefore to give that shared layer its own
-  package first (display log + command items + input acceptance + approvals);
-  after that each worker depends on `wire` and that package only, and can move
-  with its white-box tests.
+  (`internal/zotigod/wire`), and the first part of the shared logic is too
+  (`internal/zotigod/sessionlog`: item sources, the event broker, IDs). The
+  rest of the shared layer is still in `zotigod`, and the reason is
+  measurable. After the sessionlog move, the native worker files
+  (`worker_client*.go`, `worker_runtime*.go`, `worker_command_replay.go`,
+  `worker_tool_recovery.go`, `turn_hooks.go`, `runtime_tool_specs.go`) still
+  use 34 package-level symbols defined in the rest of `zotigod`, and the rest
+  uses 31 defined in them. What remains on the worker's side is: the display
+  log writer (`workerDisplayLog`, `newWorkerDisplayLog`,
+  `workerRestartedReason`), session-input acceptance and deduplication
+  (`appendAcceptedSessionInput`, `findExistingSessionInput`,
+  `inputMessageFromRequest`, `messageCommandForRequest`,
+  `steeringCommandForRequest`, `workerInputErrorDetails` and the sentinel
+  errors `errCommandIDConflict`, `errNoActiveTurn`, `errTurnMismatch`,
+  `errInputPolicyMismatch`), approval requests (`approvalRequest`,
+  `newApprovalRequest`, `validateApprovalDecisions`, `publicApprovalRequest`),
+  image blob storage (`storeRoot`), and a daemon-flavoured remainder
+  (approval-policy and profile persistence, the channel runtime tool, the
+  worker HTTP client, hooks). The next step is to move the display log
+  writer, command items, input acceptance, approvals, interactions and
+  message images into `sessionlog`; that needs `items.go`,
+  `command_items.go`, `display_events.go` and `interactions.go` split so
+  their HTTP response builders and handlers stay in `zotigod`. After that each
+  worker depends on `wire` and `sessionlog` plus the small remainder, and can
+  move with its white-box tests.
 - `agent.RunMessage` in `turn_loop.go` is one function of about 600 lines.
 - `Agent.ApproveAndExecutePendingActions` is called only by tests, and it
   writes a "user approved action" audit event that the production path

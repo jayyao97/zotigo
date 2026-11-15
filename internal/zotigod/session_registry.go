@@ -10,6 +10,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type SessionState string
@@ -110,7 +111,7 @@ func (r *sessionRegistry) GetOrAdd(session Session) Session {
 func (r *sessionRegistry) addLocked(session Session) Session {
 	r.nextID++
 	if session.ID == "" {
-		session.ID = newZotigodID("sess")
+		session.ID = sessionlog.NewID("sess")
 	}
 	if session.State == "" {
 		session.State = SessionStateCreated
@@ -136,7 +137,7 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 
 func newSession(workingDirectory string, profileName string) Session {
 	return Session{
-		ID:                   newZotigodID("sess"),
+		ID:                   sessionlog.NewID("sess"),
 		State:                SessionStateCreated,
 		Live:                 true,
 		WorkingDirectory:     workingDirectory,

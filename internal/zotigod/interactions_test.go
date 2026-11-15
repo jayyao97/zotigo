@@ -11,6 +11,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -172,7 +173,7 @@ func TestCodexReconnectExpiresUnroutableApprovalAndInteraction(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	h := handler{items: storedDisplayItemSource{store: store}}
+	h := handler{items: sessionlog.StoredItemSource{Store: store}}
 	if err := h.expireDisconnectedCodexRequests(context.Background(), "session-reconnect"); err != nil {
 		t.Fatal(err)
 	}

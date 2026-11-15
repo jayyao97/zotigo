@@ -20,6 +20,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/update"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -36,7 +37,7 @@ type handler struct {
 	updater              *update.Manager
 	updateMu             sync.RWMutex
 	registry             *sessionRegistry
-	items                displayItemSource
+	items                sessionlog.ItemSource
 	store                zotigosession.Store
 	workers              *workerRegistry
 	launcher             workerLauncher
@@ -50,7 +51,7 @@ type handler struct {
 	queueOps             *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
-	events               *displayEventBroker
+	events               *sessionlog.EventBroker
 	catalog              *zotigoworkspace.Store
 	catalogErr           error
 	codexSync            *codexSessionSyncer
@@ -89,7 +90,7 @@ type handlerOptions struct {
 	workspaceOps         *sessionOperationLocks
 	titleSuggestion      titleSuggestionFunc
 	titleTimeout         time.Duration
-	events               *displayEventBroker
+	events               *sessionlog.EventBroker
 	publicAuthToken      string
 	workerAuthToken      string
 	catalog              *zotigoworkspace.Store
@@ -105,7 +106,7 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 	store, err := zotigosession.NewFileStore("")
 	if err != nil {
 		opts.store = unavailableSessionStore{err: err}
-		return newHandler(newSessionRegistry(), failingDisplayItemSource{err: err}, opts)
+		return newHandler(newSessionRegistry(), sessionlog.FailingItemSource{Err: err}, opts)
 	}
 	opts.store = store
 	if opts.maintenanceContext != nil {
@@ -124,7 +125,7 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 			})
 		}
 	}
-	items := storedDisplayItemSource{store: store}
+	items := sessionlog.StoredItemSource{Store: store}
 	return newHandler(newSessionRegistry(), items, opts)
 }
 
@@ -172,9 +173,9 @@ func (s unavailableSessionStore) Close() error {
 	return nil
 }
 
-func newHandler(registry *sessionRegistry, items displayItemSource, opts ...handlerOptions) http.Handler {
+func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...handlerOptions) http.Handler {
 	if items == nil {
-		items = failingDisplayItemSource{err: errors.New("display item source is not configured")}
+		items = sessionlog.FailingItemSource{Err: errors.New("display item source is not configured")}
 	}
 	options := handlerOptions{workerConnectTimeout: 0}
 	if len(opts) > 0 {
@@ -184,8 +185,8 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		options.workers = newWorkerRegistry()
 	}
 	if options.store == nil {
-		if source, ok := items.(storedDisplayItemSource); ok {
-			options.store = source.store
+		if source, ok := items.(sessionlog.StoredItemSource); ok {
+			options.store = source.Store
 		}
 	}
 	if options.workerConnectTimeout == 0 && options.launcher != nil {
@@ -213,11 +214,11 @@ func newHandler(registry *sessionRegistry, items displayItemSource, opts ...hand
 		options.titleTimeout = defaultTitleSuggestionTimeout
 	}
 	if options.events == nil {
-		options.events = newDisplayEventBroker()
+		options.events = sessionlog.NewEventBroker()
 	}
-	eventingItems := eventingDisplayItemSource{source: items, events: options.events}
-	if offsetItems, ok := items.(offsetDisplayItemSource); ok {
-		items = eventingOffsetDisplayItemSource{eventingDisplayItemSource: eventingItems, offset: offsetItems}
+	eventingItems := sessionlog.EventingItemSource{Source: items, Events: options.events}
+	if offsetItems, ok := items.(sessionlog.OffsetItemSource); ok {
+		items = sessionlog.EventingOffsetItemSource{EventingItemSource: eventingItems, Offset: offsetItems}
 	} else {
 		items = eventingItems
 	}

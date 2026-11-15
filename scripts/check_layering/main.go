@@ -21,6 +21,7 @@ const module = "github.com/jayyao97/zotigo/"
 type rule struct {
 	from   []string
 	deny   []string
+	allow  []string // packages under deny that may be imported anyway
 	except []string // packages under from that the rule does not apply to
 	why    string
 }
@@ -62,6 +63,12 @@ var rules = []rule{
 		deny: []string{"internal", "cli", "cmd"},
 		why:  "the daemon-worker protocol is data both processes share and must not depend on either side",
 	},
+	{
+		from:  []string{"internal/zotigod/sessionlog"},
+		deny:  []string{"internal/zotigod", "internal/zotigodclient", "internal/cliapp", "internal/acpserver", "cli", "cmd"},
+		allow: []string{"internal/zotigod/wire"},
+		why:   "the session log is run by both the daemon and its workers and must not depend on the daemon or its clients",
+	},
 }
 
 func under(pkg string, roots []string) bool {
@@ -100,7 +107,7 @@ func forbiddenImports(path string, source []byte) ([]string, error) {
 		}
 		imported := strings.TrimPrefix(name, module)
 		for _, r := range rules {
-			if !under(pkg, r.from) || under(pkg, r.except) || !under(imported, r.deny) || sameTree(pkg, imported) {
+			if !under(pkg, r.from) || under(pkg, r.except) || !under(imported, r.deny) || under(imported, r.allow) || sameTree(pkg, imported) {
 				continue
 			}
 			violations = append(violations, fmt.Sprintf("%s: %s must not import %q: %s", fset.Position(spec.Pos()), pkg, name, r.why))

@@ -24,6 +24,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -649,7 +650,7 @@ func TestChannelBindingPreservesBypassSessionSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: sessionStore}, handlerOptions{store: sessionStore, channels: service})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: sessionStore}, handlerOptions{store: sessionStore, channels: service})
 	body := `{"display_name":"Shadow Test","session_id":"session-bypass","workspace_id":"","enabled":true,"allowed_sender_ids":["user-1"],"agent_instructions_mode":"inherit","agent_instructions":"","approval_instructions_mode":"inherit","approval_instructions":""}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))

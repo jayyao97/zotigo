@@ -16,6 +16,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -24,7 +25,7 @@ func TestApprovalRequestFlowCreatesItemsAndAcceptsDecision(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
@@ -106,7 +107,7 @@ func TestInteractionRequestFlowAcceptsAnswersAndResumesSession(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
@@ -475,7 +476,7 @@ func TestPersistedApprovalRemainsReadableWhenSessionEnds(t *testing.T) {
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
-	approvalID := newZotigodID("apr")
+	approvalID := sessionlog.NewID("apr")
 	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
 		if sessionID == created.ID && item.Type == zotigosession.DisplayItemApprovalRequest {
 			_, _ = registry.End(created.ID)
@@ -510,7 +511,7 @@ func TestApprovalRequestFlowCreatesStoredDisplayLogForDaemonSession(t *testing.T
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
@@ -542,7 +543,7 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	registry := newSessionRegistry()
 	handler := newHandler(registry, source)
 	created := createSession(t, handler)
@@ -550,7 +551,7 @@ func TestApprovalDecisionRejectsOfflineSession(t *testing.T) {
 	attachWorker(t, handler, created.ID)
 	approval := createApprovalRequestForTest(t, registry, source, created.ID)
 
-	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store})
+	restarted := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store})
 	newSession := createSession(t, restarted)
 	if newSession.ID == created.ID {
 		t.Fatalf("expected restart-created session id not to reuse %q", created.ID)

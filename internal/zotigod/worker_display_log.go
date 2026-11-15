@@ -9,12 +9,13 @@ import (
 	"github.com/google/uuid"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type workerDisplayLog struct {
 	sessionID string
-	items     displayItemSource
+	items     sessionlog.ItemSource
 	persisted func(zotigosession.DisplayItem)
 	wake      func(context.Context)
 	wakeSync  func(context.Context) error
@@ -49,7 +50,7 @@ type workerSubagentBlock struct {
 	info  zotigosession.DisplaySubagent
 }
 
-func newWorkerDisplayLog(sessionID string, items displayItemSource) *workerDisplayLog {
+func newWorkerDisplayLog(sessionID string, items sessionlog.ItemSource) *workerDisplayLog {
 	return &workerDisplayLog{sessionID: sessionID, items: items}
 }
 

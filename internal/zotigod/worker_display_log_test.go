@@ -9,6 +9,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -531,7 +532,7 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 	defer store.Close()
 	const id = "steering-boundary"
 	putStoredSession(t, store, id, t.TempDir())
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	display := newWorkerDisplayLog(id, source)
 	turn, err := display.StartTurn(ctx)
 	if err != nil {

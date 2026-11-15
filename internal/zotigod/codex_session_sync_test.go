@@ -16,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type codexSyncFuncRPC struct {
@@ -125,7 +126,7 @@ func TestCodexSessionSyncFallsBackWhenItemsListUnsupportedWhileRuntimeActive(t *
 	}}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: meta.ID, Agent: "codex", State: SessionStateRunning, CreatedAt: now, UpdatedAt: now})
-	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, storedDisplayItemSource{store: store}, nil, registry, newSessionOperationLocks())
+	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, sessionlog.StoredItemSource{Store: store}, nil, registry, newSessionOperationLocks())
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +234,7 @@ func TestCodexSessionSyncReportsConcurrentHistoryCommitInsteadOfFalseSuccess(t *
 	}
 	t.Cleanup(unlock)
 	rpc := &codexSyncRPC{thread: codexThread{ID: meta.ConversationID, UpdatedAt: now.Add(time.Minute).Unix()}}
-	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, storedDisplayItemSource{store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
+	syncer := newCodexSessionSyncer(&codexSyncHost{rpc: rpc}, store, sessionlog.StoredItemSource{Store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	err = syncer.Sync(ctx)
@@ -274,7 +275,7 @@ func TestCodexSessionSyncReadsHistoryOnlyWhenMetadataChanges(t *testing.T) {
 			},
 		}},
 	}}
-	syncer := &codexSessionSyncer{store: store, items: storedDisplayItemSource{store: store}}
+	syncer := &codexSessionSyncer{store: store, items: sessionlog.StoredItemSource{Store: store}}
 	meta, err := store.Get(context.Background(), "session-1")
 	if err != nil || meta == nil {
 		t.Fatalf("load session: %#v %v", meta, err)
@@ -342,7 +343,7 @@ func TestCodexSessionSyncOrchestratesAndThrottlesSuccessfulRefresh(t *testing.T)
 	}
 	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix(), Turns: []codexTurn{{ID: "turn-1", Status: "completed"}}}}
 	host := &codexSyncHost{rpc: rpc}
-	syncer := newCodexSessionSyncer(host, store, storedDisplayItemSource{store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
+	syncer := newCodexSessionSyncer(host, store, sessionlog.StoredItemSource{Store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
 	if err := syncer.Sync(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -431,7 +432,7 @@ func TestSyncCompletedCodexTurnsIsIdempotent(t *testing.T) {
 		ID: "turn-1", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
 		Items: []codexThreadItem{{ID: "assistant-1", Type: "agentMessage", Text: "Done."}},
 	}}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	if err := syncCompletedCodexTurns(context.Background(), source, "session-1", turns); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +456,7 @@ func TestSyncCompletedCodexTurnsIsIdempotentWithoutCompletedAt(t *testing.T) {
 		t.Fatal(err)
 	}
 	turns := []codexTurn{{ID: "turn-1", Status: "interrupted"}}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	if err := syncCompletedCodexTurns(context.Background(), source, "session-1", turns); err != nil {
 		t.Fatal(err)
 	}
@@ -480,7 +481,7 @@ func TestSyncCompletedCodexTurnsBackfillsItemsAfterInterruptedTerminal(t *testin
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	for _, item := range []zotigosession.DisplayItem{
 		{ID: "codex-turn-started-turn-1", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 		{ID: "user-1", Type: zotigosession.DisplayItemUserMessage, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -529,7 +530,7 @@ func TestSyncCompletedCodexTurnsUsesClientIDForLocalSteering(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	for _, item := range []zotigosession.DisplayItem{
 		{ID: "turn-started", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 		{ID: "steering-command", Type: zotigosession.DisplayItemSteeringMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "more"}}, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -566,7 +567,7 @@ func TestSyncCompletedCodexTurnsMatchesPendingLocalUserWithoutClientID(t *testin
 	if err := store.Put(context.Background(), &zotigosession.Session{Metadata: zotigosession.Metadata{ID: "session-1", CreatedAt: now, UpdatedAt: now}}); err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	if _, err := source.AppendItem(context.Background(), "session-1", zotigosession.DisplayItem{
 		ID: "local-user", Type: zotigosession.DisplayItemUserMessage,
 		Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "question"}},
@@ -697,7 +698,7 @@ func TestCodexSyncCandidateHoldsOperationAndHistorySyncLocks(t *testing.T) {
 		}
 	}}
 	operations := newSessionOperationLocks()
-	syncer := &codexSessionSyncer{store: store, items: storedDisplayItemSource{store: store}, sessionOps: operations}
+	syncer := &codexSessionSyncer{store: store, items: sessionlog.StoredItemSource{Store: store}, sessionOps: operations}
 	done := make(chan error, 1)
 	go func() { done <- syncer.syncCandidate(context.Background(), rpc, meta) }()
 	<-readStarted
@@ -755,7 +756,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenDisplayMergeFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
-	syncer := &codexSessionSyncer{store: store, items: failingDisplayItemSource{err: errors.New("display unavailable")}}
+	syncer := &codexSessionSyncer{store: store, items: sessionlog.FailingItemSource{Err: errors.New("display unavailable")}}
 	if err := syncer.syncSession(context.Background(), rpc, meta); err == nil {
 		t.Fatal("expected display merge failure")
 	}
@@ -786,7 +787,7 @@ func TestCodexSyncDoesNotAdvanceCheckpointWhenCatalogActivityFails(t *testing.T)
 		t.Fatal(err)
 	}
 	rpc := &codexSyncRPC{thread: codexThread{ID: "thread-1", UpdatedAt: now.Add(time.Minute).Unix()}}
-	syncer := &codexSessionSyncer{store: store, items: storedDisplayItemSource{store: store}, catalog: catalog}
+	syncer := &codexSessionSyncer{store: store, items: sessionlog.StoredItemSource{Store: store}, catalog: catalog}
 	if err := syncer.syncSession(context.Background(), rpc, meta); !errors.Is(err, zotigoworkspace.ErrNotFound) {
 		t.Fatalf("catalog error = %v, want not found", err)
 	}
@@ -844,7 +845,7 @@ func TestCatalogSessionListReportsCodexSyncDiagnostic(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
 	privatePath := "/Users/private/.codex/internal.sock"
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, catalog: catalog, codexHost: &codexSyncHost{err: errors.New(privatePath)},
 	})
 	for _, path := range []string{"/sessions?sync_codex=true", "/catalog/sessions?sync_codex=true"} {
@@ -896,7 +897,7 @@ func TestSyncCompletedCodexTurnsDoesNotDuplicateLocalUserPrompt(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	for _, item := range []zotigosession.DisplayItem{
 		{ID: "local-user", Type: zotigosession.DisplayItemUserMessage, Role: "user", Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "question"}}},
 		{ID: "turn-started", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -940,7 +941,7 @@ func TestSyncCompletedCodexTurnsPersistsGeneratedImage(t *testing.T) {
 	}
 	startedAt := now.Unix()
 	completedAt := now.Add(time.Second).Unix()
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	turns := []codexTurn{{
 		ID: "turn-image", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
 		Items: []codexThreadItem{{ID: "image-sync-1", Type: "imageGeneration", Status: "completed", Result: tinyPNGBase64()}},
@@ -1001,7 +1002,7 @@ func TestCodexSessionSyncContinuesPastUnavailableHistoricalImage(t *testing.T) {
 			},
 		}},
 	}}
-	syncer := &codexSessionSyncer{store: store, items: storedDisplayItemSource{store: store}}
+	syncer := &codexSessionSyncer{store: store, items: sessionlog.StoredItemSource{Store: store}}
 	if err := syncer.syncSession(context.Background(), rpc, meta); err != nil {
 		t.Fatal(err)
 	}
@@ -1042,7 +1043,7 @@ func TestCodexSessionSyncWithTypedNilHostReturnsError(t *testing.T) {
 		t.Fatal(err)
 	}
 	var host *codexapp.Host
-	syncer := newCodexSessionSyncer(host, store, storedDisplayItemSource{store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
+	syncer := newCodexSessionSyncer(host, store, sessionlog.StoredItemSource{Store: store}, nil, newSessionRegistry(), newSessionOperationLocks())
 	if err := syncer.Sync(context.Background()); err == nil || !strings.Contains(err.Error(), "unavailable") {
 		t.Fatalf("sync error = %v", err)
 	}

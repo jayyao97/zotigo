@@ -19,6 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -207,7 +208,7 @@ func TestSessionProfileChangeAppliesToOfflineSession(t *testing.T) {
 	if err := store.Put(context.Background(), stored); err != nil {
 		t.Fatalf("save old profile: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-offline-profile/profile", strings.NewReader(`{"profile":"NEW"}`)))
@@ -271,7 +272,7 @@ func TestSessionProfileChangeRejectsOfflineSessionLockedByWorker(t *testing.T) {
 		t.Fatalf("simulate worker lock: %v", err)
 	}
 	defer func() { _ = store.Unlock(context.Background(), "sess-locked-profile") }()
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-locked-profile/profile", strings.NewReader(`{"profile":"new"}`)))
@@ -529,7 +530,7 @@ func TestSessionProfileChangeReportsUnlockFailure(t *testing.T) {
 		t.Fatalf("save old profile: %v", err)
 	}
 	store := unlockFailingStore{Store: baseStore}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/sess-unlock-profile/profile", strings.NewReader(`{"profile":"new"}`)))
@@ -605,7 +606,7 @@ func TestSessionProfileChangeDoesNotRaceSessionStart(t *testing.T) {
 		<-releaseLaunch
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workerConnectTimeout: 10 * time.Millisecond,

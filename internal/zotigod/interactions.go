@@ -8,6 +8,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -22,7 +23,7 @@ var errInvalidInteraction = errors.New("invalid interaction")
 
 func newUserInputInteraction(sessionID, turnID, itemID string, requester wire.InteractionRequester, questions []wire.InteractionQuestion, blocking bool, autoResolveMS *uint64) (wire.InteractionRequest, error) {
 	req := wire.InteractionRequest{
-		ID: newZotigodID("interaction"), SessionID: strings.TrimSpace(sessionID),
+		ID: sessionlog.NewID("interaction"), SessionID: strings.TrimSpace(sessionID),
 		TurnID: strings.TrimSpace(turnID), ItemID: strings.TrimSpace(itemID),
 		Kind: interactionKindUserInput, Status: interactionStatusPending,
 		Requester: requester, Questions: questions, IsBlocking: blocking,

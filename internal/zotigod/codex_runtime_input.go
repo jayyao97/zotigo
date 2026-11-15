@@ -13,6 +13,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/skills"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -28,7 +29,7 @@ func (r *codexWorkerRuntime) AcceptInput(ctx context.Context, request wire.Input
 }
 
 func (r *codexWorkerRuntime) acceptInput(ctx context.Context, request wire.InputRequest, boundResults <-chan wire.ConversationBoundResult, notifications <-chan codexapp.Message, workerChannels ...codexWorkerChannels) (wire.Command, error) {
-	source := storedDisplayItemSource{store: r.store}
+	source := sessionlog.StoredItemSource{Store: r.store}
 	if existing, found, err := findExistingSessionInput(ctx, source, r.cfg.SessionID, request.Command, r.cfg.SessionStoreRoot); err != nil {
 		return wire.Command{}, err
 	} else if found {

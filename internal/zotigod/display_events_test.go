@@ -15,6 +15,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -118,7 +119,7 @@ func TestSessionEventsStreamsVolatileDeltaWithoutDurableCursor(t *testing.T) {
 }
 
 func TestDisplayBarrierDropsQueuedPreviewsAndCannotBeOvertakenByLaterDelta(t *testing.T) {
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	events, unsubscribe := broker.Subscribe("session-order")
 	defer unsubscribe()
 	for i := 0; i < cap(events); i++ {
@@ -126,26 +127,26 @@ func TestDisplayBarrierDropsQueuedPreviewsAndCannotBeOvertakenByLaterDelta(t *te
 	}
 
 	broker.WakeBarrier("session-order")
-	if event := <-events; event.delta != nil {
+	if event := <-events; event.Delta != nil {
 		t.Fatalf("barrier did not replace queued previews: %#v", event)
 	}
 	if len(events) != 0 {
 		t.Fatalf("queued previews remained behind barrier: %d", len(events))
 	}
 	broker.PublishDelta("session-order", wire.DisplayDelta{ItemID: "new-generation", Delta: "new"})
-	if event := <-events; event.delta == nil || event.delta.ItemID != "new-generation" {
+	if event := <-events; event.Delta == nil || event.Delta.ItemID != "new-generation" {
 		t.Fatalf("new generation delta was not queued after barrier: %#v", event)
 	}
 }
 
 func TestDisplayBarrierCoalescesExistingWakeAndFollowingPreview(t *testing.T) {
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	events, unsubscribe := broker.Subscribe("session-existing-wake")
 	defer unsubscribe()
 	broker.Wake("session-existing-wake")
 	broker.PublishDelta("session-existing-wake", wire.DisplayDelta{ItemID: "old-generation", Delta: "old"})
 	broker.WakeBarrier("session-existing-wake")
-	if event := <-events; event.delta != nil {
+	if event := <-events; event.Delta != nil {
 		t.Fatalf("barrier event = %#v", event)
 	}
 	if len(events) != 0 {
@@ -154,7 +155,7 @@ func TestDisplayBarrierCoalescesExistingWakeAndFollowingPreview(t *testing.T) {
 }
 
 func TestOrderedDisplayWakeDoesNotAffectOtherSubscribers(t *testing.T) {
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	full, unsubscribeFull := broker.Subscribe("full-session")
 	other, unsubscribeOther := broker.Subscribe("other-session")
 	for i := 0; i < cap(full); i++ {
@@ -162,11 +163,11 @@ func TestOrderedDisplayWakeDoesNotAffectOtherSubscribers(t *testing.T) {
 	}
 	second, unsubscribeSecond := broker.Subscribe("full-session")
 	broker.WakeBarrier("full-session")
-	if event := <-second; event.delta != nil {
+	if event := <-second; event.Delta != nil {
 		t.Fatalf("second subscriber did not receive ordered wake: %#v", event)
 	}
 	broker.PublishDelta("other-session", wire.DisplayDelta{ItemID: "other", Delta: "ready"})
-	if event := <-other; event.delta == nil || event.delta.ItemID != "other" {
+	if event := <-other; event.Delta == nil || event.Delta.ItemID != "other" {
 		t.Fatalf("unrelated subscriber was stalled: %#v", event)
 	}
 	unsubscribeFull()
@@ -235,8 +236,8 @@ func TestWorkerWebSocketForwardsVolatileDeltaToSessionEvents(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
-	broker := newDisplayEventBroker()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	broker := sessionlog.NewEventBroker()
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:   store,
 		workers: newWorkerRegistry(),
 		events:  broker,
@@ -279,8 +280,8 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
-	broker := newDisplayEventBroker()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	broker := sessionlog.NewEventBroker()
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:   store,
 		workers: newWorkerRegistry(),
 		events:  broker,
@@ -324,14 +325,14 @@ func TestWorkerWebSocketBarrierOrdersBufferedDisplayEvents(t *testing.T) {
 	for {
 		select {
 		case event := <-events:
-			if event.delta == nil {
+			if event.Delta == nil {
 				sawWake = true
 				continue
 			}
-			if event.delta.ItemID == "old" && sawWake {
+			if event.Delta.ItemID == "old" && sawWake {
 				t.Fatal("old generation delta arrived after display barrier")
 			}
-			if event.delta.ItemID == "new" {
+			if event.Delta.ItemID == "new" {
 				if !sawWake {
 					t.Fatal("new generation delta arrived before display barrier")
 				}
@@ -515,7 +516,7 @@ func TestSessionEventsRejectsInvalidRequests(t *testing.T) {
 		t.Fatalf("create store: %v", err)
 	}
 	defer store.Close()
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	tests := []struct {
 		name       string
@@ -543,13 +544,13 @@ func TestSessionEventsRejectsInvalidRequests(t *testing.T) {
 	}
 }
 
-func newDisplayEventTestServer(t *testing.T) (*zotigosession.FileStore, *displayEventBroker, *httptest.Server, string) {
+func newDisplayEventTestServer(t *testing.T) (*zotigosession.FileStore, *sessionlog.EventBroker, *httptest.Server, string) {
 	t.Helper()
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	sessionID := "sess-events"
 	now := time.Now().UTC()
 	if err := store.Put(context.Background(), &zotigosession.Session{
@@ -558,7 +559,7 @@ func newDisplayEventTestServer(t *testing.T) (*zotigosession.FileStore, *display
 	}); err != nil {
 		t.Fatalf("create session: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store, events: broker})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store, events: broker})
 	server := httptest.NewServer(handler)
 	t.Cleanup(func() {
 		server.Close()
@@ -644,13 +645,11 @@ func readDisplayEvent(t *testing.T, reader *bufio.Reader) receivedDisplayEvent {
 	return receivedDisplayEvent{}
 }
 
-func waitForDisplayEventSubscribers(t *testing.T, broker *displayEventBroker, sessionID string, want int) {
+func waitForDisplayEventSubscribers(t *testing.T, broker *sessionlog.EventBroker, sessionID string, want int) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
 	for {
-		broker.mu.Lock()
-		got := len(broker.subscribers[sessionID])
-		broker.mu.Unlock()
+		got := broker.SubscriberCount(sessionID)
 		if got == want {
 			return
 		}
@@ -699,32 +698,32 @@ func TestSessionEventsRestoresUnfinishedPrefixAfterSwitch(t *testing.T) {
 	if got := readDisplayEvent(t, reader); got.eventType != "item" || got.item.ID != stored.ID {
 		t.Fatalf("completed block = %#v", got)
 	}
-	if broker.hasPreview(sessionID, delta.ItemID) {
+	if broker.HasPreview(sessionID, delta.ItemID) {
 		t.Fatal("completed prefix retained")
 	}
 }
 
 func TestDisplayPrefixSubscriptionBoundaryAndRetirement(t *testing.T) {
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	prefix := strings.Repeat("正文🙂", 5000)
 	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "body", Role: "assistant", PartType: "text", Delta: prefix})
 	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "child", Role: "assistant", PartType: "reasoning", Delta: "child prefix", Subagent: &zotigosession.DisplaySubagent{ToolCallID: "spawn-1"}})
 	broker.PublishDelta("two", wire.DisplayDelta{ItemID: "other", Role: "assistant", PartType: "text", Delta: "private"})
-	events, snapshot, cancel := broker.subscribeWithPreviews("one")
+	events, snapshot, cancel := broker.SubscribeWithPreviews("one")
 	defer cancel()
 	broker.PublishDelta("one", wire.DisplayDelta{ItemID: "body", Role: "assistant", PartType: "text", Delta: "tail"})
 	if len(snapshot) != 2 || snapshot[0].Delta != prefix || snapshot[1].Delta != "child prefix" {
 		t.Fatal("snapshot is incomplete or contaminated by another session/later delta")
 	}
-	if event := <-events; event.delta == nil || event.delta.Delta != "tail" {
+	if event := <-events; event.Delta == nil || event.Delta.Delta != "tail" {
 		t.Fatalf("subscription boundary = %#v", event)
 	}
-	broker.Retire("one", previewRetirement(zotigosession.DisplayItem{ID: "result", Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: &zotigosession.DisplayToolResult{ToolCallID: "spawn-1"}}}}))
-	if broker.hasPreview("one", "child") || !broker.hasPreview("one", "body") {
+	broker.Retire("one", sessionlog.PreviewRetirement(zotigosession.DisplayItem{ID: "result", Content: []zotigosession.DisplayContentPart{{Type: "tool_result", ToolResult: &zotigosession.DisplayToolResult{ToolCallID: "spawn-1"}}}}))
+	if broker.HasPreview("one", "child") || !broker.HasPreview("one", "body") {
 		t.Fatal("tool retirement removed wrong blocks")
 	}
 	broker.Retire("one", wire.PreviewRetirement{Terminal: true})
-	if broker.hasPreview("one", "body") || !broker.hasPreview("two", "other") {
+	if broker.HasPreview("one", "body") || !broker.HasPreview("two", "other") {
 		t.Fatal("terminal retirement leaked across sessions")
 	}
 }
@@ -754,7 +753,7 @@ func TestWorkersNotifyPreviewRetirementAfterPersistence(t *testing.T) {
 			writer := &workerClientWriter{sendCh: make(chan wire.Message, 4), done: make(chan struct{})}
 			item := zotigosession.DisplayItem{ID: "finished-block", Type: zotigosession.DisplayItemAssistantMessage, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "body"}}}
 			if kind == "native" {
-				log := newWorkerDisplayLog(sessionID, storedDisplayItemSource{store: store})
+				log := newWorkerDisplayLog(sessionID, sessionlog.StoredItemSource{Store: store})
 				log.persisted = writer.SendDisplayItem
 				if _, err := log.appendItem(context.Background(), item); err != nil {
 					t.Fatal(err)
@@ -786,7 +785,7 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Live: true})
 	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	broker := newDisplayEventBroker()
+	broker := sessionlog.NewEventBroker()
 	server := httptest.NewServer(newHandler(registry, source, handlerOptions{events: broker}))
 	defer server.Close()
 	conn, _ := connectWorker(t, server, sessionID)
@@ -814,10 +813,10 @@ func TestDisplayRetirementSurvivesFullQueueWithoutSubscribers(t *testing.T) {
 	}
 	// No SSE subscription or history catch-up is involved in this cleanup.
 	// Allow the first WebSocket JSON decode to initialize under race instrumentation.
-	for deadline := time.Now().Add(5 * time.Second); broker.hasPreview(sessionID, stored.ID) && time.Now().Before(deadline); {
+	for deadline := time.Now().Add(5 * time.Second); broker.HasPreview(sessionID, stored.ID) && time.Now().Before(deadline); {
 		time.Sleep(time.Millisecond)
 	}
-	if broker.hasPreview(sessionID, stored.ID) {
+	if broker.HasPreview(sessionID, stored.ID) {
 		t.Fatal("completed prefix retained without subscribers")
 	}
 }

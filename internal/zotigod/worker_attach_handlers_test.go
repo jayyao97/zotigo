@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -30,7 +31,7 @@ func TestWorkerDisconnectClearsRunningActivity(t *testing.T) {
 	handler := &handler{
 		registry:   registry,
 		items:      &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
-		events:     newDisplayEventBroker(),
+		events:     sessionlog.NewEventBroker(),
 		sessionOps: newSessionOperationLocks(),
 	}
 
@@ -55,7 +56,7 @@ func TestStaleWorkerDisconnectDoesNotResetRestartedSession(t *testing.T) {
 	}
 	handler := &handler{
 		registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
-		events: newDisplayEventBroker(), sessionOps: newSessionOperationLocks(),
+		events: sessionlog.NewEventBroker(), sessionOps: newSessionOperationLocks(),
 	}
 
 	handler.handleWorkerDisconnect("sess-stale-disconnect", "worker-old")
@@ -95,7 +96,7 @@ func TestDisconnectedRunningSessionRejectsRemovedProfile(t *testing.T) {
 		CreatedAt:        now,
 	})
 	var launches atomic.Int32
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store,
 		launcher: workerLauncherFunc(func(context.Context, string, string) error {
 			launches.Add(1)

@@ -14,6 +14,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type codexImageStore interface {
@@ -255,16 +256,16 @@ func codexSessionStoreRoot(store zotigosession.Store) string {
 	return ""
 }
 
-func codexSessionStoreFromItems(items displayItemSource) zotigosession.Store {
+func codexSessionStoreFromItems(items sessionlog.ItemSource) zotigosession.Store {
 	switch source := items.(type) {
 	case *codexSyncBuffer:
 		return codexSessionStoreFromItems(source.source)
-	case storedDisplayItemSource:
-		return source.store
-	case eventingDisplayItemSource:
-		return codexSessionStoreFromItems(source.source)
-	case eventingOffsetDisplayItemSource:
-		return codexSessionStoreFromItems(source.source)
+	case sessionlog.StoredItemSource:
+		return source.Store
+	case sessionlog.EventingItemSource:
+		return codexSessionStoreFromItems(source.Source)
+	case sessionlog.EventingOffsetItemSource:
+		return codexSessionStoreFromItems(source.Source)
 	default:
 		return nil
 	}

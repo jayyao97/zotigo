@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestSessionReadStateAPISharedAcrossClients(t *testing.T) {
@@ -18,7 +19,7 @@ func TestSessionReadStateAPISharedAcrossClients(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	server := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	appendTurn := func() {
 		t.Helper()
 		if _, err := store.AppendDisplayItem(t.Context(), sess.ID, zotigosession.DisplayItem{Type: zotigosession.DisplayItemTurnCompleted}); err != nil {

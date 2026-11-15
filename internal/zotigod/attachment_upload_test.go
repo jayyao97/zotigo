@@ -13,6 +13,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestScratchSessionsHaveIndependentPersistentDirectories(t *testing.T) {
@@ -31,7 +32,7 @@ func TestScratchSessionsHaveIndependentPersistentDirectories(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "config.yaml"), config, 0600); err != nil {
 		t.Fatal(err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	var previous string
 	for range 2 {
 		rec := requestCatalog(t, handler, http.MethodPost, "/sessions", `{}`)
@@ -152,7 +153,7 @@ func TestAttachmentUploadToPersistedOfflineSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	registry := newSessionRegistry()
-	handler := newHandler(registry, storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(registry, sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	req := httptest.NewRequest(http.MethodPost, "/files/upload?sessionId=offline-session&name=notes.txt", strings.NewReader("offline upload"))
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, req)

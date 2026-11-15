@@ -14,6 +14,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const (
@@ -37,7 +38,7 @@ func (e *codexSessionSyncFailure) Unwrap() error { return e.err }
 type codexSessionSyncer struct {
 	host       codexapp.HostProvider
 	store      zotigosession.Store
-	items      displayItemSource
+	items      sessionlog.ItemSource
 	catalog    *zotigoworkspace.Store
 	registry   *sessionRegistry
 	sessionOps *sessionOperationLocks
@@ -101,7 +102,7 @@ type backendActivityUpdater interface {
 	UpdateBackendActivity(context.Context, string, time.Time, int) error
 }
 
-func newCodexSessionSyncer(host codexapp.HostProvider, store zotigosession.Store, items displayItemSource, catalog *zotigoworkspace.Store, registry *sessionRegistry, sessionOps *sessionOperationLocks) *codexSessionSyncer {
+func newCodexSessionSyncer(host codexapp.HostProvider, store zotigosession.Store, items sessionlog.ItemSource, catalog *zotigoworkspace.Store, registry *sessionRegistry, sessionOps *sessionOperationLocks) *codexSessionSyncer {
 	return &codexSessionSyncer{host: host, store: store, items: items, catalog: catalog, registry: registry, sessionOps: sessionOps}
 }
 
@@ -333,7 +334,7 @@ type codexTerminalState struct {
 }
 
 type codexSyncBuffer struct {
-	source           displayItemSource
+	source           sessionlog.ItemSource
 	expectedSequence uint64
 	pending          []zotigosession.DisplayItem
 	cleanups         []func()
@@ -363,7 +364,7 @@ func (b *codexSyncBuffer) AppendItemIf(ctx context.Context, sessionID string, it
 }
 
 func (b *codexSyncBuffer) commit(ctx context.Context, sessionID string) error {
-	batch, ok := b.source.(batchDisplayItemSource)
+	batch, ok := b.source.(sessionlog.BatchItemSource)
 	if !ok {
 		b.cleanup()
 		return errors.New("codex history sync requires atomic display append")
@@ -394,7 +395,7 @@ func (s codexTerminalState) matches(desired codexTerminalState) bool {
 	return !desired.hasCompletedAt || s.completedAt == desired.completedAt
 }
 
-func syncCompletedCodexTurns(ctx context.Context, items displayItemSource, sessionID string, turns []codexTurn) error {
+func syncCompletedCodexTurns(ctx context.Context, items sessionlog.ItemSource, sessionID string, turns []codexTurn) error {
 	existing, _, err := items.LoadItems(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("load display items: %w", err)
@@ -553,7 +554,7 @@ func (i *codexDisplayIndex) addLocalUserKey(turnID string, key string) {
 	i.localUserKeysByTurn[turnID][key] = true
 }
 
-func syncCompletedCodexItem(ctx context.Context, items displayItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
+func syncCompletedCodexItem(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
 	if item.ID == "" {
 		return nil
 	}
@@ -670,7 +671,7 @@ func codexUserContentKey(content []zotigosession.DisplayContentPart) string {
 	return strings.Join(parts, "\x1e")
 }
 
-func syncCompletedCodexTool(ctx context.Context, items displayItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
+func syncCompletedCodexTool(ctx context.Context, items sessionlog.ItemSource, sessionID string, turnID string, createdAt time.Time, item codexThreadItem, seen *codexDisplayIndex) error {
 	name, arguments, ok, err := codexToolCall(item)
 	if err != nil || !ok {
 		return err
@@ -744,7 +745,7 @@ func codexUserMessageContent(value any) ([]zotigosession.DisplayContentPart, err
 	return content, nil
 }
 
-func appendIndexedCodexItem(ctx context.Context, items displayItemSource, sessionID string, item zotigosession.DisplayItem, seen *codexDisplayIndex) error {
+func appendIndexedCodexItem(ctx context.Context, items sessionlog.ItemSource, sessionID string, item zotigosession.DisplayItem, seen *codexDisplayIndex) error {
 	if err := appendSyncedCodexItem(ctx, items, sessionID, item); err != nil {
 		return err
 	}
@@ -752,7 +753,7 @@ func appendIndexedCodexItem(ctx context.Context, items displayItemSource, sessio
 	return nil
 }
 
-func appendSyncedCodexItem(ctx context.Context, items displayItemSource, sessionID string, item zotigosession.DisplayItem) error {
+func appendSyncedCodexItem(ctx context.Context, items sessionlog.ItemSource, sessionID string, item zotigosession.DisplayItem) error {
 	if _, err := items.AppendItem(ctx, sessionID, item); err != nil {
 		return fmt.Errorf("append Codex display item: %w", err)
 	}

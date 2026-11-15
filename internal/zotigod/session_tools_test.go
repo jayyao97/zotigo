@@ -15,13 +15,14 @@ import (
 	session "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
 	t.Helper()
 	h, store, catalog, workspace := newChannelProvisionFixture(t)
-	h.items = storedDisplayItemSource{store: store}
+	h.items = sessionlog.StoredItemSource{Store: store}
 	h.workers = newWorkerRegistry()
 	source := newSession(workspace.RootPath, "channel-default")
 	if err := h.persistSession(context.Background(), source); err != nil {

@@ -13,6 +13,7 @@ import (
 	_ "github.com/jayyao97/zotigo/core/providers/gemini"
 	_ "github.com/jayyao97/zotigo/core/providers/openai"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -43,7 +44,7 @@ func newWorkerDisplayBarrierClient(writer *workerClientWriter) *workerDisplayBar
 func (b *workerDisplayBarrierClient) Wait(ctx context.Context) error {
 	waitCtx, cancel := context.WithTimeout(ctx, b.timeout)
 	defer cancel()
-	barrier := wire.DisplayBarrier{ID: newZotigodID("display_barrier")}
+	barrier := wire.DisplayBarrier{ID: sessionlog.NewID("display_barrier")}
 	acknowledged := make(chan struct{})
 	b.mu.Lock()
 	b.waiters[barrier.ID] = acknowledged
@@ -120,7 +121,7 @@ func (w *workerClientWriter) SendDelta(delta wire.DisplayDelta) {
 }
 
 func (w *workerClientWriter) SendDisplayItem(item zotigosession.DisplayItem) {
-	retirement := previewRetirement(item)
+	retirement := sessionlog.PreviewRetirement(item)
 	// Unlike an ordinary wake, this retires daemon-owned preview memory even
 	// when nobody is reading history. Keep it ordered after earlier deltas and
 	// apply backpressure instead of dropping it or adding an unbounded queue.

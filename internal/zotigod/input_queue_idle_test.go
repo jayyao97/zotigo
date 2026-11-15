@@ -8,11 +8,12 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type blockedQueueHistory struct {
-	displayItemSource
+	sessionlog.ItemSource
 	entered chan struct{}
 	release chan struct{}
 }

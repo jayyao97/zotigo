@@ -19,6 +19,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -136,7 +137,7 @@ func TestSessionMessageAllowsConversationBindingBeforeInputResult(t *testing.T) 
 		ID: sessionID, State: SessionStateRunning, Agent: "codex",
 		WorkingDirectory: t.TempDir(), CreatedAt: now,
 	})
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	handler := newHandler(registry, source, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -272,12 +273,12 @@ func TestSessionMessageAutoResumesStoredSession(t *testing.T) {
 				workerReady <- nil
 				return
 			}
-			serveTestWorkerInputs(t, conn, storedDisplayItemSource{store: store}, sessionID)
+			serveTestWorkerInputs(t, conn, sessionlog.StoredItemSource{Store: store}, sessionID)
 			workerReady <- conn
 		}()
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -339,12 +340,12 @@ func TestSessionMessageReloadsDisplayLogAfterResume(t *testing.T) {
 				workerReady <- nil
 				return
 			}
-			serveTestWorkerInputs(t, conn, storedDisplayItemSource{store: store}, sessionID)
+			serveTestWorkerInputs(t, conn, sessionlog.StoredItemSource{Store: store}, sessionID)
 			workerReady <- conn
 		}()
 		return nil
 	})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store:                store,
 		launcher:             launcher,
 		workers:              workers,
@@ -385,7 +386,7 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -393,7 +394,7 @@ func TestSessionMessageAcceptsImageInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	requests := serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -474,7 +475,7 @@ func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -482,7 +483,7 @@ func TestSessionMessageAcceptsImageOnlyInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	requests := serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -534,7 +535,7 @@ func TestSessionImageReadRejectsUnreferencedBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	created := createSession(t, handler)
 	dir := filepath.Join(root, "sessions", created.ID+".images")
@@ -558,7 +559,7 @@ func TestSessionImageReadRejectsNestedImageName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	created := createSession(t, handler)
 	rec := httptest.NewRecorder()
@@ -574,7 +575,7 @@ func TestSessionImageReadBackfillsLegacyDisplayLogReference(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	created := createSession(t, handler)
 	imageData, err := base64.StdEncoding.DecodeString(tinyPNGBase64())
@@ -632,7 +633,7 @@ func TestSessionMessageRejectsEmptyTextWithoutImages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	created := createSession(t, handler)
 	startSession(t, handler, created.ID)
@@ -677,7 +678,7 @@ func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -685,7 +686,7 @@ func TestSessionMessageImageCommandReplaysFromBlob(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 
 	imageBase64 := tinyPNGBase64()
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, imageBase64)
@@ -721,7 +722,7 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -729,7 +730,7 @@ func TestSessionMessageFailedDuplicateImageDoesNotDeleteAcceptedBlob(t *testing.
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
 	rec := httptest.NewRecorder()
@@ -759,7 +760,7 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -767,7 +768,7 @@ func TestWorkerCommandsSkipsMissingImageBlob(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 
 	body := fmt.Sprintf(`{"text":"describe this","images":[{"mime_type":"image/png","data_base64":%q}]}`, tinyPNGBase64())
 	rec := httptest.NewRecorder()
@@ -880,7 +881,7 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create store: %v", err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	server := httptest.NewServer(handler)
 	defer server.Close()
 
@@ -888,7 +889,7 @@ func TestSessionSteeringAcceptsImageOnlyInput(t *testing.T) {
 	startSession(t, handler, created.ID)
 	worker := dialWorker(t, server, created.ID)
 	defer worker.Close()
-	requests := serveTestWorkerInputs(t, worker, storedDisplayItemSource{store: store}, created.ID)
+	requests := serveTestWorkerInputs(t, worker, sessionlog.StoredItemSource{Store: store}, created.ID)
 	if _, err := store.AppendDisplayItem(context.Background(), created.ID, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemTurnStarted,
 		Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
@@ -1791,7 +1792,7 @@ func TestWorkerCommandsSupportDisplayLogOffset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("new file store: %v", err)
 	}
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	handler := newHandler(newSessionRegistry(), source)
 	created := createSession(t, handler)
 
@@ -1920,7 +1921,7 @@ func TestTurnScopedControlsRejectStoredOfflineSession(t *testing.T) {
 		t.Fatalf("create session store: %v", err)
 	}
 	putStoredSession(t, store, "sess-stored", t.TempDir())
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	rec := httptest.NewRecorder()
 	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPost, "/sessions/sess-stored/pause", nil))

@@ -13,6 +13,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -30,7 +31,7 @@ func TestEmptyQueueDoesNotLoadHistory(t *testing.T) {
 }
 
 type slowQueueHistory struct {
-	storedDisplayItemSource
+	sessionlog.StoredItemSource
 	delay atomic.Bool
 }
 
@@ -38,7 +39,7 @@ func (s *slowQueueHistory) LoadItems(ctx context.Context, id string) ([]zotigose
 	if s.delay.Load() {
 		time.Sleep(350 * time.Millisecond)
 	}
-	return s.storedDisplayItemSource.LoadItems(ctx, id)
+	return s.StoredItemSource.LoadItems(ctx, id)
 }
 
 func TestQueuedInputsWaitForTurnAndMerge(t *testing.T) {
@@ -70,7 +71,7 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Agent: agent, WorkingDirectory: dir, CreatedAt: now})
-	source := &slowQueueHistory{storedDisplayItemSource: storedDisplayItemSource{store: store}}
+	source := &slowQueueHistory{StoredItemSource: sessionlog.StoredItemSource{Store: store}}
 	if _, err := source.AppendItem(ctx, sessionID, zotigosession.DisplayItem{ID: "turn-start", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "old"}, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +273,7 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 		t.Fatal(err)
 	}
 	defer catalog.Close()
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	h := &handler{catalog: catalog, store: store, items: source, workers: newWorkerRegistry(), queueOps: newSessionOperationLocks()}
 	images, err := validateMessageImages([]submitMessageImageRequest{{MimeType: "image/png", DataBase64: tinyPNGBase64()}})
 	if err != nil {
@@ -343,7 +344,7 @@ func TestQueuePausedAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer catalog.Close()
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	h := &handler{catalog: catalog, store: store, items: source, workers: newWorkerRegistry(), queueOps: newSessionOperationLocks()}
 	for _, kind := range []zotigosession.DisplayItemType{zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted} {
 		id := string(kind)

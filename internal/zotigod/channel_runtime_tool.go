@@ -9,6 +9,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
 	"github.com/jayyao97/zotigo/internal/channels"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -37,7 +38,7 @@ func (c *workerRuntimeToolClient) request(ctx context.Context, request wire.Runt
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
-	requestID := newZotigodID("runtime_tool")
+	requestID := sessionlog.NewID("runtime_tool")
 	request.RequestID = requestID
 	if err := c.writer.SendRuntimeToolRequest(ctx, request); err != nil {
 		return "", err

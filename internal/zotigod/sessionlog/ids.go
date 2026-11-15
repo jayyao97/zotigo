@@ -1,4 +1,4 @@
-package zotigod
+package sessionlog
 
 import (
 	"crypto/rand"
@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-func newZotigodID(prefix string) string {
+func NewID(prefix string) string {
 	var buf [8]byte
 	if _, err := rand.Read(buf[:]); err == nil {
 		return prefix + "_" + hex.EncodeToString(buf[:])

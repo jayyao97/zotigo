@@ -57,6 +57,13 @@ func TestLayerRules(t *testing.T) {
 		{"wire must not import other product packages", "internal/zotigod/wire/x.go", m + "internal/runtime", 1},
 		{"wire may import core", "internal/zotigod/wire/x.go", m + "core/protocol", 0},
 		{"zotigod may import wire", "internal/zotigod/x.go", m + "internal/zotigod/wire", 0},
+		{"sessionlog must not import the daemon", "internal/zotigod/sessionlog/x.go", m + "internal/zotigod", 1},
+		{"sessionlog must not import the daemon client", "internal/zotigod/sessionlog/x.go", m + "internal/zotigodclient", 1},
+		{"sessionlog must not import the cli", "internal/zotigod/sessionlog/x.go", m + "cli/tui", 1},
+		{"sessionlog may import wire", "internal/zotigod/sessionlog/x.go", m + "internal/zotigod/wire", 0},
+		{"sessionlog may import runtime", "internal/zotigod/sessionlog/x.go", m + "internal/runtime", 0},
+		{"sessionlog may import core", "internal/zotigod/sessionlog/x.go", m + "core/session", 0},
+		{"zotigod may import sessionlog", "internal/zotigod/x.go", m + "internal/zotigod/sessionlog", 0},
 		{"tests are exempt", "core/agent/x_test.go", m + "core/session", 0},
 		{"third party ignored", "core/protocol/x.go", "golang.org/x/text", 0},
 	} {

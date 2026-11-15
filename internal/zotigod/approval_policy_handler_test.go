@@ -17,6 +17,7 @@ import (
 	"github.com/jayyao97/zotigo/core/providers"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -39,7 +40,7 @@ func TestSessionsCreatePersistsApprovalPolicy(t *testing.T) {
 		t.Fatalf("create store: %v", err)
 	}
 	defer store.Close()
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	workDir := t.TempDir()
 	writeTestProfileConfig(t, workDir)
 
@@ -74,7 +75,7 @@ func TestSessionsCreatePersistsApprovalPolicy(t *testing.T) {
 		t.Fatalf("stored approval policy = %q, want bypass", stored.ApprovalPolicy)
 	}
 
-	restarted := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	restarted := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	rec := httptest.NewRecorder()
 	restarted.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+bypass.ID, nil))
 	if rec.Code != http.StatusOK {
@@ -217,7 +218,7 @@ func TestSessionApprovalPolicyChangeAppliesToOfflineCodexSession(t *testing.T) {
 	if err := store.Put(context.Background(), stored); err != nil {
 		t.Fatal(err)
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 
 	for _, policy := range []agent.ApprovalPolicy{agent.ApprovalPolicyBypass, agent.ApprovalPolicyAuto} {
 		rec := httptest.NewRecorder()

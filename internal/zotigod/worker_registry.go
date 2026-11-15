@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/sonic"
 	"github.com/gorilla/websocket"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -446,7 +447,7 @@ func (r *workerRegistry) SubmitInput(ctx context.Context, sessionID string, requ
 }
 
 func (r *workerRegistry) BeginInput(sessionID string, request wire.InputRequest) (*workerInputSubmission, error) {
-	request.RequestID = newZotigodID("input_submit")
+	request.RequestID = sessionlog.NewID("input_submit")
 	waiter := make(chan wire.InputResult, 1)
 
 	r.mu.Lock()
@@ -613,7 +614,7 @@ func (c *workerConnection) trySendMessage(msg wire.Message) bool {
 }
 
 func (c *workerConnection) submitApproval(ctx context.Context, approvalID string, decisions []zotigosession.DisplayApprovalDecision, stopTurn bool) (wire.ApprovalRequest, error) {
-	requestID := newZotigodID("approval_submit")
+	requestID := sessionlog.NewID("approval_submit")
 	waiter := make(chan wire.ApprovalResult, 1)
 	c.waitersMu.Lock()
 	c.waiters[requestID] = waiter
@@ -658,7 +659,7 @@ func (c *workerConnection) submitApproval(ctx context.Context, approvalID string
 }
 
 func (c *workerConnection) submitInteraction(ctx context.Context, interactionID string, answers map[string][]string) (wire.InteractionRequest, error) {
-	requestID := newZotigodID("interaction_submit")
+	requestID := sessionlog.NewID("interaction_submit")
 	waiter := make(chan wire.InteractionResult, 1)
 	c.waitersMu.Lock()
 	c.interactionWaiters[requestID] = waiter

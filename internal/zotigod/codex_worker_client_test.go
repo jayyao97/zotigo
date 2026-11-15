@@ -21,6 +21,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -506,7 +507,7 @@ func TestCodexWorkerPersistsGeneratedImageAcrossReload(t *testing.T) {
 	if string(data) != string(want) {
 		t.Fatal("reloaded generated image bytes differ")
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: reopened}, handlerOptions{store: reopened})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: reopened}, handlerOptions{store: reopened})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, image.URL, nil))
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Content-Type") != "image/png" || recorder.Body.String() != string(want) {

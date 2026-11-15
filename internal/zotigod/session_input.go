@@ -7,6 +7,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -32,7 +33,7 @@ func workerInputErrorDetails(err error) (string, string) {
 	}
 }
 
-func findExistingSessionInput(ctx context.Context, source displayItemSource, sessionID string, request wire.Command, rootDir string) (wire.Command, bool, error) {
+func findExistingSessionInput(ctx context.Context, source sessionlog.ItemSource, sessionID string, request wire.Command, rootDir string) (wire.Command, bool, error) {
 	items, _, err := source.LoadItems(ctx, sessionID)
 	if err != nil {
 		return wire.Command{}, false, err
@@ -143,8 +144,8 @@ func steeringCommandForRequest(request wire.InputRequest, turnID string) wire.Co
 	return command
 }
 
-func appendAcceptedSessionInput(ctx context.Context, source displayItemSource, sessionID string, command wire.Command) (wire.Command, error) {
-	atomic, ok := source.(atomicDisplayItemSource)
+func appendAcceptedSessionInput(ctx context.Context, source sessionlog.ItemSource, sessionID string, command wire.Command) (wire.Command, error) {
+	atomic, ok := source.(sessionlog.AtomicItemSource)
 	if !ok {
 		return wire.Command{}, errors.New("display item source does not support atomic session input")
 	}

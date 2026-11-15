@@ -12,6 +12,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/hooks"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 // WorkerSubcommand is the hidden first argument that host binaries embedding
@@ -117,7 +118,7 @@ func StartEmbedded(logger *log.Logger) (*EmbeddedService, error) {
 	go maintainConversationIndex(ctx, store, logger)
 
 	service.server = &http.Server{
-		Handler:           newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, options),
+		Handler:           newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, options),
 		ReadHeaderTimeout: 5 * time.Second,
 		// Request contexts derive from ctx so Close also ends long-lived
 		// event streams, which http.Server.Shutdown would otherwise wait on.

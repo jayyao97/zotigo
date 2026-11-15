@@ -27,6 +27,7 @@ import (
 	"github.com/jayyao97/zotigo/internal/hooks"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
 	"github.com/jayyao97/zotigo/internal/wiring"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -138,7 +139,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*workerRunt
 		"process_start":  time.Now().UTC().Format(time.RFC3339),
 		"worker":         true,
 	})
-	display := newWorkerDisplayLog(cfg.SessionID, storedDisplayItemSource{store: cfg.Store})
+	display := newWorkerDisplayLog(cfg.SessionID, sessionlog.StoredItemSource{Store: cfg.Store})
 	display.delta = cfg.SendDelta
 	display.persisted = cfg.NotifyDisplayItem
 	display.wake = func(context.Context) {

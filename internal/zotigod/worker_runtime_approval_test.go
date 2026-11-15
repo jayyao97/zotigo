@@ -16,6 +16,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/subagent"
 	zotigotransport "github.com/jayyao97/zotigo/core/transport"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -142,7 +143,7 @@ func TestWorkerRuntimeReusesActiveWALWhenReleasingSubagentApproval(t *testing.T)
 		t.Fatal(err)
 	}
 
-	display := newWorkerDisplayLog(sessionID, storedDisplayItemSource{store: store})
+	display := newWorkerDisplayLog(sessionID, sessionlog.StoredItemSource{Store: store})
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}

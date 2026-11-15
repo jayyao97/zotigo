@@ -26,6 +26,7 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/tools"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -709,10 +710,10 @@ func getSession(t *testing.T, handler http.Handler, id string) Session {
 	return session
 }
 
-func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source displayItemSource, id string) wire.ApprovalRequest {
+func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, source sessionlog.ItemSource, id string) wire.ApprovalRequest {
 	t.Helper()
 	approval := approvalRequest{
-		ID:        newZotigodID("apr"),
+		ID:        sessionlog.NewID("apr"),
 		SessionID: id,
 		TurnID:    "turn-1",
 		Status:    approvalStatusPending,
@@ -751,7 +752,7 @@ func createApprovalRequestForTest(t *testing.T, registry *sessionRegistry, sourc
 	return publicApprovalRequest(approval)
 }
 
-func respondToApprovalDecision(conn *websocket.Conn, source displayItemSource, sessionID string, approval wire.ApprovalRequest) <-chan error {
+func respondToApprovalDecision(conn *websocket.Conn, source sessionlog.ItemSource, sessionID string, approval wire.ApprovalRequest) <-chan error {
 	done := make(chan error, 1)
 	go func() {
 		var msg wire.Message
@@ -885,7 +886,7 @@ func readWorkerMessage(t *testing.T, conn *websocket.Conn) wire.Message {
 	return msg
 }
 
-func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayItemSource, sessionID string) <-chan wire.InputRequest {
+func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source sessionlog.ItemSource, sessionID string) <-chan wire.InputRequest {
 	t.Helper()
 	requests := make(chan wire.InputRequest, 8)
 	go func() {
@@ -952,7 +953,7 @@ func serveTestWorkerInputs(t *testing.T, conn *websocket.Conn, source displayIte
 	return requests
 }
 
-func serveTestWorkerConnectionInputs(connection *workerConnection, source displayItemSource, sessionID string) {
+func serveTestWorkerConnectionInputs(connection *workerConnection, source sessionlog.ItemSource, sessionID string) {
 	go func() {
 		for {
 			select {

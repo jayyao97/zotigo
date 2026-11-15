@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -79,8 +80,8 @@ func buildCommandsResponse(items []zotigosession.DisplayItem, query commandQuery
 	return resp, nil
 }
 
-func buildCommandsResponseFromOffset(ctx context.Context, source displayItemSource, sessionID string, query commandQuery, rootDir string) (wire.CommandsPage, error) {
-	offsetSource, ok := source.(offsetDisplayItemSource)
+func buildCommandsResponseFromOffset(ctx context.Context, source sessionlog.ItemSource, sessionID string, query commandQuery, rootDir string) (wire.CommandsPage, error) {
+	offsetSource, ok := source.(sessionlog.OffsetItemSource)
 	if !ok {
 		items, _, err := source.LoadItems(ctx, sessionID)
 		if err != nil {

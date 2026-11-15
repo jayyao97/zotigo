@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/websocket"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -43,7 +44,7 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	generation := newZotigodID("worker")
+	generation := sessionlog.NewID("worker")
 	responseHeader := http.Header{}
 	responseHeader.Set(wire.GenerationHeader, generation)
 	if h.catalog != nil {

@@ -13,6 +13,7 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -31,7 +32,7 @@ func completionOrigin(value workspace.CompletionTrigger) *protocol.RequestContex
 
 // Recheck at admission as an approval can appear after the dispatcher observed
 // the active turn. Callback data must not act as a human approval response.
-func validateCompletionSteering(ctx context.Context, source displayItemSource, id string, command wire.Command) error {
+func validateCompletionSteering(ctx context.Context, source sessionlog.ItemSource, id string, command wire.Command) error {
 	if !strings.HasPrefix(command.ID, "completion:") {
 		return nil
 	}

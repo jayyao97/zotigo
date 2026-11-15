@@ -10,6 +10,7 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestWorkerToolExecutionWaitsForDurableCallBeforeInvokingTool(t *testing.T) {
@@ -77,7 +78,7 @@ func TestWorkerToolExecutionDoesNotInvokeWhenStartedMarkerFails(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("persist tool call: %v", err)
 	}
-	display.items = failingDisplayItemSource{err: errors.New("disk full")}
+	display.items = sessionlog.FailingItemSource{Err: errors.New("disk full")}
 	executed := false
 	recorder := &workerDurabilityRecorder{display: display}
 	invoke := func(ctx context.Context, call *agent.ToolCall) (any, error) {

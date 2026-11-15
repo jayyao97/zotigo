@@ -7,6 +7,7 @@ import (
 	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 const (
@@ -33,7 +34,7 @@ func newApprovalRequest(sessionID string, turnID string, pending []zotigosession
 	}
 
 	return approvalRequest{
-		ID:        newZotigodID("apr"),
+		ID:        sessionlog.NewID("apr"),
 		SessionID: sessionID,
 		TurnID:    strings.TrimSpace(turnID),
 		Status:    approvalStatusPending,

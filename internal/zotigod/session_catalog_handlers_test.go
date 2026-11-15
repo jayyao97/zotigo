@@ -11,6 +11,7 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
@@ -352,7 +353,7 @@ func newCatalogSessionFixtureWithWorkspaceOps(t *testing.T, workspaceOps *sessio
 	return newCatalogSessionFixtureWithRuntime(t, workspaceOps, nil, nil)
 }
 
-func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items displayItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
+func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items sessionlog.ItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
 	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
@@ -379,7 +380,7 @@ func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOper
 	}
 	registry := newSessionRegistry()
 	if items == nil {
-		items = storedDisplayItemSource{store: store}
+		items = sessionlog.StoredItemSource{Store: store}
 	}
 	handler := newHandler(registry, items, handlerOptions{store: store, catalog: catalog, workspaceOps: workspaceOps, workers: workers})
 	return handler, registry, catalog, workspace

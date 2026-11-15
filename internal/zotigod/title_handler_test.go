@@ -15,6 +15,7 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestFirstCompletedTurnTitleSource(t *testing.T) {
@@ -155,7 +156,7 @@ func TestStoredSessionTitleSuggestionDoesNotStartWorker(t *testing.T) {
 	}
 	defer store.Close()
 
-	createHandler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	createHandler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	createRec := httptest.NewRecorder()
 	createHandler.ServeHTTP(createRec, httptest.NewRequest(
 		http.MethodPost,
@@ -176,7 +177,7 @@ func TestStoredSessionTitleSuggestionDoesNotStartWorker(t *testing.T) {
 	}
 
 	restartedRegistry := newSessionRegistry()
-	restarted := newHandler(restartedRegistry, storedDisplayItemSource{store: store}, handlerOptions{
+	restarted := newHandler(restartedRegistry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store,
 		titleSuggestion: func(context.Context, config.ProfileConfig, string, string) (string, error) {
 			return "Stored title", nil
