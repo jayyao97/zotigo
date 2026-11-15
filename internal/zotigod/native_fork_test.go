@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 	session "github.com/jayyao97/zotigo/core/session"
 )
 
@@ -71,7 +71,7 @@ func TestNativeForkActualCompressor(t *testing.T) {
 		history = append(history, protocol.NewUserMessage(strings.Repeat("question ", 500)), protocol.NewAssistantMessage(strings.Repeat("answer ", 500)))
 	}
 	source := checkpointSource(history[:2])
-	compressor := services.NewCompressor(services.CompressorConfig{TranscriptDir: dir, PreserveRatio: 0.2})
+	compressor := compaction.NewCompressor(compaction.CompressorConfig{TranscriptDir: dir, PreserveRatio: 0.2})
 	compressed, result, err := compressor.ForceCompress(context.Background(), history)
 	if err != nil || !result.Compressed || result.TranscriptPath == "" {
 		t.Fatalf("compression: %+v %v", result, err)

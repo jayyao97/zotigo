@@ -6,6 +6,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestSessionToolSteeringAuthority(t *testing.T) {
@@ -37,9 +38,9 @@ func TestSessionToolSteeringAuthority(t *testing.T) {
 			}
 			for _, item := range []session.DisplayItem{
 				{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "turn"}},
-				{ID: "next-input", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: sessionCommandMessage, RequestContext: initial}},
+				{ID: "next-input", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage, RequestContext: initial}},
 				{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "next"}},
-				{ID: id, Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: "next", RequestContext: steering}},
+				{ID: id, Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandSteering, TurnID: "next", RequestContext: steering}},
 			} {
 				if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
 					t.Fatal(err)

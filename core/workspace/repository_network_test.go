@@ -137,6 +137,12 @@ func TestRepositoryNetworkRechecksCatalogAfterFetch(t *testing.T) {
 }
 
 func TestRepositoryCloneDoesNotBlockCatalogOperations(t *testing.T) {
+	// The cancelled clone's transport child keeps git's output pipe open while
+	// the remote hangs, so stopping it sits out the whole grace period. Not
+	// parallel: the grace period is package state.
+	originalWaitDelay := gitWaitDelay
+	gitWaitDelay = 100 * time.Millisecond
+	t.Cleanup(func() { gitWaitDelay = originalWaitDelay })
 	store, remote := repositoryFixture(t)
 	started := make(chan struct{}, 1)
 	release := make(chan struct{})

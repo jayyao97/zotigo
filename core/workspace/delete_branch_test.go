@@ -9,6 +9,7 @@ import (
 )
 
 func TestDeleteWorkspaceIgnoresCurrentBranch(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"switched", "detached", "original-missing"} {
 		t.Run(mode, func(t *testing.T) {
 			store, workspace, source := createGitWorkspaceFixture(t)
@@ -42,6 +43,7 @@ func TestDeleteWorkspaceIgnoresCurrentBranch(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRetryAfterCheckoutRemoval(t *testing.T) {
+	t.Parallel()
 	for _, removeOwnership := range []bool{false, true} {
 		store, workspace, source := createGitWorkspaceFixture(t)
 		ctx := context.Background()
@@ -68,6 +70,7 @@ func TestDeleteWorkspaceRetryAfterCheckoutRemoval(t *testing.T) {
 }
 
 func TestDeleteWorkspacePreflightProtectsCheckoutOnInvalidRoot(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	path := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if err := os.Remove(filepath.Join(workspace.RootPath, ownerMarkerName)); err != nil {
@@ -85,6 +88,7 @@ func TestDeleteWorkspacePreflightProtectsCheckoutOnInvalidRoot(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRejectsSymlinkCheckout(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	path := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	relocated := filepath.Join(t.TempDir(), "checkout")
@@ -103,6 +107,7 @@ func TestDeleteWorkspaceRejectsSymlinkCheckout(t *testing.T) {
 }
 
 func TestDeleteWorkspacePreflightsAllCheckouts(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	repository := filepath.Join(t.TempDir(), "second")
@@ -146,6 +151,7 @@ func TestDeleteWorkspacePreflightsAllCheckouts(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRetryAfterRootMovedToTrash(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	checkouts, _, err := store.workspaceBindings(ctx, workspace.ID)

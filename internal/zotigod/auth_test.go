@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func TestAuthenticatedHandlerUsesSeparatePublicAndWorkerTokens(t *testing.T) {
@@ -163,7 +165,7 @@ func TestWorkerHTTPClientSendsBearerToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	client := newWorkerHTTPClient("worker-secret")
+	client := workerbase.NewHTTPClient("worker-secret")
 	req, err := http.NewRequest(http.MethodGet, server.URL, nil)
 	if err != nil {
 		t.Fatalf("new request: %v", err)

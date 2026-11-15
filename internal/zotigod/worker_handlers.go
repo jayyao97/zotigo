@@ -8,10 +8,9 @@ import (
 	"github.com/gorilla/websocket"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
-
-const workerGenerationHeader = "X-Zotigo-Worker-Generation"
-const workerWorkspaceHeader = "X-Zotigo-Workspace-ID"
 
 var workerUpgrader = websocket.Upgrader{}
 
@@ -45,9 +44,9 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	generation := newZotigodID("worker")
+	generation := sessionlog.NewID("worker")
 	responseHeader := http.Header{}
-	responseHeader.Set(workerGenerationHeader, generation)
+	responseHeader.Set(wire.GenerationHeader, generation)
 	if h.catalog != nil {
 		organization, err := h.catalog.GetSessionOrganization(r.Context(), sessionID)
 		if err != nil && !errors.Is(err, zotigoworkspace.ErrNotFound) {
@@ -55,7 +54,7 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if err == nil && organization.WorkspaceID != nil {
-			responseHeader.Set(workerWorkspaceHeader, *organization.WorkspaceID)
+			responseHeader.Set(wire.WorkspaceHeader, *organization.WorkspaceID)
 		}
 	}
 	conn, err := workerUpgrader.Upgrade(w, r, responseHeader)

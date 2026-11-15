@@ -8,12 +8,14 @@ import (
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zotigoruntime.WorkerLaunchSpec, error) {
 	runtimeSession, ok := h.registry.Get(sessionID)
 	if !ok {
-		return zotigoruntime.WorkerLaunchSpec{}, errSessionNotFound
+		return zotigoruntime.WorkerLaunchSpec{}, workerbase.ErrSessionNotFound
 	}
 	if h.store == nil {
 		agentKind := zotigoruntime.AgentKind(runtimeSession.Agent)
@@ -32,7 +34,7 @@ func (h *handler) runtimeLaunchSpec(ctx context.Context, sessionID string) (zoti
 		return zotigoruntime.WorkerLaunchSpec{}, fmt.Errorf("load session runtime metadata: %w", err)
 	}
 	if stored == nil {
-		return zotigoruntime.WorkerLaunchSpec{}, errSessionNotFound
+		return zotigoruntime.WorkerLaunchSpec{}, workerbase.ErrSessionNotFound
 	}
 	agentKind := zotigoruntime.AgentKind(stored.Agent)
 	if agentKind == "" {
@@ -82,11 +84,11 @@ type backendBindingStore interface {
 
 var _ backendBindingStore = (*zotigosession.FileStore)(nil)
 
-func (h *handler) handleConversationBound(sessionID string, generation string, request *workerConversationBound) {
+func (h *handler) handleConversationBound(sessionID string, generation string, request *wire.ConversationBound) {
 	if request == nil || request.ConversationID == "" {
 		return
 	}
-	result := workerConversationBoundResult{ConversationID: request.ConversationID}
+	result := wire.ConversationBoundResult{ConversationID: request.ConversationID}
 	func() {
 		unlock := h.sessionOps.lockWorkerCallback(sessionID)
 		defer unlock()

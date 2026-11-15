@@ -2,7 +2,6 @@ package skills
 
 import (
 	"fmt"
-	"os"
 	"sort"
 	"sync"
 )
@@ -14,7 +13,6 @@ type SkillManager struct {
 	diagnostics []Diagnostic
 	projectDir  string
 	userDir     string
-	extraDirs   []string
 	loaded      bool
 }
 
@@ -22,15 +20,6 @@ type SkillManagerOption func(*SkillManager)
 
 func WithUserDir(dir string) SkillManagerOption {
 	return func(m *SkillManager) { m.userDir = dir }
-}
-
-// WithAgentsDir is retained as an alias for WithUserDir.
-func WithAgentsDir(dir string) SkillManagerOption {
-	return WithUserDir(dir)
-}
-
-func WithExtraDirs(dirs ...string) SkillManagerOption {
-	return func(m *SkillManager) { m.extraDirs = append(m.extraDirs, dirs...) }
 }
 
 func NewSkillManager(projectDir string, opts ...SkillManagerOption) *SkillManager {
@@ -57,11 +46,6 @@ func (m *SkillManager) Load() error {
 	}
 	if err := m.loadDir(m.userDir, SkillSourceUser); err != nil {
 		m.diagnostics = append(m.diagnostics, Diagnostic{Code: "scan_failed", Message: err.Error(), Scope: SkillSourceUser.String()})
-	}
-	for _, dir := range m.extraDirs {
-		if err := m.loadDir(dir, SkillSourceUser); err != nil {
-			m.diagnostics = append(m.diagnostics, Diagnostic{Code: "scan_failed", Message: err.Error(), Scope: SkillSourceUser.String()})
-		}
 	}
 	if m.projectDir != "" {
 		if err := m.loadDir(GetProjectSkillsDir(m.projectDir), SkillSourceWorkspace); err != nil {
@@ -97,13 +81,6 @@ func (m *SkillManager) EnsureLoaded() error {
 		return nil
 	}
 	return m.Load()
-}
-
-func (m *SkillManager) SetAgentsDir(dir string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.userDir = dir
-	m.loaded = false
 }
 
 func (m *SkillManager) addSkill(skill *SkillDefinition) {
@@ -153,24 +130,19 @@ func (m *SkillManager) Diagnostics() []Diagnostic {
 	return append([]Diagnostic(nil), m.diagnostics...)
 }
 
-func (m *SkillManager) Count() int {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return len(m.skills)
-}
-
+// Dirs returns the roots skills are discovered from. Hosts register them as
+// safe read locations so the model can open a skill's files without approval.
+// Roots that do not exist yet are included: /skills --reload picks up a
+// directory created after startup, and reads there must be safe too.
 func (m *SkillManager) Dirs() []string {
 	m.mu.RLock()
-	dirs := append([]string{m.userDir, GetProjectSkillsDir(m.projectDir)}, m.extraDirs...)
-	m.mu.RUnlock()
-	var existing []string
-	for _, dir := range dirs {
-		if dir == "" {
-			continue
-		}
-		if info, err := os.Stat(dir); err == nil && info.IsDir() {
-			existing = append(existing, dir)
-		}
+	defer m.mu.RUnlock()
+	var dirs []string
+	if m.userDir != "" {
+		dirs = append(dirs, m.userDir)
 	}
-	return existing
+	if m.projectDir != "" {
+		dirs = append(dirs, GetProjectSkillsDir(m.projectDir))
+	}
+	return dirs
 }

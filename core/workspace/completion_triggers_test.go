@@ -13,6 +13,7 @@ import (
 )
 
 func TestCompletionTriggerPersistenceAndSingleDelivery(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
@@ -75,6 +76,7 @@ func TestCompletionTriggerPersistenceAndSingleDelivery(t *testing.T) {
 }
 
 func TestCompletionTriggerExpiryCancelQuotaAndRollback(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
@@ -128,6 +130,7 @@ func TestCompletionTriggerExpiryCancelQuotaAndRollback(t *testing.T) {
 }
 
 func TestCompletionQueuePreservesOrderAndAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
@@ -156,6 +159,7 @@ func TestCompletionQueuePreservesOrderAndAuthority(t *testing.T) {
 }
 
 func TestCompletionCleanupRetainsFiredAuthority(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
@@ -188,6 +192,7 @@ func TestCompletionCleanupRetainsFiredAuthority(t *testing.T) {
 }
 
 func TestCompletionTriggerHistoryStatesAndSessionScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
@@ -229,6 +234,7 @@ func TestCompletionTriggerHistoryStatesAndSessionScope(t *testing.T) {
 }
 
 func TestCompletionHistoryBoundAndTargetScope(t *testing.T) {
+	t.Parallel()
 	ctx := context.Background()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {

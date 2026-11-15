@@ -19,7 +19,7 @@ func TestConversationIndexFiltersBeforePagination(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestConversationIndexMigrationBackfillResumes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,7 +165,7 @@ func TestReasoningIndexMigrationPreservesHistoryAndReadState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -25,8 +25,11 @@ type AgentConfig struct {
 
 	ApprovalPolicy agent.ApprovalPolicy
 	TranscriptDir  string
-	Observer       observability.Observer
-	Middleware     []agent.Middleware
+	// SafeDirs are extra read-only locations outside the working directory,
+	// such as skill roots, that read tools may open without approval.
+	SafeDirs   []string
+	Observer   observability.Observer
+	Middleware []agent.Middleware
 
 	ConfigureClassifier  bool
 	ApprovalInstructions string
@@ -61,6 +64,8 @@ func NewAgent(cfg AgentConfig) (*agent.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	ag.AddSafeDirs(cfg.SafeDirs...)
 
 	if cfg.ConfigureClassifier {
 		configureClassifier(ag, cfg)

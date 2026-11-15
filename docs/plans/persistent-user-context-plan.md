@@ -1,5 +1,7 @@
 # Prompt Cache Stability: Design, Status, and Validation
 
+> Status (2026-11): partly implemented. The append-only dynamic user context exists (`UserContextBuilder` in `core/agent/prompt/prompt.go`, wired in `internal/wiring/prompt.go` and `core/agent/agent.go`). The durable zotigod session cache-rate accumulator and its read-only endpoint (section "Future: Durable Zotigod Session Cache Rate") do not exist.
+
 ## Status
 
 This document is the single source of truth for Zotigo prompt-cache stability.

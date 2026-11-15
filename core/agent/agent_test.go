@@ -288,7 +288,7 @@ func TestAgentSnapshotDeepCopiesAuditRequestContext(t *testing.T) {
 
 	snapshot := ag.Snapshot()
 	snapshot.Turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role = "owner"
-	if got := ag.AuditTurns()[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role; got != "member" {
+	if got := ag.Snapshot().Turns[0].SafetyEvents[0].ContextSummary.RequestContext.Actor.Role; got != "member" {
 		t.Fatalf("agent audit role=%q after snapshot mutation, want member", got)
 	}
 }
@@ -863,7 +863,7 @@ func (t *ProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision {
 	return tools.SafetyDecision{Level: tools.LevelSafe}
 }
 func (t *ProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
-	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+	if sink, ok := tools.EventSinkFromContext(ctx); ok {
 		sink(protocol.Event{
 			Type: protocol.EventTypeToolProgress,
 			ToolResult: &protocol.ToolResult{
@@ -888,7 +888,7 @@ func (t *ApprovalProgressTool) Classify(_ tools.SafetyCall) tools.SafetyDecision
 	return tools.SafetyDecision{Level: tools.LevelLow, RequiresApproval: true}
 }
 func (t *ApprovalProgressTool) Execute(ctx context.Context, exec executor.Executor, args string) (any, error) {
-	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
+	if sink, ok := tools.EventSinkFromContext(ctx); ok {
 		sink(protocol.Event{
 			Type: protocol.EventTypeToolProgress,
 			ToolResult: &protocol.ToolResult{
@@ -1191,11 +1191,11 @@ func TestAgentReActLoop(t *testing.T) {
 		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
 	}
 
-	toolRes := protocol.NewTextToolResult("call_1", "12:00", false)
-
-	events2, err := ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{toolRes})
+	// Approve the pending call the way production does: no denial decisions,
+	// so the registered TimeTool runs and its "12:00" result resumes the loop.
+	events2, err := ag.ResolvePendingActions(context.Background(), nil)
 	if err != nil {
-		t.Fatalf("Submit error: %v", err)
+		t.Fatalf("Resolve error: %v", err)
 	}
 
 	var content string
@@ -1397,66 +1397,6 @@ func TestAgentReviewAllToolsKeepsBlockedCallsAsHardRule(t *testing.T) {
 	}
 	if got := ag.Snapshot().State; got != agent.StateIdle {
 		t.Fatalf("state = %s, want idle after blocked result", got)
-	}
-}
-
-func TestAgentBypassResumeExecutesRegisteredAndBlocksUnknownTools(t *testing.T) {
-	const providerName = "bypass-resume"
-	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
-		return &profileTextProvider{name: providerName, text: "resumed"}, nil
-	})
-	exec, err := executor.NewLocalExecutor(t.TempDir())
-	if err != nil {
-		t.Fatalf("executor: %v", err)
-	}
-	defer exec.Close()
-	tool := &BypassProbeTool{}
-	ag, err := agent.New(
-		config.ProfileConfig{Provider: providerName},
-		exec,
-		agent.WithApprovalPolicy(agent.ApprovalPolicyBypass),
-		agent.WithTools(tool),
-	)
-	if err != nil {
-		t.Fatalf("agent.New: %v", err)
-	}
-	assistant := protocol.NewAssistantMessage("")
-	assistant.AddToolCall(protocol.ToolCall{ID: "known", Name: tool.Name(), Arguments: `{}`})
-	assistant.AddToolCall(protocol.ToolCall{ID: "unknown", Name: "missing_tool", Arguments: `{}`})
-	ag.Restore(agent.Snapshot{
-		State:   agent.StatePaused,
-		History: []protocol.Message{protocol.NewUserMessage("continue"), assistant},
-		PendingActions: []*agent.PendingAction{
-			{ToolCallID: "known", Name: tool.Name(), Arguments: `{}`, Order: 0},
-			{ToolCallID: "unknown", Name: "missing_tool", Arguments: `{}`, Order: 1},
-		},
-	})
-
-	events, err := ag.ExecuteBypassedPendingActions(context.Background())
-	if err != nil {
-		t.Fatalf("ExecuteBypassedPendingActions: %v", err)
-	}
-	results := make(map[string]protocol.ToolResult)
-	for event := range events {
-		if event.Type == protocol.EventTypeError {
-			t.Fatalf("unexpected error event: %v", event.Error)
-		}
-		if event.Type == protocol.EventTypeToolResultDone && event.ToolResult != nil {
-			results[event.ToolResult.ToolCallID] = *event.ToolResult
-		}
-	}
-
-	if tool.classifyCalls != 0 {
-		t.Fatalf("Tool.Classify called %d times, want 0", tool.classifyCalls)
-	}
-	if tool.executeCalls != 1 {
-		t.Fatalf("Tool.Execute called %d times, want 1", tool.executeCalls)
-	}
-	if result := results["unknown"]; result.Type != protocol.ToolResultTypeExecutionDenied || !result.IsError {
-		t.Fatalf("unknown tool result = %#v, want execution denied", result)
-	}
-	if ag.Snapshot().TurnSafety.SnapshotAttempted {
-		t.Fatal("snapshot must not be attempted for bypassed resumed actions")
 	}
 }
 
@@ -1708,57 +1648,6 @@ func TestAgentAddsToolResultUsageToSessionUsage(t *testing.T) {
 	}
 	if snapshot.CumulativeUsage != childUsage {
 		t.Fatalf("cumulative usage should include tool result usage: got %+v want %+v", snapshot.CumulativeUsage, childUsage)
-	}
-}
-
-func TestAgentClearHistoryPreservesCumulativeUsage(t *testing.T) {
-	const providerName = "clear-history-usage"
-	turnUsage := protocol.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12}
-	providers.Register(providerName, func(config.ProfileConfig) (providers.Provider, error) {
-		return &profileTextProvider{name: providerName, text: "answer", usage: &turnUsage}, nil
-	})
-	exec, err := executor.NewLocalExecutor(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	ag, err := agent.New(config.ProfileConfig{Provider: providerName}, exec)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	events, err := ag.Run(context.Background(), "before clear")
-	if err != nil {
-		t.Fatal(err)
-	}
-	progressSeen := false
-	for event := range events {
-		if event.Type == protocol.EventTypeUsageUpdated && event.Usage != nil {
-			progressSeen = true
-			if *event.Usage != turnUsage || event.ContextUsage == nil || event.ContextUsage.Tokens < turnUsage.TotalInput() {
-				t.Fatalf("invalid progress: %+v", event)
-			}
-		}
-		if event.Type == protocol.EventTypeFinish && (event.Usage == nil || *event.Usage != turnUsage) {
-			t.Fatalf("finish lost turn usage: %+v", event.Usage)
-		}
-	}
-	if !progressSeen {
-		t.Fatal("usage not emitted before turn completion")
-	}
-	ag.ClearHistory()
-	cleared := ag.Snapshot()
-	if len(cleared.History) != 0 || cleared.CumulativeUsage != turnUsage {
-		t.Fatalf("clear lost session usage: history=%d usage=%+v", len(cleared.History), cleared.CumulativeUsage)
-	}
-	events, err = ag.Run(context.Background(), "after clear")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for range events {
-	}
-	want := turnUsage.Add(turnUsage)
-	if got := ag.Snapshot().CumulativeUsage; got != want {
-		t.Fatalf("cumulative usage after clear = %+v, want %+v", got, want)
 	}
 }
 
@@ -2017,9 +1906,8 @@ func TestAgentGetContextStats(t *testing.T) {
 	}
 
 	// Initial stats
-	stats := ag.GetContextStats()
-	if stats["message_count"] != 0 {
-		t.Errorf("Expected 0 messages initially, got %d", stats["message_count"])
+	if n := len(ag.Snapshot().History); n != 0 {
+		t.Errorf("Expected 0 messages initially, got %d", n)
 	}
 
 	// Run a conversation
@@ -2027,20 +1915,24 @@ func TestAgentGetContextStats(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Run error: %v", err)
 	}
-	for range events {
-		// Drain events
+	// Production reports context size on the event stream.
+	var usage *protocol.ContextUsage
+	for e := range events {
+		if e.ContextUsage != nil {
+			usage = e.ContextUsage
+		}
 	}
 
 	// Stats should update
-	stats = ag.GetContextStats()
-	if stats["message_count"] < 2 {
-		t.Errorf("Expected at least 2 messages (user + assistant), got %d", stats["message_count"])
+	messageCount := len(ag.Snapshot().History)
+	if messageCount < 2 {
+		t.Errorf("Expected at least 2 messages (user + assistant), got %d", messageCount)
 	}
-	if stats["estimated_tokens"] <= 0 {
-		t.Errorf("Expected positive token count, got %d", stats["estimated_tokens"])
+	if usage == nil || usage.Tokens <= 0 {
+		t.Fatalf("Expected positive context token count on the event stream, got %+v", usage)
 	}
 
-	t.Logf("Context stats: messages=%d, tokens=%d", stats["message_count"], stats["estimated_tokens"])
+	t.Logf("Context stats: messages=%d, tokens=%d", messageCount, usage.Tokens)
 }
 
 func TestAgentForceCompress(t *testing.T) {
@@ -2072,9 +1964,7 @@ func TestAgentForceCompress(t *testing.T) {
 	}
 
 	// Get stats before compression
-	statsBefore := ag.GetContextStats()
-	t.Logf("Before compression: messages=%d, tokens=%d",
-		statsBefore["message_count"], statsBefore["estimated_tokens"])
+	t.Logf("Before compression: messages=%d", len(ag.Snapshot().History))
 
 	// Force compress
 	result, err := ag.ForceCompress(context.Background())
@@ -2092,9 +1982,7 @@ func TestAgentForceCompress(t *testing.T) {
 				result.CompressedTokens, result.OriginalTokens)
 		}
 
-		statsAfter := ag.GetContextStats()
-		t.Logf("After compression: messages=%d, tokens=%d",
-			statsAfter["message_count"], statsAfter["estimated_tokens"])
+		t.Logf("After compression: messages=%d", len(ag.Snapshot().History))
 	}
 }
 
@@ -2321,41 +2209,6 @@ func TestAgent_512KProfileWithMultiMegabytePayloadDoesNotInflateTokensOrRepeatCo
 	}
 	if compactionCount > 1 {
 		t.Fatalf("repeated compaction triggered on consecutive turns: count = %d", compactionCount)
-	}
-}
-
-func TestAgentResetLoopDetector(t *testing.T) {
-	providers.Register("mock-loop", func(cfg config.ProfileConfig) (providers.Provider, error) {
-		return &StatsMockProvider{}, nil
-	})
-
-	tmpDir := t.TempDir()
-	exec, err := executor.NewLocalExecutor(tmpDir)
-	if err != nil {
-		t.Fatalf("Failed to create executor: %v", err)
-	}
-
-	cfg := config.ProfileConfig{Provider: "mock-loop"}
-	ag, err := agent.New(cfg, exec)
-	if err != nil {
-		t.Fatalf("Failed to create agent: %v", err)
-	}
-
-	// Reset should not panic even with no history
-	ag.ResetLoopDetector()
-
-	// Run a conversation
-	events, _ := ag.Run(context.Background(), "Test")
-	for range events {
-	}
-
-	// Reset again
-	ag.ResetLoopDetector()
-
-	// Loop stats should be reset
-	stats := ag.GetContextStats()
-	if loopCalls, ok := stats["loop_total_calls"]; ok && loopCalls > 0 {
-		t.Logf("Loop stats after reset: %v", stats)
 	}
 }
 
@@ -2960,7 +2813,7 @@ func TestAgent_ClassifierAllowAutoExecutesWhenConfigured(t *testing.T) {
 		t.Fatal("Expected classifier allow to auto-execute when configured")
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 		t.Fatal("Expected safety events")
 	}
@@ -3104,7 +2957,7 @@ func TestAgent_ClassifierEnabledWithoutImplementationFallsBackToApproval(t *test
 		t.Fatalf("Expected need_approval, got %s", lastEvent.FinishReason)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 		t.Fatal("Expected safety event")
 	}
@@ -3218,7 +3071,7 @@ func TestAgent_FirstProtectedActionCreatesSingleSnapshot(t *testing.T) {
 		t.Fatalf("Expected exactly one snapshot call, got %d", exec.snapshotCalls)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) != 1 {
 		t.Fatalf("Expected one turn, got %d", len(turns))
 	}
@@ -3265,7 +3118,7 @@ func TestAgent_SnapshotFailureStopsExecution(t *testing.T) {
 		t.Fatal("Expected snapshot failure to stop execution")
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if turns[0].SnapshotStatus != agent.SnapshotStatusFailed {
 		t.Fatalf("Expected failed snapshot status, got %s", turns[0].SnapshotStatus)
 	}
@@ -3312,7 +3165,7 @@ func TestAgent_NonGitWorkspaceDoesNotSnapshot(t *testing.T) {
 		t.Fatalf("Expected no snapshot calls in non-git workspace, got %d", exec.snapshotCalls)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if turns[0].SnapshotStatus != agent.SnapshotStatusMissingGitRepo {
 		t.Fatalf("Expected missing_git_repo snapshot status, got %s", turns[0].SnapshotStatus)
 	}
@@ -3371,7 +3224,7 @@ func TestAgent_SnapshotNotInstalledDegradesGracefully(t *testing.T) {
 			t.Errorf("Expected note.txt to be written despite missing snap-commit: %v", err)
 		}
 
-		turns := ag.AuditTurns()
+		turns := ag.Snapshot().Turns
 		if len(turns) == 0 {
 			t.Fatal("Expected at least one turn")
 		}
@@ -3467,7 +3320,7 @@ func TestAgent_SnapshotNotInstalled_LocalExecutor(t *testing.T) {
 	}
 
 	// Audit should show the distinct "not installed" status, not generic "failed".
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	if len(turns) == 0 {
 		t.Fatal("Expected at least one turn")
 	}
@@ -3526,7 +3379,7 @@ func TestAgent_CaptureRawAuditContext(t *testing.T) {
 		for range events {
 		}
 
-		turns := ag.AuditTurns()
+		turns := ag.Snapshot().Turns
 		if len(turns) == 0 || len(turns[0].SafetyEvents) == 0 {
 			t.Fatal("Expected safety events")
 		}
@@ -3595,8 +3448,8 @@ func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
 	for range events {
 	}
 
-	_, err = ag.SubmitToolOutputs(context.Background(), []protocol.ToolResult{
-		{
+	_, err = ag.ResolvePendingActions(context.Background(), map[string]protocol.ToolResult{
+		"call_1": {
 			ToolCallID: "call_1",
 			ToolName:   "write_file",
 			Type:       protocol.ToolResultTypeExecutionDenied,
@@ -3604,10 +3457,10 @@ func TestAgent_DenyOutputsRecordedAsUserApprovalAudit(t *testing.T) {
 		},
 	})
 	if err != nil {
-		t.Fatalf("SubmitToolOutputs error: %v", err)
+		t.Fatalf("ResolvePendingActions error: %v", err)
 	}
 
-	turns := ag.AuditTurns()
+	turns := ag.Snapshot().Turns
 	found := false
 	for _, ev := range turns[0].SafetyEvents {
 		if ev.DecisionSource == agent.SafetyDecisionSourceUserApproval &&
@@ -4060,7 +3913,7 @@ func TestAgentSteeringCancelsStartedTool(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop that tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop that tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4108,7 +3961,7 @@ func TestAgentSteeringPreservesToolCompletedBeforeLaterToolWasInterrupted(t *tes
 		t.Fatalf("run: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop the second tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop the second tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4149,7 +4002,7 @@ func TestAgentSteeringPreservesToolThatSucceedsAfterCancellation(t *testing.T) {
 		t.Fatalf("run: %v", err)
 	}
 	<-tool.started
-	if err := ag.QueueTurnUserInput("change direction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("change direction")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 	close(tool.release)
@@ -4198,7 +4051,7 @@ func TestAgentSteeringCancelsStartedApprovedTool(t *testing.T) {
 		t.Fatalf("approve: %v", err)
 	}
 	<-started
-	if err := ag.QueueTurnUserInput("stop approved tool"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("stop approved tool")); err != nil {
 		t.Fatalf("queue steering: %v", err)
 	}
 
@@ -4241,7 +4094,7 @@ func TestAgentPersistsUserContextBeforeRealUserMessage(t *testing.T) {
 	ag, err := agent.New(cfg, exec,
 		agent.WithSystemPromptBuilder(prompt.NewSystemPromptBuilder(prompt.WithStaticPrompt("base system"))),
 		agent.WithUserContextBuilder(prompt.NewUserContextBuilder(
-			prompt.WithContext("environment", func(ctx prompt.PromptContext) string {
+			prompt.WithKeyedContext("environment", "environment", func(ctx prompt.PromptContext) string {
 				return "cwd=" + ctx.WorkDir
 			}),
 		)),
@@ -4544,10 +4397,10 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatal("provider did not start")
 	}
 	currentDate = "2026-07-29"
-	if err := ag.QueueTurnUserInput("first correction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("first correction")); err != nil {
 		t.Fatalf("queue first input: %v", err)
 	}
-	if err := ag.QueueTurnUserInput("second correction"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("second correction")); err != nil {
 		t.Fatalf("queue second input: %v", err)
 	}
 	close(prov.Release)
@@ -4589,7 +4442,7 @@ func TestAgentDrainsQueuedTurnUserInputIntoHistory(t *testing.T) {
 		t.Fatalf("expected merged queued input in history, got %#v", got)
 	}
 
-	if err := ag.QueueTurnUserInput("late"); err == nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("late")); err == nil {
 		t.Fatal("expected queueing input without an active turn to fail")
 	}
 }
@@ -4631,7 +4484,7 @@ func TestAgentDrainsStructuredQueuedTurnUserInputIntoHistory(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("queue structured input: %v", err)
 	}
-	if err := ag.QueueTurnUserInput("then use the simpler fix"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("then use the simpler fix")); err != nil {
 		t.Fatalf("queue text input: %v", err)
 	}
 	close(prov.Release)
@@ -4730,11 +4583,11 @@ func TestAgentQueuesTurnUserInputWhilePaused(t *testing.T) {
 	}
 	ag.Restore(agent.Snapshot{State: agent.StatePaused})
 
-	if err := ag.QueueTurnUserInput("apply after approval"); err != nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("apply after approval")); err != nil {
 		t.Fatalf("queue input while paused: %v", err)
 	}
 	ag.Restore(agent.Snapshot{State: agent.StateIdle})
-	if err := ag.QueueTurnUserInput("late"); err == nil {
+	if err := ag.QueueTurnUserMessage(protocol.NewUserMessage("late")); err == nil {
 		t.Fatal("expected queueing input while idle to fail")
 	}
 }

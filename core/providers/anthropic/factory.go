@@ -10,7 +10,7 @@ import (
 const ProviderName = "anthropic"
 
 func init() {
-	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(New)))
+	providers.Register(ProviderName, providers.WithRetries(providers.WithImageBudget(providers.WithOwnReasoningOnly(New))))
 }
 
 func New(cfg config.ProfileConfig) (providers.Provider, error) {

@@ -8,6 +8,7 @@ import (
 )
 
 func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	project2, err := store.CreateProject(ctx, "Second")
@@ -48,13 +49,16 @@ func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(navigation.Pinned, desired) {
 		t.Fatalf("navigation = %+v, %v", navigation, err)
 	}
-	// A second connection sees the same shared order.
-	reader, err := OpenReadOnly(store.RootDir())
+	// A reopened catalog sees the same shared order.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(store.RootDir())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reader.Close()
-	other, err := reader.GetNavigation(ctx)
+	defer store.Close()
+	other, err := store.GetNavigation(ctx)
 	if err != nil || !reflect.DeepEqual(other, navigation) {
 		t.Fatalf("other client = %+v, %v", other, err)
 	}
@@ -94,6 +98,7 @@ func TestNavigationMixedPinsAndIndependentOrdering(t *testing.T) {
 }
 
 func TestNavigationReorderValidationIsAtomic(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	pin := NavigationItem{Kind: "workspace", ID: workspace.ID}
@@ -129,6 +134,7 @@ func TestNavigationReorderValidationIsAtomic(t *testing.T) {
 }
 
 func TestNavigationImportFirstClientWinsAndDropsStaleIDs(t *testing.T) {
+	t.Parallel()
 	store, ws, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	second, err := store.CreateProject(ctx, "Second")
@@ -160,6 +166,7 @@ func TestNavigationImportFirstClientWinsAndDropsStaleIDs(t *testing.T) {
 }
 
 func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixtureInRoot(t, t.TempDir())
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "old-session", workspace.ID); err != nil {

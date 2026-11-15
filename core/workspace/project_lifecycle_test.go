@@ -11,6 +11,7 @@ import (
 )
 
 func TestProjectArchiveHidesProjectAndLeavesWorkspacesArchivedOnRestore(t *testing.T) {
+	t.Parallel()
 	store, project, workspace, source := createFolderProjectFixture(t)
 	ctx := context.Background()
 	impact, err := store.PreviewProjectArchive(ctx, project.ID)
@@ -69,6 +70,7 @@ func TestProjectArchiveHidesProjectAndLeavesWorkspacesArchivedOnRestore(t *testi
 }
 
 func TestProjectArchiveRejectsDirtyWorktreeBeforeChangingProjectStatus(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	project, err := store.GetProject(ctx, workspace.ProjectID)
@@ -96,6 +98,7 @@ func TestProjectArchiveRejectsDirtyWorktreeBeforeChangingProjectStatus(t *testin
 }
 
 func TestProjectArchiveAllowsAlreadyArchivedGitWorkspace(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	project, err := store.GetProject(ctx, workspace.ProjectID)
@@ -119,6 +122,7 @@ func TestProjectArchiveAllowsAlreadyArchivedGitWorkspace(t *testing.T) {
 }
 
 func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
+	t.Parallel()
 	store, project, workspace, source := createFolderProjectFixture(t)
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "retained-session", workspace.ID); err != nil {
@@ -184,6 +188,7 @@ func TestProjectDeleteRetriesAfterUnknownManagedDirectoryContent(t *testing.T) {
 }
 
 func TestProjectDeleteRejectsSymlinkedProjectsDirectory(t *testing.T) {
+	t.Parallel()
 	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
@@ -215,6 +220,7 @@ func TestProjectDeleteRejectsSymlinkedProjectsDirectory(t *testing.T) {
 }
 
 func TestProjectDeleteRejectsSymlinkedProjectDirectoryBeforeTouchingDescendants(t *testing.T) {
+	t.Parallel()
 	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {

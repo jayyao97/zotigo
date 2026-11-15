@@ -12,6 +12,9 @@ import (
 	"github.com/jayyao97/zotigo/core/config"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type publicProfile struct {
@@ -35,17 +38,6 @@ type changeProfileResponse struct {
 	Profile   string `json:"profile"`
 	Status    string `json:"status"`
 	CommandID string `json:"command_id,omitempty"`
-}
-
-type sessionProfileUpdater interface {
-	UpdateProfile(ctx context.Context, id string, profileName string, updatedAt time.Time) error
-}
-
-func persistSessionProfile(ctx context.Context, store zotigosession.Store, sess *zotigosession.Session) error {
-	if updater, ok := store.(sessionProfileUpdater); ok {
-		return updater.UpdateProfile(ctx, sess.ID, sess.ProfileName, sess.UpdatedAt)
-	}
-	return store.Put(ctx, sess)
 }
 
 func (h *handler) handleProfiles(w http.ResponseWriter, r *http.Request) {
@@ -209,7 +201,7 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:    sessionCommandProfile,
+			Type:    wire.CommandProfile,
 			Profile: target,
 		},
 	})
@@ -217,7 +209,7 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append profile command: %v", err))
 		return
 	}
-	h.sendCommand(r.Context(), id, profileCommandFromItem(item))
+	h.sendCommand(r.Context(), id, sessionlog.ProfileCommandFromItem(item))
 	writeAPIJSON(w, http.StatusAccepted, changeProfileResponse{Profile: target, Status: "pending", CommandID: item.ID})
 }
 
@@ -263,9 +255,9 @@ func (h *handler) applyStoredProfileLocked(ctx context.Context, id string, profi
 	}
 	sess.ProfileName = profileName
 	sess.UpdatedAt = time.Now().UTC()
-	if err := persistSessionProfile(ctx, h.store, sess); err != nil {
+	if err := workerbase.PersistSessionProfile(ctx, h.store, sess); err != nil {
 		if errors.Is(err, zotigosession.ErrProfileStateUncertain) {
-			return &profileStateUncertainError{cause: err}
+			return &workerbase.ProfileStateUncertainError{Cause: err}
 		}
 		return err
 	}
@@ -278,8 +270,8 @@ func (h *handler) applyStoredProfileLocked(ctx context.Context, id string, profi
 	}); err != nil {
 		sess.ProfileName = from
 		sess.UpdatedAt = previousUpdatedAt
-		if rollbackErr := persistSessionProfile(ctx, h.store, sess); rollbackErr != nil {
-			return &profileStateUncertainError{cause: errors.Join(
+		if rollbackErr := workerbase.PersistSessionProfile(ctx, h.store, sess); rollbackErr != nil {
+			return &workerbase.ProfileStateUncertainError{Cause: errors.Join(
 				fmt.Errorf("append profile changed: %w", err),
 				fmt.Errorf("rollback session profile: %w", rollbackErr),
 			)}
@@ -287,7 +279,7 @@ func (h *handler) applyStoredProfileLocked(ctx context.Context, id string, profi
 		return err
 	}
 	if _, err := h.repairPendingProfileCommands(ctx, id, profileName); err != nil {
-		return &profileStateUncertainError{cause: fmt.Errorf("repair pending profile commands: %w", err)}
+		return &workerbase.ProfileStateUncertainError{Cause: fmt.Errorf("repair pending profile commands: %w", err)}
 	}
 	return nil
 }
@@ -310,7 +302,7 @@ func (h *handler) ensureStoredProfileMarker(ctx context.Context, id string, prof
 	}
 	_, err = h.repairPendingProfileCommandsFromItems(ctx, id, profileName, items)
 	if err != nil {
-		return &profileStateUncertainError{cause: fmt.Errorf("repair pending profile commands: %w", err)}
+		return &workerbase.ProfileStateUncertainError{Cause: fmt.Errorf("repair pending profile commands: %w", err)}
 	}
 	return nil
 }
@@ -320,7 +312,7 @@ func hasOfflineProfileIntent(items []zotigosession.DisplayItem, profileName stri
 	var latestIntent uint64
 	var latestIntentProfile string
 	for _, item := range items {
-		if item.Command != nil && item.Command.Type == sessionCommandProfile {
+		if item.Command != nil && item.Command.Type == wire.CommandProfile {
 			latestProfileCommand = item.Sequence
 		}
 		if item.Type == zotigosession.DisplayItemProfileChanged && item.Profile != nil && item.Profile.CommandID == "" {
@@ -348,7 +340,7 @@ func (h *handler) repairPendingProfileCommandsFromItems(ctx context.Context, id 
 	}
 	hadPending := false
 	for _, item := range items {
-		if item.Command == nil || item.Command.Type != sessionCommandProfile || completed[item.ID] {
+		if item.Command == nil || item.Command.Type != wire.CommandProfile || completed[item.ID] {
 			continue
 		}
 		hadPending = true

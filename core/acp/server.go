@@ -8,7 +8,6 @@ import (
 	"io"
 	"sync"
 
-	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"go.lsp.dev/jsonrpc2"
 )
 
@@ -36,6 +35,8 @@ type Server struct {
 	// serverCtx is the long-lived context for the server's lifetime.
 	serverCtx context.Context
 
+	agentVersion string
+
 	// callbacks
 	onSessionNew    func(ctx context.Context, params SessionNewParams) (string, error)
 	onSessionPrompt func(ctx context.Context, sessionID string, text string, images []ContentBlock) PromptResult
@@ -45,8 +46,6 @@ type Server struct {
 	onInitialized   func(caps ClientCapabilities)
 	sessionModes    func(ctx context.Context, sessionID string) *SessionModeState
 	onSetMode       func(ctx context.Context, sessionID string, modeID string) error
-
-	clientCaps ClientCapabilities
 }
 
 // ServerOption configures the Server.
@@ -101,6 +100,11 @@ func OnInitialized(fn func(caps ClientCapabilities)) ServerOption {
 	return func(s *Server) { s.onInitialized = fn }
 }
 
+// WithAgentVersion sets the version reported to the client in initialize.
+func WithAgentVersion(version string) ServerOption {
+	return func(s *Server) { s.agentVersion = version }
+}
+
 // NewServer creates a new ACP server over the given reader/writer (typically stdin/stdout).
 func NewServer(rwc io.ReadWriteCloser, opts ...ServerOption) *Server {
 	s := &Server{
@@ -113,18 +117,6 @@ func NewServer(rwc io.ReadWriteCloser, opts ...ServerOption) *Server {
 	stream := jsonrpc2.NewRawStream(rwc)
 	s.conn = jsonrpc2.NewConn(stream)
 	return s
-}
-
-// Conn returns the underlying JSON-RPC connection for direct calls.
-func (s *Server) Conn() jsonrpc2.Conn {
-	return s.conn
-}
-
-// ClientCaps returns the negotiated client capabilities.
-func (s *Server) ClientCaps() ClientCapabilities {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.clientCaps
 }
 
 // Run starts the JSON-RPC message loop. Blocks until the connection is closed.
@@ -371,10 +363,6 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 		return reply(ctx, nil, fmt.Errorf("invalid params: %w", err))
 	}
 
-	s.mu.Lock()
-	s.clientCaps = params.ClientCapabilities
-	s.mu.Unlock()
-
 	if s.onInitialized != nil {
 		s.onInitialized(params.ClientCapabilities)
 	}
@@ -383,7 +371,7 @@ func (s *Server) handleInitialize(ctx context.Context, reply jsonrpc2.Replier, r
 		ProtocolVersion: ProtocolVersion,
 		AgentInfo: &Implementation{
 			Name:    agentName,
-			Version: buildinfo.Version,
+			Version: s.agentVersion,
 		},
 		AgentCapabilities: AgentCapabilities{
 			LoadSession: s.onSessionLoad != nil,

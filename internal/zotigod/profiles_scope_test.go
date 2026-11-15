@@ -33,7 +33,7 @@ func TestProfilesGlobalScopeExcludesDaemonProjectConfig(t *testing.T) {
 		{"?scope=global", "global", 1},
 	} {
 		rec := httptest.NewRecorder()
-		NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles"+test.query, nil))
+		newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles"+test.query, nil))
 		if rec.Code != http.StatusOK {
 			t.Fatalf("%s: %d %s", test.query, rec.Code, rec.Body.String())
 		}
@@ -47,7 +47,7 @@ func TestProfilesGlobalScopeExcludesDaemonProjectConfig(t *testing.T) {
 	}
 	for _, query := range []string{"?scope=unknown", "?scope=global&working_directory=/tmp"} {
 		rec := httptest.NewRecorder()
-		NewHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles"+query, nil))
+		newTestHandler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/config/profiles"+query, nil))
 		if rec.Code != http.StatusBadRequest {
 			t.Fatalf("%s: %d", query, rec.Code)
 		}

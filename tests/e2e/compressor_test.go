@@ -11,9 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
 	"github.com/jayyao97/zotigo/core/testutil"
 )
 
@@ -21,7 +21,7 @@ import (
 // Run with: go test -tags=e2e -v -run TestE2E_Compressor ./tests/e2e/
 
 func TestE2E_RealWorldConversation(t *testing.T) {
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize:   4000,
 		TriggerRatio:        0.7,
 		PreserveRatio:       0.3,
@@ -79,7 +79,7 @@ func TestE2E_RealWorldConversation(t *testing.T) {
 }
 
 func TestE2E_ToolChainPreservation(t *testing.T) {
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize: 2000,
 		TriggerRatio:      0.5,
 		PreserveRatio:     0.4,
@@ -130,7 +130,7 @@ func TestE2E_ToolChainPreservation(t *testing.T) {
 }
 
 func TestE2E_LargeToolOutputCompression(t *testing.T) {
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize:   10000,
 		ToolOutputThreshold: 100,
 	})
@@ -161,7 +161,7 @@ func TestE2E_LargeToolOutputCompression(t *testing.T) {
 	}
 
 	originalLen := len(msgs[3].Content[0].ToolResult.Text)
-	truncated := c.TruncateToolResults(msgs, 100)
+	truncated := c.ProjectPrompt(msgs, 100)
 	truncatedLen := len(truncated[3].Content[0].ToolResult.Text)
 
 	t.Logf("Tool output: %d -> %d chars (%.1f%% reduction)",
@@ -189,7 +189,7 @@ func TestE2E_TokenCountingAccuracy(t *testing.T) {
 		{"你好世界，这是一个测试。", 10, 5},
 	}
 
-	tk, err := services.DefaultTokenizer()
+	tk, err := compaction.DefaultTokenizer()
 	if err != nil {
 		t.Fatalf("Failed to create tokenizer: %v", err)
 	}
@@ -216,7 +216,7 @@ func TestE2E_CompressionPerformance(t *testing.T) {
 		t.Skip("Skipping performance test in short mode")
 	}
 
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize: 1000,
 		TriggerRatio:      0.3,
 		PreserveRatio:     0.3,
@@ -290,9 +290,9 @@ func TestE2E_WithRealSummarizer(t *testing.T) {
 		t.Fatalf("Failed to create provider: %v", err)
 	}
 
-	summarizer := services.NewProviderSummarizer(provider)
+	summarizer := compaction.NewProviderSummarizer(provider)
 
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize:   500,
 		TriggerRatio:        0.5,
 		PreserveRatio:       0.3,
@@ -357,14 +357,14 @@ func TestE2E_TranscriptPersistence(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize:   500,
 		TriggerRatio:        0.5,
 		PreserveRatio:       0.3,
 		ToolOutputThreshold: 100,
 		TranscriptDir:       dir,
 	})
-	c.SetSummarizer(services.NewProviderSummarizer(provider))
+	c.SetSummarizer(compaction.NewProviderSummarizer(provider))
 
 	msgs := buildRealisticConversation()
 	t.Logf("Conversation: %d messages", len(msgs))
@@ -427,7 +427,7 @@ func TestE2E_TranscriptPersistence(t *testing.T) {
 
 func TestE2E_TranscriptWithToolChains(t *testing.T) {
 	dir := t.TempDir()
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize:   2000,
 		TriggerRatio:        0.5,
 		PreserveRatio:       0.4,
@@ -502,7 +502,7 @@ func TestE2E_TranscriptWithToolChains(t *testing.T) {
 
 func TestE2E_MultipleCompressionRounds(t *testing.T) {
 	dir := t.TempDir()
-	c := services.NewCompressor(services.CompressorConfig{
+	c := compaction.NewCompressor(compaction.CompressorConfig{
 		ContextWindowSize: 1000,
 		TriggerRatio:      0.3,
 		PreserveRatio:     0.3,

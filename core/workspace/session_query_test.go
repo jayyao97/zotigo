@@ -8,6 +8,7 @@ import (
 )
 
 func TestSessionQueryPaginationFiltersAndIndex(t *testing.T) {
+	t.Parallel()
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -103,6 +104,7 @@ func TestSessionQueryPaginationFiltersAndIndex(t *testing.T) {
 }
 
 func TestSessionQueryWorkspacePinsAndOrdering(t *testing.T) {
+	t.Parallel()
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -148,6 +150,7 @@ func TestSessionQueryWorkspacePinsAndOrdering(t *testing.T) {
 }
 
 func TestSparseUnreadQueryUsesUnreadIndex(t *testing.T) {
+	t.Parallel()
 	store, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

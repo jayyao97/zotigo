@@ -17,7 +17,7 @@ func TestSessionSearchAndBoundedWindow(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := session.NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

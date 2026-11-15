@@ -1,7 +1,6 @@
 package zotigod
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,235 +9,16 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 const (
 	defaultItemsLimit = 50
 	maxItemsLimit     = 200
 )
-
-type displayItemSource interface {
-	LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error)
-	AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error)
-	AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error)
-}
-
-type offsetDisplayItemSource interface {
-	LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
-}
-
-type batchDisplayItemSource interface {
-	AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
-	AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
-}
-
-type atomicDisplayItemSource interface {
-	AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error)
-}
-
-type storedDisplayItemSource struct {
-	store zotigosession.Store
-}
-
-type eventingDisplayItemSource struct {
-	source displayItemSource
-	events *displayEventBroker
-}
-
-type eventingOffsetDisplayItemSource struct {
-	eventingDisplayItemSource
-	offset offsetDisplayItemSource
-}
-
-func (s eventingDisplayItemSource) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
-	return s.source.LoadItems(ctx, sessionID)
-}
-
-func (s eventingOffsetDisplayItemSource) LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error) {
-	return s.offset.LoadItemsFromOffset(ctx, sessionID, offset, maxLines)
-}
-
-func (s eventingDisplayItemSource) AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
-	stored, err := s.source.AppendItem(ctx, sessionID, item)
-	if err == nil {
-		s.events.Wake(sessionID)
-	}
-	return stored, err
-}
-
-func (s eventingDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
-	stored, err := s.source.AppendItemIf(ctx, sessionID, item, condition)
-	if err == nil {
-		s.events.Wake(sessionID)
-	}
-	return stored, err
-}
-
-func (s eventingDisplayItemSource) AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
-	source, ok := s.source.(atomicDisplayItemSource)
-	if !ok {
-		return zotigosession.DisplayItem{}, false, errors.New("display item source does not support atomic append")
-	}
-	stored, appended, err := source.AppendItemAtomically(ctx, sessionID, build)
-	if err == nil && appended {
-		s.events.Wake(sessionID)
-	}
-	return stored, appended, err
-}
-
-func (s eventingDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	batch, ok := s.source.(batchDisplayItemSource)
-	if !ok {
-		return nil, errors.New("display item source does not support atomic append")
-	}
-	stored, err := batch.AppendItems(ctx, sessionID, items)
-	if err == nil && len(stored) > 0 {
-		s.events.Wake(sessionID)
-	}
-	return stored, err
-}
-
-func (s eventingDisplayItemSource) AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	batch, ok := s.source.(batchDisplayItemSource)
-	if !ok {
-		return nil, errors.New("display item source does not support atomic append")
-	}
-	stored, err := batch.AppendItemsAfter(ctx, sessionID, expectedSequence, items)
-	if err == nil && len(stored) > 0 {
-		s.events.Wake(sessionID)
-	}
-	return stored, err
-}
-
-func (s storedDisplayItemSource) LoadItems(ctx context.Context, sessionID string) ([]zotigosession.DisplayItem, bool, error) {
-	return s.store.ListDisplayItems(ctx, sessionID)
-}
-
-func (s storedDisplayItemSource) LoadItemsFromOffset(ctx context.Context, sessionID string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error) {
-	type offsetStore interface {
-		ListDisplayItemsFromOffset(ctx context.Context, id string, offset int64, maxLines int) ([]zotigosession.DisplayItem, bool, int64, error)
-	}
-	store, ok := s.store.(offsetStore)
-	if !ok {
-		items, exists, err := s.store.ListDisplayItems(ctx, sessionID)
-		return items, exists, 0, err
-	}
-	return store.ListDisplayItemsFromOffset(ctx, sessionID, offset, maxLines)
-}
-
-func (s storedDisplayItemSource) AppendItem(ctx context.Context, sessionID string, item zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
-	if err := s.ensureSession(ctx, sessionID); err != nil {
-		return zotigosession.DisplayItem{}, err
-	}
-	return s.store.AppendDisplayItem(ctx, sessionID, item)
-}
-
-func (s storedDisplayItemSource) AppendItemIf(ctx context.Context, sessionID string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
-	if err := s.ensureSession(ctx, sessionID); err != nil {
-		return zotigosession.DisplayItem{}, err
-	}
-	type conditionalStore interface {
-		AppendDisplayItemIf(ctx context.Context, id string, item zotigosession.DisplayItem, condition func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error)
-	}
-	if store, ok := s.store.(conditionalStore); ok {
-		return store.AppendDisplayItemIf(ctx, sessionID, item, condition)
-	}
-	items, _, err := s.store.ListDisplayItems(ctx, sessionID)
-	if err != nil {
-		return zotigosession.DisplayItem{}, err
-	}
-	if condition != nil {
-		if err := condition(items); err != nil {
-			return zotigosession.DisplayItem{}, err
-		}
-	}
-	return s.store.AppendDisplayItem(ctx, sessionID, item)
-}
-
-func (s storedDisplayItemSource) AppendItemAtomically(ctx context.Context, sessionID string, build func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error) {
-	if err := s.ensureSession(ctx, sessionID); err != nil {
-		return zotigosession.DisplayItem{}, false, err
-	}
-	type atomicStore interface {
-		AppendDisplayItemAtomically(context.Context, string, func([]zotigosession.DisplayItem) (zotigosession.DisplayItem, bool, error)) (zotigosession.DisplayItem, bool, error)
-	}
-	store, ok := s.store.(atomicStore)
-	if !ok {
-		return zotigosession.DisplayItem{}, false, errors.New("session store does not support atomic display append")
-	}
-	return store.AppendDisplayItemAtomically(ctx, sessionID, build)
-}
-
-func (s storedDisplayItemSource) AppendItems(ctx context.Context, sessionID string, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	if err := s.ensureSession(ctx, sessionID); err != nil {
-		return nil, err
-	}
-	type batchStore interface {
-		AppendDisplayItems(context.Context, string, []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
-	}
-	store, ok := s.store.(batchStore)
-	if !ok {
-		return nil, errors.New("session store does not support atomic display append")
-	}
-	return store.AppendDisplayItems(ctx, sessionID, items)
-}
-
-func (s storedDisplayItemSource) AppendItemsAfter(ctx context.Context, sessionID string, expectedSequence uint64, items []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error) {
-	if err := s.ensureSession(ctx, sessionID); err != nil {
-		return nil, err
-	}
-	type batchStore interface {
-		AppendDisplayItemsAfter(context.Context, string, uint64, []zotigosession.DisplayItem) ([]zotigosession.DisplayItem, error)
-	}
-	store, ok := s.store.(batchStore)
-	if !ok {
-		return nil, errors.New("session store does not support conditional atomic display append")
-	}
-	return store.AppendDisplayItemsAfter(ctx, sessionID, expectedSequence, items)
-}
-
-func (s storedDisplayItemSource) ensureSession(ctx context.Context, sessionID string) error {
-	sess, err := s.store.Get(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("check session: %w", err)
-	}
-	if sess != nil {
-		return nil
-	}
-
-	now := time.Now().UTC()
-	return s.store.Put(ctx, &zotigosession.Session{
-		Metadata: zotigosession.Metadata{
-			ID:        sessionID,
-			CreatedAt: now,
-			UpdatedAt: now,
-		},
-		AgentSnapshot: agent.Snapshot{
-			State:     agent.StateIdle,
-			CreatedAt: now,
-		},
-		Turns: make([]zotigosession.Turn, 0),
-	})
-}
-
-type failingDisplayItemSource struct {
-	err error
-}
-
-func (s failingDisplayItemSource) LoadItems(context.Context, string) ([]zotigosession.DisplayItem, bool, error) {
-	return nil, false, s.err
-}
-
-func (s failingDisplayItemSource) AppendItem(context.Context, string, zotigosession.DisplayItem) (zotigosession.DisplayItem, error) {
-	return zotigosession.DisplayItem{}, s.err
-}
-
-func (s failingDisplayItemSource) AppendItemIf(context.Context, string, zotigosession.DisplayItem, func([]zotigosession.DisplayItem) error) (zotigosession.DisplayItem, error) {
-	return zotigosession.DisplayItem{}, s.err
-}
 
 type itemResponse struct {
 	ContextUsage      *zotigosession.DisplayContextUsage `json:"context_usage,omitempty"`
@@ -345,28 +125,10 @@ type itemTurnResponse struct {
 }
 
 type itemApprovalResponse struct {
-	ID        string                         `json:"id,omitempty"`
-	TurnID    string                         `json:"turn_id,omitempty"`
-	Pending   []itemPendingApprovalResponse  `json:"pending,omitempty"`
-	Decisions []itemApprovalDecisionResponse `json:"decisions,omitempty"`
-}
-
-type itemPendingApprovalResponse struct {
-	ToolCallID       string `json:"tool_call_id,omitempty"`
-	ToolName         string `json:"tool_name,omitempty"`
-	Arguments        string `json:"arguments,omitempty"`
-	Description      string `json:"description,omitempty"`
-	Reason           string `json:"reason,omitempty"`
-	RiskLevel        string `json:"risk_level,omitempty"`
-	Source           string `json:"source,omitempty"`
-	RequiresSnapshot bool   `json:"requires_snapshot,omitempty"`
-}
-
-type itemApprovalDecisionResponse struct {
-	ToolCallID   string `json:"tool_call_id,omitempty"`
-	Approved     bool   `json:"approved"`
-	Reason       string `json:"reason,omitempty"`
-	ModifiedArgs string `json:"modified_args,omitempty"`
+	ID        string                      `json:"id,omitempty"`
+	TurnID    string                      `json:"turn_id,omitempty"`
+	Pending   []wire.PendingApproval      `json:"pending,omitempty"`
+	Decisions []wire.ApprovalToolDecision `json:"decisions,omitempty"`
 }
 
 type itemCommandResponse struct {
@@ -544,7 +306,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart, commandIma
 	for _, part := range content {
 		image := publicDisplayMediaPart(part.Image)
 		if image != nil && image.URL == "" && imageIdx < len(commandImages) {
-			image.URL = publicImageURLFromBlobPath(commandImages[imageIdx].BlobPath)
+			image.URL = sessionlog.PublicImageURLFromBlobPath(commandImages[imageIdx].BlobPath)
 		}
 		if part.Image != nil {
 			imageIdx++
@@ -561,7 +323,7 @@ func publicDisplayContent(content []zotigosession.DisplayContentPart, commandIma
 }
 
 func displayCommandImagesForContent(command *zotigosession.DisplayCommand) []zotigosession.DisplayCommandImage {
-	if command == nil || (command.Type != sessionCommandMessage && command.Type != sessionCommandSteering) {
+	if command == nil || (command.Type != wire.CommandMessage && command.Type != wire.CommandSteering) {
 		return nil
 	}
 	return command.Images
@@ -759,8 +521,8 @@ func publicDisplayApproval(approval *zotigosession.DisplayApproval) *itemApprova
 	return &itemApprovalResponse{
 		ID:        approval.ID,
 		TurnID:    approval.TurnID,
-		Pending:   publicDisplayPendingApprovals(approval.Pending),
-		Decisions: publicDisplayApprovalDecisions(approval.Decisions),
+		Pending:   sessionlog.PublicPendingApprovals(approval.Pending),
+		Decisions: sessionlog.PublicApprovalDecisions(approval.Decisions),
 	}
 }
 
@@ -792,43 +554,7 @@ func publicDisplayCommandImages(images []zotigosession.DisplayCommandImage) []it
 			SizeBytes: img.SizeBytes,
 			Width:     img.Width,
 			Height:    img.Height,
-			URL:       publicImageURLFromBlobPath(img.BlobPath),
-		})
-	}
-	return resp
-}
-
-func publicDisplayPendingApprovals(pending []zotigosession.DisplayPendingApproval) []itemPendingApprovalResponse {
-	if len(pending) == 0 {
-		return nil
-	}
-	resp := make([]itemPendingApprovalResponse, 0, len(pending))
-	for _, item := range pending {
-		resp = append(resp, itemPendingApprovalResponse{
-			ToolCallID:       item.ToolCallID,
-			ToolName:         item.ToolName,
-			Arguments:        item.Arguments,
-			Description:      item.Description,
-			Reason:           item.Reason,
-			RiskLevel:        item.RiskLevel,
-			Source:           item.Source,
-			RequiresSnapshot: item.RequiresSnapshot,
-		})
-	}
-	return resp
-}
-
-func publicDisplayApprovalDecisions(decisions []zotigosession.DisplayApprovalDecision) []itemApprovalDecisionResponse {
-	if len(decisions) == 0 {
-		return nil
-	}
-	resp := make([]itemApprovalDecisionResponse, 0, len(decisions))
-	for _, item := range decisions {
-		resp = append(resp, itemApprovalDecisionResponse{
-			ToolCallID:   item.ToolCallID,
-			Approved:     item.Approved,
-			Reason:       item.Reason,
-			ModifiedArgs: item.ModifiedArgs,
+			URL:       sessionlog.PublicImageURLFromBlobPath(img.BlobPath),
 		})
 	}
 	return resp

@@ -37,15 +37,3 @@ func NewProvider(cfg config.ProfileConfig) (Provider, error) {
 
 	return factory(cfg)
 }
-
-// ListProviders returns the names of all registered provider factories.
-func ListProviders() []string {
-	mu.RLock()
-	defer mu.RUnlock()
-
-	var names []string
-	for name := range registry {
-		names = append(names, name)
-	}
-	return names
-}

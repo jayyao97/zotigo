@@ -89,11 +89,3 @@ type ApprovalResult struct {
 	// ModifiedArgs allows the user to modify arguments (optional)
 	ModifiedArgs string
 }
-
-// EventHandler is a callback for handling events
-// Used by transports that need to process events asynchronously
-type EventHandler func(event protocol.Event)
-
-// InputHandler is a callback for handling user inputs
-// Used by transports that need to process inputs asynchronously
-type InputHandler func(input UserInput)

@@ -7,13 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-runtime", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-runtime", source)
 	runtime := zotigosession.DisplayRuntime{Agent: "zotigo", ProfileName: "main", Model: "gemini-test"}
 	if _, err := display.StartTurnWithRuntime(context.Background(), runtime); err != nil {
 		t.Fatal(err)
@@ -25,8 +29,8 @@ func TestWorkerDisplayLogPersistsTurnRuntime(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-usage", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-usage", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -50,8 +54,8 @@ func TestWorkerDisplayLogPersistsAccumulatedTurnUsage(t *testing.T) {
 func TestWorkerUsageProgressSurvivesTerminalAndApproval(t *testing.T) {
 	for _, terminal := range []string{"completed", "failed", "interrupted"} {
 		t.Run(terminal, func(t *testing.T) {
-			source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-			display := newWorkerDisplayLog("progress", source)
+			source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+			display := sessionlog.NewLog("progress", source)
 			ctx := context.Background()
 			if _, err := display.StartTurn(ctx); err != nil {
 				t.Fatal(err)
@@ -92,8 +96,8 @@ func TestWorkerUsageProgressSurvivesTerminalAndApproval(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsFailedTurnUsage(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-failed-usage", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-failed-usage", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -115,12 +119,12 @@ func TestWorkerDisplayLogPersistsFailedTurnUsage(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
-	display := newWorkerDisplayLog("sess-tool-stream", source)
+	display := sessionlog.NewLog("sess-tool-stream", source)
 	ctx := context.Background()
 	var wakeSequences []uint64
-	display.wake = func(ctx context.Context) {
+	display.Wake = func(ctx context.Context) {
 		items, _, err := source.LoadItems(ctx, "sess-tool-stream")
 		if err != nil || len(items) == 0 {
 			t.Errorf("wake ran before persistence: items=%#v err=%v", items, err)
@@ -210,10 +214,10 @@ func TestWorkerDisplayLogPersistsToolEventsBeforeFinishWithoutDuplicates(t *test
 }
 
 func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-tool-progress", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-tool-progress", source)
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -239,11 +243,11 @@ func TestWorkerDisplayLogStreamsToolProgressWithoutPersistingIt(t *testing.T) {
 }
 
 func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
-	display := newWorkerDisplayLog("sess-subagent-stream", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	display := sessionlog.NewLog("sess-subagent-stream", source)
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -337,8 +341,8 @@ func TestWorkerDisplayLogStreamsAndPersistsSubagentEvents(t *testing.T) {
 }
 
 func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-compaction", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-compaction", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
@@ -369,10 +373,10 @@ func TestWorkerDisplayLogPersistsContextCompaction(t *testing.T) {
 }
 
 func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-text-stream", source)
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-text-stream", source)
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) {
 		deltas = append(deltas, delta)
 	}
 	ctx := context.Background()
@@ -421,8 +425,8 @@ func TestWorkerDisplayLogStreamsVolatileDeltaThenPersistsSameItemID(t *testing.T
 }
 
 func TestWorkerDisplayLogDropsUnfinishedVolatileBlockOnFailure(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("sess-failed-stream", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("sess-failed-stream", source)
 	ctx := context.Background()
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
@@ -449,22 +453,22 @@ func TestWorkerDisplayLogDropsUnfinishedVolatileBlockOnFailure(t *testing.T) {
 
 func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("session-steering", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("session-steering", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
 	var deliveryOrder []string
-	display.delta = func(delta displayDeltaEvent) {
+	display.Delta = func(delta wire.DisplayDelta) {
 		deliveryOrder = append(deliveryOrder, "delta:"+delta.Delta)
 	}
-	display.barrier = func(context.Context) error {
+	display.Barrier = func(context.Context) error {
 		deliveryOrder = append(deliveryOrder, "barrier")
 		items, _, err := source.LoadItems(ctx, "session-steering")
 		if err != nil {
@@ -477,7 +481,7 @@ func TestWorkerDisplayLogPersistsSteeringAfterCurrentGeneration(t *testing.T) {
 		}
 		return nil
 	}
-	display.wakeSync = func(context.Context) error {
+	display.WakeSync = func(context.Context) error {
 		deliveryOrder = append(deliveryOrder, "wake")
 		return nil
 	}
@@ -529,22 +533,22 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 	}
 	defer store.Close()
 	const id = "steering-boundary"
-	putStoredSession(t, store, id, t.TempDir())
-	source := storedDisplayItemSource{store: store}
-	display := newWorkerDisplayLog(id, source)
+	sessionlogtest.PutStoredSession(t, store, id, t.TempDir())
+	source := sessionlog.StoredItemSource{Store: store}
+	display := sessionlog.NewLog(id, source)
 	turn, err := display.StartTurn(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	if err := display.HandleEvent(ctx, protocol.NewTextDeltaEvent("old thinking")); err != nil {
 		t.Fatal(err)
 	}
 	for _, inputID := range []string{"steer-1", "steer-2"} {
-		command := commandResponse{ID: inputID, Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: inputID, TurnID: turn}}
+		command := wire.Command{ID: inputID, Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: inputID, TurnID: turn}}
 		display.QueueSteering(command)
-		if _, err := appendAcceptedSessionInput(ctx, source, id, command); err != nil {
+		if _, err := sessionlog.AppendAcceptedInput(ctx, source, id, command); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -598,20 +602,20 @@ func TestSteeringDisplayBoundarySurvivesStoreReload(t *testing.T) {
 
 func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("session-barrier-failure", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("session-barrier-failure", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
-	display.barrier = func(context.Context) error { return errors.New("daemon unavailable") }
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
+	display.Barrier = func(context.Context) error { return errors.New("daemon unavailable") }
 	err := display.HandleEvent(ctx, protocol.Event{
 		Type:        protocol.EventTypeSteeringApplied,
 		SteeringIDs: []string{"steering-command"},
@@ -633,21 +637,21 @@ func TestWorkerDisplayLogRejectsSteeringAfterBarrierFailure(t *testing.T) {
 
 func TestWorkerDisplayLogMutesPreviewAfterReliableSteeringWakeFailure(t *testing.T) {
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("session-steering-wake-failure", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("session-steering-wake-failure", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatalf("start turn: %v", err)
 	}
-	display.QueueSteering(commandResponse{
+	display.QueueSteering(wire.Command{
 		ID:        "steering-command",
-		Type:      sessionCommandSteering,
+		Type:      wire.CommandSteering,
 		CreatedAt: time.Now().UTC(),
-		Steering:  &steeringCommandPayload{Text: "change direction"},
+		Steering:  &wire.SteeringCommandPayload{Text: "change direction"},
 	})
-	display.barrier = func(context.Context) error { return nil }
-	display.wakeSync = func(context.Context) error { return errors.New("worker connection closed") }
-	var deltas []displayDeltaEvent
-	display.delta = func(delta displayDeltaEvent) { deltas = append(deltas, delta) }
+	display.Barrier = func(context.Context) error { return nil }
+	display.WakeSync = func(context.Context) error { return errors.New("worker connection closed") }
+	var deltas []wire.DisplayDelta
+	display.Delta = func(delta wire.DisplayDelta) { deltas = append(deltas, delta) }
 	if err := display.HandleEvent(ctx, protocol.Event{
 		Type:        protocol.EventTypeSteeringApplied,
 		SteeringIDs: []string{"steering-command"},

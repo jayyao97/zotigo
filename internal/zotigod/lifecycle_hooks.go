@@ -8,11 +8,8 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/internal/hooks"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
-
-type hookEventDispatcher interface {
-	Dispatch(context.Context, hooks.Event) hooks.DispatchResult
-}
 
 func (h *handler) dispatchSessionStart(session Session) {
 	if h == nil || h.hooks == nil {
@@ -63,7 +60,7 @@ func (h *handler) sessionEndTelemetry(session Session) (string, *hooks.UsagePayl
 	}
 	var payload *hooks.UsagePayload
 	if usage.TotalTokens != 0 {
-		payload = usagePayload(usage)
+		payload = workerbase.UsagePayload(usage)
 	}
 
 	model := session.Model
@@ -79,17 +76,6 @@ func (h *handler) sessionEndTelemetry(session Session) (string, *hooks.UsagePayl
 		model = profile.Model
 	}
 	return model, payload, nil
-}
-
-func usagePayload(usage protocol.Usage) *hooks.UsagePayload {
-	usage = usage.Normalized()
-	return &hooks.UsagePayload{
-		InputTokens:              usage.InputTokens,
-		OutputTokens:             usage.OutputTokens,
-		TotalTokens:              usage.TotalTokens,
-		CacheCreationInputTokens: usage.CacheCreationInputTokens,
-		CacheReadInputTokens:     usage.CacheReadInputTokens,
-	}
 }
 
 func (h *handler) newSessionHookEvent(eventName hooks.EventName, session Session) hooks.Event {

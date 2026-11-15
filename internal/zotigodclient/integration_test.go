@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/session"
@@ -350,7 +351,7 @@ func TestConnectUsesRunningDaemon(t *testing.T) {
 	}
 }
 
-// Sessions written by the previous in-process CLI (session.Manager plus a
+// Sessions written by the previous in-process CLI (a file-store session plus a
 // TUI-written display log, no profile or policy metadata) resume through the
 // service with their history intact.
 func TestEmbeddedServiceResumesLegacyCLISession(t *testing.T) {
@@ -358,12 +359,25 @@ func TestEmbeddedServiceResumesLegacyCLISession(t *testing.T) {
 	dir := t.TempDir()
 	// The legacy CLI wrote to the same store the service now serves.
 	t.Setenv(config.StateDirEnv, fixture.StateDir)
-	manager, err := session.NewManager()
+	store, err := session.NewFileStore("")
 	if err != nil {
 		t.Fatal(err)
 	}
-	legacy, err := manager.CreateNew(dir)
-	if err != nil {
+	legacy := &session.Session{
+		Metadata: session.Metadata{
+			ID:               fmt.Sprintf("sess_%d", time.Now().UnixNano()),
+			WorkingDirectory: dir,
+			CreatedAt:        time.Now(),
+			UpdatedAt:        time.Now(),
+		},
+		AgentSnapshot: agent.Snapshot{
+			State:     agent.StateIdle,
+			CreatedAt: time.Now(),
+		},
+		Turns: make([]session.Turn, 0),
+	}
+	legacy.UpdatedAt = time.Now()
+	if err := store.Put(context.Background(), legacy); err != nil {
 		t.Fatal(err)
 	}
 	legacy.AgentSnapshot.History = []protocol.Message{
@@ -371,7 +385,8 @@ func TestEmbeddedServiceResumesLegacyCLISession(t *testing.T) {
 		protocol.NewAssistantMessage("legacy answer"),
 	}
 	legacy.LastPrompt = "legacy question"
-	if err := manager.Save(legacy); err != nil {
+	legacy.UpdatedAt = time.Now()
+	if err := store.Put(context.Background(), legacy); err != nil {
 		t.Fatal(err)
 	}
 	for _, item := range []session.DisplayItem{
@@ -380,11 +395,11 @@ func TestEmbeddedServiceResumesLegacyCLISession(t *testing.T) {
 		{Type: session.DisplayItemAssistantMessage, Role: "assistant", Content: []session.DisplayContentPart{{Type: "text", Text: "legacy answer"}}},
 		{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "turn_legacy", Status: "completed"}},
 	} {
-		if _, err := manager.AppendDisplayItem(legacy.ID, item); err != nil {
+		if _, err := store.AppendDisplayItem(context.Background(), legacy.ID, item); err != nil {
 			t.Fatal(err)
 		}
 	}
-	_ = manager.Close()
+	_ = store.Close()
 
 	ctx := context.Background()
 	conn := connectEmbedded(t, fixture.StateDir)
@@ -733,11 +748,27 @@ func TestStopTurnDoesNotGuessForUnlocatedAcceptedInput(t *testing.T) {
 	submissions := NewSubmissions()
 	submissions.Begin("unknown-outcome")
 	submissions.Finish("unknown-outcome", errors.New("connection reset"))
-	stopCtx, cancel := context.WithTimeout(ctx, time.Second)
+	// StopTurn waits out this deadline; it spans several poll rounds
+	// (stopPollInterval), each of which could wrongly report "nothing ran".
+	stopCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	if result, err := StopTurn(stopCtx, conn.Client, created.ID, StopTarget{InputIDs: []string{"unknown-outcome"}, Submissions: submissions}); err == nil {
 		t.Fatalf("result=%v, want an error instead of a guess", result)
 	}
+}
+
+// shortenSubmitRetryDelays keeps SubmitTracked's retry count but shrinks the
+// pauses between attempts, so a test that exhausts every retry does not sit
+// out the full production backoff. Tests using it must not run in parallel.
+func shortenSubmitRetryDelays(t *testing.T) {
+	t.Helper()
+	original := submitRetryDelays
+	shortened := make([]time.Duration, len(original))
+	for index, delay := range original {
+		shortened[index] = delay / 25
+	}
+	submitRetryDelays = shortened
+	t.Cleanup(func() { submitRetryDelays = original })
 }
 
 // Review round 3: the response to an accepted submission is lost. The
@@ -753,6 +784,7 @@ func TestLostSubmitResponseStaysStoppable(t *testing.T) {
 	}
 	lossy := conn.Via(servicetest.Proxy(t, conn.BaseURL(), servicetest.ProxyOptions{DropMessageResponses: true}))
 	submissions := NewSubmissions()
+	shortenSubmitRetryDelays(t)
 	_, err = SubmitTracked(ctx, lossy, created.ID, MessageRequest{Text: "slow", ClientMessageID: "lost"}, submissions)
 	if !errors.Is(err, ErrSubmissionUnconfirmed) || SubmissionRejectedErr(err) {
 		t.Fatalf("err = %v, want unconfirmed", err)
@@ -810,7 +842,10 @@ func TestStopTurnStopsKnownTurnWhileLocatingOtherInput(t *testing.T) {
 	}
 	submissions := NewSubmissions()
 	submissions.Finish("never-recorded", errors.New("connection reset"))
-	stopCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	// StopTurn keeps looking for "never-recorded" until this deadline, so the
+	// deadline is the test's running time. It still spans several poll rounds
+	// (stopPollInterval) after the known turn is stopped in the first one.
+	stopCtx, cancel := context.WithTimeout(ctx, 500*time.Millisecond)
 	defer cancel()
 	result, err := StopTurn(stopCtx, conn.Client, created.ID, StopTarget{InputIDs: []string{"known", "never-recorded"}, Submissions: submissions})
 	if err == nil || result != StopRequested {

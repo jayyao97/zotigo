@@ -13,6 +13,8 @@ import (
 	"github.com/google/uuid"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type queuedInputResponse struct {
@@ -82,22 +84,22 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 				return
 			}
 			if existing != nil {
-				var command commandResponse
+				var command wire.Command
 				err = json.Unmarshal(existing.Payload, &command)
 				if err == nil {
 					err = h.hydrateQueuedImages(&command)
 				}
-				incoming := commandResponse{Message: &messageCommandPayload{Text: text, Skills: req.Skills}}
+				incoming := wire.Command{Message: &wire.MessageCommandPayload{Text: text, Skills: req.Skills}}
 				for _, image := range images {
-					incoming.Message.Images = append(incoming.Message.Images, commandImageData{MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, DataBase64: base64.StdEncoding.EncodeToString(image.Data)})
+					incoming.Message.Images = append(incoming.Message.Images, wire.CommandImageData{MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, DataBase64: base64.StdEncoding.EncodeToString(image.Data)})
 				}
 				unlock()
 				if err != nil {
 					writeAPIError(w, 500, err.Error())
 					return
 				}
-				if !sameCommandInput(command, incoming) {
-					writeAPIError(w, 409, errCommandIDConflict.Error())
+				if !sessionlog.SameCommandInput(command, incoming) {
+					writeAPIError(w, 409, sessionlog.ErrCommandIDConflict.Error())
 					return
 				}
 				result := publicCommandFromCommand(command)
@@ -130,8 +132,8 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 			}
 		}
 		if err != nil {
-			_ = h.deleteMessageImageRefs(context.Background(), id, imageRefNames(refs))
-			cleanupMessageImageBlobs(storedImages)
+			_ = h.deleteMessageImageRefs(context.Background(), id, sessionlog.ImageRefNames(refs))
+			sessionlog.CleanupMessageImageBlobs(storedImages)
 		}
 		unlock()
 		if err != nil {
@@ -156,7 +158,7 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 	}
 	result := make([]queuedInputResponse, 0, len(rows))
 	for _, row := range rows {
-		var command commandResponse
+		var command wire.Command
 		if err := json.Unmarshal(row.Payload, &command); err != nil {
 			writeAPIError(w, 500, "invalid queued input")
 			return
@@ -197,7 +199,7 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 		if row.ID != itemID {
 			continue
 		}
-		var command commandResponse
+		var command wire.Command
 		if err := json.Unmarshal(row.Payload, &command); err != nil || command.Message == nil {
 			writeAPIError(w, 500, "invalid queued input")
 			return
@@ -208,7 +210,7 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method == http.MethodPatch && req.ImageIndices != nil {
-			images := make([]commandImageData, 0, len(*req.ImageIndices))
+			images := make([]wire.CommandImageData, 0, len(*req.ImageIndices))
 			seen := make(map[int]bool)
 			for _, index := range *req.ImageIndices {
 				if index < 0 || index >= len(command.Message.Images) || seen[index] {
@@ -231,9 +233,9 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 					other = append(other, candidate)
 				}
 			}
-			images := make([]messageImage, 0, len(command.Message.Images))
+			images := make([]sessionlog.MessageImage, 0, len(command.Message.Images))
 			for _, image := range command.Message.Images {
-				images = append(images, messageImage{SizeBytes: image.SizeBytes})
+				images = append(images, sessionlog.MessageImage{SizeBytes: image.SizeBytes})
 			}
 			if err := validateQueueCapacity(other, command.Message.Text, images); err != nil {
 				writeAPIError(w, 400, err.Error())
@@ -365,7 +367,7 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			continue
 		}
 		for _, item := range items {
-			if item.ID == row.BatchID && item.Command != nil && (item.Command.Type == sessionCommandMessage || item.Command.Type == sessionCommandSteering) {
+			if item.ID == row.BatchID && item.Command != nil && (item.Command.Type == wire.CommandMessage || item.Command.Type == wire.CommandSteering) {
 				if err := h.catalog.FinishQueuedBatch(ctx, id, row.BatchID, true); err != nil {
 					return err
 				}
@@ -373,10 +375,10 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 			}
 		}
 	}
-	turnActive := lastOpenTurnID(items) != ""
-	if hasPendingMessageCommand(items) || hasPendingHumanRequest(items) || (turnActive && resume) {
+	turnActive := sessionlog.LastOpenTurnID(items) != ""
+	if hasPendingMessageCommand(items) || sessionlog.HasPendingHumanRequest(items) || (turnActive && resume) {
 		if resume {
-			return errActiveTurn
+			return sessionlog.ErrActiveTurn
 		}
 		return nil
 	}
@@ -467,7 +469,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 		} else if unavailable != "" {
 			err = errSessionUnavailable
 		} else {
-			request := workerInputRequest{Command: command, StartOnly: startOnly}
+			request := wire.InputRequest{Command: command, StartOnly: startOnly}
 			if strings.HasPrefix(command.ID, "completion:") {
 				var stored *zotigosession.Session
 				stored, err = h.validateCompletionInput(ctx, id, command.ID)
@@ -476,7 +478,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 					trigger, err = h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(command.ID, "completion:"))
 					request.StartOnly = trigger.DeliveryMode != "steer"
 					if err == nil && !request.StartOnly {
-						err = validateCompletionSteering(ctx, h.items, id, command)
+						err = sessionlog.ValidateCompletionSteering(ctx, h.items, id, command)
 					}
 					request.RequiredApprovalPolicy = stored.ApprovalPolicy
 					request.RequiredPromptRevision = stored.PromptConfig.Revision
@@ -511,7 +513,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 					possiblyAdmitted = false
 					for _, item := range items {
 						if item.ID == rows[0].BatchID && item.Command != nil &&
-							(item.Command.Type == sessionCommandMessage || item.Command.Type == sessionCommandSteering) {
+							(item.Command.Type == wire.CommandMessage || item.Command.Type == wire.CommandSteering) {
 							possiblyAdmitted = true
 							err = nil
 							break
@@ -525,7 +527,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 		releaseErr := h.catalog.ReleaseQueuedBatch(context.Background(), id, rows[0].BatchID)
 		// A concurrent ordinary send may win the idle boundary. Leave the queue
 		// eligible for that turn's completion instead of treating it as failure.
-		if (startOnly || strings.HasPrefix(command.ID, "completion:")) && (errors.Is(err, errActiveTurn) || errors.Is(err, errWorkerInputStopping)) && releaseErr == nil {
+		if (startOnly || strings.HasPrefix(command.ID, "completion:")) && (errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, errWorkerInputStopping)) && releaseErr == nil {
 			return nil
 		}
 		return errors.Join(err, releaseErr)
@@ -534,7 +536,7 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 	return errors.Join(err, finishErr)
 }
 
-func (h *handler) hydrateQueuedImages(command *commandResponse) error {
+func (h *handler) hydrateQueuedImages(command *wire.Command) error {
 	if command.Message == nil {
 		return fmt.Errorf("queued input has no message")
 	}
@@ -543,11 +545,11 @@ func (h *handler) hydrateQueuedImages(command *commandResponse) error {
 		images = append(images, zotigosession.DisplayCommandImage{MimeType: image.MimeType, SizeBytes: image.SizeBytes, Width: image.Width, Height: image.Height, BlobPath: image.BlobPath})
 	}
 	var err error
-	command.Message.Images, err = commandImagesFromDisplay(images, h.sessionStoreRoot())
+	command.Message.Images, err = sessionlog.CommandImagesFromDisplay(images, h.sessionStoreRoot())
 	return err
 }
 
-func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []messageImage) error {
+func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []sessionlog.MessageImage) error {
 	if len(rows) >= 100 {
 		return fmt.Errorf("queue contains too many messages (maximum 100)")
 	}
@@ -556,7 +558,7 @@ func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []m
 		size += base64.StdEncoding.EncodedLen(image.SizeBytes)
 	}
 	for _, row := range rows {
-		var command commandResponse
+		var command wire.Command
 		if err := json.Unmarshal(row.Payload, &command); err != nil {
 			return err
 		}
@@ -569,18 +571,18 @@ func validateQueueCapacity(rows []workspace.QueuedInput, text string, images []m
 			size += base64.StdEncoding.EncodedLen(image.SizeBytes)
 		}
 	}
-	if count > maxMessageImages || size > maxMessageRequestBytes-4096 {
+	if count > sessionlog.MaxMessageImages || size > maxMessageRequestBytes-4096 {
 		return fmt.Errorf("combined queued input exceeds the message attachment or size limit")
 	}
 	return nil
 }
 
-func mergeQueuedInputs(rows []workspace.QueuedInput) (commandResponse, error) {
-	command := commandResponse{ID: rows[0].BatchID, Type: sessionCommandMessage, CreatedAt: time.Now().UTC(), Message: &messageCommandPayload{}}
+func mergeQueuedInputs(rows []workspace.QueuedInput) (wire.Command, error) {
+	command := wire.Command{ID: rows[0].BatchID, Type: wire.CommandMessage, CreatedAt: time.Now().UTC(), Message: &wire.MessageCommandPayload{}}
 	texts := []string{}
 	seen := map[string]bool{}
 	for _, row := range rows {
-		var input commandResponse
+		var input wire.Command
 		if err := json.Unmarshal(row.Payload, &input); err != nil {
 			return command, err
 		}

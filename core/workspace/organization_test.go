@@ -11,6 +11,7 @@ import (
 )
 
 func TestMigratesV5SessionActivityTimestamp(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	db, err := sql.Open("sqlite", filepath.Join(root, "catalog.sqlite"))
 	if err != nil {
@@ -49,6 +50,7 @@ func TestMigratesV5SessionActivityTimestamp(t *testing.T) {
 }
 
 func TestSessionOrganizationLifecycle(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 
@@ -110,6 +112,7 @@ func TestSessionOrganizationLifecycle(t *testing.T) {
 }
 
 func TestRecordSessionActivityMovesWorkspaceSessionToFront(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	first, err := store.AssignSession(ctx, "session-1", workspace.ID)
@@ -146,6 +149,7 @@ func TestRecordSessionActivityMovesWorkspaceSessionToFront(t *testing.T) {
 }
 
 func TestRecordSessionActivityIgnoresStaleActivity(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	first, err := store.AssignSession(ctx, "session-1", workspace.ID)
@@ -176,6 +180,7 @@ func TestRecordSessionActivityIgnoresStaleActivity(t *testing.T) {
 }
 
 func TestRecordSessionActivityOrderDoesNotDependOnCallOrder(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "session-newer", workspace.ID); err != nil {
@@ -199,6 +204,7 @@ func TestRecordSessionActivityOrderDoesNotDependOnCallOrder(t *testing.T) {
 }
 
 func TestDeleteWorkspaceArchivesOrganizationAndKeepsPathTombstone(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	if _, err := store.AssignSession(ctx, "session-1", workspace.ID); err != nil {
@@ -265,6 +271,7 @@ func TestDeleteWorkspaceArchivesOrganizationAndKeepsPathTombstone(t *testing.T) 
 }
 
 func TestAssignSessionRejectsPositionOverflow(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := t.Context()
 	if _, err := store.AssignSession(ctx, "first", workspace.ID); err != nil {

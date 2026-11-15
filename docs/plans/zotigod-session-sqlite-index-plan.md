@@ -1,5 +1,7 @@
 # Zotigod Session SQLite Index Plan
 
+> Status (2026-11): implemented, with a different file layout. The SQLite session metadata index and image reference table exist (`core/session/session_index.go`: upsert / delete / list / image refs / bootstrap from files and the legacy registry), but the `sessions` and `session_images` tables live in the shared catalog database managed by `core/catalogschema` (`core/catalogschema/schema.sql`), not in a separate `~/.zotigo/session_index.sqlite`.
+
 ## Background
 
 `zotigod` now supports reopening stored sessions after a daemon restart. Read APIs can show old sessions as `offline`, and `POST /sessions/{id}/messages` can start a worker when the user wants to continue.

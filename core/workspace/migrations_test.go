@@ -18,6 +18,7 @@ import (
 )
 
 func TestCatalogMigrationRoundTrip(t *testing.T) {
+	t.Parallel()
 	s, ws, _ := createGitWorkspaceFixtureInRoot(t, t.TempDir())
 	ctx := context.Background()
 	if _, err := s.AssignSession(ctx, "preserved", ws.ID); err != nil {
@@ -80,6 +81,7 @@ func TestCatalogMigrationRoundTrip(t *testing.T) {
 }
 
 func TestCatalogMigrationRejectsActiveWriterAndInvalidTargets(t *testing.T) {
+	t.Parallel()
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -92,11 +94,6 @@ func TestCatalogMigrationRejectsActiveWriterAndInvalidTargets(t *testing.T) {
 		_ = other.Close()
 		t.Fatal("second writer acquired catalog")
 	}
-	reader, err := OpenReadOnly(s.RootDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_ = reader.Close()
 	for _, target := range []uint{0, 6, schemaVersion + 1} {
 		if err := MigrateCatalog(context.Background(), s.RootDir(), target); err == nil {
 			t.Fatalf("accepted target %d", target)
@@ -108,6 +105,7 @@ func TestCatalogMigrationRejectsActiveWriterAndInvalidTargets(t *testing.T) {
 }
 
 func TestCatalogMigrationAdoptsLegacyV8(t *testing.T) {
+	t.Parallel()
 	s, err := openWriter(t.TempDir(), false)
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +170,7 @@ CREATE UNIQUE INDEX projects_storage_name ON projects(storage_name);`)); err != 
 }
 
 func TestCatalogMigrationFailureRollsBackAndStaysDirty(t *testing.T) {
+	t.Parallel()
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)
@@ -210,6 +209,7 @@ func TestCatalogMigrationFailureRollsBackAndStaysDirty(t *testing.T) {
 }
 
 func TestCatalogMigrationRebuildPreservesChildrenAndValidatesForeignKeys(t *testing.T) {
+	t.Parallel()
 	s, err := Open(t.TempDir())
 	if err != nil {
 		t.Fatal(err)

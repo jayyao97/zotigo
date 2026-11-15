@@ -151,13 +151,6 @@ retry:
 	return Command{}, unconfirmed
 }
 
-// Forget drops id once its turn is known.
-func (s *Submissions) Forget(id string) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	delete(s.states, id)
-}
-
 // State reports what is known about id; unknown ids count as accepted.
 func (s *Submissions) State(id string) SubmissionState {
 	if s == nil {

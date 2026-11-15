@@ -6,7 +6,6 @@ import (
 	"strings"
 
 	"github.com/jayyao97/zotigo/core/executor"
-	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
 )
 
@@ -86,42 +85,9 @@ func toolExecutionDenialReason(err error) (string, bool) {
 	return denied.Error(), true
 }
 
-type toolEventSinkKey struct{}
-type toolCallContextKey struct{}
-
-type ToolCallContext struct {
-	ID   string
-	Name string
-}
-
-// ToolEventSink emits observational events from long-running tools.
-// It is optional: most tools ignore it and return a final ToolResult only.
-type ToolEventSink func(protocol.Event)
-
 type ToolOutputWithMetadata interface {
 	ToolOutputText() string
 	ToolResultMetadata() map[string]any
-}
-
-func withToolEventSink(ctx context.Context, sink ToolEventSink) context.Context {
-	if sink == nil {
-		return ctx
-	}
-	return context.WithValue(ctx, toolEventSinkKey{}, sink)
-}
-
-func ToolEventSinkFromContext(ctx context.Context) (ToolEventSink, bool) {
-	sink, ok := ctx.Value(toolEventSinkKey{}).(ToolEventSink)
-	return sink, ok && sink != nil
-}
-
-func withToolCallContext(ctx context.Context, call *ToolCall) context.Context {
-	return context.WithValue(ctx, toolCallContextKey{}, ToolCallContext{ID: call.ToolCallID, Name: call.Name})
-}
-
-func ToolCallFromContext(ctx context.Context) (ToolCallContext, bool) {
-	call, ok := ctx.Value(toolCallContextKey{}).(ToolCallContext)
-	return call, ok && call.ID != ""
 }
 
 // Middleware is a tool-call wrapper in the HTTP-handler-middleware

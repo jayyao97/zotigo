@@ -283,3 +283,21 @@ func TestBuildResponseParams_ToolResultExecutionDeniedIncludesReason(t *testing.
 		t.Errorf("expected denial reason in tool output, got %s", js)
 	}
 }
+
+// The Responses API only returns readable reasoning when a summary is
+// requested. Requests without a reasoning effort must not ask for one.
+func TestBuildResponseParams_RequestsReasoningSummaryWithEffort(t *testing.T) {
+	for _, tc := range []struct {
+		effort      string
+		wantSummary bool
+	}{{"low", true}, {"medium", true}, {"high", true}, {"", false}} {
+		params, err := buildResponseParams("gpt-5", 32768, []protocol.Message{protocol.NewUserMessage("hi")}, nil, tc.effort, providers.ToolChoice{})
+		if err != nil {
+			t.Fatalf("build: %v", err)
+		}
+		js := marshalJSON(t, params)
+		if got := strings.Contains(js, `"summary":"auto"`); got != tc.wantSummary {
+			t.Errorf("effort %q: summary requested = %v, want %v in %s", tc.effort, got, tc.wantSummary, js)
+		}
+	}
+}

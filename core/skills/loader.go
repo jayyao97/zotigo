@@ -127,12 +127,6 @@ func DiscoverSkillsWithDiagnostics(dir string, source SkillSource) ([]*SkillDefi
 	return discovered, diagnostics, nil
 }
 
-// DiscoverSkills discovers all skills in a directory
-func DiscoverSkills(dir string, source SkillSource) ([]*SkillDefinition, error) {
-	skills, _, err := DiscoverSkillsWithDiagnostics(dir, source)
-	return skills, err
-}
-
 // walkSkillsDir walks the directory looking for SKILL.md files
 func walkSkillsDir(root string, fn func(string) error) error {
 	type pendingDir struct {
@@ -230,17 +224,6 @@ func GetUserSkillsDir() (string, error) {
 		return "", fmt.Errorf("failed to get home directory: %w", err)
 	}
 	return filepath.Join(home, ".agents", "skills"), nil
-}
-
-// GetAgentsUserSkillsDir returns the ~/.agents/skills/ directory path
-// (shared across agent CLI tools like Claude Code, Aider, etc.).
-//
-// Always returns the path so that (a) directories created after process
-// start are picked up by /skills --reload, and (b) non-ENOENT Stat errors
-// (permission denied, symlink loops, stale NFS) surface through the normal
-// DiscoverSkills warning path instead of being silently ignored.
-func GetAgentsUserSkillsDir() (string, error) {
-	return GetUserSkillsDir()
 }
 
 // GetProjectSkillsDir returns the canonical workspace skills directory path.

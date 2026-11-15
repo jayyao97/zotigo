@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
@@ -24,6 +26,8 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestChannelMessageImagesUseSessionImageValidation(t *testing.T) {
@@ -221,7 +225,7 @@ func TestEnsureChannelSessionPromptTracksRevisions(t *testing.T) {
 	if err := handler.persistSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 	prompt := channels.SessionPromptConfig{AgentInstructions: "channel agent", ApprovalInstructions: "channel approval", ReviewAllTools: true}
 	if _, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt); err != nil {
 		t.Fatal(err)
@@ -256,7 +260,7 @@ func TestEnsureChannelSessionPromptSupportsCodex(t *testing.T) {
 	if err := handler.persistSession(context.Background(), session); err != nil {
 		t.Fatal(err)
 	}
-	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 	prompt := channels.SessionPromptConfig{AgentInstructions: "channel context"}
 	canonical, err := handler.EnsureChannelSessionPrompt(context.Background(), session.ID, prompt)
 	if err != nil || canonical != prompt {
@@ -282,7 +286,7 @@ func TestEnsureChannelSessionPromptDefersWhileSessionIsWorking(t *testing.T) {
 	if err := store.Put(context.Background(), storedFixture); err != nil {
 		t.Fatal(err)
 	}
-	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 	live := handler.registry.Add(Session{ID: session.ID, State: SessionStateRunning, Working: true})
 	if !live.Working {
 		t.Fatal("fixture session is not working")
@@ -312,7 +316,7 @@ func TestEnsureChannelSessionPromptRecyclesIdleWorker(t *testing.T) {
 	if err := store.Put(context.Background(), storedFixture); err != nil {
 		t.Fatal(err)
 	}
-	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 	handler.workers = newWorkerRegistry()
 	worker := newWorkerConnection(session.ID, "generation-1", nil, handler.workers)
 	handler.workers.mu.Lock()
@@ -347,7 +351,7 @@ func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
 	if err := sessionStore.Put(context.Background(), storedFixture); err != nil {
 		t.Fatal(err)
 	}
-	handler.items.(*fakeDisplayItemSource).items[session.ID] = nil
+	handler.items.(*sessionlogtest.ItemSource).Items[session.ID] = nil
 
 	channelStore, err := channels.Open(t.TempDir())
 	if err != nil {
@@ -430,7 +434,7 @@ func TestLocalTurnRefreshesBoundChannelPrompt(t *testing.T) {
 		modes = append(modes, steeringOnly)
 		if steeringOnly {
 			handler.registry.MarkIdle(session.ID)
-			return errNoActiveTurn
+			return sessionlog.ErrNoActiveTurn
 		}
 		return nil
 	}); err != nil {
@@ -476,7 +480,7 @@ func newChannelProvisionFixture(t *testing.T) (*handler, zotigosession.Store, *z
 		t.Fatal(err)
 	}
 	registry := newSessionRegistry()
-	handler := &handler{registry: registry, items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, store: store, catalog: catalog, sessionOps: newSessionOperationLocks(), workspaceOps: newSessionOperationLocks()}
+	handler := &handler{registry: registry, items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, store: store, catalog: catalog, sessionOps: newSessionOperationLocks(), workspaceOps: newSessionOperationLocks()}
 	return handler, store, catalog, workspace
 }
 
@@ -490,7 +494,7 @@ func TestChannelConnectionAPIKeepsSecretsOutOfResponses(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
 	body := `{"provider":"feishu","name":"Test","app_id":"cli_test","app_secret":"super-secret","enabled":false,"allow_chat_ids":["oc_allowed"],"agent_instructions":"","approval_instructions":"review","review_all_tools":true}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/channels/connections", strings.NewReader(body)))
@@ -524,7 +528,7 @@ func TestEnabledChannelAllowsGroupDiscoveryWithoutLegacyAllowlist(t *testing.T) 
 	}
 	secretStore, _ := channels.NewSecretStore(t.TempDir())
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/channels/connections", strings.NewReader(`{"provider":"feishu","name":"Test","app_id":"cli_test","app_secret":"secret","enabled":true,"allow_chat_ids":[],"agent_instructions":"","approval_instructions":"","review_all_tools":true}`)))
 	if recorder.Code != http.StatusCreated {
@@ -554,7 +558,7 @@ func TestChannelGroupsAPIListsBotGroups(t *testing.T) {
 	if err := service.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/channels/connections/"+connection.ID+"/groups", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "Shadow Test") || !strings.Contains(recorder.Body.String(), "chat-shadow") {
@@ -577,7 +581,7 @@ func TestChannelGroupMembersAPIListsProviderMembers(t *testing.T) {
 	if err := service.Start(ctx); err != nil {
 		t.Fatal(err)
 	}
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{channels: service})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/channels/connections/"+connection.ID+"/groups/chat-shadow/members", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), "ou_owner") || !strings.Contains(recorder.Body.String(), "Member") {
@@ -605,7 +609,7 @@ func TestChannelGroupBindingValidatesWorkspaceAndClearsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(provisionHandler.registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{store: sessionStore, catalog: catalog, channels: service})
+	handler := newHandler(provisionHandler.registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{store: sessionStore, catalog: catalog, channels: service})
 	body := fmt.Sprintf(`{"display_name":"Shadow Test","session_id":"must-be-cleared","workspace_id":%q,"agent":"zotigo","profile_name":"channel-default","enabled":true,"allowed_sender_ids":["owner-1"],"agent_instructions_mode":"inherit","approval_instructions_mode":"inherit"}`, workspace.ID)
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
@@ -648,7 +652,7 @@ func TestChannelBindingPreservesBypassSessionSnapshot(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: sessionStore}, handlerOptions{store: sessionStore, channels: service})
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: sessionStore}, handlerOptions{store: sessionStore, channels: service})
 	body := `{"display_name":"Shadow Test","session_id":"session-bypass","workspace_id":"","enabled":true,"allowed_sender_ids":["user-1"],"agent_instructions_mode":"inherit","agent_instructions":"","approval_instructions_mode":"inherit","approval_instructions":""}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
@@ -683,7 +687,7 @@ func TestChannelBindingAllowsIdleRunningSessionWithHistory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{"session-private": {
+	items := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{"session-private": {
 		{ID: "private-message", Type: zotigosession.DisplayItemUserMessage},
 		{ID: "private-turn", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 		{ID: "private-answer", Type: zotigosession.DisplayItemAssistantMessage, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -726,7 +730,7 @@ func TestChannelBindingRejectsSessionWithOpenTurn(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: session.ID, State: SessionStateRunning, Agent: "zotigo"})
-	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {
+	items := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {
 		{ID: "active-turn", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 	}}}
 	daemonHandler := &handler{registry: registry, items: items, store: sessionStore}
@@ -751,8 +755,8 @@ func TestChannelBindingRejectsSessionWithPendingMessage(t *testing.T) {
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: session.ID, State: SessionStateRunning, Agent: "zotigo"})
-	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {
-		{ID: "pending-message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "not started yet"}},
+	items := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {
+		{ID: "pending-message", Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "not started yet"}},
 	}}}
 	daemonHandler := &handler{registry: registry, items: items, store: sessionStore}
 	_, err = daemonHandler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: channels.SessionAgentZotigo})
@@ -775,7 +779,7 @@ func TestChannelBindingPreparesUnstartedCodexSessionTools(t *testing.T) {
 	if err := sessionStore.Put(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	handler := &handler{registry: newSessionRegistry(), items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
 	if _, err := handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "codex", Model: session.Model, ReasoningEffort: session.ReasoningEffort}); err != nil {
 		t.Fatal(err)
 	}
@@ -799,7 +803,7 @@ func TestChannelBindingPreparesExistingZotigoSessionTools(t *testing.T) {
 	if err := sessionStore.Put(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	handler := &handler{registry: newSessionRegistry(), items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
 	if _, err := handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "zotigo", ProfileName: "default"}); err != nil {
 		t.Fatal(err)
 	}
@@ -836,7 +840,7 @@ func TestChannelBindingRestartsIdleWorkerOutsideDisconnectLock(t *testing.T) {
 		close(disconnected)
 	})
 	handler := &handler{
-		registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}},
+		registry: newSessionRegistry(), items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}},
 		store: sessionStore, workers: workers,
 	}
 	done := make(chan error, 1)
@@ -875,7 +879,7 @@ func TestChannelBindingRejectsStartedCodexSessionWithoutTools(t *testing.T) {
 	if err := sessionStore.Put(ctx, session); err != nil {
 		t.Fatal(err)
 	}
-	handler := &handler{registry: newSessionRegistry(), items: &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
+	handler := &handler{registry: newSessionRegistry(), items: &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, store: sessionStore}
 	_, err = handler.validateChannelSessionBinding(ctx, session.ID, channels.SessionRuntimeConfig{Agent: "codex", Model: session.Model, ReasoningEffort: session.ReasoningEffort})
 	if !errors.Is(err, errSessionMissingChannelTools) {
 		t.Fatalf("error = %v", err)
@@ -933,7 +937,7 @@ func TestChannelBindingAllowsPromptUpdateWithoutMutatingSessionEagerly(t *testin
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}
+	items := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}
 	handler := newHandler(newSessionRegistry(), items, handlerOptions{store: sessionStore, channels: service})
 	body := `{"display_name":"Root","session_id":"session-snapshot","enabled":true,"allowed_sender_ids":["owner-1"],"agent_instructions_mode":"inherit","approval_instructions_mode":"inherit"}`
 	recorder := httptest.NewRecorder()
@@ -1032,7 +1036,7 @@ func TestChannelBoundSessionRejectsRuntimeMutationEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{store: sessionStore, channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{store: sessionStore, channels: service})
 
 	tests := []struct {
 		path string
@@ -1082,7 +1086,7 @@ func TestManualCodexChannelBindingDoesNotExposeStoredProfileSentinel(t *testing.
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, handlerOptions{store: sessionStore, channels: service})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}, handlerOptions{store: sessionStore, channels: service})
 	body := `{"display_name":"Codex root","session_id":"manual-codex","agent":"codex","profile_name":"","model":"gpt-channel","reasoning_effort":"high","enabled":true,"allowed_sender_ids":["owner-1"]}`
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, "/channels/conversations/"+conversation.ID, strings.NewReader(body)))
@@ -1124,7 +1128,7 @@ func TestDuplicateChannelBindingRejectsBeforeSessionValidation(t *testing.T) {
 	if _, err := channelStore.PutConversation(ctx, first); err != nil {
 		t.Fatal(err)
 	}
-	items := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{session.ID: {}}}
+	items := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{session.ID: {}}}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
 	handler := newHandler(newSessionRegistry(), items, handlerOptions{store: sessionStore, channels: service})
 	body := `{"display_name":"Second","session_id":"session-bound","enabled":true,"allowed_sender_ids":["user-2"],"agent_instructions_mode":"inherit","approval_instructions_mode":"inherit"}`
@@ -1133,14 +1137,14 @@ func TestDuplicateChannelBindingRejectsBeforeSessionValidation(t *testing.T) {
 	if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), "already bound") {
 		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if calls := items.loadCalls.Load(); calls != 0 {
+	if calls := items.LoadCalls.Load(); calls != 0 {
 		t.Fatalf("duplicate binding reached session validation %d times", calls)
 	}
 }
 
 func TestChannelTaskResultIgnoresTurnBeforeAcceptedCommand(t *testing.T) {
 	usage := protocol.Usage{InputTokens: 12, OutputTokens: 3, TotalTokens: 15}
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{"session-1": {{Sequence: 2, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "private", Runtime: &zotigosession.DisplayRuntime{Agent: "zotigo", Model: "wrong"}}}, {Sequence: 3, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "private", LastAgentMessage: "private answer"}}, {Sequence: 5, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "channel", Runtime: &zotigosession.DisplayRuntime{Agent: "codex", Model: "gpt-channel", ReasoningEffort: "high"}}}, {Sequence: 6, Type: zotigosession.DisplayItemAssistantMessage, Turn: &zotigosession.DisplayTurn{ID: "channel"}, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "channel answer"}}}, {Sequence: 7, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "channel", DurationMS: 2500, Usage: &usage}}}}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{"session-1": {{Sequence: 2, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "private", Runtime: &zotigosession.DisplayRuntime{Agent: "zotigo", Model: "wrong"}}}, {Sequence: 3, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "private", LastAgentMessage: "private answer"}}, {Sequence: 5, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "channel", Runtime: &zotigosession.DisplayRuntime{Agent: "codex", Model: "gpt-channel", ReasoningEffort: "high"}}}, {Sequence: 6, Type: zotigosession.DisplayItemAssistantMessage, Turn: &zotigosession.DisplayTurn{ID: "channel"}, Content: []zotigosession.DisplayContentPart{{Type: "text", Text: "channel answer"}}}, {Sequence: 7, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "channel", DurationMS: 2500, Usage: &usage}}}}}
 	handler := &handler{items: source}
 	turnID := ""
 	approvalReported := false
@@ -1210,12 +1214,12 @@ func TestChannelStopKeepsAdmissionClosedUntilDurablePauseIsAccepted(t *testing.T
 	const sessionID = "session-stop"
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
-	source := &fakeDisplayItemSource{
-		items: map[string][]zotigosession.DisplayItem{sessionID: {{
+	source := &sessionlogtest.ItemSource{
+		Items: map[string][]zotigosession.DisplayItem{sessionID: {{
 			ID: "turn-start", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"},
 		}}},
-		appendHook: func(_ string, item zotigosession.DisplayItem) {
-			if item.Command != nil && item.Command.Type == sessionCommandPause {
+		AppendHook: func(_ string, item zotigosession.DisplayItem) {
+			if item.Command != nil && item.Command.Type == wire.CommandPause {
 				close(appendStarted)
 				<-releaseAppend
 			}
@@ -1259,7 +1263,7 @@ func TestChannelStopKeepsAdmissionClosedUntilDurablePauseIsAccepted(t *testing.T
 	}
 	select {
 	case message := <-worker.sendCh:
-		if message.Command == nil || message.Command.Type != sessionCommandPause || message.Command.Pause == nil || message.Command.Pause.TurnID != "turn-1" {
+		if message.Command == nil || message.Command.Type != wire.CommandPause || message.Command.Pause == nil || message.Command.Pause.TurnID != "turn-1" {
 			t.Fatalf("worker message=%+v", message)
 		}
 	default:

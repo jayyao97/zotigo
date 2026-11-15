@@ -14,6 +14,7 @@ import (
 
 	"github.com/jayyao97/zotigo/core/acp"
 	"github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/buildinfo"
 	"github.com/jayyao97/zotigo/internal/testutil/servicetest"
 	"github.com/jayyao97/zotigo/internal/zotigod"
 	"github.com/jayyao97/zotigo/internal/zotigodclient"
@@ -162,6 +163,9 @@ func startACPClient(t *testing.T, client *zotigodclient.Client, workspaceID stri
 	}
 	if !init.AgentCapabilities.LoadSession {
 		t.Fatal("adapter must advertise session/load")
+	}
+	if init.AgentInfo == nil || init.AgentInfo.Version != buildinfo.Version {
+		t.Fatalf("adapter must report the build version, got %+v", init.AgentInfo)
 	}
 	return editor
 }
@@ -567,10 +571,19 @@ func TestACPDisconnectStopsOnlyOwnTurns(t *testing.T) {
 func TestACPStopsTurnBeforeStreamReportsIt(t *testing.T) {
 	fixture := servicetest.New(t)
 	service := connectService(t, fixture)
-	lagging := service.Via(servicetest.DelayEvents(t, service.BaseURL(), 3*time.Second))
+	// The proxy withholds the event stream until release is called, so the
+	// editor's view provably has not reported the turn when it is stopped.
+	laggingService := func(t *testing.T) (lagging *zotigodclient.Client, release func()) {
+		t.Helper()
+		gate := make(chan struct{})
+		release = sync.OnceFunc(func() { close(gate) })
+		t.Cleanup(release)
+		return service.Via(servicetest.Proxy(t, service.BaseURL(), servicetest.ProxyOptions{EventGate: gate})), release
+	}
 	ctx := context.Background()
 
 	t.Run("session/cancel", func(t *testing.T) {
+		lagging, release := laggingService(t)
 		client := startACPClient(t, lagging, "", false)
 		sessionID, err := client.newSession(t, t.TempDir(), nil)
 		if err != nil {
@@ -585,6 +598,8 @@ func TestACPStopsTurnBeforeStreamReportsIt(t *testing.T) {
 		if end := waitTurnEnd(t, service, sessionID, ""); end.Type != session.DisplayItemTurnInterrupted {
 			t.Fatalf("turn ended with %s", end.Type)
 		}
+		// Only now does the stream catch up and let the prompt return.
+		release()
 		select {
 		case stop := <-stopCh:
 			if stop != acp.StopReasonCancelled {
@@ -596,6 +611,7 @@ func TestACPStopsTurnBeforeStreamReportsIt(t *testing.T) {
 	})
 
 	t.Run("disconnect", func(t *testing.T) {
+		lagging, _ := laggingService(t)
 		client := startACPClient(t, lagging, "", false)
 		sessionID, err := client.newSession(t, t.TempDir(), nil)
 		if err != nil {
@@ -668,5 +684,27 @@ func TestACPLostSubmitResponseThenDisconnectStopsTurn(t *testing.T) {
 	client.disconnect(t)
 	if end := waitTurnEnd(t, service, sessionID, ""); end.Type != session.DisplayItemTurnInterrupted {
 		t.Fatalf("turn ended with %s", end.Type)
+	}
+}
+
+// The ACP server only knows the version it is handed: the adapter must pass
+// the build version through, or editors see an empty agentInfo.version.
+func TestACPInitializeReportsBuildVersion(t *testing.T) {
+	fixture := servicetest.New(t)
+	client := startACP(t, connectService(t, fixture), "")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	var result acp.InitializeResult
+	if _, err := client.conn.Call(ctx, acp.MethodInitialize, acp.InitializeParams{ProtocolVersion: 1}, &result); err != nil {
+		t.Fatal(err)
+	}
+	if buildinfo.Version == "" {
+		t.Fatal("buildinfo.Version is empty; the assertion below would be vacuous")
+	}
+	if result.AgentInfo == nil {
+		t.Fatal("initialize response has no agentInfo")
+	}
+	if result.AgentInfo.Version != buildinfo.Version {
+		t.Fatalf("initialize agentInfo.version = %q, want buildinfo.Version %q", result.AgentInfo.Version, buildinfo.Version)
 	}
 }

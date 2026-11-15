@@ -8,22 +8,8 @@ import (
 	"testing"
 
 	"github.com/gorilla/websocket"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
-
-func TestCodexThreadIdentityOnStartAndResume(t *testing.T) {
-	for _, dynamic := range []bool{false, true} {
-		params := codexThreadParams(codexWorkerConfig{
-			workerClientConfig: workerClientConfig{SessionID: "sess_child"},
-			WorkspaceID:        "workspace_current", DeveloperInstructions: "Existing instructions.",
-		}, dynamic)
-		text, _ := params["developerInstructions"].(string)
-		for _, want := range []string{"Existing instructions.", "session_id: sess_child", "workspace_id: workspace_current"} {
-			if !strings.Contains(text, want) {
-				t.Fatalf("instructions missing %q: %s", want, text)
-			}
-		}
-	}
-}
 
 func TestWorkerIdentityComesFromCatalog(t *testing.T) {
 	for _, assigned := range []bool{false, true} {
@@ -49,7 +35,7 @@ func TestWorkerIdentityComesFromCatalog(t *testing.T) {
 			if assigned {
 				want = workspace.ID
 			}
-			if got := response.Header.Get(workerWorkspaceHeader); got != want {
+			if got := response.Header.Get(wire.WorkspaceHeader); got != want {
 				t.Fatalf("workspace = %q, want %q", got, want)
 			}
 		})

@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"github.com/bytedance/sonic"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestMain(m *testing.M) {
@@ -21,12 +22,12 @@ func TestMain(m *testing.M) {
 		os.Exit(1)
 	}
 
-	// sonic compiles a decoder per type on first use. For workerMessage
+	// sonic compiles a decoder per type on first use. For wire.Message
 	// that takes about 0.1s, and about 1s under -race, which otherwise lands
 	// inside whichever test first reads a worker message and can exceed its
 	// timing assertions (for example the 1s wait in
 	// TestSessionMessageAllowsApprovalCallbackBeforeInputResult).
-	if err := sonic.Pretouch(reflect.TypeOf(workerMessage{})); err != nil {
+	if err := sonic.Pretouch(reflect.TypeOf(wire.Message{})); err != nil {
 		fmt.Fprintln(os.Stderr, "pretouch worker message decoder:", err)
 		_ = os.RemoveAll(home)
 		os.Exit(1)

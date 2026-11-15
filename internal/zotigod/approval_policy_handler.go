@@ -9,6 +9,9 @@ import (
 
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type changeApprovalPolicyRequest struct {
@@ -19,47 +22,6 @@ type changeApprovalPolicyResponse struct {
 	ApprovalPolicy agent.ApprovalPolicy `json:"approval_policy"`
 	Status         string               `json:"status"`
 	CommandID      string               `json:"command_id,omitempty"`
-}
-
-type sessionApprovalPolicyUpdater interface {
-	UpdateApprovalPolicy(ctx context.Context, id string, policy agent.ApprovalPolicy, updatedAt time.Time) error
-}
-
-func persistSessionApprovalPolicy(ctx context.Context, store zotigosession.Store, sess *zotigosession.Session) error {
-	if updater, ok := store.(sessionApprovalPolicyUpdater); ok {
-		return updater.UpdateApprovalPolicy(ctx, sess.ID, sess.ApprovalPolicy, sess.UpdatedAt)
-	}
-	return store.Put(ctx, sess)
-}
-
-func normalizeSessionApprovalPolicy(policy agent.ApprovalPolicy, allowEmpty bool) (agent.ApprovalPolicy, error) {
-	if policy == "" && allowEmpty {
-		return agent.ApprovalPolicyAuto, nil
-	}
-	switch policy {
-	case agent.ApprovalPolicyManual, agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass:
-		return policy, nil
-	default:
-		return "", fmt.Errorf("approval_policy must be %q, %q or %q", agent.ApprovalPolicyManual, agent.ApprovalPolicyAuto, agent.ApprovalPolicyBypass)
-	}
-}
-
-// lowersPermissions reports whether moving from one policy to another
-// grants the agent less autonomy (bypass > auto > manual). Workers apply a
-// lowering change before persisting it so a persistence failure leaves the
-// runtime on the safer policy.
-func lowersPermissions(from, to agent.ApprovalPolicy) bool {
-	rank := func(policy agent.ApprovalPolicy) int {
-		switch policy {
-		case agent.ApprovalPolicyManual:
-			return 0
-		case agent.ApprovalPolicyBypass:
-			return 2
-		default:
-			return 1
-		}
-	}
-	return rank(to) < rank(from)
 }
 
 func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Request, id string) {
@@ -73,7 +35,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
-	target, err := normalizeSessionApprovalPolicy(req.ApprovalPolicy, false)
+	target, err := workerbase.NormalizeSessionApprovalPolicy(req.ApprovalPolicy, false)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -128,7 +90,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load display items: %v", err))
 		return
 	}
-	if lastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
+	if sessionlog.LastOpenTurnID(items) != "" || hasPendingMessageCommand(items) {
 		writeAPIError(w, http.StatusConflict, "approval policy change requires an idle session")
 		return
 	}
@@ -175,7 +137,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 	item, err := h.items.AppendItemIf(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:           sessionCommandApprovalPolicy,
+			Type:           wire.CommandApprovalPolicy,
 			ApprovalPolicy: string(target),
 		},
 	}, requireIdleSession)
@@ -187,7 +149,7 @@ func (h *handler) handleSessionApprovalPolicy(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append approval policy command: %v", err))
 		return
 	}
-	command := approvalPolicyCommandFromItem(item)
+	command := sessionlog.ApprovalPolicyCommandFromItem(item)
 	unlockOperation()
 	operationLocked = false
 	h.sendCommand(r.Context(), id, command)
@@ -209,7 +171,7 @@ func pendingApprovalPolicyIntent(items []zotigosession.DisplayItem) (agent.Appro
 	var commandID string
 	var sequence uint64
 	for _, item := range items {
-		if item.Command == nil || item.Command.Type != sessionCommandApprovalPolicy || completed[item.ID] || item.Sequence < sequence {
+		if item.Command == nil || item.Command.Type != wire.CommandApprovalPolicy || completed[item.ID] || item.Sequence < sequence {
 			continue
 		}
 		policy = agent.ApprovalPolicy(item.Command.ApprovalPolicy)
@@ -235,5 +197,5 @@ func (h *handler) applyStoredApprovalPolicy(ctx context.Context, id string, poli
 	}
 	sess.ApprovalPolicy = policy
 	sess.UpdatedAt = time.Now().UTC()
-	return errors.Join(persistSessionApprovalPolicy(ctx, h.store, sess), h.store.Unlock(context.Background(), id))
+	return errors.Join(workerbase.PersistSessionApprovalPolicy(ctx, h.store, sess), h.store.Unlock(context.Background(), id))
 }

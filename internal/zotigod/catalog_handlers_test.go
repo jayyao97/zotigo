@@ -13,6 +13,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
@@ -26,7 +28,7 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 	t.Cleanup(func() { _ = catalog.Close() })
 	handler := newHandler(
 		newSessionRegistry(),
-		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		&sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		handlerOptions{catalog: catalog},
 	)
 
@@ -246,7 +248,7 @@ func TestCatalogProjectSourceAndWorkspaceRoutes(t *testing.T) {
 func TestSourceInspectionDoesNotRequireProject(t *testing.T) {
 	handler := newHandler(
 		newSessionRegistry(),
-		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		&sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		handlerOptions{},
 	)
 	folder := t.TempDir()
@@ -278,7 +280,7 @@ func TestCatalogCreatesGitWorkspaceWithoutClientSideCommitResolution(t *testing.
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{catalog: catalog})
 	projectRec := requestCatalog(t, handler, http.MethodPost, "/projects", `{"name":"Git"}`)
 	var project zotigoworkspace.Project
 	decodeCatalogData(t, projectRec, &project)
@@ -381,7 +383,7 @@ func TestCatalogRoutesUsePublicAuthentication(t *testing.T) {
 	t.Cleanup(func() { _ = catalog.Close() })
 	handler := newHandler(
 		newSessionRegistry(),
-		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		&sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		handlerOptions{catalog: catalog, publicAuthToken: "secret"},
 	)
 
@@ -409,7 +411,7 @@ func TestCatalogProjectStatusAllIncludesDeletingProject(t *testing.T) {
 	t.Cleanup(func() { _ = catalog.Close() })
 	handler := newHandler(
 		newSessionRegistry(),
-		&fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}},
+		&sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}},
 		handlerOptions{catalog: catalog},
 	)
 	projectRec := requestCatalog(t, handler, http.MethodPost, "/projects", `{"name":"Deleting Project"}`)

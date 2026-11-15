@@ -65,16 +65,6 @@ func New(ag *agent.Agent, tr transport.Transport, opts ...Option) *Runner {
 	return r
 }
 
-// Agent returns the underlying agent.
-func (r *Runner) Agent() *agent.Agent {
-	return r.agent
-}
-
-// Transport returns the underlying transport.
-func (r *Runner) Transport() transport.Transport {
-	return r.transport
-}
-
 // Start begins the main event loop, processing user inputs and streaming events.
 // When an agent turn requires tool approval, it automatically calls
 // transport.RequestApproval() and continues — callers never need to manage
@@ -126,34 +116,13 @@ func (r *Runner) Stop() {
 	}
 }
 
-// RunOnce executes a single turn with the given input message.
-// Returns when all events are sent, including "need_approval" if approval is needed.
-// Use SubmitApproval to continue after approval.
-//
-// This is useful for serverless/HTTP patterns where the process may be killed
-// between approval cycles.
-func (r *Runner) RunOnce(ctx context.Context, msg protocol.Message) error {
-	eventCh, err := r.agent.RunMessage(ctx, msg)
-	if err != nil {
-		return err
-	}
-
-	_, err = r.streamEvents(ctx, eventCh, false)
-	return err
-}
-
-// RunFullTurn executes a complete conversation turn, automatically handling
-// the approval loop via transport.RequestApproval(). Blocks until the turn
-// truly finishes (no more tool calls).
+// RunFullTurnStarted executes a complete conversation turn, automatically
+// handling the approval loop via transport.RequestApproval(). Blocks until the
+// turn truly finishes (no more tool calls). onStarted, if non-nil, is invoked
+// after the agent accepts the input and before streamed events are drained.
 //
 // This is suitable for long-lived transports (ACP, WebSocket) where the
 // transport can respond to approval requests synchronously.
-func (r *Runner) RunFullTurn(ctx context.Context, msg protocol.Message) error {
-	return r.RunFullTurnStarted(ctx, msg, nil)
-}
-
-// RunFullTurnStarted is like RunFullTurn, but invokes onStarted after the
-// agent accepts the input and before streamed events are drained.
 func (r *Runner) RunFullTurnStarted(ctx context.Context, msg protocol.Message, onStarted func()) error {
 	eventCh, err := r.agent.RunMessage(ctx, msg)
 	if err != nil {
@@ -164,26 +133,6 @@ func (r *Runner) RunFullTurnStarted(ctx context.Context, msg protocol.Message, o
 	}
 
 	return r.drainWithApprovalLoop(ctx, eventCh)
-}
-
-// SubmitApproval submits user approval decisions and continues execution.
-// This should be called after RunOnce returns with a "need_approval" finish.
-func (r *Runner) SubmitApproval(ctx context.Context, results []transport.ApprovalResult) error {
-	snap := r.agent.Snapshot()
-	if snap.State != agent.StatePaused {
-		return fmt.Errorf("agent is not waiting for approval")
-	}
-
-	var eventCh <-chan protocol.Event
-	var err error
-	eventCh, err = r.agent.ResolvePendingActions(ctx, deniedResultsFromApprovals(results, snap.PendingActions))
-
-	if err != nil {
-		return err
-	}
-
-	_, err = r.streamEvents(ctx, eventCh, false)
-	return err
 }
 
 func deniedResultsFromApprovals(results []transport.ApprovalResult, pending []*agent.PendingAction) map[string]protocol.ToolResult {
@@ -213,24 +162,6 @@ func deniedResultsFromApprovals(results []transport.ApprovalResult, pending []*a
 		}
 	}
 	return denied
-}
-
-// GetPendingApprovals returns the current pending tool calls awaiting approval.
-func (r *Runner) GetPendingApprovals() []transport.PendingToolCall {
-	snap := r.agent.Snapshot()
-	if snap.State != agent.StatePaused || len(snap.PendingActions) == 0 {
-		return nil
-	}
-
-	pending := make([]transport.PendingToolCall, 0, len(snap.PendingActions))
-	for _, action := range snap.PendingActions {
-		pending = append(pending, transport.PendingToolCall{
-			ID:        action.ToolCallID,
-			Name:      action.Name,
-			Arguments: action.Arguments,
-		})
-	}
-	return pending
 }
 
 // --- internal ---
@@ -283,7 +214,7 @@ func (r *Runner) handleMessage(ctx context.Context, input transport.UserInput) e
 // calls transport.RequestApproval() and continues until the turn finishes.
 func (r *Runner) drainWithApprovalLoop(ctx context.Context, eventCh <-chan protocol.Event) error {
 	for {
-		needsApproval, err := r.streamEvents(ctx, eventCh, true)
+		needsApproval, err := r.streamEvents(ctx, eventCh)
 		if err != nil {
 			return err
 		}
@@ -320,11 +251,10 @@ func (r *Runner) drainWithApprovalLoop(ctx context.Context, eventCh <-chan proto
 	}
 }
 
-// streamEvents drains an eventCh, forwarding events to transport.
-// If handleApproval is true, returns (true, nil) on need_approval so the
-// caller can handle it. If false, returns immediately on need_approval
-// (for RunOnce/SubmitApproval patterns).
-func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event, handleApproval bool) (needsApproval bool, err error) {
+// streamEvents drains an eventCh, forwarding events to transport. It returns
+// (true, nil) when the stream ends in need_approval so the caller can resolve
+// the pending tool calls.
+func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event) (needsApproval bool, err error) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -348,10 +278,7 @@ func (r *Runner) streamEvents(ctx context.Context, eventCh <-chan protocol.Event
 			if event.Type == protocol.EventTypeFinish {
 				if event.FinishReason == "need_approval" {
 					r.fireOnPause()
-					if handleApproval {
-						return true, nil
-					}
-					return false, nil
+					return true, nil
 				}
 				if event.FinishReason == protocol.FinishReasonStop {
 					r.fireAfterTurn()

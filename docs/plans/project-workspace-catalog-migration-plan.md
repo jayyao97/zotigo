@@ -1,5 +1,7 @@
 # Project / Workspace Catalog 设计与交付记录
 
+> 状态（2026-11）：已实现。Catalog 领域模型与存储位于 `core/workspace`（`store.go`、`provision.go`、`lifecycle.go`），schema 位于 `core/catalogschema/schema.sql`，HTTP API 位于 `internal/zotigod/catalog_handlers.go`；下文标记为“进行中”的 Project 生命周期（archive / unarchive / delete 及 preview 路由）也已存在于 `core/workspace/project_lifecycle.go` 和 `internal/zotigod/app.go` 的路由表中。
+
 Status: catalog implemented; Project lifecycle extension in progress
 Branch: `feat/project-workspace-catalog`
 Repository: `zotigo`

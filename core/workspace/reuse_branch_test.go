@@ -9,6 +9,7 @@ import (
 )
 
 func TestProvisionReusesDeletedWorkspaceBranch(t *testing.T) {
+	t.Parallel()
 	store, previous, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	path := filepath.Join(previous.RootPath, "code", workspaceSourceName(source))
@@ -48,6 +49,7 @@ func TestProvisionReusesDeletedWorkspaceBranch(t *testing.T) {
 }
 
 func TestProvisionRejectsBranchOfExistingWorkspace(t *testing.T) {
+	t.Parallel()
 	for _, archived := range []bool{false, true} {
 		t.Run(map[bool]string{false: "active", true: "archived"}[archived], func(t *testing.T) {
 			store, previous, source := createGitWorkspaceFixture(t)
@@ -69,6 +71,7 @@ func TestProvisionRejectsBranchOfExistingWorkspace(t *testing.T) {
 }
 
 func TestAddWorkspaceSourceReusesLocalBranch(t *testing.T) {
+	t.Parallel()
 	store, previous, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	runGitProvisionCommand(t, source.CanonicalPath, "branch", "existing", "main")
@@ -91,6 +94,7 @@ func TestAddWorkspaceSourceReusesLocalBranch(t *testing.T) {
 }
 
 func TestAddWorkspaceSourceDefaultsToSharedWorkspaceBranch(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	for _, step := range []struct {
@@ -134,6 +138,7 @@ func TestAddWorkspaceSourceDefaultsToSharedWorkspaceBranch(t *testing.T) {
 }
 
 func TestUnownedPlansDoNotReserveExistingBranch(t *testing.T) {
+	t.Parallel()
 	store, previous, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	runGitProvisionCommand(t, source.CanonicalPath, "branch", "existing", "main")

@@ -12,6 +12,9 @@ import (
 	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func completeForkFixture(t *testing.T) (*handler, sessionToolCaller) {
@@ -84,7 +87,7 @@ func TestNativeForkExactPrefixAndIsolation(t *testing.T) {
 	if org.WorkspacePosition == nil || *org.WorkspacePosition != 1234 {
 		t.Fatal("retry overwrote manually chosen position")
 	}
-	if _, err := h.forkSession(ctx, "branch", source.ID, "other", "Branch"); !errors.Is(err, errCommandIDConflict) {
+	if _, err := h.forkSession(ctx, "branch", source.ID, "other", "Branch"); !errors.Is(err, sessionlog.ErrCommandIDConflict) {
 		t.Fatalf("conflict: %v", err)
 	}
 	after, _ := h.store.Get(ctx, source.ID)
@@ -136,7 +139,7 @@ func TestSessionForkHTTPAndLatestCompleted(t *testing.T) {
 func TestSessionToolForkCannotReadOtherChannelSession(t *testing.T) {
 	h, caller := completeForkFixture(t)
 	caller.Origin = &protocol.RequestContext{Source: "channel"}
-	req := workerRuntimeToolRequest{Name: "create_session", CallID: "fork", Arguments: json.RawMessage(`{"workspace_id":"` + caller.WorkspaceID + `","initial_message":"hello","fork_from":{"session_id":"other","through_turn_id":"turn"}}`)}
+	req := wire.RuntimeToolRequest{Name: "create_session", CallID: "fork", Arguments: json.RawMessage(`{"workspace_id":"` + caller.WorkspaceID + `","initial_message":"hello","fork_from":{"session_id":"other","through_turn_id":"turn"}}`)}
 	if _, err := h.writeToolSession(context.Background(), caller, req); err == nil || !strings.Contains(err.Error(), "bound session") {
 		t.Fatalf("channel fork: %v", err)
 	}
@@ -157,7 +160,7 @@ func TestSessionForkCodexLatestIgnoresBackfillAndProjectsChild(t *testing.T) {
 		t.Fatal(err)
 	}
 	stamp := time.Now().Unix()
-	turn := codexTurn{ID: "turn", Status: "completed", StartedAt: &stamp, CompletedAt: &stamp, Items: []codexThreadItem{{ID: "answer-id", Type: "agentMessage", Text: "late inherited answer"}}}
+	turn := codexworker.Turn{ID: "turn", Status: "completed", StartedAt: &stamp, CompletedAt: &stamp, Items: []codexworker.ThreadItem{{ID: "answer-id", Type: "agentMessage", Text: "late inherited answer"}}}
 	forkCalls := 0
 	host := &codexSyncHost{rpc: codexSyncFuncRPC{call: func(_ context.Context, method string, raw any, result any) error {
 		params := raw.(map[string]any)
@@ -168,11 +171,11 @@ func TestSessionForkCodexLatestIgnoresBackfillAndProjectsChild(t *testing.T) {
 			if params["lastTurnId"] != "turn" {
 				t.Fatalf("selected older backfill: %#v", params)
 			}
-			payload = codexThreadSnapshot{Thread: codexThread{ID: "child-thread"}}
+			payload = codexworker.ThreadSnapshot{Thread: codexworker.Thread{ID: "child-thread"}}
 		case "thread/turns/list":
-			payload = codexTurnList{Data: []codexTurn{turn}}
+			payload = codexworker.TurnList{Data: []codexworker.Turn{turn}}
 		case "thread/items/list":
-			payload = codexThreadItemList{Data: []codexThreadItemEntry{{TurnID: "turn", Item: turn.Items[0]}}}
+			payload = codexworker.ThreadItemList{Data: []codexworker.ThreadItemEntry{{TurnID: "turn", Item: turn.Items[0]}}}
 		default:
 			t.Fatalf("unexpected call %s", method)
 		}
@@ -203,7 +206,7 @@ func TestSessionForkCodexLatestIgnoresBackfillAndProjectsChild(t *testing.T) {
 	if answers != 1 {
 		t.Fatalf("missing late answer: %#v", items)
 	}
-	if err := syncCompletedCodexTurns(ctx, h.items, child.ID, []codexTurn{turn}); err != nil {
+	if err := codexworker.SyncCompletedTurns(ctx, h.items, child.ID, []codexworker.Turn{turn}); err != nil {
 		t.Fatal(err)
 	}
 	after, _, _ := h.items.LoadItems(ctx, child.ID)

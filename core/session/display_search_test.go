@@ -19,7 +19,7 @@ func TestDisplaySearchBoundsAndContent(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestDisplaySearchBoundsAndContent(t *testing.T) {
 			t.Fatalf("unexpected match %q: %+v %v", q, result, err)
 		}
 	}
-	other, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	other, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -107,7 +107,7 @@ func BenchmarkDisplaySearch(b *testing.B) {
 				b.Fatal(err)
 			}
 			defer store.Close()
-			sess, err := NewManagerWithStore(store).CreateNew(b.TempDir())
+			sess, err := createTestSession(store, b.TempDir())
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -146,7 +146,7 @@ func TestDisplaySearchMigrationBackfill(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -192,7 +192,7 @@ func TestDisplaySearchDoesNotOccupyWriterConnection(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	sess, err := NewManagerWithStore(store).CreateNew(t.TempDir())
+	sess, err := createTestSession(store, t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}

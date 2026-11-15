@@ -341,7 +341,7 @@ func newDynamicCachingTestAgent(
 	for i := 0; i < 150; i++ {
 		largePrompt.WriteString("Stable cache-prefix rule: preserve deterministic instructions across every request.\n")
 	}
-	pb.SetStaticPrompt(largePrompt.String())
+	prompt.WithStaticPrompt(largePrompt.String())(pb)
 
 	ag, err := agent.New(profile, exec,
 		agent.WithSystemPromptBuilder(pb),
@@ -499,12 +499,4 @@ func TestE2E_UsageAllProviders(t *testing.T) {
 			}
 		})
 	}
-}
-
-// firstProfile returns the first profile from a map.
-func firstProfile(profiles map[string]config.ProfileConfig) config.ProfileConfig {
-	for _, p := range profiles {
-		return p
-	}
-	return config.ProfileConfig{}
 }

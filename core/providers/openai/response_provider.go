@@ -175,6 +175,12 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 			// assembled call).
 
 			case "response.output_item.added":
+				// Every output item is announced here, and all of them carry
+				// an ID, so the item type is the only thing that tells a tool
+				// call from a reasoning or message item.
+				if evt.Item.Type != "function_call" {
+					continue
+				}
 				if fn := evt.Item.AsFunctionCall(); fn.ID != "" || fn.CallID != "" {
 					pc := &pendingCall{
 						id:     fn.ID,
@@ -236,6 +242,11 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 			// blockType check to avoid firing on indexes we never saw
 			// reasoning on).
 			case "response.output_item.done":
+				// As with output_item.added, this fires for every item and
+				// all of them carry an ID; only reasoning items are reasoning.
+				if evt.Item.Type != "reasoning" {
+					continue
+				}
 				rs := evt.Item.AsReasoning()
 				if rs.ID == "" && rs.EncryptedContent == "" {
 					continue
@@ -515,6 +526,11 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffortMedium}
 	case "high":
 		params.Reasoning = shared.ReasoningParam{Effort: shared.ReasoningEffortHigh}
+	}
+	// The API returns no readable reasoning unless a summary is requested,
+	// which left the thinking block empty for these models.
+	if params.Reasoning.Effort != "" {
+		params.Reasoning.Summary = shared.ReasoningSummaryAuto
 	}
 
 	// Convert tools.

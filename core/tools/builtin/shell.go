@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/jayyao97/zotigo/core/agent"
 	"github.com/jayyao97/zotigo/core/executor"
 	"github.com/jayyao97/zotigo/core/protocol"
 	"github.com/jayyao97/zotigo/core/tools"
@@ -148,8 +147,8 @@ func (t *ShellTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		Timeout: timeout,
 	}
 	var reporter *shellProgressReporter
-	if sink, ok := agent.ToolEventSinkFromContext(ctx); ok {
-		if call, hasCall := agent.ToolCallFromContext(ctx); hasCall {
+	if sink, ok := tools.EventSinkFromContext(ctx); ok {
+		if call, hasCall := tools.CallInfoFromContext(ctx); hasCall {
 			reporter = newShellProgressReporter(sink, call.ID)
 			reporter.emit("$ " + args.Command + "\n")
 			opts.OnOutput = reporter.report
@@ -193,13 +192,13 @@ const shellProgressChunkLimit = 4096
 
 type shellProgressReporter struct {
 	mu         sync.Mutex
-	sink       agent.ToolEventSink
+	sink       tools.EventSink
 	toolCallID string
 	lastEmit   time.Time
 	pending    strings.Builder
 }
 
-func newShellProgressReporter(sink agent.ToolEventSink, toolCallID string) *shellProgressReporter {
+func newShellProgressReporter(sink tools.EventSink, toolCallID string) *shellProgressReporter {
 	return &shellProgressReporter{sink: sink, toolCallID: toolCallID}
 }
 

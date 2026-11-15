@@ -5,11 +5,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
@@ -18,7 +21,7 @@ func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
 	prompt := protocol.ContextInput{PromptKey: "prompt", ProfileKey: "profile", PrefixTokens: 10}
 	first, _ := h.nativeContextTokens("session", history, prompt)
 	anchor := prompt
-	anchor.HistoryDigest = services.ContextDigest(history)
+	anchor.HistoryDigest = compaction.ContextDigest(history)
 	answer := protocol.NewAssistantMessage("answer")
 	answer.Metadata = &protocol.MessageMetadata{ContextInput: &anchor, Usage: &protocol.Usage{InputTokens: 1000}}
 	history = append(history, answer)
@@ -44,7 +47,7 @@ func TestContextUsageCacheInvalidatesOnContentAndCalibration(t *testing.T) {
 
 func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	cfg, err := config.NewManager().LoadForDir(workDir)
 	if err != nil {
 		t.Fatal(err)
@@ -53,11 +56,11 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	c := services.NewCompressor(services.CompressorConfig{ContextWindowSize: profile.ContextWindow})
+	c := compaction.NewCompressor(compaction.CompressorConfig{ContextWindowSize: profile.ContextWindow})
 	history := []protocol.Message{protocol.NewUserMessage("question")}
 	anchor := protocol.ContextInput{
-		HistoryDigest: services.ContextDigest(history), PromptKey: "system-tools",
-		ProfileKey: services.ContextProfileKey(profile), PrefixTokens: 40,
+		HistoryDigest: compaction.ContextDigest(history), PromptKey: "system-tools",
+		ProfileKey: compaction.ContextProfileKey(profile), PrefixTokens: 40,
 	}
 	answer := protocol.NewAssistantMessage("answer")
 	answer.Metadata = &protocol.MessageMetadata{
@@ -83,7 +86,7 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h := &handler{store: store, items: storedDisplayItemSource{store: store}}
+	h := &handler{store: store, items: sessionlog.StoredItemSource{Store: store}}
 	get := func() *SessionContextUsage {
 		return h.decorateSession(ctx, sessionFromMetadata(loaded.Metadata, SessionStateOffline, false), loaded).ContextUsage
 	}
@@ -105,7 +108,7 @@ func TestNativeContextUsageUsesValidatedBaselineAndDelta(t *testing.T) {
 
 func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 	workDir := t.TempDir()
-	writeTestProfileConfig(t, workDir)
+	sessionlogtest.WriteProfileConfig(t, workDir)
 	cfg, err := config.NewManager().LoadForDir(workDir)
 	if err != nil {
 		t.Fatal(err)
@@ -119,12 +122,12 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 		window = config.DefaultContextWindow
 	}
 	ctx := context.Background()
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
-	display := newWorkerDisplayLog("live", source)
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	display := sessionlog.NewLog("live", source)
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}
-	progress := &protocol.ContextUsage{Tokens: 527163, Window: window, Source: "provider_estimate", ProfileKey: services.ContextProfileKey(profile)}
+	progress := &protocol.ContextUsage{Tokens: 527163, Window: window, Source: "provider_estimate", ProfileKey: compaction.ContextProfileKey(profile)}
 	if err := display.HandleEvent(ctx, protocol.Event{Type: protocol.EventTypeUsageUpdated, ContextUsage: progress}); err != nil {
 		t.Fatal(err)
 	}
@@ -137,11 +140,11 @@ func TestNativeContextUsageReadsLiveProgressWithoutSnapshot(t *testing.T) {
 		t.Fatalf("live usage = %+v", got)
 	}
 	// A new model/profile must never reuse an old model's progress.
-	source.items["live"][1].ContextUsage.ProfileKey = "other"
+	source.Items["live"][1].ContextUsage.ProfileKey = "other"
 	if got := get(); got.Status != "unavailable" {
 		t.Fatalf("stale usage = %+v", got)
 	}
-	source.items["live"][1].ContextUsage.ProfileKey = progress.ProfileKey
+	source.Items["live"][1].ContextUsage.ProfileKey = progress.ProfileKey
 	if _, err := display.StartTurn(ctx); err != nil {
 		t.Fatal(err)
 	}

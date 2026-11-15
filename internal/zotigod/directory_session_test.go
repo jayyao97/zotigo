@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 )
 
@@ -19,7 +21,7 @@ func TestDirectorySessionOwnershipFollowsContainingWorkspace(t *testing.T) {
 	}
 	outside := t.TempDir()
 	for _, dir := range []string{workspace.RootPath, backend, outside} {
-		writeTestProfileConfig(t, dir)
+		sessionlogtest.WriteProfileConfig(t, dir)
 	}
 
 	create := func(t *testing.T, body string) Session {

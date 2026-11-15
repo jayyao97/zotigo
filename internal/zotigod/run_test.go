@@ -44,7 +44,7 @@ func TestRunReusesCompatibleZotigod(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	server := &http.Server{Handler: NewHandler()}
+	server := &http.Server{Handler: newTestHandler()}
 	go func() { _ = server.Serve(listener) }()
 	t.Cleanup(func() { _ = server.Close() })
 

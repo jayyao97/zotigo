@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestCodexInputImageServesOnlyRecordedBoundedImages(t *testing.T) {
@@ -19,7 +20,7 @@ func TestCodexInputImageServesOnlyRecordedBoundedImages(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	router := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	router := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	session := createSession(t, router)
 	other := createSession(t, router)
 	data, _ := base64.StdEncoding.DecodeString(tinyPNGBase64())
@@ -61,7 +62,7 @@ func TestCodexInputImageServesOnlyRecordedBoundedImages(t *testing.T) {
 			t.Fatalf("invalid attachment %s: %d", path, rec.Code)
 		}
 	}
-	for _, content := range [][]byte{[]byte("private non-image content"), make([]byte, maxMessageImageBytes+1)} {
+	for _, content := range [][]byte{[]byte("private non-image content"), make([]byte, sessionlog.MaxMessageImageBytes+1)} {
 		if err := os.WriteFile(imagePath, content, 0600); err != nil {
 			t.Fatal(err)
 		}

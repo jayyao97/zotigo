@@ -16,6 +16,8 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 const channelTaskTimeout = 2 * time.Hour
@@ -32,7 +34,7 @@ func (h *handler) EnsureChannelSessionPrompt(ctx context.Context, sessionID stri
 	}
 	if stored == nil {
 		unlock()
-		return channels.SessionPromptConfig{}, errSessionNotFound
+		return channels.SessionPromptConfig{}, workerbase.ErrSessionNotFound
 	}
 	desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
 	detached, err := h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true, prompt.ApprovalPolicy)
@@ -68,9 +70,9 @@ func (h *handler) reconcileChannelSessionPromptLocked(ctx context.Context, store
 		return nil, fmt.Errorf("load channel session history: %w", err)
 	}
 	if !exists {
-		return nil, errSessionNotFound
+		return nil, workerbase.ErrSessionNotFound
 	}
-	if err := requireIdleSession(items); err != nil || hasPendingHumanRequest(items) {
+	if err := requireIdleSession(items); err != nil || sessionlog.HasPendingHumanRequest(items) {
 		return nil, errSessionBusy
 	}
 	desired.Revision = current.Revision + 1
@@ -117,7 +119,7 @@ func (h *handler) withRefreshedBoundChannelPrompt(ctx context.Context, sessionID
 			}
 			if stored == nil {
 				unlock()
-				return errSessionNotFound
+				return workerbase.ErrSessionNotFound
 			}
 			desired := zotigosession.PromptConfig{AgentInstructions: prompt.AgentInstructions, ApprovalInstructions: prompt.ApprovalInstructions, ReviewAllTools: prompt.ReviewAllTools}
 			detached, err = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, bound, prompt.ApprovalPolicy)
@@ -132,7 +134,7 @@ func (h *handler) withRefreshedBoundChannelPrompt(ctx context.Context, sessionID
 			// A prompt cannot change inside an active turn. Admit only as
 			// steering; if the turn ended at this boundary, reconcile once more
 			// before allowing a new turn to start.
-			if err := admit(true); !errors.Is(err, errNoActiveTurn) {
+			if err := admit(true); !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 				return err
 			}
 		}
@@ -267,7 +269,7 @@ func (h *handler) StopChannelTask(parent context.Context, task channels.Task, pr
 	if _, err := h.pauseActiveSession(ctx, task.SessionID, session, ""); err != nil {
 		completeAdmission()
 		switch {
-		case errors.Is(err, errNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
+		case errors.Is(err, sessionlog.ErrNoActiveTurn), errors.Is(err, errSessionBusy), errors.Is(err, errInvalidSessionTransition):
 			return channels.TaskResult{Text: "There is no active task to stop."}, nil
 		case errors.Is(err, errWorkerInputStopping):
 			return channels.TaskResult{Text: "A stop is already in progress."}, nil
@@ -319,7 +321,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 			return fmt.Errorf("load bound session: %w", loadErr)
 		}
 		if stored == nil {
-			return errSessionNotFound
+			return workerbase.ErrSessionNotFound
 		}
 		detached, loadErr = h.reconcileChannelSessionPromptLocked(ctx, stored, &desired, true, task.ApprovalPolicy)
 		return loadErr
@@ -334,7 +336,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 		return channels.TaskResult{}, fmt.Errorf("load session items: %w", err)
 	}
 	if !exists {
-		return channels.TaskResult{}, errSessionNotFound
+		return channels.TaskResult{}, workerbase.ErrSessionNotFound
 	}
 	fallbackRuntime := channelSessionRuntimeAttribution(stored)
 	events, unsubscribe := h.events.Subscribe(task.SessionID)
@@ -365,7 +367,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, task.SessionID, commandID, task.Text, images, nil, "", false, true, &sessionInputConstraints{approvalPolicy: channelPolicy, promptRevision: desired.Revision, requestContext: requestContext})
 	if err != nil {
-		if errors.Is(err, errActiveTurn) || errors.Is(err, errSessionBusy) {
+		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, errSessionBusy) {
 			return channels.TaskResult{}, errors.New("the bound session already has an active turn")
 		}
 		return channels.TaskResult{}, err
@@ -395,35 +397,35 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 	}
 }
 
-func channelMessageImages(inputs []channels.InboundImage) ([]messageImage, error) {
+func channelMessageImages(inputs []channels.InboundImage) ([]sessionlog.MessageImage, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
-	if len(inputs) > maxMessageImages {
-		return nil, fmt.Errorf("channel message images must contain at most %d items", maxMessageImages)
+	if len(inputs) > sessionlog.MaxMessageImages {
+		return nil, fmt.Errorf("channel message images must contain at most %d items", sessionlog.MaxMessageImages)
 	}
-	images := make([]messageImage, 0, len(inputs))
+	images := make([]sessionlog.MessageImage, 0, len(inputs))
 	totalBytes := 0
 	for index, input := range inputs {
 		if len(input.Data) == 0 {
 			return nil, fmt.Errorf("channel message image %d is empty", index)
 		}
-		if len(input.Data) > maxMessageImageBytes {
-			return nil, fmt.Errorf("channel message image %d exceeds %d bytes", index, maxMessageImageBytes)
+		if len(input.Data) > sessionlog.MaxMessageImageBytes {
+			return nil, fmt.Errorf("channel message image %d exceeds %d bytes", index, sessionlog.MaxMessageImageBytes)
 		}
 		totalBytes += len(input.Data)
-		if totalBytes > maxMessageTotalImageBytes {
-			return nil, fmt.Errorf("channel message images exceed %d total bytes", maxMessageTotalImageBytes)
+		if totalBytes > sessionlog.MaxMessageTotalImageBytes {
+			return nil, fmt.Errorf("channel message images exceed %d total bytes", sessionlog.MaxMessageTotalImageBytes)
 		}
 		mimeType := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(input.Data), ";")[0]))
-		if !isAllowedMessageImageMimeType(mimeType) {
+		if !sessionlog.IsAllowedMessageImageMimeType(mimeType) {
 			return nil, fmt.Errorf("channel message image %d has unsupported MIME type %q", index, mimeType)
 		}
-		width, height, err := validateMessageImageData(mimeType, input.Data)
+		width, height, err := sessionlog.ValidateMessageImageData(mimeType, input.Data)
 		if err != nil {
 			return nil, fmt.Errorf("validate channel message image %d: %w", index, err)
 		}
-		images = append(images, messageImage{MimeType: mimeType, Data: input.Data, SizeBytes: len(input.Data), Width: width, Height: height})
+		images = append(images, sessionlog.MessageImage{MimeType: mimeType, Data: input.Data, SizeBytes: len(input.Data), Width: width, Height: height})
 	}
 	return images, nil
 }
@@ -434,7 +436,7 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 		return channels.TaskResult{}, false, err
 	}
 	if !exists {
-		return channels.TaskResult{}, false, errSessionNotFound
+		return channels.TaskResult{}, false, workerbase.ErrSessionNotFound
 	}
 	answer := ""
 	runtime := fallbackRuntime

@@ -79,11 +79,3 @@ type ExecResult struct {
 func (r *ExecResult) Success() bool {
 	return r.ExitCode == 0
 }
-
-// CombinedOutput returns stdout and stderr combined
-func (r *ExecResult) CombinedOutput() []byte {
-	result := make([]byte, 0, len(r.Stdout)+len(r.Stderr))
-	result = append(result, r.Stdout...)
-	result = append(result, r.Stderr...)
-	return result
-}

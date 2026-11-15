@@ -13,6 +13,7 @@ import (
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/channels"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 var errSessionMissingChannelTools = errors.New("codex session was started without Channel tools")
@@ -45,7 +46,7 @@ func (h *handler) handleChannelConnections(w http.ResponseWriter, r *http.Reques
 			writeAPIError(w, 400, fmt.Sprintf("decode request: %v", err))
 			return
 		}
-		value, err := h.channels.PutConnection(r.Context(), newZotigodID("channel"), input)
+		value, err := h.channels.PutConnection(r.Context(), sessionlog.NewID("channel"), input)
 		if err != nil {
 			writeAPIError(w, 400, err.Error())
 			return

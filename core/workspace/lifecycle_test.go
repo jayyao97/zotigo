@@ -12,6 +12,7 @@ import (
 )
 
 func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -66,6 +67,7 @@ func TestArchiveAndUnarchiveWorkspacePreserveBranchAndFiles(t *testing.T) {
 }
 
 func TestArchiveTracksCurrentWorktreeBranch(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []string{"renamed", "switched"} {
 		t.Run(mode, func(t *testing.T) {
 			store, workspace, source := createGitWorkspaceFixture(t)
@@ -106,6 +108,7 @@ func TestArchiveTracksCurrentWorktreeBranch(t *testing.T) {
 }
 
 func TestArchiveRejectsDetachedWorktree(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -120,6 +123,7 @@ func TestArchiveRejectsDetachedWorktree(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRemovesOwnedRootAndPreservesBranches(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -157,6 +161,7 @@ func TestDeleteWorkspaceRemovesOwnedRootAndPreservesBranches(t *testing.T) {
 }
 
 func TestDeleteFailedWorkspaceWithUncreatedCheckout(t *testing.T) {
+	t.Parallel()
 	store, readyWorkspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	branchRef := "refs/heads/already-exists"
@@ -192,6 +197,7 @@ func TestDeleteFailedWorkspaceWithUncreatedCheckout(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRejectsSymlinkAncestor(t *testing.T) {
+	t.Parallel()
 	store, workspace, _ := createGitWorkspaceFixture(t)
 	projectDir := filepath.Dir(filepath.Dir(workspace.RootPath))
 	relocated := filepath.Join(store.RootDir(), "relocated-project")
@@ -210,6 +216,7 @@ func TestDeleteWorkspaceRejectsSymlinkAncestor(t *testing.T) {
 }
 
 func TestDeleteWorkspaceRequiresZotigoBranchOwnership(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ownershipRef := checkoutOwnershipRef(workspace.ID, source.SourceKey)
 	runGitProvisionCommand(t, source.CanonicalPath, "update-ref", "-d", ownershipRef)
@@ -225,6 +232,7 @@ func TestDeleteWorkspaceRequiresZotigoBranchOwnership(t *testing.T) {
 }
 
 func TestArchivedWorkspaceRejectsRecreatedBranchGeneration(t *testing.T) {
+	t.Parallel()
 	for _, operation := range []string{"unarchive", "delete"} {
 		t.Run(operation, func(t *testing.T) {
 			store, workspace, source := createGitWorkspaceFixture(t)

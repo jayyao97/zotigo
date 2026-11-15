@@ -193,8 +193,12 @@ func transientCode(code string) bool {
 	return false
 }
 
+// retryBaseDelay is the first backoff step; later steps double it. It is a
+// variable only so tests in this package can sit out a shorter backoff.
+var retryBaseDelay = time.Second
+
 func retryDelay(header http.Header, attempt int) time.Duration {
-	delay := time.Second * time.Duration(1<<attempt)
+	delay := retryBaseDelay * time.Duration(1<<attempt)
 	delay += time.Duration(rand.Int64N(int64(delay / 2)))
 	if seconds, err := strconv.ParseInt(header.Get("Retry-After"), 10, 32); err == nil && seconds > 0 {
 		return max(delay, time.Duration(seconds)*time.Second)

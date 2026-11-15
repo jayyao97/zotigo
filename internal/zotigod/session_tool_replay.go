@@ -8,22 +8,11 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
-)
 
-// Live admission already holds the source Channel configuration fence. Only
-// durable command replay performs this second RPC, avoiding recursive RLocks
-// while the daemon waits for a live worker admission.
-func authorizeRuntimeToolReplay(ctx context.Context, client *workerRuntimeToolClient, commandID string) error {
-	if !strings.HasPrefix(commandID, "session_tool:") && !strings.HasPrefix(commandID, "completion:") {
-		return nil
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	arguments, _ := json.Marshal(map[string]string{"command_id": commandID})
-	_, err := client.request(ctx, workerRuntimeToolRequest{Namespace: "host", Name: "authorize_input", Arguments: arguments})
-	return err
-}
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
+)
 
 func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string, raw json.RawMessage) (string, error) {
 	var input struct {
@@ -41,7 +30,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if err != nil {
 			return "", err
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, commandResponse{ID: input.CommandID, Message: &messageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
+		_, found, err := sessionlog.FindExistingInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: completionPrompt(value.OnFire, value.CallbackText), RequestContext: completionOrigin(value)}}, h.sessionStoreRoot())
 		if err != nil {
 			return "", err
 		}
@@ -79,14 +68,14 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		return "", err
 	}
 	if source == nil {
-		return "", errSessionNotFound
+		return "", workerbase.ErrSessionNotFound
 	}
 	target, err := h.store.Get(ctx, targetID)
 	if err != nil {
 		return "", err
 	}
 	if target == nil {
-		return "", errSessionNotFound
+		return "", workerbase.ErrSessionNotFound
 	}
 	caller := sessionToolCaller{SessionID: source.ID, WorkspaceID: operation.WorkspaceID, Stored: source, Origin: operation.Origin}
 	validate := func() error {
@@ -103,7 +92,7 @@ func (h *handler) authorizeDelegatedReplay(ctx context.Context, targetID string,
 		if operation.Name == "create_session" {
 			text = operation.Input.InitialMessage
 		}
-		_, found, err := findExistingSessionInput(ctx, h.items, targetID, commandResponse{ID: input.CommandID, Message: &messageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
+		_, found, err := sessionlog.FindExistingInput(ctx, h.items, targetID, wire.Command{ID: input.CommandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: operation.Origin}}, root)
 		if err != nil {
 			return err
 		}

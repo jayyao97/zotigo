@@ -39,12 +39,14 @@ func TestEnsureGlobalConfigCreatesTemplateAndParentDirectory(t *testing.T) {
 	}
 }
 
-func TestWebSearchConfigRoundTrip(t *testing.T) {
-	t.Setenv("HOME", t.TempDir())
-	cfg := config.DefaultConfig()
-	cfg.Tools.Web.SearchProvider = "deepseek"
-	cfg.Tools.Web.DeepSeekAPIKey = "test-key"
-	if err := config.NewManager().Save(cfg); err != nil {
+func TestWebSearchConfigLoads(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, config.ConfigDirName, config.ConfigFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("tools:\n  web:\n    search_provider: deepseek\n    deepseek_api_key: test-key\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := config.NewManager().LoadForDir(t.TempDir())
@@ -52,7 +54,7 @@ func TestWebSearchConfigRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	if loaded.Tools.Web.SearchProvider != "deepseek" || loaded.Tools.Web.DeepSeekAPIKey != "test-key" {
-		t.Fatal("web search configuration did not survive save/load")
+		t.Fatal("web search configuration was not loaded from the global config")
 	}
 }
 
@@ -92,7 +94,15 @@ func TestDottedModelSettingsProfileLoadsAndMerges(t *testing.T) {
 	if len(cfg.Profiles) != 2 || cfg.Profiles["deepseek"].Model != "separate-model" {
 		t.Fatal("dotted and non-dotted profile names collided")
 	}
-	if err := manager.Save(cfg); err != nil {
+	settings, err = manager.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = manager.UpdateModelSettings(config.ModelSettingsChange{
+		Revision: settings.Revision, Action: "save",
+		Profile: config.ModelSettingsProfile{Name: "deepseek.v4", Provider: "deepseek", Model: "project-model"},
+	})
+	if err != nil {
 		t.Fatal(err)
 	}
 	check("", "project-model")
@@ -271,12 +281,6 @@ func TestProjectConfigMerge(t *testing.T) {
 	}
 	defer os.RemoveAll(tmpDir)
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	// Override default profile and add a custom profile
 	projectConfigContent := []byte(`
 default_profile: my-custom-model
@@ -287,12 +291,12 @@ profiles:
 ui:
   theme: light
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -349,12 +353,6 @@ profiles:
 func TestProjectConfigMerge_PreservesSafetyDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	projectConfigContent := []byte(`
 profiles:
   gpt-4o:
@@ -364,12 +362,12 @@ profiles:
       classifier:
         timeout_ms: 1500
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -392,12 +390,6 @@ profiles:
 func TestProjectConfigMerge_PreservesClassifierProfileOverride(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	projectConfigContent := []byte(`
 profiles:
   gpt-4o:
@@ -411,12 +403,12 @@ profiles:
     provider: openai
     model: gpt-5-mini
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -433,12 +425,6 @@ profiles:
 func TestProjectConfigMerge_ExplicitDisableClassifier(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	projectConfigContent := []byte(`
 profiles:
   gpt-4o:
@@ -448,12 +434,12 @@ profiles:
       classifier:
         enabled: false
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -471,12 +457,6 @@ profiles:
 func TestProjectConfigMerge_ExplicitDisableWithOtherOverrides(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	projectConfigContent := []byte(`
 profiles:
   gpt-4o:
@@ -487,12 +467,12 @@ profiles:
         enabled: false
         timeout_ms: 5000
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -509,12 +489,6 @@ profiles:
 func TestProjectConfigMerge_CustomProfileGetsClassifierDefaults(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	// A user-defined profile with no safety block at all. Before the fix,
 	// this profile would load with Enabled=nil and IsEnabled() would return
 	// false — silently disabling the classifier.
@@ -525,12 +499,12 @@ profiles:
     model: llama3
     base_url: http://localhost:11434
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}
@@ -553,12 +527,6 @@ profiles:
 func TestProjectConfigMerge_CustomProfilePartialClassifier(t *testing.T) {
 	tmpDir := t.TempDir()
 
-	originalWd, _ := os.Getwd()
-	defer os.Chdir(originalWd)
-	if err := os.Chdir(tmpDir); err != nil {
-		t.Fatalf("Failed to chdir: %v", err)
-	}
-
 	// A user-defined profile with partial classifier config. Fields not set
 	// should inherit defaults; explicit fields should be preserved.
 	projectConfigContent := []byte(`
@@ -570,12 +538,12 @@ profiles:
       classifier:
         timeout_ms: 7500
 `)
-	if err := os.WriteFile("zotigo.yaml", projectConfigContent, 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpDir, "zotigo.yaml"), projectConfigContent, 0644); err != nil {
 		t.Fatalf("Failed to write project config: %v", err)
 	}
 
 	mgr := config.NewManager()
-	cfg, err := mgr.Load()
+	cfg, err := mgr.LoadForDir(tmpDir)
 	if err != nil {
 		t.Fatalf("Failed to load config: %v", err)
 	}

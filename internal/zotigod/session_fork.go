@@ -15,6 +15,9 @@ import (
 	session "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/sessionadapter"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 var errForkOutcomeUnknown = errors.New("fork outcome_unknown: creation may have started; do not retry with a new request ID")
@@ -106,7 +109,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 			return nil, err
 		}
 		if prior.SourceID != sourceID || prior.RequestedTurnID != throughTurnID || prior.Title != title {
-			return nil, errCommandIDConflict
+			return nil, sessionlog.ErrCommandIDConflict
 		}
 		if !prior.Complete {
 			return nil, errForkOutcomeUnknown
@@ -127,7 +130,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		return nil, err
 	}
 	if source == nil {
-		return nil, errSessionNotFound
+		return nil, workerbase.ErrSessionNotFound
 	}
 	items, _, err := h.items.LoadItems(ctx, sourceID)
 	if err != nil {
@@ -149,7 +152,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	switch source.Agent {
 	case "", "zotigo":
 		// Match the native worker's TranscriptDir, including custom-store hosts.
-		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, compactedTranscriptDir())
+		snapshot, err = nativeForkSnapshot(ctx, source, throughTurnID, workerbase.CompactedTranscriptDir())
 		if err != nil {
 			return nil, err
 		}
@@ -174,7 +177,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 	child.LastPrompt = ""
 	child.Capabilities.ChannelToolsVersion = 0
 	if source.Agent == "codex" {
-		child.ConversationID, err = forkCodexConversation(ctx, h.codexSync.host, source, throughTurnID)
+		child.ConversationID, err = codexworker.ForkConversation(ctx, h.codexSync.host, source, throughTurnID)
 		if err != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 		}
@@ -197,12 +200,12 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		if acquireErr != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, acquireErr)
 		}
-		turns, readErr := readCodexThreadHistory(ctx, lease.RPC, child.ConversationID)
+		turns, readErr := codexworker.ReadThreadHistory(ctx, lease.RPC, child.ConversationID)
 		_ = lease.Release()
 		if readErr != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, readErr)
 		}
-		if err := syncCompletedCodexTurns(ctx, h.items, targetID, turns); err != nil {
+		if err := codexworker.SyncCompletedTurns(ctx, h.items, targetID, turns); err != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 		}
 	} else {

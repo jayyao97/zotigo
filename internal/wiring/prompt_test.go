@@ -101,12 +101,15 @@ Use this skill for tests.
 		Transport:                  "test transport",
 		IncludeProjectInstructions: true,
 	})
-	context := userContextBuilder.BuildMetaUserContext(prompt.PromptContext{
+	context, _, err := userContextBuilder.BuildFull(prompt.PromptContext{
 		WorkDir:  workDir,
 		Platform: "linux",
 	})
+	if err != nil {
+		t.Fatalf("BuildFull: %v", err)
+	}
 	for _, want := range []string{
-		"<user_context>",
+		`<user_context update="full">`,
 		"<environment>",
 		"working_directory: " + workDir,
 		"platform: linux",

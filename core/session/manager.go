@@ -1,8 +1,6 @@
 package session
 
 import (
-	"context"
-	"fmt"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/agent"
@@ -72,50 +70,6 @@ type ForkPoint struct {
 	HistoryDigest string `json:"history_digest"`
 }
 
-// Manager handles session storage, retrieval, and locking.
-// It uses a Store backend for persistence.
-type Manager struct {
-	store Store
-}
-
-// NewManager creates a new Manager with the default FileStore.
-func NewManager() (*Manager, error) {
-	store, err := NewFileStore("")
-	if err != nil {
-		return nil, err
-	}
-	return &Manager{store: store}, nil
-}
-
-// NewManagerWithStore creates a new Manager with a custom Store backend.
-func NewManagerWithStore(store Store) *Manager {
-	return &Manager{store: store}
-}
-
-// CreateNew initializes a new session for the current directory.
-func (m *Manager) CreateNew(workDir string) (*Session, error) {
-	id := fmt.Sprintf("sess_%d", time.Now().UnixNano())
-	sess := &Session{
-		Metadata: Metadata{
-			ID:               id,
-			WorkingDirectory: workDir,
-			CreatedAt:        time.Now(),
-			UpdatedAt:        time.Now(),
-		},
-		AgentSnapshot: agent.Snapshot{
-			State:     agent.StateIdle,
-			CreatedAt: time.Now(),
-		},
-		Turns: make([]Turn, 0),
-	}
-
-	// Initial save to register it
-	if err := m.Save(sess); err != nil {
-		return nil, err
-	}
-	return sess, nil
-}
-
 // EnsureInitialized backfills fields added in newer versions so old sessions remain usable.
 func (s *Session) EnsureInitialized() {
 	if s.Agent == "" {
@@ -127,77 +81,4 @@ func (s *Session) EnsureInitialized() {
 	if s.Turns == nil {
 		s.Turns = make([]Turn, 0)
 	}
-}
-
-// ListByDir returns all sessions for a given directory, sorted by UpdatedAt desc.
-func (m *Manager) ListByDir(workDir string) ([]Metadata, error) {
-	return m.store.List(context.Background(), ListFilter{
-		WorkingDirectory: workDir,
-		OrderBy:          OrderByUpdatedDesc,
-	})
-}
-
-// ListAll returns all sessions sorted by UpdatedAt descending.
-func (m *Manager) ListAll() ([]Metadata, error) {
-	return m.store.List(context.Background(), ListFilter{OrderBy: OrderByUpdatedDesc})
-}
-
-// RootDir returns the backing store root when the manager uses a FileStore.
-func (m *Manager) RootDir() string {
-	if store, ok := m.store.(*FileStore); ok {
-		return store.RootDir()
-	}
-	return ""
-}
-
-// Load reads a session from the store.
-func (m *Manager) Load(id string) (*Session, error) {
-	sess, err := m.store.Get(context.Background(), id)
-	if err != nil {
-		return nil, err
-	}
-	if sess == nil {
-		return nil, fmt.Errorf("session not found: %s", id)
-	}
-	return sess, nil
-}
-
-// Save writes the session to the store.
-func (m *Manager) Save(sess *Session) error {
-	sess.UpdatedAt = time.Now()
-	return m.store.Put(context.Background(), sess)
-}
-
-func (m *Manager) AppendDisplayItem(id string, item DisplayItem) (DisplayItem, error) {
-	return m.store.AppendDisplayItem(context.Background(), id, item)
-}
-
-func (m *Manager) ListDisplayItems(id string) ([]DisplayItem, bool, error) {
-	return m.store.ListDisplayItems(context.Background(), id)
-}
-
-// Delete removes a session from the store.
-func (m *Manager) Delete(id string) error {
-	return m.store.Delete(context.Background(), id)
-}
-
-// Lock creates a lock on the session.
-func (m *Manager) Lock(id string) error {
-	return m.store.Lock(context.Background(), id)
-}
-
-// Unlock releases the lock on the session.
-func (m *Manager) Unlock(id string) error {
-	return m.store.Unlock(context.Background(), id)
-}
-
-// IsLocked checks if a session is currently locked.
-func (m *Manager) IsLocked(id string) bool {
-	locked, _ := m.store.IsLocked(context.Background(), id)
-	return locked
-}
-
-// Close closes the underlying store.
-func (m *Manager) Close() error {
-	return m.store.Close()
 }

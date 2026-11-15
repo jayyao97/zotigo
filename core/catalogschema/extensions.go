@@ -28,17 +28,6 @@ func extensionVersion(ctx context.Context, db *sql.DB) (int, error) {
 	return version, err
 }
 
-func CheckExtensions(ctx context.Context, db *sql.DB) error {
-	version, err := extensionVersion(ctx, db)
-	if err != nil {
-		return err
-	}
-	if version < ExtensionVersion {
-		return fmt.Errorf("catalog extensions %d are not ready (expected %d)", version, ExtensionVersion)
-	}
-	return nil
-}
-
 func ensureExtensions(ctx context.Context, db *sql.DB) error {
 	version, err := extensionVersion(ctx, db)
 	if err != nil {

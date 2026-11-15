@@ -20,6 +20,9 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
 	workspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
+	"github.com/jayyao97/zotigo/internal/zotigod/workerbase"
 )
 
 type sessionToolCaller struct {
@@ -46,20 +49,20 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 		return caller, err
 	}
 	if stored == nil {
-		return caller, errSessionNotFound
+		return caller, workerbase.ErrSessionNotFound
 	}
 	items, exists, err := h.items.LoadItems(ctx, id)
 	if err != nil {
 		return caller, err
 	}
-	if !exists || lastOpenTurnID(items) != turnID {
+	if !exists || sessionlog.LastOpenTurnID(items) != turnID {
 		return caller, errors.New("runtime tool caller turn is no longer active")
 	}
 	var pending, input *session.DisplayItem
 	started := false
 	for index := range items {
 		item := &items[index]
-		if item.Command != nil && item.Command.Type == sessionCommandMessage {
+		if item.Command != nil && item.Command.Type == wire.CommandMessage {
 			pending = item
 		}
 		if item.Type == session.DisplayItemTurnStarted && item.Turn != nil && item.Turn.ID == turnID {
@@ -68,7 +71,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 		}
 		// Steering from the same principal preserves the turn's authority. Do
 		// not let a different sender borrow the initiating input's grants.
-		if sessionScope && started && item.Command != nil && item.Command.Type == sessionCommandSteering {
+		if sessionScope && started && item.Command != nil && item.Command.Type == wire.CommandSteering {
 			// Host-created callback feedback contributes data, not a new principal.
 			// Preserve the initiating user's authority only for a verified receipt;
 			// callback-initiated turns still hit the delegation fence below.
@@ -79,7 +82,7 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 				}
 				if trigger.SessionID != id || trigger.State != "fired" || trigger.DeliveryMode != "steer" ||
 					item.Command.Text != completionPrompt(trigger.OnFire, trigger.CallbackText) ||
-					!sameRequestContext(item.Command.RequestContext, completionOrigin(trigger)) {
+					!sessionlog.SameRequestContext(item.Command.RequestContext, completionOrigin(trigger)) {
 					return caller, errors.New("completion steering has no matching host receipt")
 				}
 				continue
@@ -126,7 +129,7 @@ func sameSessionToolPrincipal(left, right *protocol.RequestContext) bool {
 		left.Actor.ID != "" && left.Actor.ID == right.Actor.ID
 }
 
-func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string, request workerRuntimeToolRequest) (string, error) {
+func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string, request wire.RuntimeToolRequest) (string, error) {
 	if !h.workers.Matches(id, generation) {
 		return "", errors.New("stale runtime tool worker")
 	}
@@ -144,7 +147,7 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 			if err != nil {
 				return "", err
 			}
-			turnID = lastOpenTurnID(items)
+			turnID = sessionlog.LastOpenTurnID(items)
 		}
 		caller, err := h.resolveRuntimeToolCaller(ctx, id, generation, turnID, false)
 		if err != nil {
@@ -156,8 +159,8 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 	if request.Namespace != "zotigo" || request.CallID == "" || len(request.CallID) > 512 {
 		return "", errors.New("invalid runtime tool identity")
 	}
-	var spec *runtimeToolSpec
-	for _, candidate := range sessionToolSpecs() {
+	var spec *workerbase.RuntimeToolSpec
+	for _, candidate := range workerbase.SessionToolSpecs() {
 		if candidate.Name == request.Name {
 			copy := candidate
 			spec = &copy
@@ -412,7 +415,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 			return nil, err
 		}
 		if !exists {
-			return nil, errSessionNotFound
+			return nil, workerbase.ErrSessionNotFound
 		}
 	} else {
 		if window.Since != nil || window.Until != nil {
@@ -423,7 +426,7 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 			return nil, loadErr
 		}
 		if !exists {
-			return nil, errSessionNotFound
+			return nil, workerbase.ErrSessionNotFound
 		}
 		page = session.PageDisplayItems(items, query)
 	}
@@ -469,7 +472,7 @@ func toolDigest(values ...string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller, request workerRuntimeToolRequest) (any, error) {
+func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller, request wire.RuntimeToolRequest) (any, error) {
 	var input sessionToolWriteInput
 	if err := decodeSessionToolArguments(request.Arguments, &input); err != nil {
 		return nil, err
@@ -533,7 +536,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 			return nil, err
 		}
 		if existing.SourceSessionID != operation.SourceSessionID || existing.SourceTurnID != operation.SourceTurnID || existing.CallID != operation.CallID || existing.Name != operation.Name || !reflect.DeepEqual(existing.Input, input) || existing.TargetID != operation.TargetID {
-			return nil, errCommandIDConflict
+			return nil, sessionlog.ErrCommandIDConflict
 		}
 		operation = existing
 	} else if errors.Is(err, os.ErrNotExist) {
@@ -569,10 +572,10 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 		return nil, err
 	}
 	if target == nil {
-		return nil, errSessionNotFound
+		return nil, workerbase.ErrSessionNotFound
 	}
 	commandID := "session_tool:" + turnKey + ":" + callKey
-	previous, found, err := findExistingSessionInput(ctx, h.items, operation.TargetID, commandResponse{ID: commandID, Message: &messageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
+	previous, found, err := sessionlog.FindExistingInput(ctx, h.items, operation.TargetID, wire.Command{ID: commandID, Message: &wire.MessageCommandPayload{Text: text, RequestContext: caller.Origin}}, root)
 	if err != nil {
 		return nil, err
 	}
@@ -605,7 +608,7 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, operation.TargetID, commandID, text, nil, nil, "", false, true, &sessionInputConstraints{approvalPolicy: target.ApprovalPolicy, promptRevision: target.PromptConfig.Revision, requestContext: caller.Origin})
 	if err != nil {
-		if errors.Is(err, errActiveTurn) || errors.Is(err, errInputPolicyMismatch) || errors.Is(err, errWorkerInputStopping) {
+		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, sessionlog.ErrInputPolicyMismatch) || errors.Is(err, errWorkerInputStopping) {
 			return nil, err
 		}
 		return uncertainSessionToolResult(operation.TargetID, commandID), nil

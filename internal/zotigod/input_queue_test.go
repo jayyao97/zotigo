@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -13,6 +14,8 @@ import (
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestEmptyQueueDoesNotLoadHistory(t *testing.T) {
@@ -29,7 +32,7 @@ func TestEmptyQueueDoesNotLoadHistory(t *testing.T) {
 }
 
 type slowQueueHistory struct {
-	storedDisplayItemSource
+	sessionlog.StoredItemSource
 	delay atomic.Bool
 }
 
@@ -37,7 +40,7 @@ func (s *slowQueueHistory) LoadItems(ctx context.Context, id string) ([]zotigose
 	if s.delay.Load() {
 		time.Sleep(350 * time.Millisecond)
 	}
-	return s.storedDisplayItemSource.LoadItems(ctx, id)
+	return s.StoredItemSource.LoadItems(ctx, id)
 }
 
 func TestQueuedInputsWaitForTurnAndMerge(t *testing.T) {
@@ -69,7 +72,7 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 	}
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: sessionID, State: SessionStateRunning, Agent: agent, WorkingDirectory: dir, CreatedAt: now})
-	source := &slowQueueHistory{storedDisplayItemSource: storedDisplayItemSource{store: store}}
+	source := &slowQueueHistory{StoredItemSource: sessionlog.StoredItemSource{Store: store}}
 	if _, err := source.AppendItem(ctx, sessionID, zotigosession.DisplayItem{ID: "turn-start", Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "old"}, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
@@ -126,7 +129,7 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 			t.Fatal(err)
 		}
-		var input workerMessage
+		var input wire.Message
 		if err := worker.ReadJSON(&input); err != nil {
 			t.Fatal(err)
 		}
@@ -134,7 +137,7 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 			t.Fatalf("immediate input = %+v", input)
 		}
 		// A definite rejection must preserve the item and permit a fresh retry.
-		if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{RequestID: input.InputRequest.RequestID, ErrorCode: "input_failed", Error: "image decoding failed before admission"}}); err != nil {
+		if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{RequestID: input.InputRequest.RequestID, ErrorCode: "input_failed", Error: "image decoding failed before admission"}}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -156,19 +159,19 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		if input.InputRequest == nil {
 			t.Fatal("retry input missing")
 		}
-		command := steeringCommandForRequest(*input.InputRequest, "old")
-		accepted, err := appendAcceptedSessionInput(ctx, source, sessionID, command)
+		command := sessionlog.SteeringCommandForRequest(*input.InputRequest, "old")
+		accepted, err := sessionlog.AppendAcceptedInput(ctx, source, sessionID, command)
 		if err != nil {
 			t.Fatal(err)
 		}
 		idleSequence = accepted.Sequence
-		result := &workerInputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}
+		result := &wire.InputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}
 		wantStatus := 200
 		if failAfterAdmission {
 			result.Command = nil
 			result.ErrorCode, result.Error = "input_failed", "approval interruption failed after admission"
 		}
-		if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: result}); err != nil {
+		if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: result}); err != nil {
 			t.Fatal(err)
 		}
 		select {
@@ -207,13 +210,13 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 	}
 	// Preparation deliberately exceeds Codex's 250ms idle eviction timeout.
 	source.delay.Store(true)
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: idleSequence}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{CommandSequence: idleSequence}}); err != nil {
 		t.Fatal(err)
 	}
 	if err := worker.SetReadDeadline(time.Now().Add(3 * time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var input workerMessage
+	var input wire.Message
 	if err := worker.ReadJSON(&input); err != nil {
 		rows, _ := catalog.QueuedInputs(ctx, sessionID)
 		current, _ := registry.Get(sessionID)
@@ -227,11 +230,11 @@ func testQueuedInputsWaitForTurnAndMerge(t *testing.T, agent string, sendNow, fa
 		t.Fatalf("input=%+v", input)
 	}
 	command := input.InputRequest.Command
-	accepted, err := appendAcceptedSessionInput(ctx, source, sessionID, command)
+	accepted, err := sessionlog.AppendAcceptedInput(ctx, source, sessionID, command)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{RequestID: input.InputRequest.RequestID, Command: &accepted}}); err != nil {
 		t.Fatal(err)
 	}
 	deadline := time.Now().Add(3 * time.Second)
@@ -271,7 +274,7 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 		t.Fatal(err)
 	}
 	defer catalog.Close()
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	h := &handler{catalog: catalog, store: store, items: source, workers: newWorkerRegistry(), queueOps: newSessionOperationLocks()}
 	images, err := validateMessageImages([]submitMessageImageRequest{{MimeType: "image/png", DataBase64: tinyPNGBase64()}})
 	if err != nil {
@@ -282,8 +285,8 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 		t.Fatal(err)
 	}
 	first.Message.Images[0].DataBase64 = ""
-	second := commandResponse{ID: "b", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "second", Skills: []string{"review", "writing"}}}
-	for _, command := range []commandResponse{first, second} {
+	second := wire.Command{ID: "b", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "second", Skills: []string{"review", "writing"}}}
+	for _, command := range []wire.Command{first, second} {
 		data, err := json.Marshal(command)
 		if err != nil {
 			t.Fatal(err)
@@ -300,7 +303,7 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if merged.Message.Text != "first\n\nsecond" || !equalStrings(merged.Message.Skills, []string{"review", "writing"}) {
+	if merged.Message.Text != "first\n\nsecond" || !slices.Equal(merged.Message.Skills, []string{"review", "writing"}) {
 		t.Fatalf("merge=%+v", merged.Message)
 	}
 	if err := h.hydrateQueuedImages(&merged); err != nil {
@@ -310,9 +313,9 @@ func testQueuedInputImagesAndLostAcknowledgement(t *testing.T, steering bool) {
 		t.Fatal("image was not rehydrated")
 	}
 	if steering {
-		merged = steeringCommandForRequest(workerInputRequest{Command: merged}, "active")
+		merged = sessionlog.SteeringCommandForRequest(wire.InputRequest{Command: merged}, "active")
 	}
-	if _, err := appendAcceptedSessionInput(ctx, source, "s", merged); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, source, "s", merged); err != nil {
 		t.Fatal(err)
 	}
 	if err := catalog.RecoverQueuedInputs(ctx); err != nil {
@@ -342,7 +345,7 @@ func TestQueuePausedAfterFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer catalog.Close()
-	source := storedDisplayItemSource{store: store}
+	source := sessionlog.StoredItemSource{Store: store}
 	h := &handler{catalog: catalog, store: store, items: source, workers: newWorkerRegistry(), queueOps: newSessionOperationLocks()}
 	for _, kind := range []zotigosession.DisplayItemType{zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted} {
 		id := string(kind)
@@ -383,7 +386,7 @@ func TestEditQueuedImages(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer catalog.Close()
-			command := commandResponse{ID: "q", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "original", Images: []commandImageData{{BlobPath: "first"}, {BlobPath: "second"}}}}
+			command := wire.Command{ID: "q", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "original", Images: []wire.CommandImageData{{BlobPath: "first"}, {BlobPath: "second"}}}}
 			data, _ := json.Marshal(command)
 			if err := catalog.QueueInput(ctx, "s", "q", data); err != nil {
 				t.Fatal(err)
@@ -411,7 +414,7 @@ func TestEditQueuedImages(t *testing.T) {
 			if err != nil || len(rows) != 1 {
 				t.Fatalf("rows: %v %v", rows, err)
 			}
-			command = commandResponse{}
+			command = wire.Command{}
 			if err := json.Unmarshal(rows[0].Payload, &command); err != nil {
 				t.Fatal(err)
 			}

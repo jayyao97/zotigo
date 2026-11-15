@@ -104,6 +104,11 @@ func sourceKey(kind SourceKind, identity string) string {
 	return hex.EncodeToString(digest[:8])
 }
 
+// gitWaitDelay bounds how long a cancelled git command may keep its output
+// pipes open through a child process. It is a variable only so a test in this
+// package can sit out a shorter grace period.
+var gitWaitDelay = 2 * time.Second
+
 func runGit(ctx context.Context, directory string, args ...string) (string, error) {
 	return runGitWithOutputLimit(ctx, directory, 64*1024, args...)
 }
@@ -111,7 +116,7 @@ func runGit(ctx context.Context, directory string, args ...string) (string, erro
 func runGitWithOutputLimit(ctx context.Context, directory string, outputLimit int, args ...string) (string, error) {
 	commandArgs := append([]string{"-C", directory}, args...)
 	cmd := exec.CommandContext(ctx, "git", commandArgs...)
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = gitWaitDelay
 	cmd.Env = sanitizedGitEnvironment(os.Environ())
 	output, err := cmd.Output()
 	if err != nil {

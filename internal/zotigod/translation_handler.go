@@ -13,7 +13,7 @@ import (
 	"github.com/anthropics/anthropic-sdk-go"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/providers"
-	"github.com/jayyao97/zotigo/core/services"
+	"github.com/jayyao97/zotigo/core/textassist"
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/genai"
 )
@@ -76,7 +76,7 @@ func (h *handler) handleTranslation(w http.ResponseWriter, r *http.Request, id s
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
 	defer cancel()
-	translated, err := services.TranslateText(ctx, provider, input.Text, input.TargetLanguage)
+	translated, err := textassist.TranslateText(ctx, provider, input.Text, input.TargetLanguage)
 	if err != nil {
 		status, reason := translationFailure(err)
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {

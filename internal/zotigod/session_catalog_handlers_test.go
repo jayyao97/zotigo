@@ -9,15 +9,19 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func TestWorkspaceDeleteHidesSessionsButPreservesHistoryProjection(t *testing.T) {
 	for _, parent := range []string{"workspace", "project"} {
 		t.Run(parent, func(t *testing.T) {
 			handler, _, catalog, workspace := newCatalogSessionFixture(t)
-			writeTestProfileConfig(t, workspace.RootPath)
+			sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 			created := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 			if created.Code != http.StatusCreated {
 				t.Fatalf("create = %d: %s", created.Code, created.Body.String())
@@ -58,7 +62,7 @@ func TestWorkspaceDeleteHidesSessionsButPreservesHistoryProjection(t *testing.T)
 
 func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	if create.Code != http.StatusCreated {
@@ -132,7 +136,7 @@ func TestAssignedSessionOrganizationAndAvailability(t *testing.T) {
 
 func TestIdleRunningSessionCanBeArchivedAndRestarted(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	var session Session
 	decodeCatalogData(t, create, &session)
@@ -168,10 +172,10 @@ func TestIdleRunningSessionCanBeArchivedAndRestarted(t *testing.T) {
 }
 
 func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	workers := newWorkerRegistry()
 	handler, registry, _, workspace := newCatalogSessionFixtureWithRuntime(t, newSessionOperationLocks(), source, workers)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	var session Session
 	decodeCatalogData(t, create, &session)
@@ -186,8 +190,8 @@ func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
 	serveTestWorkerConnectionInputs(connection, source, session.ID)
 	appendStarted := make(chan struct{})
 	releaseAppend := make(chan struct{})
-	source.appendHook = func(sessionID string, item zotigosession.DisplayItem) {
-		if sessionID == session.ID && item.Command != nil && item.Command.Type == sessionCommandMessage {
+	source.AppendHook = func(sessionID string, item zotigosession.DisplayItem) {
+		if sessionID == session.ID && item.Command != nil && item.Command.Type == wire.CommandMessage {
 			close(appendStarted)
 			<-releaseAppend
 		}
@@ -221,7 +225,7 @@ func TestMessageAppendSerializesWithSessionArchive(t *testing.T) {
 
 func TestIdleSessionArchiveFailurePreservesRunningState(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	var session Session
 	decodeCatalogData(t, create, &session)
@@ -264,7 +268,7 @@ func TestDetachedWorkerCannotUnregisterReplacement(t *testing.T) {
 func TestAssignedSessionCreationUsesWorkspaceLifecycleLock(t *testing.T) {
 	workspaceOps := newSessionOperationLocks()
 	handler, _, _, workspace := newCatalogSessionFixtureWithWorkspaceOps(t, workspaceOps)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	unlock := workspaceOps.lock(workspace.ID)
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -286,7 +290,7 @@ func TestAssignedSessionCreationUsesWorkspaceLifecycleLock(t *testing.T) {
 func TestAssignedSessionCreationUsesProjectLifecycleLock(t *testing.T) {
 	workspaceOps := newSessionOperationLocks()
 	handler, _, _, workspace := newCatalogSessionFixtureWithWorkspaceOps(t, workspaceOps)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	unlock := workspaceOps.lock(projectOperationLockKey(workspace.ProjectID))
 	done := make(chan *httptest.ResponseRecorder, 1)
 	go func() {
@@ -307,7 +311,7 @@ func TestAssignedSessionCreationUsesProjectLifecycleLock(t *testing.T) {
 
 func TestArchivedWorkspaceBlocksSessionActivation(t *testing.T) {
 	handler, _, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	var session Session
 	decodeCatalogData(t, create, &session)
@@ -323,7 +327,7 @@ func TestArchivedWorkspaceBlocksSessionActivation(t *testing.T) {
 
 func TestProjectDeletePreservesRuntimeSessionAndArchivesOrganization(t *testing.T) {
 	handler, registry, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	create := requestCatalog(t, handler, http.MethodPost, "/sessions", `{"workspace_id":`+quotedJSON(t, workspace.ID)+`}`)
 	if create.Code != http.StatusCreated {
 		t.Fatalf("create assigned session status = %d: %s", create.Code, create.Body.String())
@@ -351,7 +355,7 @@ func newCatalogSessionFixtureWithWorkspaceOps(t *testing.T, workspaceOps *sessio
 	return newCatalogSessionFixtureWithRuntime(t, workspaceOps, nil, nil)
 }
 
-func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items displayItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
+func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOperationLocks, items sessionlog.ItemSource, workers *workerRegistry) (http.Handler, *sessionRegistry, *zotigoworkspace.Store, zotigoworkspace.Workspace) {
 	t.Helper()
 	root := newTestStoreRoot(t)
 	store, err := zotigosession.NewFileStore(root)
@@ -378,7 +382,7 @@ func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOper
 	}
 	registry := newSessionRegistry()
 	if items == nil {
-		items = storedDisplayItemSource{store: store}
+		items = sessionlog.StoredItemSource{Store: store}
 	}
 	handler := newHandler(registry, items, handlerOptions{store: store, catalog: catalog, workspaceOps: workspaceOps, workers: workers})
 	return handler, registry, catalog, workspace
@@ -386,7 +390,7 @@ func newCatalogSessionFixtureWithRuntime(t *testing.T, workspaceOps *sessionOper
 
 func TestCreateSessionStartsAtFrontWithoutClientReorder(t *testing.T) {
 	handler, _, catalog, workspace := newCatalogSessionFixture(t)
-	writeTestProfileConfig(t, workspace.RootPath)
+	sessionlogtest.WriteProfileConfig(t, workspace.RootPath)
 	var previousID string
 	var previousPosition int64
 	for i := 0; i < 3; i++ {

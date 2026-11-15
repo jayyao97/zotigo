@@ -125,7 +125,7 @@ func TestUsageHelpers(t *testing.T) {
 	}
 }
 
-func TestSessionAndLastTurnUsage(t *testing.T) {
+func TestSessionUsage(t *testing.T) {
 	usage1 := &protocol.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15}
 	usage2 := &protocol.Usage{InputTokens: 30, CacheReadInputTokens: 100, OutputTokens: 7, TotalTokens: 137}
 	toolUsage := &protocol.Usage{InputTokens: 3, OutputTokens: 2, TotalTokens: 5}
@@ -146,22 +146,6 @@ func TestSessionAndLastTurnUsage(t *testing.T) {
 	total := protocol.SessionUsage(history)
 	if total.InputTokens != 43 || total.CacheReadInputTokens != 100 || total.OutputTokens != 14 || total.TotalTokens != 157 {
 		t.Errorf("SessionUsage wrong: %+v", total)
-	}
-
-	last, ok := protocol.LastTurnUsage(history)
-	if !ok {
-		t.Fatal("LastTurnUsage returned ok=false on populated history")
-	}
-	if last.OutputTokens != 7 || last.InputTokens != 30 || last.TotalTokens != 137 {
-		t.Errorf("LastTurnUsage returned wrong turn: %+v", last)
-	}
-
-	if _, ok := protocol.LastTurnUsage(nil); ok {
-		t.Error("LastTurnUsage should be ok=false on empty history")
-	}
-
-	if got := protocol.CountAssistantTurns(history); got != 2 {
-		t.Errorf("CountAssistantTurns = %d, want 2", got)
 	}
 }
 

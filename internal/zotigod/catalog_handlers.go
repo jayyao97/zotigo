@@ -10,6 +10,7 @@ import (
 	"time"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type createProjectRequest struct {
@@ -658,7 +659,7 @@ func (h *handler) lockWorkspaceSessions(ctx context.Context, workspaceID string)
 				release()
 				return func() {}, false, err
 			}
-			if requireIdleSession(items) != nil || hasPendingHumanRequest(items) {
+			if requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
 				return release, true, nil
 			}
 		}

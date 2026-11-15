@@ -8,10 +8,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jayyao97/zotigo/core/protocol"
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	zotigosession "github.com/jayyao97/zotigo/core/session"
-	"github.com/jayyao97/zotigo/core/skills"
-	"github.com/jayyao97/zotigo/internal/sessionadapter"
 )
 
 func TestSkillsAPIListsUserAndSessionWorkspaceSkills(t *testing.T) {
@@ -29,7 +28,7 @@ func TestSkillsAPIListsUserAndSessionWorkspaceSkills(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	withoutSession := httptest.NewRecorder()
 	handler.ServeHTTP(withoutSession, httptest.NewRequest(http.MethodGet, "/skills", nil))
 	if withoutSession.Code != http.StatusOK {
@@ -93,7 +92,7 @@ func TestSessionMessageValidatesAndPersistsSelectedSkills(t *testing.T) {
 	t.Setenv("HOME", home)
 	workspace := t.TempDir()
 	writeDaemonTestSkill(t, filepath.Join(workspace, ".agents", "skills"), "review-taste", "review", "review carefully")
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
 	handler := newHandler(newSessionRegistry(), source)
 	server := httptest.NewServer(handler)
 	defer server.Close()
@@ -122,7 +121,7 @@ func TestSessionMessageValidatesAndPersistsSelectedSkills(t *testing.T) {
 func TestSessionMessageRejectsUnknownSkillAndPath(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	session := createSession(t, handler)
 
 	unknown := httptest.NewRecorder()
@@ -139,7 +138,7 @@ func TestSessionMessageReloadsSkillsBeforeValidation(t *testing.T) {
 	t.Setenv("HOME", home)
 	root := filepath.Join(home, ".agents", "skills")
 	path := writeDaemonTestSkill(t, root, "review-taste", "review", "review carefully")
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	session := createSession(t, handler)
 
 	prime := httptest.NewRecorder()
@@ -157,7 +156,7 @@ func TestSessionMessageReloadsSkillsBeforeValidation(t *testing.T) {
 }
 
 func TestSkillsAPIRejectsUnsafeSessionID(t *testing.T) {
-	handler := newHandler(newSessionRegistry(), &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}})
+	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}})
 	recorder := httptest.NewRecorder()
 	handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, "/skills?session_id=../registry", nil))
 	assertAPIError(t, recorder, http.StatusBadRequest, "invalid_request", "invalid session_id")
@@ -180,77 +179,6 @@ func TestSkillsAPIDoesNotExposeStoreErrors(t *testing.T) {
 		if strings.Contains(recorder.Body.String(), secretPath) {
 			t.Fatalf("response leaked absolute path: %s", recorder.Body.String())
 		}
-	}
-}
-
-func TestNativeRuntimeInjectsCompleteSelectedSkill(t *testing.T) {
-	root := filepath.Join(t.TempDir(), "skills")
-	path := writeDaemonTestSkill(t, root, "review-taste", "review", "review carefully")
-	manager := skills.NewSkillManager("", skills.WithUserDir(root))
-	message, err := messageFromCommandWithSkills("command-1", &messageCommandPayload{
-		Text: "review this", Skills: []string{"review-taste"},
-	}, manager)
-	if err != nil {
-		t.Fatal(err)
-	}
-	raw, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	text := message.Content[0].Text
-	if !strings.Contains(text, string(raw)) || !strings.HasSuffix(text, "review this") {
-		t.Fatalf("native message did not include complete skill: %q", text)
-	}
-	if got := message.DisplayString(); got != "review this" {
-		t.Fatalf("display text leaked injected skill: %q", got)
-	}
-	if got := sessionadapter.LastUserPrompt([]protocol.Message{message}); got != "review this" {
-		t.Fatalf("last prompt leaked injected skill: %q", got)
-	}
-}
-
-func TestCodexRuntimeBuildsTextAndStructuredSkillInputs(t *testing.T) {
-	workspace := t.TempDir()
-	path := writeDaemonTestSkill(t, filepath.Join(workspace, ".agents", "skills"), "review-taste", "review", "review carefully")
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{WorkingDirectory: workspace}}
-	inputs, err := runtime.codexInputs("review this", nil, []string{"review-taste"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(inputs) != 2 || inputs[0]["type"] != "text" || inputs[0]["text"] != "$review-taste review this" {
-		t.Fatalf("Codex inputs = %#v", inputs)
-	}
-	if inputs[1]["type"] != "skill" || inputs[1]["name"] != "review-taste" || inputs[1]["path"] != path {
-		t.Fatalf("Codex skill input = %#v", inputs[1])
-	}
-	inputs, err = runtime.codexInputs("$review-taste review this", nil, []string{"review-taste"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Count(inputs[0]["text"].(string), "$review-taste") != 1 {
-		t.Fatalf("Codex mention duplicated: %#v", inputs[0])
-	}
-}
-
-func TestCodexRuntimeMaterializesBuiltinSkill(t *testing.T) {
-	runtime := &codexWorkerRuntime{cfg: codexWorkerConfig{WorkingDirectory: t.TempDir()}}
-	inputs, err := runtime.codexInputs("create a skill", nil, []string{"skill-creator"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	path, _ := inputs[1]["path"].(string)
-	if !filepath.IsAbs(path) || filepath.Base(path) != "SKILL.md" {
-		t.Fatalf("builtin skill path = %q", path)
-	}
-	if data, readErr := os.ReadFile(path); readErr != nil || !strings.Contains(string(data), "name: skill-creator") {
-		t.Fatalf("materialized builtin = %q, err=%v", data, readErr)
-	}
-	root := runtime.skillTempDir
-	if err := runtime.cleanupSkillFiles(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(root); !os.IsNotExist(err) {
-		t.Fatalf("builtin skill temp dir was not removed: %v", err)
 	}
 }
 

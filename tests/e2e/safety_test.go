@@ -42,7 +42,7 @@ func newSafetyTestAgent(t *testing.T, e2eCfg *testutil.E2EConfig, tmpDir string)
 	}
 
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a concise coding assistant. Use tools as needed. Keep responses short.")
+	prompt.WithStaticPrompt("You are a concise coding assistant. Use tools as needed. Keep responses short.")(pb)
 
 	opts := []agent.AgentOption{
 		agent.WithSystemPromptBuilder(pb),
@@ -434,20 +434,20 @@ func TestE2E_Safety_DenyStopsExecution(t *testing.T) {
 	}
 
 	// Step 2: DENY the pending actions
-	var deniedOutputs []protocol.ToolResult
+	deniedOutputs := make(map[string]protocol.ToolResult)
 	for _, pa := range snap.PendingActions {
-		deniedOutputs = append(deniedOutputs, protocol.ToolResult{
+		deniedOutputs[pa.ToolCallID] = protocol.ToolResult{
 			ToolCallID: pa.ToolCallID,
 			ToolName:   pa.Name,
 			Type:       protocol.ToolResultTypeExecutionDenied,
 			Reason:     "User denied: not allowed to write secrets",
 			IsError:    true,
-		})
+		}
 	}
 
-	events, err = ag.SubmitToolOutputs(ctx, deniedOutputs)
+	events, err = ag.ResolvePendingActions(ctx, deniedOutputs)
 	if err != nil {
-		t.Fatalf("SubmitToolOutputs error: %v", err)
+		t.Fatalf("ResolvePendingActions error: %v", err)
 	}
 
 	content, _ := drainEvents(t, events)
@@ -502,7 +502,7 @@ func TestE2E_Safety_DestructiveCommandNeverExecutes(t *testing.T) {
 
 	profileCfg := e2eCfg.GetProfileConfig()
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use shell tool.")
+	prompt.WithStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use shell tool.")(pb)
 
 	ag, err := agent.New(profileCfg, localExec,
 		agent.WithSystemPromptBuilder(pb),
@@ -576,7 +576,7 @@ func TestE2E_Safety_HighRiskShellTriggersClassifier(t *testing.T) {
 	}
 
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use the shell tool.")
+	prompt.WithStaticPrompt("You are a concise assistant. Do exactly what the user asks. Use the shell tool.")(pb)
 
 	opts := []agent.AgentOption{
 		agent.WithSystemPromptBuilder(pb),
@@ -679,7 +679,7 @@ func TestE2E_Safety_ClassifierDisabledFallsBackToHardRules(t *testing.T) {
 	}
 
 	pb := prompt.NewSystemPromptBuilder()
-	pb.SetStaticPrompt("You are a concise assistant.")
+	prompt.WithStaticPrompt("You are a concise assistant.")(pb)
 
 	ag, err := agent.New(profileCfg, localExec,
 		agent.WithSystemPromptBuilder(pb),

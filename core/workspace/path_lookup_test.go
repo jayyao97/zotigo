@@ -11,6 +11,7 @@ import (
 )
 
 func TestWorkspaceContainingPath(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)

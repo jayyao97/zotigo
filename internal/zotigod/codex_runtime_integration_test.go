@@ -11,11 +11,15 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/gorilla/websocket"
 	"github.com/jayyao97/zotigo/core/agent"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 type fakeCodexRuntime struct {
@@ -42,7 +46,7 @@ func (f *fakeCodexRuntime) StartWorker(_ context.Context, spec zotigoruntime.Wor
 		if err != nil {
 			return
 		}
-		generation := response.Header.Get(workerGenerationHeader)
+		generation := response.Header.Get(wire.GenerationHeader)
 		ready, err := postWorkerReady(f.server, spec.SessionID, generation)
 		if err == nil {
 			_ = ready.Body.Close()
@@ -69,7 +73,7 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -79,7 +83,7 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
-	command := commandResponse{ID: "command-1", Sequence: 1, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}}
+	command := wire.Command{ID: "command-1", Sequence: 1, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "hello"}}
 	if !workers.Send(session.ID, command) {
 		t.Fatal("send command to ready worker")
 	}
@@ -88,7 +92,7 @@ func TestCodexWorkerReleasesWhenIdleAndNewerCommandCancelsRelease(t *testing.T) 
 	if !workers.Has(session.ID) {
 		t.Fatal("ready-worker idle timer closed a worker after a newer command")
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: command.Sequence}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{CommandSequence: command.Sequence}}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(time.Second); workers.Has(session.ID) && time.Now().Before(deadline); {
@@ -108,7 +112,7 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -122,16 +126,16 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
-			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		_, err := workers.SubmitInput(context.Background(), session.ID, wire.InputRequest{
+			Command: wire.Command{ID: "command-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "hello"}},
 		})
 		resultCh <- err
 	}()
 	request := readWorkerMessage(t, worker)
-	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+	if request.Type != wire.MessageInputRequest || request.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", request)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{}}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
@@ -151,7 +155,7 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 	}
 	command := request.InputRequest.Command
 	command.Sequence = 1
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: request.InputRequest.RequestID, Command: &command,
 	}}); err != nil {
 		t.Fatal(err)
@@ -174,7 +178,7 @@ func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -188,20 +192,20 @@ func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := workers.SubmitInput(ctx, session.ID, workerInputRequest{
-			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		_, err := workers.SubmitInput(ctx, session.ID, wire.InputRequest{
+			Command: wire.Command{ID: "command-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "hello"}},
 		})
 		resultCh <- err
 	}()
 	request := readWorkerMessage(t, worker)
-	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+	if request.Type != wire.MessageInputRequest || request.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", request)
 	}
 	cancel()
 	if err := <-resultCh; !errors.Is(err, context.Canceled) {
 		t.Fatalf("expected canceled caller, got %v", err)
 	}
-	if !workers.CloseWhenIdle(session.ID, generation, workerIdle{}, 25*time.Millisecond) {
+	if !workers.CloseWhenIdle(session.ID, generation, wire.Idle{}, 25*time.Millisecond) {
 		t.Fatal("idle notification was not retained while the worker resolved canceled input")
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -210,7 +214,7 @@ func TestCodexWorkerKeepsInputLeaseAfterCallerCancellation(t *testing.T) {
 	}
 	command := request.InputRequest.Command
 	command.Sequence = 1
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: request.InputRequest.RequestID, Command: &command,
 	}}); err != nil {
 		t.Fatal(err)
@@ -229,8 +233,8 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
 	})
 	workers := newWorkerRegistry()
-	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 100 * time.Millisecond}
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -244,17 +248,17 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
-			Command:      commandResponse{ID: "command-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "hello"}},
+		_, err := workers.SubmitInput(context.Background(), session.ID, wire.InputRequest{
+			Command:      wire.Command{ID: "command-1", Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: "hello"}},
 			SteeringOnly: true,
 		})
 		resultCh <- err
 	}()
 	request := readWorkerMessage(t, worker)
-	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+	if request.Type != wire.MessageInputRequest || request.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", request)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{}}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
@@ -271,12 +275,12 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	if !workers.Has(session.ID) {
 		t.Fatal("pending idle closed worker before rejected input resolved")
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: request.InputRequest.RequestID, ErrorCode: "no_active_turn", Error: "steering requires an active turn",
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+	if err := <-resultCh; !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 		t.Fatalf("expected no active turn, got %v", err)
 	}
 	if current, _ := registry.Get(session.ID); current.Working || current.ActiveTool != "" {
@@ -299,7 +303,7 @@ func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
 	})
 	workers := newWorkerRegistry()
 	fakeRuntime := &fakeCodexRuntime{}
-	handler := newHandler(registry, &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
+	handler := newHandler(registry, &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -312,25 +316,25 @@ func TestRejectedInputResultWinsImmediateIdleDisconnect(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
-			Command:      commandResponse{ID: "command-1", Type: sessionCommandSteering, Steering: &steeringCommandPayload{Text: "hello"}},
+		_, err := workers.SubmitInput(context.Background(), session.ID, wire.InputRequest{
+			Command:      wire.Command{ID: "command-1", Type: wire.CommandSteering, Steering: &wire.SteeringCommandPayload{Text: "hello"}},
 			SteeringOnly: true,
 		})
 		resultCh <- err
 	}()
 	request := readWorkerMessage(t, worker)
-	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+	if request.Type != wire.MessageInputRequest || request.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", request)
 	}
-	if !workers.CloseWhenIdle(session.ID, generation, workerIdle{}, 0) {
+	if !workers.CloseWhenIdle(session.ID, generation, wire.Idle{}, 0) {
 		t.Fatal("defer immediate idle close")
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: request.InputRequest.RequestID, ErrorCode: "no_active_turn", Error: "steering requires an active turn",
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := <-resultCh; !errors.Is(err, errNoActiveTurn) {
+	if err := <-resultCh; !errors.Is(err, sessionlog.ErrNoActiveTurn) {
 		t.Fatalf("expected no active turn result before disconnect, got %v", err)
 	}
 }
@@ -342,15 +346,15 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 		ID: "sess-codex-duplicate-input", State: SessionStateStarting, Agent: string(zotigoruntime.AgentCodex),
 		WorkingDirectory: t.TempDir(), CreatedAt: createdAt,
 	})
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		session.ID: {
-			{ID: "command-1", Sequence: 1, Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: sessionCommandMessage, Text: "hello"}},
+			{ID: "command-1", Sequence: 1, Type: zotigosession.DisplayItemUserMessage, Command: &zotigosession.DisplayCommand{Type: wire.CommandMessage, Text: "hello"}},
 			{Sequence: 2, Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 			{Sequence: 3, Type: zotigosession.DisplayItemTurnCompleted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
 		},
 	}}
 	workers := newWorkerRegistry()
-	fakeRuntime := &fakeCodexRuntime{idleTimeout: 500 * time.Millisecond}
+	fakeRuntime := &fakeCodexRuntime{idleTimeout: 100 * time.Millisecond}
 	handler := newHandler(registry, source, handlerOptions{
 		workers: workers, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fakeRuntime), workerConnectTimeout: time.Second,
 	})
@@ -365,16 +369,16 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 
 	resultCh := make(chan error, 1)
 	go func() {
-		_, err := workers.SubmitInput(context.Background(), session.ID, workerInputRequest{
-			Command: commandResponse{ID: "command-1", Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "hello"}},
+		_, err := workers.SubmitInput(context.Background(), session.ID, wire.InputRequest{
+			Command: wire.Command{ID: "command-1", Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "hello"}},
 		})
 		resultCh <- err
 	}()
 	request := readWorkerMessage(t, worker)
-	if request.Type != workerMessageInputRequest || request.InputRequest == nil {
+	if request.Type != wire.MessageInputRequest || request.InputRequest == nil {
 		t.Fatalf("expected input request, got %#v", request)
 	}
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageIdle, Idle: &workerIdle{CommandSequence: 1}}); err != nil {
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageIdle, Idle: &wire.Idle{CommandSequence: 1}}); err != nil {
 		t.Fatal(err)
 	}
 	for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); {
@@ -393,7 +397,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 	}
 	existing := request.InputRequest.Command
 	existing.Sequence = 1
-	if err := worker.WriteJSON(workerMessage{Type: workerMessageInputResult, InputResult: &workerInputResult{
+	if err := worker.WriteJSON(wire.Message{Type: wire.MessageInputResult, InputResult: &wire.InputResult{
 		RequestID: request.InputRequest.RequestID, Command: &existing,
 	}}); err != nil {
 		t.Fatal(err)
@@ -416,14 +420,14 @@ func TestWorkerRegistryTreatsIdleClosingWorkerAsOffline(t *testing.T) {
 	workers := newWorkerRegistry()
 	worker := &workerConnection{
 		sessionID: "sess-closing", generation: "worker-1", registry: workers,
-		sendCh: make(chan workerMessage, 1), doneCh: make(chan struct{}), closing: true,
+		sendCh: make(chan wire.Message, 1), doneCh: make(chan struct{}), closing: true,
 	}
 	workers.workers[worker.sessionID] = worker
 
 	if workers.Has(worker.sessionID) {
 		t.Fatal("closing worker reported online")
 	}
-	if workers.Send(worker.sessionID, commandResponse{Sequence: 1}) {
+	if workers.Send(worker.sessionID, wire.Command{Sequence: 1}) {
 		t.Fatal("command accepted by closing worker")
 	}
 	done := make(chan struct{})
@@ -446,7 +450,7 @@ func TestCodexScratchSessionsUseIndependentPersistentCWD(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = catalog.Close() })
 	fake := &fakeCodexRuntime{launches: make(chan zotigoruntime.WorkerLaunchSpec, 1), connected: make(chan *websocket.Conn, 1)}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, catalog: catalog, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fake), workerConnectTimeout: time.Second,
 	})
 	server := httptest.NewServer(handler)
@@ -523,7 +527,7 @@ func TestCodexSessionUsesWorkspaceCWDWithoutRuntimeProjectBinding(t *testing.T) 
 	fake := &fakeCodexRuntime{
 		launches: make(chan zotigoruntime.WorkerLaunchSpec, 1), connected: make(chan *websocket.Conn, 1),
 	}
-	handler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{
+	handler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store, catalog: catalog, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, fake),
 		workerConnectTimeout: time.Second,
 	})

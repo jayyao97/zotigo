@@ -12,9 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jayyao97/zotigo/internal/testutil/sessionlogtest"
+
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	zotigosession "github.com/jayyao97/zotigo/core/session"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 func TestFirstCompletedTurnTitleSource(t *testing.T) {
@@ -107,7 +110,7 @@ func TestSessionTitleSuggestion(t *testing.T) {
 	writeTitleTestConfig(t, workDir)
 	registry := newSessionRegistry()
 	created := registry.Add(newSession(workDir, "title-test"))
-	source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 		created.ID: {
 			titleMessageItem(zotigosession.DisplayItemUserMessage, "帮我看看这个"),
 			{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -155,7 +158,7 @@ func TestStoredSessionTitleSuggestionDoesNotStartWorker(t *testing.T) {
 	}
 	defer store.Close()
 
-	createHandler := newHandler(newSessionRegistry(), storedDisplayItemSource{store: store}, handlerOptions{store: store})
+	createHandler := newHandler(newSessionRegistry(), sessionlog.StoredItemSource{Store: store}, handlerOptions{store: store})
 	createRec := httptest.NewRecorder()
 	createHandler.ServeHTTP(createRec, httptest.NewRequest(
 		http.MethodPost,
@@ -176,7 +179,7 @@ func TestStoredSessionTitleSuggestionDoesNotStartWorker(t *testing.T) {
 	}
 
 	restartedRegistry := newSessionRegistry()
-	restarted := newHandler(restartedRegistry, storedDisplayItemSource{store: store}, handlerOptions{
+	restarted := newHandler(restartedRegistry, sessionlog.StoredItemSource{Store: store}, handlerOptions{
 		store: store,
 		titleSuggestion: func(context.Context, config.ProfileConfig, string, string) (string, error) {
 			return "Stored title", nil
@@ -199,7 +202,7 @@ func TestSessionTitleSuggestionErrors(t *testing.T) {
 	created := registry.Add(newSession(workDir, "title-test"))
 
 	t.Run("not completed", func(t *testing.T) {
-		source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{
+		source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
 			created.ID: {
 				titleMessageItem(zotigosession.DisplayItemUserMessage, "user"),
 				{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "turn-1"}},
@@ -212,7 +215,7 @@ func TestSessionTitleSuggestionErrors(t *testing.T) {
 	})
 
 	t.Run("timeout", func(t *testing.T) {
-		source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{created.ID: completedTitleItems()}}
+		source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{created.ID: completedTitleItems()}}
 		handler := newHandler(registry, source, handlerOptions{
 			titleTimeout: 5 * time.Millisecond,
 			titleSuggestion: func(ctx context.Context, _ config.ProfileConfig, _, _ string) (string, error) {
@@ -226,7 +229,7 @@ func TestSessionTitleSuggestionErrors(t *testing.T) {
 	})
 
 	t.Run("generation failure", func(t *testing.T) {
-		source := &fakeDisplayItemSource{items: map[string][]zotigosession.DisplayItem{created.ID: completedTitleItems()}}
+		source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{created.ID: completedTitleItems()}}
 		handler := newHandler(registry, source, handlerOptions{
 			titleSuggestion: func(context.Context, config.ProfileConfig, string, string) (string, error) {
 				return "", errors.New("provider unavailable")

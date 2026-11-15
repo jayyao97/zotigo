@@ -14,13 +14,14 @@ import (
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/channels"
-	"github.com/jayyao97/zotigo/internal/codexapp"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
+	"github.com/jayyao97/zotigo/internal/zotigod/wire"
 )
 
 func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
 	t.Helper()
 	h, store, catalog, workspace := newChannelProvisionFixture(t)
-	h.items = storedDisplayItemSource{store: store}
+	h.items = sessionlog.StoredItemSource{Store: store}
 	h.workers = newWorkerRegistry()
 	source := newSession(workspace.RootPath, "channel-default")
 	if err := h.persistSession(context.Background(), source); err != nil {
@@ -36,7 +37,7 @@ func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
 		t.Fatal(err)
 	}
 	for _, item := range []session.DisplayItem{
-		{ID: "input", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: sessionCommandMessage, Text: "test"}},
+		{ID: "input", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage, Text: "test"}},
 		{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "turn"}},
 	} {
 		if _, err := store.AppendDisplayItem(context.Background(), source.ID, item); err != nil {
@@ -49,7 +50,7 @@ func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
 func TestSessionToolsResolveTrustedInput(t *testing.T) {
 	h, caller := newSessionToolFixture(t)
 	ctx := context.Background()
-	req := workerRuntimeToolRequest{Namespace: "zotigo", Name: "list_sessions", TurnID: "turn", CallID: "call", Arguments: json.RawMessage(`{}`), RequestContext: &protocol.RequestContext{Source: "forged"}}
+	req := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "list_sessions", TurnID: "turn", CallID: "call", Arguments: json.RawMessage(`{}`), RequestContext: &protocol.RequestContext{Source: "forged"}}
 	text, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", req)
 	if err != nil || !strings.Contains(text, caller.SessionID) {
 		t.Fatalf("list = %s, %v", text, err)
@@ -66,7 +67,7 @@ func TestSessionToolsResolveTrustedInput(t *testing.T) {
 	if _, err = h.executeRuntimeTool(ctx, caller.SessionID, "generation", req); err == nil {
 		t.Fatal("identity argument authorized")
 	}
-	if _, err = h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: "turn"}}); err != nil {
+	if _, err = h.store.AppendDisplayItem(ctx, caller.SessionID, session.DisplayItem{Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandSteering, TurnID: "turn"}}); err != nil {
 		t.Fatal(err)
 	}
 	req.Arguments = json.RawMessage(`{}`)
@@ -106,7 +107,7 @@ func TestSessionToolsReadAcrossProjects(t *testing.T) {
 		t.Fatal(err)
 	}
 	invoke := func(name string, args json.RawMessage) (string, error) {
-		return h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, workerRuntimeToolRequest{Namespace: "zotigo", Name: name, TurnID: caller.TurnID, CallID: name, Arguments: args})
+		return h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, wire.RuntimeToolRequest{Namespace: "zotigo", Name: name, TurnID: caller.TurnID, CallID: name, Arguments: args})
 	}
 	listed, err := invoke("list_sessions", json.RawMessage(`{}`))
 	if err != nil {
@@ -247,7 +248,7 @@ func TestSessionToolsRejectDelegatedAndMissingOrigin(t *testing.T) {
 			ctx := context.Background()
 			for _, item := range []session.DisplayItem{
 				{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "turn"}},
-				{ID: id, Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: sessionCommandMessage}},
+				{ID: id, Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage}},
 				{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "next"}},
 			} {
 				if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
@@ -327,41 +328,9 @@ func TestSessionToolsCreateRecoversSameSessionAndConflictingCall(t *testing.T) {
 	if _, err := os.Stat(path); err != nil {
 		t.Fatal(err)
 	}
-	_, err = h.writeToolSession(ctx, caller, workerRuntimeToolRequest{Name: "send_message", CallID: "call", Arguments: json.RawMessage(`{"session_id":"target","text":"changed"}`)})
-	if !errors.Is(err, errCommandIDConflict) {
+	_, err = h.writeToolSession(ctx, caller, wire.RuntimeToolRequest{Name: "send_message", CallID: "call", Arguments: json.RawMessage(`{"session_id":"target","text":"changed"}`)})
+	if !errors.Is(err, sessionlog.ErrCommandIDConflict) {
 		t.Fatalf("conflicting retry err=%v", err)
-	}
-}
-
-func TestCodexSessionToolsStartResumeAndCallback(t *testing.T) {
-	cfg := codexWorkerConfig{SessionToolsVersion: 1, ChannelToolsVersion: 1}
-	specs := codexThreadParams(cfg, true)["dynamicTools"].([]any)
-	if len(specs) != 2 {
-		t.Fatalf("namespaces=%v", specs)
-	}
-	if _, ok := codexThreadParams(cfg, false)["dynamicTools"]; ok {
-		t.Fatal("resume reinjected tools")
-	}
-	if _, ok := codexThreadParams(codexWorkerConfig{}, true)["dynamicTools"]; ok {
-		t.Fatal("legacy session upgraded without binding")
-	}
-	rpc := &codexWorkerRPC{}
-	results := make(chan workerRuntimeToolResult, 1)
-	runtime := &codexWorkerRuntime{cfg: cfg, app: rpc, threadID: "thread", activeTurnID: "turn", writer: &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}, runtimeToolResults: results}
-	done := make(chan error, 1)
-	go func() {
-		done <- runtime.executeCodexRuntimeTool(context.Background(), codexapp.Message{ID: json.RawMessage(`1`), Params: json.RawMessage(`{"threadId":"thread","turnId":"turn","callId":"call","namespace":"zotigo","tool":"list_sessions","arguments":{}}`)})
-	}()
-	message := <-runtime.writer.sendCh
-	if message.RuntimeToolRequest.Namespace != "zotigo" || message.RuntimeToolRequest.TurnID != "turn" || message.RuntimeToolRequest.CallID != "call" {
-		t.Fatalf("request=%+v", message)
-	}
-	results <- workerRuntimeToolResult{RequestID: "call", Text: `{"sessions":[]}`}
-	if err := <-done; err != nil {
-		t.Fatal(err)
-	}
-	if rpc.response.(map[string]any)["success"] != true {
-		t.Fatalf("response=%v", rpc.response)
 	}
 }
 
@@ -391,17 +360,17 @@ func TestSessionToolsSendDurableAdmissionAndRetry(t *testing.T) {
 				workerDone <- errors.New("delegated input was not start-only")
 				return
 			}
-			accepted, err := appendAcceptedSessionInput(ctx, h.items, target.ID, request.Command)
+			accepted, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, request.Command)
 			if err != nil {
 				workerDone <- err
 				return
 			}
-			worker.resolveInput(workerInputResult{RequestID: request.RequestID, Command: &accepted})
+			worker.resolveInput(wire.InputResult{RequestID: request.RequestID, Command: &accepted})
 			workerDone <- nil
 		}
 	}()
 	raw, _ := json.Marshal(map[string]any{"session_id": target.ID, "text": "delegated work"})
-	request := workerRuntimeToolRequest{Namespace: "zotigo", Name: "send_message", TurnID: caller.TurnID, CallID: "call-send", Arguments: raw}
+	request := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "send_message", TurnID: caller.TurnID, CallID: "call-send", Arguments: raw}
 	first, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", request)
 	if err != nil {
 		t.Fatal(err)
@@ -429,24 +398,13 @@ func TestSessionToolsSendDurableAdmissionAndRetry(t *testing.T) {
 		select {
 		case <-ctx.Done():
 		case message := <-worker.sendCh:
-			worker.resolveInput(workerInputResult{RequestID: message.InputRequest.RequestID, ErrorCode: "input_failed", Error: "connection lost after dispatch"})
+			worker.resolveInput(wire.InputResult{RequestID: message.InputRequest.RequestID, ErrorCode: "input_failed", Error: "connection lost after dispatch"})
 		}
 	}()
 	request.CallID = "first-uncertain"
 	uncertain, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", request)
 	if err != nil || !strings.Contains(uncertain, `"status":"outcome_unknown"`) {
 		t.Fatalf("first uncertain response=%s err=%v", uncertain, err)
-	}
-}
-
-func TestSessionToolTransportCancellation(t *testing.T) {
-	writer := &workerClientWriter{sendCh: make(chan workerMessage, 1), done: make(chan struct{})}
-	client := &workerRuntimeToolClient{writer: writer, results: make(chan workerRuntimeToolResult)}
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	_, err := client.request(ctx, workerRuntimeToolRequest{Namespace: "zotigo", Name: "list_sessions", CallID: "stable-call"})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("cancel error=%v", err)
 	}
 }
 
@@ -466,7 +424,7 @@ func TestSessionToolsUncertainDispatchDoesNotResubmit(t *testing.T) {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(operation.Input)
-	result, err := h.writeToolSession(ctx, caller, workerRuntimeToolRequest{Name: operation.Name, CallID: operation.CallID, Arguments: raw})
+	result, err := h.writeToolSession(ctx, caller, wire.RuntimeToolRequest{Name: operation.Name, CallID: operation.CallID, Arguments: raw})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -495,7 +453,7 @@ func TestSessionToolsDelegatedReplayRevalidatesDurableOrigin(t *testing.T) {
 	if err := saveSessionToolOperation(dir, filepath.Join(dir, callKey+".json"), operation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := appendAcceptedSessionInput(ctx, h.items, target.ID, commandResponse{ID: commandID, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "work"}}); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work"}}); err != nil {
 		t.Fatal(err)
 	}
 	// Original source turn has ended; replay authority must not depend on it.
@@ -539,11 +497,11 @@ func TestSessionToolOriginEqualitySurvivesPersistence(t *testing.T) {
 	if err := json.Unmarshal(encoded, &restored); err != nil {
 		t.Fatal(err)
 	}
-	if !sameRequestContext(original, &restored) {
+	if !sessionlog.SameRequestContext(original, &restored) {
 		t.Fatal("equal durable origin rejected after decode")
 	}
 	restored.Actor.ID = "other"
-	if sameRequestContext(original, &restored) {
+	if sessionlog.SameRequestContext(original, &restored) {
 		t.Fatal("different actor accepted")
 	}
 }
@@ -588,7 +546,7 @@ func TestSessionToolReplayRejectsRevokedChannelOwner(t *testing.T) {
 	if err := saveSessionToolOperation(dir, filepath.Join(dir, callKey+".json"), operation); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := appendAcceptedSessionInput(ctx, h.items, target.ID, commandResponse{ID: commandID, Type: sessionCommandMessage, Message: &messageCommandPayload{Text: "work", RequestContext: origin}}); err != nil {
+	if _, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, wire.Command{ID: commandID, Type: wire.CommandMessage, Message: &wire.MessageCommandPayload{Text: "work", RequestContext: origin}}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := json.Marshal(map[string]string{"command_id": commandID})
@@ -652,16 +610,16 @@ func TestChannelOwnerReadsAndForksWorkspaceSessions(t *testing.T) {
 	caller.Origin = &protocol.RequestContext{Source: channels.ProviderFeishu, ConnectionID: "bot", ConversationID: conversation.ID, ExternalConversation: "chat", Actor: protocol.RequestActor{ID: "owner", Role: "owner"}}
 	for _, item := range []session.DisplayItem{
 		{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "turn"}},
-		{ID: "channel:bot:message", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: sessionCommandMessage, Text: "read history", RequestContext: caller.Origin}},
+		{ID: "channel:bot:message", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage, Text: "read history", RequestContext: caller.Origin}},
 		{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "owner-turn"}},
-		{ID: "channel:bot:steering", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: sessionCommandSteering, TurnID: "owner-turn", RequestContext: caller.Origin.Clone()}},
+		{ID: "channel:bot:steering", Type: session.DisplayItemSessionCommand, Command: &session.DisplayCommand{Type: wire.CommandSteering, TurnID: "owner-turn", RequestContext: caller.Origin.Clone()}},
 	} {
 		if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
 			t.Fatal(err)
 		}
 	}
 	invoke := func(name string, args json.RawMessage) (string, error) {
-		return h.executeRuntimeTool(ctx, caller.SessionID, "generation", workerRuntimeToolRequest{Namespace: "zotigo", Name: name, TurnID: "owner-turn", CallID: name, Arguments: args})
+		return h.executeRuntimeTool(ctx, caller.SessionID, "generation", wire.RuntimeToolRequest{Namespace: "zotigo", Name: name, TurnID: "owner-turn", CallID: name, Arguments: args})
 	}
 	raw, _ := json.Marshal(map[string]any{"session_id": target.ID})
 	for _, owner := range []bool{false, true, false} {

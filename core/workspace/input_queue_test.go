@@ -9,6 +9,7 @@ import (
 )
 
 func TestInputQueuePersistenceAndClaims(t *testing.T) {
+	t.Parallel()
 	root := catalogtest.NewRoot(t)
 	ctx := context.Background()
 	store, err := Open(root)

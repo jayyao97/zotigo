@@ -9,6 +9,8 @@ import (
 	"time"
 
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
+	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
+	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
 type sessionProjection struct {
@@ -115,7 +117,7 @@ func codexSyncErrorDiagnostics(err error) []sessionSyncDiagnostic {
 		var failure *codexSessionSyncFailure
 		if errors.As(current, &failure) {
 			code := "codex_history_sync_failed"
-			if errors.Is(failure.err, errCodexHistoryAPIUnsupported) {
+			if errors.Is(failure.err, codexworker.ErrHistoryAPIUnsupported) {
 				code = "codex_history_api_unsupported"
 			}
 			diagnostics = append(diagnostics, sessionSyncDiagnostic{SessionID: failure.sessionID, Code: code, Message: "Codex history refresh failed"})
@@ -287,7 +289,7 @@ func (h *handler) handleSessionOrganizationArchive(w http.ResponseWriter, r *htt
 				writeAPIError(w, http.StatusInternalServerError, "load session activity failed")
 				return
 			}
-			if requireIdleSession(items) != nil || hasPendingHumanRequest(items) {
+			if requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
 				writeAPIError(w, http.StatusConflict, "session is active")
 				return
 			}

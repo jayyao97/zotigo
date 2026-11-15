@@ -60,6 +60,9 @@ func TestTransientErrors(t *testing.T) {
 }
 
 func TestRetryHTTPTimeoutWithLiveCaller(t *testing.T) {
+	// Two real retry backoffs elapse here, so the base step is shortened.
+	// Not parallel: the base step is package state.
+	shortenRetryBackoff(t)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		<-r.Context().Done()
 	}))
@@ -158,6 +161,9 @@ func TestRetryAfter(t *testing.T) {
 }
 
 func TestRetryBudgetIsBounded(t *testing.T) {
+	// Two real retry backoffs elapse here, so the base step is shortened.
+	// Not parallel: the base step is package state.
+	shortenRetryBackoff(t)
 	inner := &retryTestProvider{events: []protocol.Event{protocol.NewErrorEvent(errors.New(`{"error":{"code":503}}`))}}
 	stream, _ := (&retryProvider{Provider: inner}).StreamChat(context.Background(), nil, nil)
 	retries, failures := 0, 0
@@ -179,4 +185,13 @@ func TestRetryBudgetIsBounded(t *testing.T) {
 	if len(statuses) != 5 || statuses[4] != "failed" {
 		t.Fatalf("missing terminal retry state: %v", statuses)
 	}
+}
+
+// shortenRetryBackoff makes the real backoff timers of a non-parallel test
+// short. Only the wait shrinks; the retry budget and its events are unchanged.
+func shortenRetryBackoff(t *testing.T) {
+	t.Helper()
+	original := retryBaseDelay
+	retryBaseDelay = 10 * time.Millisecond
+	t.Cleanup(func() { retryBaseDelay = original })
 }

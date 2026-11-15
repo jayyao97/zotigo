@@ -30,11 +30,6 @@ func NewManager() *Manager {
 	return &Manager{v: v}
 }
 
-func (m *Manager) Load() (*Config, error) {
-	cwd, _ := os.Getwd()
-	return m.LoadForDir(cwd)
-}
-
 func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 	defaults := DefaultConfig()
 	m.v.SetDefault("security", defaults.Security)
@@ -138,25 +133,6 @@ func (m *Manager) LoadForDir(workDir string) (*Config, error) {
 	}
 
 	return &cfg, nil
-}
-
-func (m *Manager) Save(cfg *Config) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
-	}
-
-	configDir := filepath.Join(home, ConfigDirName)
-	if err := os.MkdirAll(configDir, 0755); err != nil {
-		return fmt.Errorf("failed to create config directory: %w", err)
-	}
-
-	filePath := filepath.Join(configDir, ConfigFileName)
-	if err := configWriter(cfg).WriteConfigAs(filePath); err != nil {
-		return fmt.Errorf("failed to write config file: %w", err)
-	}
-
-	return nil
 }
 
 // EnsureGlobalConfig creates the default global config only when it is absent.

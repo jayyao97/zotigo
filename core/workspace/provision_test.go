@@ -15,6 +15,7 @@ import (
 )
 
 func TestProvisionWorkspaceFolderBindings(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -96,6 +97,7 @@ func TestProvisionWorkspaceFolderBindings(t *testing.T) {
 }
 
 func TestProvisionRejectsAbsoluteSymlinkInCopiedBindings(t *testing.T) {
+	t.Parallel()
 	for _, mode := range []FolderMode{FolderModeCopy, FolderModeReference} {
 		t.Run(string(mode), func(t *testing.T) {
 			store, err := Open(catalogtest.NewRoot(t))
@@ -136,6 +138,7 @@ func TestProvisionRejectsAbsoluteSymlinkInCopiedBindings(t *testing.T) {
 }
 
 func TestProvisionWorkspaceGitWorktree(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -194,6 +197,7 @@ func TestProvisionWorkspaceGitWorktree(t *testing.T) {
 }
 
 func TestProvisionWorkspaceUsesSemanticStorageNames(t *testing.T) {
+	t.Parallel()
 	root := catalogtest.NewRoot(t)
 	store, err := Open(root)
 	if err != nil {
@@ -253,6 +257,7 @@ func TestProvisionWorkspaceUsesSemanticStorageNames(t *testing.T) {
 }
 
 func TestMigratesExistingLegacyWorktreeWithoutRenaming(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	ctx := context.Background()
 	projectID := "project_11111111-1111-1111-1111-111111111111"
@@ -416,6 +421,7 @@ func TestMigratesExistingLegacyWorktreeWithoutRenaming(t *testing.T) {
 }
 
 func TestReadyWorkspaceRetryRecreatesMissingWorktree(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	worktree := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
 	if err := os.RemoveAll(worktree); err != nil {
@@ -430,6 +436,7 @@ func TestReadyWorkspaceRetryRecreatesMissingWorktree(t *testing.T) {
 }
 
 func TestReadyWorkspaceRetryRenamesLegacyHashedWorktree(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	named := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -457,6 +464,7 @@ func TestReadyWorkspaceRetryRenamesLegacyHashedWorktree(t *testing.T) {
 }
 
 func TestReadyWorkspaceRetryReconcilesInterruptedLegacyWorktreeRename(t *testing.T) {
+	t.Parallel()
 	store, workspace, source := createGitWorkspaceFixture(t)
 	ctx := context.Background()
 	named := filepath.Join(workspace.RootPath, "code", workspaceSourceName(source))
@@ -487,6 +495,7 @@ func TestReadyWorkspaceRetryReconcilesInterruptedLegacyWorktreeRename(t *testing
 }
 
 func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -689,6 +698,7 @@ func TestAddWorkspaceSourceToReadyWorkspace(t *testing.T) {
 }
 
 func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)
@@ -841,6 +851,7 @@ func TestAddWorkspaceSourceRejectsSymlinkedManagedPaths(t *testing.T) {
 }
 
 func TestFolderBindingRecoveryRetainsOwnedTargets(t *testing.T) {
+	t.Parallel()
 	store, err := Open(catalogtest.NewRoot(t))
 	if err != nil {
 		t.Fatal(err)

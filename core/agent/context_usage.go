@@ -4,9 +4,9 @@ import (
 	"encoding/json"
 	"sort"
 
+	"github.com/jayyao97/zotigo/core/compaction"
 	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
-	"github.com/jayyao97/zotigo/core/services"
 )
 
 // contextPromptLocked describes static request input, including tool schemas
@@ -32,8 +32,8 @@ func (a *Agent) contextPromptFor(system []protocol.Message) protocol.ContextInpu
 		prefix = append(prefix, protocol.NewSystemMessage(string(definition)))
 	}
 	prompt := protocol.ContextInput{
-		PromptKey:  services.ContextDigest(prefix),
-		ProfileKey: services.ContextProfileKey(a.cfg),
+		PromptKey:  compaction.ContextDigest(prefix),
+		ProfileKey: compaction.ContextProfileKey(a.cfg),
 	}
 	if a.compressor != nil {
 		prompt.PrefixTokens = a.compressor.CountTokens(prefix)
