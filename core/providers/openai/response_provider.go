@@ -175,6 +175,12 @@ func (p *ResponseProvider) StreamChat(ctx context.Context, messages []protocol.M
 			// assembled call).
 
 			case "response.output_item.added":
+				// Every output item is announced here, and all of them carry
+				// an ID, so the item type is the only thing that tells a tool
+				// call from a reasoning or message item.
+				if evt.Item.Type != "function_call" {
+					continue
+				}
 				if fn := evt.Item.AsFunctionCall(); fn.ID != "" || fn.CallID != "" {
 					pc := &pendingCall{
 						id:     fn.ID,
