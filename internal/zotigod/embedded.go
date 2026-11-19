@@ -115,7 +115,7 @@ func StartEmbedded(logger *log.Logger) (*EmbeddedService, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	service.cancel = cancel
-	options.maintenanceContext = ctx
+	options.serviceContext = ctx
 	go maintainConversationIndex(ctx, store, logger)
 
 	service.server = &http.Server{

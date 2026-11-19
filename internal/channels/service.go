@@ -988,25 +988,19 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	return s.store.PutConversation(ctx, c)
 }
 
-// GuardSessionRuntimeMutation keeps Channel binding changes serialized with a
-// Session runtime mutation. Callers must release the returned guard after the
-// mutation completes so the config -> session lock order remains consistent.
-func (s *Service) GuardSessionRuntimeMutation(ctx context.Context, sessionID string) (func(), error) {
+// GuardSessionProfileChange holds the binding stable until the session profile command is recorded.
+func (s *Service) GuardSessionProfileChange(ctx context.Context, sessionID string) (bound bool, release func(), err error) {
 	s.configMu.RLock()
 	if s.closed {
 		s.configMu.RUnlock()
-		return nil, errors.New("channel service is closed")
+		return false, nil, errors.New("channel service is closed")
 	}
-	_, err := s.store.GetConversationBySession(ctx, strings.TrimSpace(sessionID))
-	if err == nil {
+	_, err = s.store.GetConversationBySession(ctx, sessionID)
+	if err != nil && !errors.Is(err, ErrNotFound) {
 		s.configMu.RUnlock()
-		return nil, errors.New("channel-bound session runtime cannot be changed")
+		return false, nil, err
 	}
-	if !errors.Is(err, ErrNotFound) {
-		s.configMu.RUnlock()
-		return nil, fmt.Errorf("load channel session binding: %w", err)
-	}
-	return s.configMu.RUnlock, nil
+	return err == nil, s.configMu.RUnlock, nil
 }
 
 func conversationRuntime(conversation Conversation) SessionRuntimeConfig {

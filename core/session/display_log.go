@@ -183,6 +183,7 @@ type DisplayCommand struct {
 	Images         []DisplayCommandImage    `json:"images,omitempty"`
 	TurnID         string                   `json:"turn_id,omitempty"`
 	Reason         string                   `json:"reason,omitempty"`
+	RequireIdle    bool                     `json:"require_idle,omitempty"`
 	Profile        string                   `json:"profile,omitempty"`
 	ApprovalPolicy string                   `json:"approval_policy,omitempty"`
 	RequestContext *protocol.RequestContext `json:"request_context,omitempty"`

@@ -66,7 +66,7 @@ func TestCompactionPreservesRecentSpawnReport(t *testing.T) {
 				if mode != "none" {
 					c.SetSummarizer(&MockSummarizer{MessagesSummary: "older turns", TextSummary: "should not replace findings", ShouldFail: mode == "failure"})
 				}
-				report := "Full report: /workspace/.zotigo/subagent-reports/report.md\n" + cjkText(4000) + "\nFINAL FINDINGS AND TEST RESULTS"
+				report := "Full report: /workspace/artifacts/subagent-reports/report.md\n" + cjkText(4000) + "\nFINAL FINDINGS AND TEST RESULTS"
 				history := []protocol.Message{
 					protocol.NewUserMessage("old task"),
 					protocol.NewAssistantMessage(strings.Repeat("old answer ", 2000)),

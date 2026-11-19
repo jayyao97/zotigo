@@ -144,6 +144,7 @@ func ProfileCommandFromItem(item zotigosession.DisplayItem) wire.Command {
 	}
 	if item.Command != nil {
 		command.Profile.Name = item.Command.Profile
+		command.Profile.RequireIdle = item.Command.RequireIdle
 	}
 	return command
 }

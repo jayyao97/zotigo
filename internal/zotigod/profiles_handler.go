@@ -123,13 +123,15 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusBadRequest, "profile is required")
 		return
 	}
+	channelBound := false
 	if h.channels != nil {
-		unlockChannels, err := h.channels.GuardSessionRuntimeMutation(r.Context(), id)
+		bound, release, err := h.channels.GuardSessionProfileChange(r.Context(), id)
 		if err != nil {
-			writeAPIError(w, http.StatusConflict, err.Error())
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load channel binding: %v", err))
 			return
 		}
-		defer unlockChannels()
+		defer release()
+		channelBound = bound
 	}
 	unlockOperation := h.sessionOps.lock(id)
 	defer unlockOperation()
@@ -151,6 +153,17 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	if session.Agent == string(zotigoruntime.AgentCodex) {
 		writeAPIError(w, http.StatusBadRequest, "profile is only valid for agent zotigo")
 		return
+	}
+	if channelBound {
+		items, _, err := h.items.LoadItems(r.Context(), id)
+		if err != nil {
+			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session history: %v", err))
+			return
+		}
+		if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
+			writeAPIError(w, http.StatusConflict, "wait for the current Channel turn to finish before changing profile")
+			return
+		}
 	}
 	workingDirectory := session.WorkingDirectory
 	if workingDirectory == "" {
@@ -201,8 +214,9 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
-			Type:    wire.CommandProfile,
-			Profile: target,
+			Type:        wire.CommandProfile,
+			Profile:     target,
+			RequireIdle: channelBound,
 		},
 	})
 	if err != nil {

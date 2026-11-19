@@ -36,6 +36,7 @@ type SpawnTool struct {
 	mu                   sync.RWMutex
 	cfg                  config.ProfileConfig
 	childTools           []tools.Tool
+	reportDir            string
 	approvalPolicySource func() agent.ApprovalPolicy
 	approvalRequester    SpawnApprovalRequester
 }
@@ -52,6 +53,15 @@ type SpawnApprovalRequest struct {
 // SpawnApprovalRequester routes child approvals to the parent host.
 type SpawnApprovalRequester interface {
 	RequestSpawnApproval(context.Context, SpawnApprovalRequest) ([]transport.ApprovalResult, error)
+}
+
+// ReportDirectory returns the location of complete reports under a workspace root.
+func ReportDirectory(root string) string { return filepath.Join(root, "artifacts", "subagent-reports") }
+
+// WithReportDirectory sets the report location when the session runs below
+// the root of its owning workspace.
+func WithReportDirectory(path string) SpawnOption {
+	return func(tool *SpawnTool) { tool.reportDir = path }
 }
 
 // WithApprovalPolicySource supplies the parent Agent's current policy. Bypass
@@ -111,13 +121,15 @@ Use this for complex searches, multi-file analysis, independent review, or scope
 
 Subagents start fresh: include the goal, relevant context, file paths, constraints, what you have already learned, and the output format you want. Do not delegate vague synthesis like "based on your findings, fix it"; give a concrete task.
 
-Completed reports are saved under .zotigo/subagent-reports in the parent working directory. If a returned report is truncated, read the provided full-report path with read_file byte_offset=0 and the returned next-byte cursor instead of running the task again.
+Completed reports are saved under artifacts/subagent-reports in the owning workspace (or the parent working directory for standalone sessions). If a returned report is truncated, read the provided full-report path with read_file byte_offset=0 and the returned next-byte cursor instead of running the task again.
 
 Set workdir when the subagent should operate in a specific directory. If workdir is outside the parent agent's current safe scope, Zotigo will ask the user to approve that scoped access before launching the subagent.
 
 Agent types:
 - general-purpose: can use the normal child tool pool, including write/edit/shell when available.
-- explore: read-only codebase exploration using read_file, grep, glob, web_search, and web_fetch. It cannot edit files or run shell commands.`
+- explore: read-only codebase exploration using read_file, grep, glob, web_search, and web_fetch. It cannot edit files or run shell commands.
+
+All subagent types run serially by default. For independent tasks, issue the spawn calls together in one tool batch and set allow_parallel=true on each. Use false when tasks depend on one another or may edit the same files.`
 }
 
 func (t *SpawnTool) Schema() any {
@@ -140,6 +152,11 @@ func (t *SpawnTool) Schema() any {
 				"type":        "string",
 				"enum":        []string{spawnAgentGeneral, spawnAgentExplore},
 				"description": "Subagent type to run (default: general-purpose)",
+			},
+			"allow_parallel": map[string]any{
+				"default":     false,
+				"type":        "boolean",
+				"description": "Defaults to false: run this call serially. Set true only for independent tasks to allow overlap with adjacent eligible calls in the same tool batch.",
 			},
 			"workdir": map[string]any{
 				"type":        "string",
@@ -187,12 +204,13 @@ func (t *SpawnTool) Classify(call tools.SafetyCall) tools.SafetyDecision {
 
 func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSON string) (any, error) {
 	var args struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Prompt      string `json:"prompt"`
-		AgentType   string `json:"agent_type"`
-		WorkDir     string `json:"workdir"`
-		TimeoutMs   int    `json:"timeout_ms"`
+		Name          string `json:"name"`
+		Description   string `json:"description"`
+		Prompt        string `json:"prompt"`
+		AgentType     string `json:"agent_type"`
+		WorkDir       string `json:"workdir"`
+		TimeoutMs     int    `json:"timeout_ms"`
+		AllowParallel bool   `json:"allow_parallel"`
 	}
 	if err := json.Unmarshal([]byte(argsJSON), &args); err != nil {
 		return nil, fmt.Errorf("invalid arguments: %w", err)
@@ -295,6 +313,7 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 			},
 		})
 	}
+	forwardChildStatus("running")
 	for {
 		var finish protocol.FinishReason
 		for event := range events {
@@ -358,7 +377,11 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 	// Use the parent's executor/scope so the parent can recover the full report
 	// even when the child ran in another directory. Content addressing avoids
 	// collisions between parallel children and does not trust their names as paths.
-	reportPath := filepath.Join(exec.WorkDir(), ".zotigo", "subagent-reports", fmt.Sprintf("%x.md", sha256.Sum256([]byte(report))))
+	reportDir := t.reportDir
+	if reportDir == "" {
+		reportDir = ReportDirectory(exec.WorkDir())
+	}
+	reportPath := filepath.Join(reportDir, fmt.Sprintf("%x.md", sha256.Sum256([]byte(report))))
 	reportLocation := fmt.Sprintf("Full report: %s\nIf the report below is truncated, use read_file with path=%q and byte_offset=0, then follow next_byte_offset. Do not rerun the subagent just to recover its report.\n\n", reportPath, reportPath)
 	if err := exec.WriteFile(ctx, reportPath, []byte(report), 0600); err != nil {
 		// The completed report is still valuable when the workspace is read-only.

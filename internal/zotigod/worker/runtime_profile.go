@@ -23,6 +23,16 @@ func (r *Runtime) switchProfile(ctx context.Context, commandID string, command *
 	completion := make(chan error, 1)
 	predecessor, ordered := r.nextProfileOrder()
 	target := strings.TrimSpace(command.Name)
+	if command.RequireIdle {
+		// A new input can reach the worker before a previously accepted profile command.
+		r.mu.Lock()
+		active := r.turnActive
+		r.mu.Unlock()
+		if active || r.display.CurrentTurnID() != "" {
+			r.completeProfileFailure(predecessor, ordered, completion, commandID, target, errors.New("wait for the current Channel turn to finish before changing profile"))
+			return completion, nil
+		}
+	}
 	epoch, err := r.nextProfileEpoch()
 	if err != nil {
 		close(ordered)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -103,9 +104,14 @@ func Run(ctx context.Context, cfg workerbase.Config) (returnErr error) {
 	runtimeToolClient := &workerbase.RuntimeToolClient{Writer: clientWriter, Results: runtimeToolResults}
 
 	stepStarted = time.Now()
+	workspaceRoot, err := url.PathUnescape(resp.Header.Get(wire.WorkspaceRootHeader))
+	if err != nil {
+		return fmt.Errorf("decode worker workspace root: %w", err)
+	}
 	runtime, err = newWorkerRuntime(ctx, workerRuntimeConfig{
 		SessionID:         cfg.SessionID,
 		WorkspaceID:       resp.Header.Get(wire.WorkspaceHeader),
+		WorkspaceRoot:     workspaceRoot,
 		Store:             store,
 		SendDelta:         clientWriter.SendDelta,
 		NotifyDisplay:     clientWriter.SendDisplayWake,

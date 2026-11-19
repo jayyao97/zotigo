@@ -996,17 +996,21 @@ func TestChannelBindingAllowsPromptUpdateWithoutMutatingSessionEagerly(t *testin
 	}
 }
 
-func TestChannelBoundSessionRejectsRuntimeMutationEndpoints(t *testing.T) {
+func TestChannelBoundSessionUsesUpdatedModelSettings(t *testing.T) {
 	ctx := context.Background()
 	sessionStore, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = sessionStore.Close() })
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, config.ProjectConfig), []byte("profiles:\n  new:\n    provider: openai\n    model: test-model\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	now := time.Now()
 	for _, session := range []*zotigosession.Session{
-		{Metadata: zotigosession.Metadata{ID: "channel-zotigo", Agent: channels.SessionAgentZotigo, ProfileName: "old", ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: now, UpdatedAt: now}},
-		{Metadata: zotigosession.Metadata{ID: "channel-codex", Agent: channels.SessionAgentCodex, Model: "gpt-old", ReasoningEffort: "medium", ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: now, UpdatedAt: now}},
+		{Metadata: zotigosession.Metadata{ID: "channel-zotigo", Agent: channels.SessionAgentZotigo, WorkingDirectory: dir, ProfileName: "old", ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: now, UpdatedAt: now}},
+		{Metadata: zotigosession.Metadata{ID: "channel-codex", Agent: channels.SessionAgentCodex, Model: "gpt-old", ReasoningEffort: "high", ApprovalPolicy: agent.ApprovalPolicyAuto, CreatedAt: now, UpdatedAt: now}},
 	} {
 		if err := sessionStore.Put(ctx, session); err != nil {
 			t.Fatal(err)
@@ -1036,21 +1040,44 @@ func TestChannelBoundSessionRejectsRuntimeMutationEndpoints(t *testing.T) {
 		t.Fatal(err)
 	}
 	service := channels.NewService(channelStore, secretStore, log.New(io.Discard, "", 0), map[string]channels.AdapterFactory{channels.ProviderFeishu: noopChannelFactory{}})
-	handler := newHandler(newSessionRegistry(), &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}, handlerOptions{store: sessionStore, channels: service})
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	handler := newHandler(newSessionRegistry(), source, handlerOptions{store: sessionStore, channels: service, runtimes: newRuntimeRegistry(nativeRuntimeAdapter{}, &fakeCodexRuntime{})})
 
 	tests := []struct {
-		path string
-		body string
+		id       string
+		endpoint string
+		body     string
+		want     channels.RuntimeAttribution
 	}{
-		{"/sessions/channel-zotigo/profile", `{"profile":"new"}`},
-		{"/sessions/channel-codex/codex-settings", `{"model":"gpt-new","reasoning_effort":"high"}`},
+		{"channel-zotigo", "profile", `{"profile":"new"}`, channels.RuntimeAttribution{Agent: "zotigo", ProfileName: "new"}},
+		{"channel-codex", "codex-settings", `{"model":"gpt-5.6-luna","reasoning_effort":"medium"}`, channels.RuntimeAttribution{Agent: "codex", Model: "gpt-5.6-luna", ReasoningEffort: "medium"}},
 	}
 	for _, test := range tests {
 		recorder := httptest.NewRecorder()
-		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, test.path, strings.NewReader(test.body)))
-		if recorder.Code != http.StatusConflict || !strings.Contains(recorder.Body.String(), "channel-bound session runtime cannot be changed") {
-			t.Fatalf("%s status=%d body=%s", test.path, recorder.Code, recorder.Body.String())
+		path := "/sessions/" + test.id + "/" + test.endpoint
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodPut, path, strings.NewReader(test.body)))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("%s status=%d body=%s", path, recorder.Code, recorder.Body.String())
 		}
+		stored, err := sessionStore.Get(ctx, test.id)
+		if err != nil || stored == nil {
+			t.Fatalf("load %s: %v", test.id, err)
+		}
+		if got := channelSessionRuntimeAttribution(stored); got != test.want {
+			t.Fatalf("%s runtime after switch = %+v, want %+v", test.id, got, test.want)
+		}
+		binding, err := channelStore.GetConversationBySession(ctx, test.id)
+		if err != nil || !binding.Enabled || binding.ChatID != "chat-1" {
+			t.Fatalf("%s binding = %+v, err = %v", test.id, binding, err)
+		}
+	}
+	if _, err := source.AppendItem(ctx, "channel-zotigo", zotigosession.DisplayItem{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "active"}}); err != nil {
+		t.Fatal(err)
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, httptest.NewRequest(http.MethodPut, "/sessions/channel-zotigo/profile", strings.NewReader(`{"profile":"old"}`)))
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "turn to finish") {
+		t.Fatalf("switch during active Channel turn: status=%d body=%s", rec.Code, rec.Body.String())
 	}
 }
 

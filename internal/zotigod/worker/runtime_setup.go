@@ -35,6 +35,7 @@ import (
 type workerRuntimeConfig struct {
 	SessionID              string
 	WorkspaceID            string
+	WorkspaceRoot          string
 	Store                  zotigosession.Store
 	SendDelta              func(wire.DisplayDelta)
 	NotifyDisplayItem      func(zotigosession.DisplayItem)
@@ -258,6 +259,7 @@ func newWorkerRuntime(ctx context.Context, cfg workerRuntimeConfig) (*Runtime, e
 		ShellPolicy:            builtin.DefaultShellPolicy(),
 		LSPManager:             lspManager,
 		Spawn:                  true,
+		WorkspaceRoot:          cfg.WorkspaceRoot,
 		SpawnApprovalRequester: transport,
 	}); err != nil {
 		if ownsHookDispatcher {

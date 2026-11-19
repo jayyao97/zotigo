@@ -53,6 +53,40 @@ func TestGroupFromListChatExcludesPrivateChats(t *testing.T) {
 	}
 }
 
+type lifecycleChannel struct {
+	channeltypes.Channel
+	ready, reconnected func()
+	onError            func(error)
+}
+
+func (c *lifecycleChannel) OnReady(fn func())       { c.ready = fn }
+func (c *lifecycleChannel) OnReconnected(fn func()) { c.reconnected = fn }
+func (c *lifecycleChannel) OnError(fn func(error))  { c.onError = fn }
+
+func TestReconnectRevalidatesIdentityAndOwnersBeforeReportingReady(t *testing.T) {
+	ws := &lifecycleChannel{}
+	var status string
+	var ownerErr error
+	a := &Adapter{channel: ws, resolveBotIdentity: func(context.Context) *channeltypes.BotIdentity {
+		return &channeltypes.BotIdentity{OpenID: "bot"}
+	}, resolveOwnerIDs: func(context.Context) ([]string, error) { return nil, ownerErr },
+		callbacks: channels.AdapterCallbacks{Ready: func(id, _ string) { status = id }, Error: func(err error) { status = err.Error() }},
+	}
+	a.registerLifecycleCallbacks()
+	ws.ready()
+	ws.onError(errors.New("dial timeout"))
+	ownerErr = errors.New("owner lookup failed")
+	ws.reconnected()
+	if status != ownerErr.Error() {
+		t.Fatalf("reported %q after failed owner lookup", status)
+	}
+	ownerErr = nil
+	ws.reconnected()
+	if status != "bot" {
+		t.Fatalf("reported %q after successful reconnect", status)
+	}
+}
+
 func TestReceiveForwardsGroupMetadataAndFiltersUnsupportedMessages(t *testing.T) {
 	var received []channels.InboundMessage
 	adapter := &Adapter{
