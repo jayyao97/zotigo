@@ -79,7 +79,7 @@ type createSessionRequest struct {
 type handlerOptions struct {
 	callbackBaseURL      string
 	updater              *update.Manager
-	maintenanceContext   context.Context
+	serviceContext       context.Context
 	launcher             workerLauncher
 	runtimes             *runtimeRegistry
 	workers              *workerRegistry
@@ -110,16 +110,16 @@ func newDefaultHandler(opts handlerOptions) http.Handler {
 		return newHandler(newSessionRegistry(), sessionlog.FailingItemSource{Err: err}, opts)
 	}
 	opts.store = store
-	if opts.maintenanceContext != nil {
-		go maintainConversationIndex(opts.maintenanceContext, store, opts.logger)
+	if opts.serviceContext != nil {
+		go maintainConversationIndex(opts.serviceContext, store, opts.logger)
 	}
 	catalog, catalogErr := zotigoworkspace.Open(store.RootDir())
 	opts.catalog = catalog
 	opts.catalogErr = catalogErr
 	if catalogErr == nil {
 		opts.catalogErr = catalog.RecoverQueuedInputs(context.Background())
-		if opts.maintenanceContext != nil {
-			catalog.StartRepositoryMaintenance(opts.maintenanceContext, func(err error) {
+		if opts.serviceContext != nil {
+			catalog.StartRepositoryMaintenance(opts.serviceContext, func(err error) {
 				if opts.logger != nil {
 					opts.logger.Printf("repository_maintenance_failed: %v", err)
 				}
@@ -351,7 +351,7 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 	mux.HandleFunc("/config/models", handler.handleModelSettings)
 	mux.HandleFunc("/config/models/test", handler.handleModelTest)
 	mux.HandleFunc("/sources/inspect", handler.handleSourceInspection)
-	mux.HandleFunc("/files/events", handler.handleFileEvents)
+	mux.HandleFunc("/files/events", untilServiceStops(options.serviceContext, handler.handleFileEvents))
 	mux.HandleFunc("/files/capabilities", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/open", handler.handleWorkspaceFile)
 	mux.HandleFunc("/files/save", handler.handleWorkspaceFile)
@@ -384,6 +384,7 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 	handleOptionalTrailingSlash(mux, "/workspaces/{workspace_id}/retry", withPathValue("workspace_id", handler.handleWorkspaceRetry))
 	mux.HandleFunc("/workspaces/{workspace_id}/{route...}", handler.handleWorkspaceRouteNotFound)
 	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
+	mux.HandleFunc("GET /catalog/activity", untilServiceStops(options.serviceContext, handler.handleSessionActivity))
 	mux.HandleFunc("/catalog/snapshot", handler.handleCatalogSnapshot)
 	mux.HandleFunc("/catalog/navigation", handler.handleNavigation)
 	mux.HandleFunc("/catalog/navigation/import", handler.handleNavigationImport)
@@ -405,7 +406,7 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 	mux.HandleFunc("/sessions/{id}/search", withPathValue("id", handler.handleSessionSearch))
 	mux.HandleFunc("/sessions/{id}/items/window", withPathValue("id", handler.handleSessionItemWindow))
 	mux.HandleFunc("/sessions/{id}/items", withPathValue("id", handler.handleSessionItems))
-	mux.HandleFunc("/sessions/{id}/events", withPathValue("id", handler.handleSessionEvents))
+	mux.HandleFunc("/sessions/{id}/events", untilServiceStops(options.serviceContext, withPathValue("id", handler.handleSessionEvents)))
 	mux.HandleFunc("/sessions/{id}/messages", withPathValue("id", handler.handleSessionMessage))
 	mux.HandleFunc("/sessions/{id}/queue", withPathValue("id", handler.handleInputQueue))
 	mux.HandleFunc("POST /completion-triggers/{trigger}/fire", handler.handleFireCompletionTrigger)
@@ -448,6 +449,21 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 	mux.HandleFunc("/internal/sessions/{id}/{route...}", handler.handleSessionRouteNotFound)
 	mux.HandleFunc("/internal/workers/connect", handler.handleWorkerConnect)
 	return authenticatedHandler(mux, options.publicAuthToken, options.workerAuthToken)
+}
+
+// http.Server.Shutdown waits for active requests. Cancel long-lived event streams
+// when the daemon stops so ordinary requests can drain within the grace period.
+func untilServiceStops(serviceContext context.Context, next http.HandlerFunc) http.HandlerFunc {
+	if serviceContext == nil {
+		return next
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		ctx, cancel := context.WithCancel(r.Context())
+		stop := context.AfterFunc(serviceContext, cancel)
+		defer stop()
+		defer cancel()
+		next(w, r.WithContext(ctx))
+	}
 }
 
 func handleOptionalTrailingSlash(mux *http.ServeMux, pattern string, handler http.HandlerFunc) {

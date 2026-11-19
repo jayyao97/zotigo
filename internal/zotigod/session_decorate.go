@@ -31,6 +31,14 @@ func (h *handler) decorateSession(ctx context.Context, session Session, stored *
 	session.ContextUsage = unavailableSessionContextUsage()
 	items, _, err := h.items.LoadItems(ctx, session.ID)
 	if err == nil {
+		var latest uint64
+		for idx := len(items) - 1; idx >= 0; idx-- {
+			if isPublicDisplayItem(items[idx], true) {
+				latest = items[idx].Sequence
+				break
+			}
+		}
+		session.LatestItemSequence = &latest
 		if session.State == SessionStateStarting || session.State == SessionStateRunning || session.State == SessionStatePausing || session.State == SessionStatePaused {
 			session.Working = session.State == SessionStatePausing || sessionlog.LastOpenTurnID(items) != ""
 			session.ActiveTool = activeToolName(items)

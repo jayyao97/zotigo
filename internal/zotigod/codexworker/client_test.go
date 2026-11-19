@@ -1400,10 +1400,16 @@ func TestCodexTurnRuntimeUsesStoredPerTurnSettings(t *testing.T) {
 	if err := store.Put(context.Background(), stored); err != nil {
 		t.Fatal(err)
 	}
-	command := wire.Command{ID: "message-runtime", Message: &wire.MessageCommandPayload{Text: "hello"}}
+	command := wire.Command{ID: "message-runtime", Message: &wire.MessageCommandPayload{
+		Text:           "continue",
+		RequestContext: &protocol.RequestContext{Source: "feishu", ConversationID: "topic-1"},
+	}}
 	turnID, turnRuntime, err := runtime.callTurnStart(context.Background(), command, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if got := rpc.requests["turn/start"]["model"]; got != "gpt-current" {
+		t.Fatalf("turn/start model=%#v", got)
 	}
 	if got := rpc.requests["turn/start"]["effort"]; got != "high" {
 		t.Fatalf("turn/start effort=%#v", got)

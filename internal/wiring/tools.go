@@ -18,6 +18,7 @@ type ToolSetConfig struct {
 	ShellPolicy            *builtin.ShellPolicy
 	LSPManager             *lsp.Manager
 	Spawn                  bool
+	WorkspaceRoot          string
 	SpawnApprovalRequester subagent.SpawnApprovalRequester
 	// ACP fs/read_text_file cannot preserve binary image bytes.
 	DisableViewImage bool
@@ -87,6 +88,11 @@ func RegisterDefaultTools(ag *agent.Agent, cfg ToolSetConfig) error {
 			subagent.WithApprovalPolicySource(func() agent.ApprovalPolicy {
 				return ag.Describe().ApprovalPolicy
 			}),
+		}
+		if cfg.WorkspaceRoot != "" {
+			reportDir := subagent.ReportDirectory(cfg.WorkspaceRoot)
+			ag.AddSafeDirs(reportDir)
+			spawnOpts = append(spawnOpts, subagent.WithReportDirectory(reportDir))
 		}
 		if cfg.SpawnApprovalRequester != nil {
 			spawnOpts = append(spawnOpts, subagent.WithSpawnApprovalRequester(cfg.SpawnApprovalRequester))

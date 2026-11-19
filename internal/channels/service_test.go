@@ -2122,6 +2122,72 @@ func TestServiceOnlyRestartsAdapterForRuntimeConfigurationChanges(t *testing.T) 
 	}
 }
 
+func TestConnectionRecoversOnReadyAfterTransportError(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	secrets, err := NewSecretStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := &collectingFactory{}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: factory})
+	defer service.Close(ctx)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "bot", ConnectionInput{Provider: ProviderFeishu, Name: "bot", AppID: "app", AppSecret: &secret, Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	read := func() Connection {
+		t.Helper()
+		c, err := service.GetConnection(ctx, "bot")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return c
+	}
+	for deadline := time.Now().Add(3 * time.Second); read().Status != "running"; {
+		if time.Now().After(deadline) {
+			t.Fatal("adapter never became ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	callbacks := factory.adapters[0].callbacks
+	receive := func() {
+		t.Helper()
+		if err := callbacks.Inbound(ctx, InboundMessage{MessageID: "message", ChatID: "unbound", ConversationKey: "thread"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	callbacks.Error(errors.New("timeout"))
+	if c := read(); c.Status != "error" || c.LastError != "timeout" {
+		t.Fatalf("missing transport error: %+v", c)
+	}
+	receive()
+	if c := read(); c.Status != "error" {
+		t.Fatalf("late inbound cleared the transport error: %+v", c)
+	}
+	callbacks.Ready("bot-1", "Test Bot")
+	recovered := read()
+	if recovered.Status != "running" || recovered.LastError != "" || recovered.BotOpenID != "bot-1" || recovered.BotName != "Test Bot" {
+		t.Fatalf("recovered: %+v", recovered)
+	}
+	receive()
+	if c := read(); !c.UpdatedAt.Equal(recovered.UpdatedAt) {
+		t.Fatal("healthy inbound rewrote the connection")
+	}
+	callbacks.Error(errors.New("owner unavailable"))
+	receive()
+	if c := read(); c.Status != "error" || c.LastError != "owner unavailable" {
+		t.Fatalf("inbound cleared initialization error: %+v", c)
+	}
+}
+
 func TestServiceRejectsCallbacksFromReplacedConnection(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

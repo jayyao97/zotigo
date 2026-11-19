@@ -83,6 +83,29 @@ func TestDecorateSessionDoesNotReportInactiveSessionWorking(t *testing.T) {
 	}
 }
 
+func TestSessionDetailCursorIncludesIdleProfileChange(t *testing.T) {
+	const id = "idle"
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: id, State: SessionStateRunning})
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{
+		id: {
+			{Sequence: 1, Type: zotigosession.DisplayItemTurnCompleted},
+			{Sequence: 2, Type: zotigosession.DisplayItemProfileChanged},
+			{Sequence: 3, Type: zotigosession.DisplayItemContextUsageUpdated},
+		},
+	}}
+	h := newHandler(registry, source)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/sessions/"+id, nil))
+	var detail Session
+	if err := decodeAPIData(t, rec.Body.Bytes(), &detail); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Code != http.StatusOK || detail.Working || detail.LatestItemSequence == nil || *detail.LatestItemSequence != 2 {
+		t.Fatalf("unexpected idle detail: %+v", detail)
+	}
+}
+
 func TestSessionsCreateAndList(t *testing.T) {
 	store, err := zotigosession.NewFileStore(newTestStoreRoot(t))
 	if err != nil {

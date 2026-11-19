@@ -159,9 +159,20 @@ func TestSpawnToolRunsChildAgent(t *testing.T) {
 		namedTool{name: "write_file"},
 	})
 
-	result, err := spawn.Execute(context.Background(), exec, `{"name":"inspect-code","description":"inspect code","prompt":"Inspect foo.go and report findings"}`)
+	var childEvents []*protocol.SubagentEvent
+	ctx := tools.WithCallInfo(context.Background(), tools.CallInfo{ID: "parent-call", Name: "spawn"})
+	ctx = tools.WithEventSink(ctx, func(event protocol.Event) {
+		if event.Subagent != nil {
+			childEvents = append(childEvents, event.Subagent)
+		}
+	})
+	result, err := spawn.Execute(ctx, exec, `{"name":"inspect-code","description":"inspect code","prompt":"Inspect foo.go and report findings"}`)
 	if err != nil {
 		t.Fatalf("Execute returned error: %v", err)
+	}
+
+	if len(childEvents) == 0 || childEvents[0].Status != "running" || childEvents[0].ToolCallID != "parent-call" {
+		t.Fatalf("expected start before child output: %+v", childEvents)
 	}
 
 	output := spawnTestOutputText(t, result)
@@ -199,13 +210,16 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 			recorder := registerSpawnTestProvider(t, report)
 			exec := newSpawnTestExecutor(t)
 			spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&builtin.ReadFileTool{}})
-			result, err := spawn.Execute(context.Background(), exec, `{"name":"../../untrusted","description":"review","prompt":"Review"}`)
+			if err := os.Mkdir(filepath.Join(exec.WorkDir(), "child"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			result, err := spawn.Execute(context.Background(), exec, `{"workdir":"child","name":"../../untrusted","description":"review","prompt":"Review"}`)
 			if err != nil {
 				t.Fatal(err)
 			}
 			output := spawnTestOutputText(t, result)
 			path := strings.TrimPrefix(strings.SplitN(output, "\n", 2)[0], "Full report: ")
-			if !strings.HasPrefix(path, filepath.Join(exec.WorkDir(), ".zotigo", "subagent-reports")+string(filepath.Separator)) {
+			if !strings.HasPrefix(path, filepath.Join(exec.WorkDir(), "artifacts", "subagent-reports")+string(filepath.Separator)) {
 				t.Fatalf("invalid report path %q", path)
 			}
 			data, err := exec.ReadFile(context.Background(), path)
@@ -269,6 +283,36 @@ func TestSpawnReportSurvivesProjectionAndCanBeReadInSections(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestSpawnReportUsesOwningWorkspaceWhenParentRunsInRepository(t *testing.T) {
+	root := t.TempDir()
+	checkout := filepath.Join(root, "code", "backend")
+	if err := os.MkdirAll(checkout, 0755); err != nil {
+		t.Fatal(err)
+	}
+	exec, err := executor.NewLocalExecutor(checkout)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer exec.Close()
+	recorder := registerSpawnTestProvider(t, "workspace report")
+	spawn := NewSpawnTool(config.ProfileConfig{Provider: recorder.name, Model: "mock"}, []tools.Tool{&builtin.ReadFileTool{}}, WithReportDirectory(ReportDirectory(root)))
+	result, err := spawn.Execute(context.Background(), exec, `{"description":"review","prompt":"Review"}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := strings.TrimPrefix(strings.SplitN(spawnTestOutputText(t, result), "\n", 2)[0], "Full report: ")
+	if filepath.Dir(path) != filepath.Join(root, "artifacts", "subagent-reports") {
+		t.Fatalf("report stored at %q", path)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != "workspace report" {
+		t.Fatalf("report = %q, %v", data, err)
+	}
+	if _, err := os.Stat(filepath.Join(checkout, "artifacts")); !os.IsNotExist(err) {
+		t.Fatalf("checkout artifacts stat = %v", err)
 	}
 }
 

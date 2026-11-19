@@ -336,6 +336,22 @@ func TestWorkerRuntimeKeepsProfileWhenPersistenceFails(t *testing.T) {
 	}
 }
 
+func TestWorkerRejectsIdleOnlyProfileWhenInputWinsAdmission(t *testing.T) {
+	source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+	runtime := &Runtime{turnActive: true, agent: &agent.Agent{}, display: sessionlog.NewLog("bound", source)}
+	item := zotigosession.DisplayItem{ID: "switch", Command: &zotigosession.DisplayCommand{
+		Type: wire.CommandProfile, Profile: "new", RequireIdle: true,
+	}}
+	if err := runtime.HandleCommand(context.Background(), sessionlog.ProfileCommandFromItem(item)); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := source.LoadItems(context.Background(), "bound")
+	if err != nil || len(items) != 1 || items[0].Type != zotigosession.DisplayItemProfileFailed ||
+		items[0].Profile.CommandID != "switch" || !strings.Contains(items[0].Error, "turn to finish") {
+		t.Fatalf("expected durable rejection, items=%+v err=%v", items, err)
+	}
+}
+
 func TestWorkerRuntimeKeepsProfileWhenProviderBuildFails(t *testing.T) {
 	const oldProviderName = "worker-profile-build-failure-old"
 	providers.Register(oldProviderName, func(config.ProfileConfig) (providers.Provider, error) { return &noopProvider{}, nil })

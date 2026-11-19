@@ -63,7 +63,8 @@ type PauseCommandPayload struct {
 }
 
 type ProfileCommandPayload struct {
-	Name string `json:"name"`
+	RequireIdle bool   `json:"require_idle,omitempty"`
+	Name        string `json:"name"`
 }
 
 type ApprovalPolicyCommandPayload struct {

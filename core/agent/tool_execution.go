@@ -370,31 +370,21 @@ func prependToolResultEvents(results []protocol.ToolResult, innerCh <-chan proto
 }
 
 func canRunActionConcurrently(action *PendingAction) bool {
-	if action == nil {
+	if action == nil || action.Decision.RequiresSnapshot {
 		return false
 	}
-	if action.Decision.RequiresSnapshot {
-		return false
-	}
-	if action.Decision.Decision == ExecutionDecisionAutoExecute &&
-		action.Decision.RiskLevel == tools.LevelSafe.String() &&
-		!action.Decision.RequiresSnapshot {
-		return true
-	}
-	return isApprovedReadOnlySubagent(action)
-}
-
-func isApprovedReadOnlySubagent(action *PendingAction) bool {
-	if action.Decision.Decision != ExecutionDecisionRequireApproval || action.Name != "spawn" {
-		return false
+	auto := action.Decision.Decision == ExecutionDecisionAutoExecute
+	if action.Name != "spawn" {
+		return auto && action.Decision.RiskLevel == tools.LevelSafe.String()
 	}
 	var args struct {
-		AgentType string `json:"agent_type"`
+		AllowParallel bool `json:"allow_parallel"`
 	}
 	if err := json.Unmarshal([]byte(action.Arguments), &args); err != nil {
 		return false
 	}
-	return args.AgentType == "explore"
+	approved := action.Decision.Decision == ExecutionDecisionRequireApproval
+	return args.AllowParallel && (auto || approved)
 }
 
 func orderedActions(actions []*PendingAction) []*PendingAction {

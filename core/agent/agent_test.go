@@ -1739,11 +1739,11 @@ func TestAgentDefersAutoToolsUntilBatchApproval(t *testing.T) {
 	}
 }
 
-func TestAgentRunsApprovedExploreSubagentsConcurrently(t *testing.T) {
+func TestAgentRunsApprovedSubagentsConcurrently(t *testing.T) {
 	providers.Register("approved-subagents", func(cfg config.ProfileConfig) (providers.Provider, error) {
 		return &BatchToolProvider{
 			Tools:     []string{"spawn", "spawn"},
-			Arguments: []string{`{"agent_type":"explore","name":"one"}`, `{"agent_type":"explore","name":"two"}`},
+			Arguments: []string{`{"agent_type":"explore","allow_parallel":true,"name":"one"}`, `{"agent_type":"general-purpose","allow_parallel":true,"name":"two"}`},
 		}, nil
 	})
 
@@ -1804,7 +1804,7 @@ func TestAgentRunsApprovedExploreSubagentsConcurrently(t *testing.T) {
 			t.Fatalf("agent finished before both approved subagents started, saw %v", seen)
 		case <-time.After(500 * time.Millisecond):
 			releaseOnce.Do(func() { close(release) })
-			t.Fatalf("expected both approved explore subagents to start concurrently, saw %v", seen)
+			t.Fatalf("expected both approved subagents to start concurrently, saw %v", seen)
 		}
 	}
 

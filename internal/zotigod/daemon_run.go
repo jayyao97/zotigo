@@ -223,18 +223,18 @@ func Run(args []string) (exitCode int) {
 		}
 	}
 	server.Handler = newDefaultHandler(handlerOptions{
-		callbackBaseURL:    workerCallback,
-		updater:            updater,
-		maintenanceContext: ctx,
-		launcher:           launcher,
-		runtimes:           runtimes,
-		codexHost:          codexHost,
-		codexUnavailable:   codexErr,
-		publicAuthToken:    publicAuthToken,
-		workerAuthToken:    workerAuthToken,
-		logger:             logger,
-		hooks:              hookDispatcher,
-		channels:           channelService,
+		callbackBaseURL:  workerCallback,
+		updater:          updater,
+		serviceContext:   ctx,
+		launcher:         launcher,
+		runtimes:         runtimes,
+		codexHost:        codexHost,
+		codexUnavailable: codexErr,
+		publicAuthToken:  publicAuthToken,
+		workerAuthToken:  workerAuthToken,
+		logger:           logger,
+		hooks:            hookDispatcher,
+		channels:         channelService,
 	})
 
 	var closeChannelsOnce sync.Once

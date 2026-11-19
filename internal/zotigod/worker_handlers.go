@@ -3,6 +3,7 @@ package zotigod
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strconv"
 
 	"github.com/gorilla/websocket"
@@ -55,6 +56,12 @@ func (h *handler) handleWorkerConnect(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil && organization.WorkspaceID != nil {
 			responseHeader.Set(wire.WorkspaceHeader, *organization.WorkspaceID)
+			workspace, err := h.catalog.GetWorkspace(r.Context(), *organization.WorkspaceID)
+			if err != nil {
+				writeAPIError(w, http.StatusInternalServerError, "load worker workspace root")
+				return
+			}
+			responseHeader.Set(wire.WorkspaceRootHeader, url.PathEscape(workspace.RootPath))
 		}
 	}
 	conn, err := workerUpgrader.Upgrade(w, r, responseHeader)

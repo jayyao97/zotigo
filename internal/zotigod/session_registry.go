@@ -28,6 +28,7 @@ const (
 )
 
 type Session struct {
+	LatestItemSequence   *uint64                   `json:"latest_item_sequence,omitempty"`
 	ReadState            *zotigosession.ReadState  `json:"read_state,omitempty"`
 	ForkedFrom           *zotigosession.ForkOrigin `json:"forked_from,omitempty"`
 	ID                   string                    `json:"id"`
@@ -75,16 +76,21 @@ var (
 const runtimeOccupiedErrorPrefix = "runtime_occupied: "
 
 type sessionRegistry struct {
-	mu       sync.Mutex
-	nextID   uint64
-	sessions map[string]Session
-	changed  chan struct{}
+	mu               sync.Mutex
+	nextID           uint64
+	sessions         map[string]Session
+	changed          chan struct{}
+	activity         map[string]SessionState
+	activityChanged  chan struct{}
+	activityRevision uint64
 }
 
 func newSessionRegistry() *sessionRegistry {
 	return &sessionRegistry{
-		sessions: make(map[string]Session),
-		changed:  make(chan struct{}),
+		sessions:        make(map[string]Session),
+		changed:         make(chan struct{}),
+		activity:        make(map[string]SessionState),
+		activityChanged: make(chan struct{}),
 	}
 }
 
@@ -130,7 +136,7 @@ func (r *sessionRegistry) addLocked(session Session) Session {
 	}
 	session.seq = r.nextID
 	r.sessions[session.ID] = session
-	r.notifyChangedLocked()
+	r.notifyChangedLocked(session)
 	return session
 }
 
@@ -197,7 +203,7 @@ func (r *sessionRegistry) MarkWorking(id string, activeTool string) {
 		return
 	}
 	r.sessions[id] = session
-	r.notifyChangedLocked()
+	r.notifyChangedLocked(session)
 }
 
 func (r *sessionRegistry) MarkIdle(id string) {
@@ -214,7 +220,7 @@ func (r *sessionRegistry) MarkIdle(id string) {
 	session.Working = false
 	session.ActiveTool = ""
 	r.sessions[id] = session
-	r.notifyChangedLocked()
+	r.notifyChangedLocked(session)
 }
 
 func (r *sessionRegistry) Start(id string) (Session, error) {
@@ -421,11 +427,22 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 		session.workerGeneration = ""
 	}
 	r.sessions[id] = session
-	r.notifyChangedLocked()
+	r.notifyChangedLocked(session)
 	return session, nil
 }
 
-func (r *sessionRegistry) notifyChangedLocked() {
+func (r *sessionRegistry) notifyChangedLocked(session Session) {
+	previous, active := r.activity[session.ID]
+	if session.Working != active || (active && previous != session.State) {
+		if session.Working {
+			r.activity[session.ID] = session.State
+		} else {
+			delete(r.activity, session.ID)
+		}
+		r.activityRevision++
+		close(r.activityChanged)
+		r.activityChanged = make(chan struct{})
+	}
 	close(r.changed)
 	r.changed = make(chan struct{})
 }

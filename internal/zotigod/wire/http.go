@@ -2,8 +2,9 @@ package wire
 
 // Header names of the worker connect handshake.
 const (
-	GenerationHeader = "X-Zotigo-Worker-Generation"
-	WorkspaceHeader  = "X-Zotigo-Workspace-ID"
+	GenerationHeader    = "X-Zotigo-Worker-Generation"
+	WorkspaceRootHeader = "X-Zotigo-Workspace-Root" // URL-escaped filesystem path.
+	WorkspaceHeader     = "X-Zotigo-Workspace-ID"
 )
 
 type ReadyRequest struct {

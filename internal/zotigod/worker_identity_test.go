@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -15,7 +17,7 @@ func TestWorkerIdentityComesFromCatalog(t *testing.T) {
 	for _, assigned := range []bool{false, true} {
 		t.Run(map[bool]string{false: "directory", true: "workspace"}[assigned], func(t *testing.T) {
 			h, _, catalog, workspace := newChannelProvisionFixture(t)
-			session := newSession(workspace.RootPath, "test")
+			session := newSession(filepath.Join(workspace.RootPath, "code", "repo"), "test")
 			session.State = SessionStateStarting
 			h.registry.Add(session)
 			if assigned {
@@ -31,6 +33,13 @@ func TestWorkerIdentityComesFromCatalog(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer conn.Close()
+			wantRoot := ""
+			if assigned {
+				wantRoot = workspace.RootPath
+			}
+			if got, err := url.PathUnescape(response.Header.Get(wire.WorkspaceRootHeader)); err != nil || got != wantRoot {
+				t.Fatalf("workspace root = %q, %v; want %q", got, err, wantRoot)
+			}
 			want := ""
 			if assigned {
 				want = workspace.ID

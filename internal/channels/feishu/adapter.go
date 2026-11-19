@@ -353,29 +353,35 @@ func (Factory) New(connection channels.Connection, secret string, callbacks chan
 		return clearProcessingReaction(ctx, messageID, reactionID, deleteReaction, listOwnedProcessingReactions)
 	}
 	events.OnP2MessageReceiveV1(adapter.receive)
-	channelClient.OnReady(func() {
-		identity := channelClient.GetBotIdentity(context.Background())
+	adapter.registerLifecycleCallbacks()
+	return adapter, nil
+}
+
+func (a *Adapter) registerLifecycleCallbacks() {
+	ready := func() {
+		identity := a.resolveBotIdentity(context.Background())
 		if identity != nil {
-			adapter.mu.Lock()
-			adapter.bot = *identity
-			adapter.mu.Unlock()
+			a.mu.Lock()
+			a.bot = *identity
+			a.mu.Unlock()
 			ownerCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-			ownerIDs, ownerErr := adapter.resolveOwnerIDs(ownerCtx)
+			ownerIDs, ownerErr := a.resolveOwnerIDs(ownerCtx)
 			cancel()
 			if ownerErr != nil {
-				callbacks.Error(ownerErr)
+				a.callbacks.Error(ownerErr)
 				return
 			}
-			if callbacks.Owners != nil {
-				callbacks.Owners(ownerIDs)
+			if a.callbacks.Owners != nil {
+				a.callbacks.Owners(ownerIDs)
 			}
-			callbacks.Ready(identity.OpenID, identity.Name)
+			a.callbacks.Ready(identity.OpenID, identity.Name)
 		} else {
-			callbacks.Error(errors.New("failed to resolve bot identity"))
+			a.callbacks.Error(errors.New("failed to resolve bot identity"))
 		}
-	})
-	channelClient.OnError(callbacks.Error)
-	return adapter, nil
+	}
+	a.channel.OnReady(ready)
+	a.channel.OnReconnected(ready)
+	a.channel.OnError(a.callbacks.Error)
 }
 
 func groupFromListChat(item *larkim.ListChat) (channels.Group, bool) {
