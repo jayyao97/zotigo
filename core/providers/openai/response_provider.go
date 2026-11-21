@@ -400,8 +400,6 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 	for _, m := range msgs {
 		switch m.Role {
 		case protocol.RoleSystem:
-			// System prompts go in the top-level instructions field so the
-			// server can cache them across turns.
 			for _, part := range m.Content {
 				if part.Type == protocol.ContentTypeText {
 					if instructions.Len() > 0 {
@@ -503,6 +501,15 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 		}
 	}
 
+	if instructions.Len() > 0 {
+		// GPT-6.2+ bills top-level instructions as uncached input on every turn.
+		// Keep reusable guidance in the conversation prefix.
+		content := responses.ResponseInputMessageContentListParam{
+			{OfInputText: &responses.ResponseInputTextParam{Text: instructions.String()}},
+		}
+		prefix := responses.ResponseInputItemParamOfMessage(content, responses.EasyInputMessageRoleDeveloper)
+		items = append(responses.ResponseInputParam{prefix}, items...)
+	}
 	params := responses.ResponseNewParams{
 		Model:           shared.ResponsesModel(model),
 		Input:           responses.ResponseNewParamsInputUnion{OfInputItemList: items},
@@ -513,9 +520,6 @@ func buildResponseParams(model string, maxOutputTokens int64, msgs []protocol.Me
 		Include: []responses.ResponseIncludable{
 			responses.ResponseIncludableReasoningEncryptedContent,
 		},
-	}
-	if instructions.Len() > 0 {
-		params.Instructions = param.NewOpt(instructions.String())
 	}
 
 	// Map reasoning effort.

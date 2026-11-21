@@ -165,22 +165,33 @@ func TestBuildResponseParams_ImageWithNoPayloadErrors(t *testing.T) {
 	}
 }
 
-func TestBuildResponseParams_SystemMessageBecomesInstructions(t *testing.T) {
+func TestBuildResponseParams_DeveloperPrefix(t *testing.T) {
 	msgs := []protocol.Message{
 		protocol.NewSystemMessage("Be concise."),
 		protocol.NewUserMessage("hi"),
+		protocol.NewSystemMessage("Use metric units."),
 	}
-	params, err := buildResponseParams("gpt-5", 32768, msgs, nil, "", providers.ToolChoice{})
+	params, err := buildResponseParams("gpt-6.2-sol", 32768, msgs, nil, "", providers.ToolChoice{})
 	if err != nil {
 		t.Fatalf("build: %v", err)
 	}
 	js := marshalJSON(t, params)
-	if !strings.Contains(js, `"instructions":"Be concise."`) {
-		t.Errorf("expected system prompt in instructions, got %s", js)
+	var wire struct {
+		Instructions json.RawMessage
+		Input        []struct {
+			Role    string
+			Content json.RawMessage
+		}
 	}
-	// User message still present.
-	if !strings.Contains(js, `"content":"hi"`) {
-		t.Errorf("expected user content, got %s", js)
+	if err := json.Unmarshal([]byte(js), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire.Instructions != nil || len(wire.Input) != 2 || wire.Input[0].Role != "developer" || wire.Input[1].Role != "user" || string(wire.Input[1].Content) != `"hi"` {
+		t.Fatalf("unexpected request: %s", js)
+	}
+	var blocks []struct{ Type, Text string }
+	if err := json.Unmarshal(wire.Input[0].Content, &blocks); err != nil || len(blocks) != 1 || blocks[0].Type != "input_text" || blocks[0].Text != "Be concise.\n\nUse metric units." {
+		t.Fatalf("unexpected developer content: %s", wire.Input[0].Content)
 	}
 }
 
