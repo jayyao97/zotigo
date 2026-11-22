@@ -305,6 +305,7 @@ func (r *Runtime) HandleNotification(ctx context.Context, message codexapp.Messa
 			return err
 		}
 		workerbase.DispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, r.activeTurnID, status, r.turnModel, r.turnUsage)
+		workerbase.RecordTurnUsage(r.store, r.cfg.SessionID, "codex", r.activeTurnID, status, r.turnModel, r.activeRequestContext, r.turnUsage)
 		r.activeTurnID = ""
 		r.activeRequestContext = nil
 		commandSequence := r.commandSequence

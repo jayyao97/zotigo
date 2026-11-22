@@ -106,20 +106,23 @@ exec '{real_mv}' "$@"
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertTrue((self.root / "current").exists())
 
-    def use_web(self):
-        self.component = "web"
+    def use_symlink_component(self, component):
+        self.component = component
         old_root = self.root
-        self.root = self.prefix / "web"
+        self.root = self.prefix / component
         old_root.rename(self.root)
         if (self.root / "current").is_symlink():
             (self.root / "current").unlink()
         else:
             shutil.rmtree(self.root / "current")
         (self.root / "current").symlink_to(self.root / "releases" / "old")
-        new_work = self.prefix / "updates" / "web"
+        new_work = self.prefix / "updates" / component
         self.work.rename(new_work)
         self.work = new_work
         self.env["FIXTURE_ROOT"] = str(self.root)
+
+    def use_web(self):
+        self.use_symlink_component("web")
         (self.prefix / "config" / "web.env").write_text("ZOTIGO_WEB_HOST=127.0.0.1\nZOTIGO_WEB_PORT=9999\nZOTIGO_WEB_ORIGIN=https://app.example.test\n")
         self.tool("curl", '''case "$*" in *"Host: app.example.test"*) echo '<html>ok</html>' ;; *) exit 22 ;; esac\n''')
 
@@ -203,6 +206,27 @@ case "$*" in
   */projects*) echo '{}' ;;
 esac
 ''')
+
+    def test_macos_desktop_two_activations_require_new_startup_receipts(self):
+        self.use_symlink_component("desktop")
+        self.env.update(FIXTURE_RECEIPT=str(self.work / "started.json"), FIXTURE_PID=str(os.getpid()))
+        self.tool("uname", "echo Darwin\n")
+        self.tool("lsof", "exit 0\n")
+        if platform.system() != "Darwin":
+            self.tool("mv", 'if [ "$1" = -fh ]; then shift; exec /bin/mv -fT "$@"; fi\nexec /bin/mv "$@"\n')
+        self.tool("open", r'''[ "$1" = "$FIXTURE_ROOT/current/Zotigo.app" ]
+[ ! -e "$FIXTURE_RECEIPT" ] || exit 1
+version=$(sed -n 's/^version=//p' "$FIXTURE_ROOT/current/INSTALLATION")
+printf '{"version":"%s","pid":%s}\n' "$version" "$FIXTURE_PID" > "$FIXTURE_RECEIPT"
+''')
+        for version in ("1.0.1", "1.0.2"):
+            prepared = self.root / "prepared"
+            prepared.mkdir(exist_ok=True)
+            (prepared / "INSTALLATION").write_text(f"version={version}\n")
+            result = self.apply()
+            self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+            self.assertIn("Update activated: desktop " + version, result.stdout)
+            self.assertIn(version, (self.work / "started.json").read_text())
 
     def test_macos_waits_for_exit_and_retries_bootstrap(self):
         self.delayed_macos()

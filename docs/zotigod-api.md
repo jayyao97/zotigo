@@ -76,6 +76,7 @@ zotigod \
 - `GET /sessions/{id}/items`
 - `GET /sessions/{id}/events`
 - `GET /catalog/activity`
+- `GET /usage/activity`, `GET /usage/sessions`
 - `POST /sessions/{id}/title-suggestion`
 - `POST /sessions/{id}/messages`
 - `POST /sessions/{id}/fork`
@@ -1614,3 +1615,78 @@ Search scans metadata when necessary; it does not search message bodies.
 
 The navigation indexes are a compatible catalog extension. API/data epochs remain
 unchanged, and previous binaries can still read and write the database.
+
+### Token usage
+
+Each finished turn with provider-reported usage is recorded once, at the live
+turn end of a native or Codex worker: completed, failed and interrupted turns
+all count. History is not backfilled, so `tracking_since` is the earliest
+recorded turn (`null` before the first one). Replayed or re-indexed history
+never adds records. Subagent usage is already part of its parent turn. A
+turn whose usage the provider did not report is omitted, not counted as zero.
+The model is the one in effect when the turn started. A native turn resumed
+after its worker restarted while waiting for approval is not recorded.
+
+Both endpoints take the same filters:
+
+- `tz` (required): an IANA time zone name such as `Asia/Shanghai` (`Local` is
+  rejected). Days are calendar days in this zone; the daemon embeds the zone
+  database.
+- `from`, `to` (required): inclusive local dates `YYYY-MM-DD`, spanning 1–400 days.
+- `model`: exact model name.
+- `channel=all|only|exclude`: defaults to `all`. A turn counts as Channel when an
+  IM message triggered it, regardless of the session's current binding.
+
+Every breakdown has `total`, `input` (uncached), `cache_read`, `cache_write`,
+`output`, `turns` and `cache_input`. `total` is all four token counts.
+`cache_input` is the full input (`input + cache_read + cache_write`) of models
+with any cache read in the queried range; the cache hit rate is
+`cache_read / cache_input`. Models whose provider never reported a cache read
+contribute nothing to it, so a missing report does not read as a 0% hit rate.
+When `cache_input` is 0, the hit rate is unavailable.
+
+`GET /usage/activity` returns:
+
+```json
+{
+  "usage_query_version": 1,
+  "tracking_since": "2026-11-21T08:00:00Z",
+  "range": {"total": 109, "input": 13, "cache_read": 90, "cache_write": 0, "output": 6, "turns": 2, "cache_input": 103},
+  "all_time": {"...": "same fields, ignoring from/to"},
+  "by_model": [{"model": "claude-opus-5-5", "runtime": "zotigo", "...": "breakdown"}],
+  "days": [{"date": "2026-11-20", "...": "breakdown"}],
+  "peak_day": {"date": "2026-11-20", "total": 109},
+  "current_streak_days": 3,
+  "longest_streak_days": 12
+}
+```
+
+`days` lists only days with usage, in ascending order. `by_model` is ordered by
+total descending and has one row per model and runtime; a row's `cache_input`
+follows the same per-model rule, so the rows add up to `range.cache_input`.
+`all_time` and both streaks keep the `model` and `channel` filters. The
+current streak includes today when it has usage and otherwise ends yesterday.
+
+`GET /usage/sessions` ranks sessions by `total` within the range, ties by
+session ID, with `limit` 1–200 (default 50) and an opaque `cursor`:
+
+```json
+{
+  "usage_query_version": 1,
+  "sessions": [{"session_id": "sess_a", "models": ["claude-opus-5-5"], "channel_turns": 0,
+    "last_completed_at": "2026-11-20T10:00:00Z", "total": 103, "...": "breakdown"}],
+  "next_cursor": ""
+}
+```
+
+Titles and organization are not repeated: resolve them through
+`GET /catalog/sessions?page=true&ids=...&include_archived=true`. Usage of a
+deleted session remains and has no catalog record.
+
+Each recorded turn also updates a rollup keyed by 15-minute UTC bucket, model,
+runtime and Channel flag. `/usage/activity` reads only that rollup, so its cost
+follows active quarter-hours rather than turns; every current IANA offset and
+transition is a multiple of 15 minutes, so each bucket belongs to exactly one
+local day. `/usage/sessions` aggregates the turns inside the requested range,
+so short ranges are cheap. Older daemons return 404. Both tables are a
+compatible catalog extension that previous binaries ignore.

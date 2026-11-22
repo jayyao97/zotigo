@@ -138,6 +138,27 @@ func TestWorkerRuntimeDispatchesTurnHooksWithUsage(t *testing.T) {
 	if events[0].TurnID != end.TurnID || events[1].TurnID != end.TurnID {
 		t.Fatalf("turn IDs do not match: %#v", events)
 	}
+	// The usage row is written right after the hook on the same goroutine.
+	deadline := time.Now().Add(time.Second)
+	for {
+		day := time.Now().UTC()
+		page, err := store.UsageSessions(context.Background(), zotigosession.UsageFilter{Location: time.UTC, From: day.AddDate(0, 0, -1), To: day.AddDate(0, 0, 1)}, "", 10)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(page.Sessions) == 1 {
+			recorded := page.Sessions[0]
+			if recorded.SessionID != "sess-turn-hooks" || recorded.Total != 20 || recorded.CacheRead != 6 || recorded.Turns != 1 || recorded.ChannelTurns != 0 ||
+				len(recorded.Models) != 1 || recorded.Models[0] != "model-test" {
+				t.Fatalf("recorded usage = %#v", recorded)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("turn usage was not recorded")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 func TestWorkerRuntimeUsesPersistedProviderErrorForTurnEndStatus(t *testing.T) {

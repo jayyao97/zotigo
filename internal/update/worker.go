@@ -119,6 +119,15 @@ func launchWorker(args []string, directory string) error {
 	if runtime.GOOS != "darwin" {
 		return fmt.Errorf("unsupported update platform")
 	}
+	return launchMacWorker(unit, args, directory)
+}
+
+func launchMacWorker(unit string, args []string, directory string) error {
+	domain := "gui/" + strconv.Itoa(os.Getuid())
+	// launchd retains even successful RunAtLoad jobs. Wait for the worker to
+	// persist its result and release its lock, then unregister this exact job.
+	// Its service target is captured in $0: another worker can reuse the plist.
+	args = append([]string{"/bin/sh", "-c", `"$@"; exec launchctl bootout "$0"`, domain + "/" + unit}, args...)
 	var body strings.Builder
 	body.WriteString(`<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>Label</key><string>` + unit + `</string><key>ProgramArguments</key><array>`)
 	for _, arg := range args {
@@ -131,7 +140,7 @@ func launchWorker(args []string, directory string) error {
 	if err := os.WriteFile(name, []byte(body.String()), 0600); err != nil {
 		return err
 	}
-	if out, err := exec.Command("launchctl", "bootstrap", "gui/"+strconv.Itoa(os.Getuid()), name).CombinedOutput(); err != nil {
+	if out, err := exec.Command("launchctl", "bootstrap", domain, name).CombinedOutput(); err != nil {
 		return fmt.Errorf("start update service: %s: %w", out, err)
 	}
 	return nil

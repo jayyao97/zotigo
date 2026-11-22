@@ -215,6 +215,7 @@ func (r *Runtime) Close() error {
 	})
 	if appendErr == nil {
 		workerbase.DispatchTurnEndHook(r.hooks, r.cfg.SessionID, "codex", r.cfg.WorkingDirectory, turnID, "interrupted", r.turnModel, r.turnUsage)
+		workerbase.RecordTurnUsage(r.store, r.cfg.SessionID, "codex", turnID, "interrupted", r.turnModel, r.activeRequestContext, r.turnUsage)
 	}
 	r.activeTurnID = ""
 	r.activeRequestContext = nil

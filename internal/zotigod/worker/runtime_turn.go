@@ -196,7 +196,9 @@ func (r *Runtime) startMessageTurn(ctx context.Context, commandID string, comman
 			if !terminal {
 				r.fail(fmt.Errorf("terminal display state missing for turn %s", turnID))
 			} else {
-				workerbase.DispatchTurnEndHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, status, model, workerbase.TurnUsageDelta(usageBefore, snapshot.CumulativeUsage))
+				turnUsage := workerbase.TurnUsageDelta(usageBefore, snapshot.CumulativeUsage)
+				workerbase.DispatchTurnEndHook(r.hooks, r.sessionID, "zotigo", r.workDir, turnID, status, model, turnUsage)
+				workerbase.RecordTurnUsage(r.store, r.sessionID, "zotigo", turnID, status, model, command.RequestContext, turnUsage)
 			}
 		}
 		sequence := r.turnSequence()

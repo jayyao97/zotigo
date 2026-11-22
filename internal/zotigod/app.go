@@ -385,6 +385,8 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 	mux.HandleFunc("/workspaces/{workspace_id}/{route...}", handler.handleWorkspaceRouteNotFound)
 	mux.HandleFunc("/catalog/sessions", handler.handleCatalogSessions)
 	mux.HandleFunc("GET /catalog/activity", untilServiceStops(options.serviceContext, handler.handleSessionActivity))
+	mux.HandleFunc("GET /usage/activity", handler.handleUsageActivity)
+	mux.HandleFunc("GET /usage/sessions", handler.handleUsageSessions)
 	mux.HandleFunc("/catalog/snapshot", handler.handleCatalogSnapshot)
 	mux.HandleFunc("/catalog/navigation", handler.handleNavigation)
 	mux.HandleFunc("/catalog/navigation/import", handler.handleNavigationImport)
