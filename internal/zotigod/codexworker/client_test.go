@@ -718,6 +718,7 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 	runtime := &Runtime{
 		cfg: Config{Config: workerbase.Config{SessionID: "session-items"}}, store: store, writer: writer,
 		threadID: "thread-1", activeTurnID: "turn-1", turnStarted: now, messages: make(map[string]string), toolNames: make(map[string]string), hooks: hookDispatcher,
+		turnModel: "gpt-test", activeRequestContext: &protocol.RequestContext{Source: "feishu", ConnectionID: "connection-1"},
 	}
 	notifications := []codexapp.Message{
 		{Method: "item/completed", Params: []byte(`{"threadId":"thread-1","turnId":"turn-1","completedAtMs":0,"item":{"type":"userMessage","id":"user-1","content":[{"type":"text","text":"Read AGENTS.md"}]}}`)},
@@ -779,6 +780,15 @@ func TestCodexWorkerPersistsCompletedItemsInProtocolOrder(t *testing.T) {
 		turnEnd.Turn.Usage.InputTokens != 10 || turnEnd.Turn.Usage.OutputTokens != 6 || turnEnd.Turn.Usage.TotalTokens != 30 ||
 		turnEnd.Turn.Usage.CacheCreationInputTokens != 4 || turnEnd.Turn.Usage.CacheReadInputTokens != 10 {
 		t.Fatalf("TurnEnd event = %#v", turnEnd)
+	}
+	day := time.Now().UTC()
+	usage, err := store.UsageSessions(context.Background(), zotigosession.UsageFilter{Location: time.UTC, From: day.AddDate(0, 0, -1), To: day.AddDate(0, 0, 1)}, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage.Sessions) != 1 || usage.Sessions[0].SessionID != "session-items" || usage.Sessions[0].Total != 30 ||
+		usage.Sessions[0].CacheWrite != 4 || usage.Sessions[0].ChannelTurns != 1 || len(usage.Sessions[0].Models) != 1 || usage.Sessions[0].Models[0] != "gpt-test" {
+		t.Fatalf("recorded usage = %#v", usage.Sessions)
 	}
 	firstDelta := nextWorkerDelta(t, writer.Queue())
 	secondDelta := nextWorkerDelta(t, writer.Queue())
