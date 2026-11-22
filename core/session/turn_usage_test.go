@@ -42,8 +42,8 @@ func mustLocation(t *testing.T, name string) *time.Location {
 }
 
 func usageFilter(location *time.Location, from, to string) UsageFilter {
-	start, _ := time.ParseInLocation(time.DateOnly, from, location)
-	end, _ := time.ParseInLocation(time.DateOnly, to, location)
+	start, _ := time.Parse(time.DateOnly, from)
+	end, _ := time.Parse(time.DateOnly, to)
 	return UsageFilter{Location: location, From: start, To: end, Channel: UsageChannelAll}
 }
 
@@ -126,6 +126,41 @@ func TestUsageRangeHandlesDaylightSavingDay(t *testing.T) {
 	}
 	if len(activity.Days) != 1 || activity.Days[0].Date != "2026-11-01" || activity.Range.Total != 3 {
 		t.Fatalf("days %+v range %+v", activity.Days, activity.Range)
+	}
+}
+
+func TestUsageDayWhoseMidnightIsSkipped(t *testing.T) {
+	store := newUsageStore(t)
+	location := mustLocation(t, "America/Santiago")
+	// Clocks jump from 00:00 to 01:00 on 2026-09-06 (-04 to -03).
+	for _, entry := range []struct {
+		id string
+		at time.Time
+	}{
+		{"before", time.Date(2026, 9, 6, 3, 30, 0, 0, time.UTC)}, // 23:30 -04 on 09-05
+		{"inside", time.Date(2026, 9, 6, 4, 30, 0, 0, time.UTC)}, // 01:30 -03 on 09-06
+		{"late", time.Date(2026, 9, 7, 2, 30, 0, 0, time.UTC)},   // 23:30 -03 on 09-06
+		{"next", time.Date(2026, 9, 7, 3, 30, 0, 0, time.UTC)},   // 00:30 -03 on 09-07
+	} {
+		recordUsage(t, store, TurnUsageRecord{SessionID: entry.id, TurnID: "t", Model: "m", CompletedAt: entry.at, Usage: protocol.Usage{InputTokens: 1}})
+	}
+	filter := usageFilter(location, "2026-09-06", "2026-09-06")
+	activity, err := store.UsageActivity(context.Background(), filter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(activity.Days) != 1 || activity.Days[0].Date != "2026-09-06" || activity.Range.Turns != 2 {
+		t.Fatalf("days %+v range %+v", activity.Days, activity.Range)
+	}
+	page, err := store.UsageSessions(context.Background(), filter, "", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(page.Sessions) != 2 || page.Sessions[0].SessionID != "inside" || page.Sessions[1].SessionID != "late" {
+		t.Fatalf("sessions %+v", page.Sessions)
+	}
+	if start := localDayStart(2026, 9, 6, location); !start.Equal(time.Date(2026, 9, 6, 4, 0, 0, 0, time.UTC)) {
+		t.Fatalf("day start %v", start)
 	}
 }
 

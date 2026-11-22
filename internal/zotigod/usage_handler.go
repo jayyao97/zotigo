@@ -104,16 +104,17 @@ func parseUsageFilter(query url.Values) (zotigosession.UsageFilter, error) {
 	if err != nil {
 		return zotigosession.UsageFilter{}, fmt.Errorf("tz %q is not a known IANA time zone", zone)
 	}
-	from, err := time.ParseInLocation(time.DateOnly, query.Get("from"), location)
+	// Dates stay calendar dates; the store finds where each day begins in the zone.
+	from, err := time.Parse(time.DateOnly, query.Get("from"))
 	if err != nil {
 		return zotigosession.UsageFilter{}, errors.New("from must be a YYYY-MM-DD date")
 	}
-	to, err := time.ParseInLocation(time.DateOnly, query.Get("to"), location)
+	to, err := time.Parse(time.DateOnly, query.Get("to"))
 	if err != nil {
 		return zotigosession.UsageFilter{}, errors.New("to must be a YYYY-MM-DD date")
 	}
 	// Count civil days so a daylight-saving transition does not change the span.
-	span := time.Date(to.Year(), to.Month(), to.Day(), 0, 0, 0, 0, time.UTC).Sub(time.Date(from.Year(), from.Month(), from.Day(), 0, 0, 0, 0, time.UTC))
+	span := to.Sub(from)
 	days := int(span.Hours()/24) + 1
 	if days < 1 || days > usageMaxRangeDays {
 		return zotigosession.UsageFilter{}, fmt.Errorf("from and to must span 1 to %d days", usageMaxRangeDays)

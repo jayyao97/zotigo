@@ -123,7 +123,9 @@ const (
 )
 
 // UsageFilter selects usage by local calendar days in Location.
-// From and To are inclusive local dates (their clock is ignored).
+// From and To are inclusive calendar dates: only their own year, month and
+// day are used, so parse them without a location (time.Parse). Parsing in
+// Location can move a date whose midnight does not exist there.
 type UsageFilter struct {
 	Location *time.Location
 	From     time.Time
@@ -222,9 +224,27 @@ func (totals *UsageTotals) add(other UsageTotals) {
 }
 
 func (filter UsageFilter) bounds() (int64, int64) {
-	from := time.Date(filter.From.Year(), filter.From.Month(), filter.From.Day(), 0, 0, 0, 0, filter.Location)
-	to := time.Date(filter.To.Year(), filter.To.Month(), filter.To.Day()+1, 0, 0, 0, 0, filter.Location)
+	from := localDayStart(filter.From.Year(), filter.From.Month(), filter.From.Day(), filter.Location)
+	to := localDayStart(filter.To.Year(), filter.To.Month(), filter.To.Day()+1, filter.Location)
 	return formatIndexTime(from), formatIndexTime(to)
+}
+
+// localDayStart returns the first instant of a local calendar day. Where a
+// daylight-saving change skips midnight (America/Santiago in September),
+// time.Date may return an instant on the previous day or after the skipped
+// hour; the day then starts at the zone transition.
+func localDayStart(year int, month time.Month, day int, location *time.Location) time.Time {
+	start := time.Date(year, month, day, 0, 0, 0, 0, location)
+	want := time.Date(year, month, day, 0, 0, 0, 0, time.UTC).Format(time.DateOnly)
+	switch local := start.In(location); {
+	case local.Format(time.DateOnly) < want:
+		_, end := start.ZoneBounds()
+		return end
+	case local.Hour() != 0 || local.Minute() != 0:
+		zoneStart, _ := start.ZoneBounds()
+		return zoneStart
+	}
+	return start
 }
 
 func usageFilterSQL(filter UsageFilter, query *strings.Builder, args []any) []any {
