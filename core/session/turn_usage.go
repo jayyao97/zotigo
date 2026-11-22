@@ -267,7 +267,7 @@ func (s *FileStore) scanUsage(ctx context.Context, query string, args []any, sca
 	if err != nil {
 		return fmt.Errorf("query turn usage: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		bucket, err := scan(rows)
 		if err != nil {
