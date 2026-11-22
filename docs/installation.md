@@ -179,3 +179,27 @@ installations and may still need separate authorization. No TCC database or
 system-wide privacy setting is modified by the installer.
 
 To uninstall, stop and disable/unload the service, remove its service file and installer-created binary link, then remove the component's installation directory. Keep `~/.zotigo` and `config/` unless you explicitly want to delete user data.
+
+### macOS Desktop updates and duplicate Dock icons
+
+Desktop carries its own copy of the updater. The first upgrade **to** a release
+with the launchd cleanup fix still runs the previously installed helper. Subsequent
+prepare and apply jobs unload their own service labels after the worker exits.
+
+Older helpers may have left completed jobs in the GUI login domain. To diagnose
+multiple Dock tiles with only one live Desktop process, inspect the old
+`com.zotigo.desktop` records in `lsappinfo list` and their `loadedJobs`.
+For each exact label, inspect `launchctl print "gui/$(id -u)/$label"`.
+Confirm that its program arguments point to this installation's
+`updates/desktop/runner`, that the component is desktop, and that the job ran
+and is now stopped. To clean up, boot out each verified service target with
+`launchctl bootout "gui/$(id -u)/$label"`, then recheck LaunchServices and the
+Dock. The shared worker.plist describes only the most recent job. The updater
+does not bulk-remove older registrations. Logging out and back in also tears
+down the GUI login domain.
+
+To verify in an isolated macOS GUI account, run
+`python3 scripts/macos_desktop_update_test.py`. It uses a unique test bundle ID,
+a local Git remote and two sequential updates in a temporary installation.
+On a test account with Dock accessibility inspection already authorized, set
+`ZOTIGO_TEST_DOCK_UI=1` to also count visible fixture tiles via System Events.
