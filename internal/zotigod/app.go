@@ -264,19 +264,20 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 			}
 			switch msg.Delta.PartType {
 			case string(protocol.ContentTypeText), string(protocol.ContentTypeReasoning), "tool_progress":
-				handler.registry.MarkWorking(sessionID, msg.Delta.ToolName)
+				handler.registry.MarkWorking(sessionID, msg.Delta.ToolName, msg.Delta.ToolCallID)
 				handler.events.PublishDelta(sessionID, *msg.Delta)
 			}
 		case wire.MessageDisplayWake:
 			if msg.PreviewRetirement != nil {
 				handler.events.Retire(sessionID, *msg.PreviewRetirement)
+				handler.registry.FinishTools(sessionID, msg.PreviewRetirement.ToolCallIDs)
 			}
 			handler.events.Wake(sessionID)
 		case wire.MessageWorking:
 			if session, ok := handler.registry.Get(sessionID); ok && session.State == SessionStatePausing {
 				_, _ = handler.registry.FinishStopping(sessionID)
 			} else {
-				handler.registry.MarkWorking(sessionID, "")
+				handler.registry.MarkWorking(sessionID, "", "")
 			}
 		case wire.MessageDisplayBarrier:
 			if msg.DisplayBarrier != nil && msg.DisplayBarrier.ID != "" {

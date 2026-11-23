@@ -2,6 +2,7 @@ package zotigod
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -55,6 +56,7 @@ type Session struct {
 	ChannelToolsEligible bool                      `json:"channel_tools_eligible"`
 	seq                  uint64
 	activationSource     string
+	activeToolCallID     string
 	workerActivation     uint64
 	workerGeneration     string
 }
@@ -185,7 +187,9 @@ func (r *sessionRegistry) List() []Session {
 	return sessions
 }
 
-func (r *sessionRegistry) MarkWorking(id string, activeTool string) {
+// MarkWorking records live worker activity. activeTool and toolCallID come
+// from tool progress; other activity passes empty values and clears them.
+func (r *sessionRegistry) MarkWorking(id string, activeTool string, toolCallID string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
@@ -195,13 +199,30 @@ func (r *sessionRegistry) MarkWorking(id string, activeTool string) {
 	}
 	changed := !session.Working
 	session.Working = true
+	session.activeToolCallID = toolCallID
 	if session.ActiveTool != activeTool {
 		session.ActiveTool = activeTool
 		changed = true
 	}
-	if !changed {
+	r.sessions[id] = session
+	if changed {
+		r.notifyChangedLocked(session)
+	}
+}
+
+// FinishTools clears the live tool once its durable result is published.
+// Without this, active_tool would outlive the tool until the model streams
+// text or the turn ends.
+func (r *sessionRegistry) FinishTools(id string, toolCallIDs []string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	session, ok := r.sessions[id]
+	if !ok || session.activeToolCallID == "" || !slices.Contains(toolCallIDs, session.activeToolCallID) {
 		return
 	}
+	session.activeToolCallID = ""
+	session.ActiveTool = ""
 	r.sessions[id] = session
 	r.notifyChangedLocked(session)
 }
@@ -219,6 +240,7 @@ func (r *sessionRegistry) MarkIdle(id string) {
 	}
 	session.Working = false
 	session.ActiveTool = ""
+	session.activeToolCallID = ""
 	r.sessions[id] = session
 	r.notifyChangedLocked(session)
 }
@@ -424,6 +446,7 @@ func (r *sessionRegistry) transition(id string, from []SessionState, apply func(
 	if session.State != SessionStateStarting && session.State != SessionStateRunning && session.State != SessionStatePausing && session.State != SessionStatePaused {
 		session.Working = false
 		session.ActiveTool = ""
+		session.activeToolCallID = ""
 		session.workerGeneration = ""
 	}
 	r.sessions[id] = session

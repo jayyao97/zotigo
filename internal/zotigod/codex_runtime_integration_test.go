@@ -122,7 +122,7 @@ func TestCodexWorkerDoesNotReleaseWhileSubmittingInput(t *testing.T) {
 	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
-	registry.MarkWorking(session.ID, "tool")
+	registry.MarkWorking(session.ID, "tool", "")
 
 	resultCh := make(chan error, 1)
 	go func() {
@@ -244,7 +244,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterRejectedInput(t *testing.T) {
 	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
-	registry.MarkWorking(session.ID, "tool")
+	registry.MarkWorking(session.ID, "tool", "")
 
 	resultCh := make(chan error, 1)
 	go func() {
@@ -365,7 +365,7 @@ func TestCodexWorkerRestoresIdleReleaseAfterDuplicateInput(t *testing.T) {
 	worker, generation := connectWorkerForActivation(t, server, session.ID, "0")
 	t.Cleanup(func() { _ = worker.Close() })
 	markWorkerReady(t, server, session.ID, generation)
-	registry.MarkWorking(session.ID, "tool")
+	registry.MarkWorking(session.ID, "tool", "")
 
 	resultCh := make(chan error, 1)
 	go func() {
