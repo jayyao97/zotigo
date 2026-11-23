@@ -13,29 +13,44 @@ import (
 func TestSessionRegistryActivityClearsWhenIdleOrTerminal(t *testing.T) {
 	registry := newSessionRegistry()
 	registry.Add(Session{ID: "sess-activity", State: SessionStateRunning})
-	registry.MarkWorking("sess-activity", "shell")
+	registry.MarkWorking("sess-activity", "shell", "")
 	working, _ := registry.Get("sess-activity")
 	if !working.Working || working.ActiveTool != "shell" {
 		t.Fatalf("working activity = %#v", working)
 	}
-	registry.MarkWorking("sess-activity", "")
+	registry.MarkWorking("sess-activity", "", "")
 	continued, _ := registry.Get("sess-activity")
 	if !continued.Working || continued.ActiveTool != "" {
 		t.Fatalf("continued activity = %#v", continued)
 	}
-	registry.MarkWorking("sess-activity", "shell")
+	registry.MarkWorking("sess-activity", "shell", "")
 	registry.MarkIdle("sess-activity")
 	idle, _ := registry.Get("sess-activity")
 	if idle.Working || idle.ActiveTool != "" {
 		t.Fatalf("idle activity = %#v", idle)
 	}
-	registry.MarkWorking("sess-activity", "read_file")
+	registry.MarkWorking("sess-activity", "read_file", "")
 	if _, err := registry.End("sess-activity"); err != nil {
 		t.Fatalf("end session: %v", err)
 	}
 	ended, _ := registry.Get("sess-activity")
 	if ended.Working || ended.ActiveTool != "" {
 		t.Fatalf("ended activity = %#v", ended)
+	}
+}
+
+func TestSessionRegistryFinishToolsClearsOnlyTheReportedTool(t *testing.T) {
+	registry := newSessionRegistry()
+	registry.Add(Session{ID: "sess-tool", State: SessionStateRunning})
+	registry.MarkWorking("sess-tool", "shell", "call-2")
+	registry.FinishTools("sess-tool", []string{"call-1"})
+	if session, _ := registry.Get("sess-tool"); session.ActiveTool != "shell" {
+		t.Fatalf("another tool's result cleared active tool: %#v", session)
+	}
+	registry.FinishTools("sess-tool", []string{"call-1", "call-2"})
+	session, _ := registry.Get("sess-tool")
+	if !session.Working || session.ActiveTool != "" {
+		t.Fatalf("finished tool activity = %#v", session)
 	}
 }
 

@@ -47,7 +47,7 @@ func TestWorkspaceArchiveIdleAndBusySessions(t *testing.T) {
 					t.Fatal(err)
 				}
 			case "working":
-				registry.MarkWorking(session.ID, "shell")
+				registry.MarkWorking(session.ID, "shell", "")
 			case "paused":
 				registry.mu.Lock()
 				s := registry.sessions[session.ID]

@@ -49,7 +49,7 @@ func TestActivityStreamTracksTurnAndReconcilesOnReconnect(t *testing.T) {
 	if len(read(r).Active) != 0 {
 		t.Fatal("idle worker appeared active")
 	}
-	registry.MarkWorking("one", "")
+	registry.MarkWorking("one", "", "")
 	started := read(r)
 	if started.Active["one"] != SessionStateRunning {
 		t.Fatal(started)
@@ -58,7 +58,7 @@ func TestActivityStreamTracksTurnAndReconcilesOnReconnect(t *testing.T) {
 	if idle := read(r); len(idle.Active) != 0 {
 		t.Fatal(idle)
 	}
-	registry.MarkWorking("one", "shell")
+	registry.MarkWorking("one", "shell", "")
 	if working := read(r); working.Active["one"] != SessionStateRunning {
 		t.Fatal(working)
 	}
