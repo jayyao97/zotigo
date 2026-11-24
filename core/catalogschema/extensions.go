@@ -10,7 +10,7 @@ import (
 
 // ExtensionVersion only advances for changes that preserve dev.31's reads and
 // writes. New executable queue payloads must never enter its runnable states.
-const ExtensionVersion = 4
+const ExtensionVersion = 5
 
 //go:embed extensions/*.sql
 var extensions embed.FS

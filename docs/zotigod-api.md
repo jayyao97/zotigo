@@ -1265,20 +1265,27 @@ gaps. Clients restore their regular timeline when leaving search. Message-ID
 lookup uses `(session_id, item_id)`.
 ## Queued session input
 
-The case-sensitive `completion:` prefix is reserved for host-created callback
-queue entries. Public queue submissions using that `client_message_id` prefix
-return 400 without inserting an entry.
+The case-sensitive prefixes `completion:` and `session_tool:` are reserved for
+callbacks and delegated messages respectively. Public queue submissions using
+either prefix return 400.
+
+The cross-session tool `zotigo.send_message` returns `accepted` on immediate
+admission. If the worker rejects admission because a turn is active, the tool
+persists the message and returns `queued` with its command ID. At dispatch the
+daemon rechecks delegation authority and submits the original message as a
+separate turn. A queued delegation has fixed content and cannot steer a turn.
 
 `POST /sessions/{id}/queue` accepts the same `text`, `images`, `skills`, and
 `client_message_id` fields as `/messages`. It returns a public command with
 `type: "queued"`. Unlike `/messages`, it never steers an active turn. When idle,
-the daemon claims ordinary queued messages up to the next completion notification and submits one merged
+the daemon claims ordinary queued messages up to the next callback or delegated message and submits one merged
 message with `StartOnly` admission. Text sections are separated by blank lines;
 image references retain order and skill names are deduplicated.
 
 `GET /sessions/{id}/queue` returns `{ "items": [...] }` inside the usual API
 envelope. Each item includes public command metadata and `state` (`queued`,
-`sending`, or `paused`), `revision`, and `editable`. This reads only the indexed
+`sending`, or `paused`), `revision`, and `editable`. The optional `cancellable` flag permits deleting an unclaimed
+delegated message with fixed content. Clients fall back to `editable` on older daemons. This reads only the indexed
 queue, not conversation snapshots. An empty or unknown session queue returns an
 empty array.
 

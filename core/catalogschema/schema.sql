@@ -212,7 +212,7 @@ CREATE TABLE session_input_queue (
   session_id TEXT NOT NULL,
   id TEXT NOT NULL,
   payload TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('queued', 'paused', 'sending', 'sent', 'cancelled', 'completion_queued', 'completion_paused', 'completion_sending', 'completion_sent', 'completion_cancelled')),
+  state TEXT NOT NULL CHECK(state IN ('queued', 'paused', 'sending', 'sent', 'cancelled', 'completion_queued', 'completion_paused', 'completion_sending', 'completion_sent', 'completion_cancelled', 'delegated_queued', 'delegated_paused', 'delegated_sending', 'delegated_sent', 'delegated_cancelled')),
   batch_id TEXT NOT NULL DEFAULT '',
   revision INTEGER NOT NULL DEFAULT 1,
   UNIQUE(session_id, id)

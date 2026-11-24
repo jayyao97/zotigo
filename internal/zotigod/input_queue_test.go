@@ -365,6 +365,45 @@ func TestQueuePausedAfterFailure(t *testing.T) {
 	}
 }
 
+func TestDelegatedQueueWakeAfterTerminal(t *testing.T) {
+	for _, kind := range []zotigosession.DisplayItemType{zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted} {
+		t.Run(string(kind), func(t *testing.T) {
+			h, caller := newSessionToolFixture(t)
+			ctx := context.Background()
+			id := caller.SessionID
+			if _, err := h.store.AppendDisplayItem(ctx, id, zotigosession.DisplayItem{Type: kind, Turn: &zotigosession.DisplayTurn{ID: caller.TurnID}}); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.catalog.QueueInput(ctx, id, "session_tool:delegation", []byte(`{"message":{"text":"review"}}`)); err != nil {
+				t.Fatal(err)
+			}
+			if err := h.catalog.QueueInput(ctx, id, "user", []byte(`{"message":{"text":"next"}}`)); err != nil {
+				t.Fatal(err)
+			}
+			// A regular enqueue wakes the dispatcher before MessageIdle arrives.
+			if err := h.dispatchQueuedInputs(id, false, false); err != nil {
+				t.Fatal(err)
+			}
+			rows, err := h.catalog.QueuedInputs(ctx, id)
+			if err != nil || len(rows) != 2 || rows[0].State != "paused" || rows[1].State != "paused" {
+				t.Fatalf("queue=%+v err=%v", rows, err)
+			}
+			req := httptest.NewRequest(http.MethodDelete, "/", strings.NewReader(fmt.Sprintf(`{"revision":%d}`, rows[0].Revision)))
+			req.SetPathValue("id", id)
+			req.SetPathValue("item", rows[0].ID)
+			rec := httptest.NewRecorder()
+			h.handleQueuedInput(rec, req)
+			if rec.Code != 200 {
+				t.Fatal(rec.Body.String())
+			}
+			remaining, err := h.catalog.ClaimQueuedInputs(ctx, id, "next", true)
+			if err != nil || len(remaining) != 1 || remaining[0].ID != "user" {
+				t.Fatalf("resume=%+v err=%v", remaining, err)
+			}
+		})
+	}
+}
+
 func TestEditQueuedImages(t *testing.T) {
 	for _, tc := range []struct {
 		name, body    string

@@ -137,18 +137,25 @@ func TestCompletionQueuePreservesOrderAndAuthority(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer store.Close()
-	for _, id := range []string{"Completion:user", "user1", "user2", "completion:one", "completion:two", "user3"} {
+	// Earlier public queue APIs permitted client IDs with this prefix.
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES('s','session_tool:legacy','{}','queued')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.PauseQueuedInputs(ctx, "s"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"Completion:user", "user1", "user2", "completion:one", "completion:two", "user3", "session_tool:one", "user4"} {
 		if err := store.QueueInput(ctx, "s", id, []byte(`{}`)); err != nil {
 			t.Fatal(err)
 		}
 	}
-	for i, want := range [][]string{{"Completion:user", "user1", "user2"}, {"completion:one"}, {"completion:two"}, {"user3"}} {
-		rows, err := store.ClaimQueuedInputs(ctx, "s", fmt.Sprint(i), false)
+	for i, want := range [][]string{{"session_tool:legacy", "Completion:user", "user1", "user2"}, {"completion:one"}, {"completion:two"}, {"user3"}, {"session_tool:one"}, {"user4"}} {
+		rows, err := store.ClaimQueuedInputs(ctx, "s", fmt.Sprint(i), i == 0)
 		if err != nil || len(rows) != len(want) {
 			t.Fatalf("batch: %v %v", rows, err)
 		}
 		for j, row := range rows {
-			if row.ID != want[j] {
+			if row.Delegated != (row.ID == "session_tool:one") || row.ID != want[j] {
 				t.Fatalf("order: %v", rows)
 			}
 		}
