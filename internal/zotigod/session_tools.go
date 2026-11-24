@@ -177,6 +177,15 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 	if caller.Stored.Capabilities.SessionToolsVersion < 1 {
 		return "", errors.New("session tools were not installed for this session")
 	}
+	// Queue operations acquire this lock before Channel and workspace authorization.
+	if request.Name == "send_message" {
+		var input sessionToolWriteInput
+		if err := decodeSessionToolArguments(request.Arguments, &input); err != nil {
+			return "", err
+		}
+		unlock := h.queueOps.lock(input.SessionID)
+		defer unlock()
+	}
 	var result any
 	run := func() error {
 		// The same mandatory guard covers both runtimes. A configuration fence in
@@ -457,6 +466,7 @@ type sessionToolOperation struct {
 	PromptConfig    session.PromptConfig     `json:"prompt_config"`
 	WorkspaceID     string                   `json:"workspace_id"`
 	DispatchStarted bool                     `json:"dispatch_started,omitempty"`
+	QueueOnRetry    bool                     `json:"queue_on_retry,omitempty"`
 	SourceSessionID string                   `json:"source_session_id"`
 	SourceTurnID    string                   `json:"source_turn_id"`
 	CallID          string                   `json:"call_id"`
@@ -582,8 +592,20 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	if found {
 		return acceptedSessionToolResult(operation, previous.ID), nil
 	}
-	if operation.DispatchStarted {
-		return uncertainSessionToolResult(operation.TargetID, commandID), nil
+	{
+		row, err := h.catalog.QueuedInputByID(ctx, operation.TargetID, commandID)
+		if err != nil {
+			return nil, err
+		}
+		if row != nil && !row.Delegated {
+			return nil, sessionlog.ErrCommandIDConflict
+		}
+		if row != nil {
+			return map[string]any{"session_id": operation.TargetID, "command_id": commandID, "status": row.State}, nil
+		}
+		if operation.DispatchStarted && !operation.QueueOnRetry {
+			return uncertainSessionToolResult(operation.TargetID, commandID), nil
+		}
 	}
 	if target.ApprovalPolicy != caller.Stored.ApprovalPolicy || target.PromptConfig != caller.Stored.PromptConfig {
 		return nil, errors.New("target approval and prompt constraints must match the source")
@@ -592,6 +614,9 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	// delivery lifecycle and could expose output to another group.
 	if target.Capabilities.ChannelToolsVersion > 0 {
 		return nil, errors.New("cannot send delegated work to a Channel-bound session")
+	}
+	if operation.QueueOnRetry {
+		return h.queueDelegatedMessage(ctx, operation, commandID)
 	}
 	if _, err = h.ensureSessionRunningInWorkspace(ctx, operation.TargetID); err != nil {
 		return nil, err
@@ -608,12 +633,43 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	}
 	accepted, err := h.acceptSessionInputCommand(ctx, operation.TargetID, commandID, text, nil, nil, "", false, true, &sessionInputConstraints{approvalPolicy: target.ApprovalPolicy, promptRevision: target.PromptConfig.Revision, requestContext: caller.Origin})
 	if err != nil {
+		if request.Name == "send_message" && errors.Is(err, sessionlog.ErrActiveTurn) {
+			// The worker definitively rejected direct admission. A replay may
+			// now retry the idempotent queue insert even if storage was full.
+			operation.QueueOnRetry = true
+			if err := saveSessionToolOperation(dir, path, operation); err != nil {
+				return nil, err
+			}
+			return h.queueDelegatedMessage(ctx, operation, commandID)
+
+		}
 		if errors.Is(err, sessionlog.ErrActiveTurn) || errors.Is(err, sessionlog.ErrInputPolicyMismatch) || errors.Is(err, errWorkerInputStopping) {
 			return nil, err
 		}
 		return uncertainSessionToolResult(operation.TargetID, commandID), nil
 	}
 	return acceptedSessionToolResult(operation, accepted.ID), nil
+}
+
+func (h *handler) queueDelegatedMessage(ctx context.Context, operation sessionToolOperation, commandID string) (any, error) {
+	text := operation.Input.Text
+	rows, err := h.catalog.QueuedInputs(ctx, operation.TargetID)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateQueueCapacity(rows, text, nil); err != nil {
+		return nil, err
+	}
+	command := wire.Command{ID: commandID, Type: wire.CommandMessage, CreatedAt: time.Now().UTC(), Message: &wire.MessageCommandPayload{Text: text, RequestContext: operation.Origin}}
+	data, err := json.Marshal(command)
+	if err != nil {
+		return nil, err
+	}
+	if err = h.catalog.QueueInput(ctx, operation.TargetID, commandID, data); err != nil {
+		return nil, err
+	}
+	go func() { _ = h.dispatchQueuedInputs(operation.TargetID, false, true) }()
+	return map[string]any{"session_id": operation.TargetID, "command_id": commandID, "status": "queued"}, nil
 }
 
 func acceptedSessionToolResult(operation sessionToolOperation, commandID string) any {

@@ -109,3 +109,26 @@ func TestCompatibleFutureExtensionsDoNotBlockBinaryRollback(t *testing.T) {
 		t.Fatal("unknown destructive downgrade accepted")
 	}
 }
+
+func TestDelegatedQueueExtensionRoundTrip(t *testing.T) {
+	ctx, root := context.Background(), t.TempDir()
+	db := testDatabase(t, root)
+	if err := upgrade(ctx, db, root); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, db, `INSERT INTO session_input_queue(session_id,id,payload,state) VALUES('s','normal','{}','queued'),('s','completion:1','{}','completion_paused'),('s','session_tool:1','{}','delegated_queued')`)
+	// The previous daemon cannot select this delegation for admission.
+	var runnable int
+	if err := db.QueryRow(`SELECT count(*) FROM session_input_queue WHERE id='session_tool:1' AND state IN ('queued','paused','sending','completion_queued','completion_paused','completion_sending')`).Scan(&runnable); err != nil || runnable != 0 {
+		t.Fatalf("legacy runnable = %d, err = %v", runnable, err)
+	}
+	for _, version := range []int{4, 5} {
+		if err := migrateExtensions(ctx, db, version); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var preserved int
+	if err := db.QueryRow(`SELECT count(*) FROM session_input_queue WHERE (id='normal' AND state='queued') OR (id='completion:1' AND state='completion_paused')`).Scan(&preserved); err != nil || preserved != 2 {
+		t.Fatalf("preserved = %d, err = %v", preserved, err)
+	}
+}

@@ -21,6 +21,7 @@ import (
 func newSessionToolFixture(t *testing.T) (*handler, sessionToolCaller) {
 	t.Helper()
 	h, store, catalog, workspace := newChannelProvisionFixture(t)
+	h.queueOps = newSessionOperationLocks()
 	h.items = sessionlog.StoredItemSource{Store: store}
 	h.workers = newWorkerRegistry()
 	source := newSession(workspace.RootPath, "channel-default")
@@ -405,6 +406,97 @@ func TestSessionToolsSendDurableAdmissionAndRetry(t *testing.T) {
 	uncertain, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", request)
 	if err != nil || !strings.Contains(uncertain, `"status":"outcome_unknown"`) {
 		t.Fatalf("first uncertain response=%s err=%v", uncertain, err)
+	}
+}
+
+func TestSessionToolsBusySendQueuesAndDeliversOnce(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	target := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+	target.State = SessionStateRunning
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.AssignSession(ctx, target.ID, caller.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	h.registry.Add(target)
+	worker := newWorkerConnection(target.ID, "target-generation", nil, h.workers)
+	h.workers.workers[target.ID] = worker
+	appendTurn := func(kind session.DisplayItemType) {
+		t.Helper()
+		if _, err := h.store.AppendDisplayItem(ctx, target.ID, session.DisplayItem{Type: kind, Turn: &session.DisplayTurn{ID: "busy"}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendTurn(session.DisplayItemTurnStarted)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case msg := <-worker.sendCh:
+			worker.resolveInput(wire.InputResult{RequestID: msg.InputRequest.RequestID, ErrorCode: "active_turn", Error: "a turn is already active"})
+		}
+	}()
+	raw, _ := json.Marshal(map[string]string{"session_id": target.ID, "text": "review"})
+	req := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "send_message", TurnID: caller.TurnID, CallID: "busy", Arguments: raw}
+	for i := 0; i < 2; i++ {
+		result, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", req)
+		if err != nil || !strings.Contains(result, `"status":"queued"`) {
+			t.Fatalf("send = %s, %v", result, err)
+		}
+	}
+	rows, err := h.catalog.QueuedInputs(ctx, target.ID)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("queue=%v err=%v", rows, err)
+	}
+	// Changing target policy while waiting must block admission. Restoring it
+	// and explicitly resuming the paused queue must deliver the original input.
+	stored, err := h.store.Get(ctx, target.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored.PromptConfig.Revision++
+	if err := h.store.Put(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	appendTurn(session.DisplayItemTurnCompleted)
+	_ = h.dispatchQueuedInputs(target.ID, false, true)
+	row, err := h.catalog.QueuedInputByID(ctx, target.ID, rows[0].ID)
+	if err != nil || row == nil || row.State != "paused" {
+		t.Fatalf("changed policy did not pause delivery: %+v %v", row, err)
+	}
+	stored.PromptConfig.Revision--
+	if err := h.store.Put(ctx, stored); err != nil {
+		t.Fatal(err)
+	}
+	received := make(chan wire.InputRequest, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case msg := <-worker.sendCh:
+			input := msg.InputRequest
+			received <- *input
+			accepted, err := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, input.Command)
+			if err == nil {
+				worker.resolveInput(wire.InputResult{RequestID: input.RequestID, Command: &accepted})
+			}
+		}
+	}()
+	if err := h.dispatchQueuedInputs(target.ID, true, false); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case input := <-received:
+		if input.Command.ID != rows[0].ID || !input.StartOnly || !input.RequirePromptRevision || input.Command.Message.Text != "review" {
+			t.Fatalf("unexpected delivery %+v", input)
+		}
+	case <-ctx.Done():
+		t.Fatal(ctx.Err())
+	}
+	result, err := h.executeRuntimeTool(ctx, caller.SessionID, "generation", req)
+	if err != nil || !strings.Contains(result, `"status":"accepted"`) {
+		t.Fatalf("delivered retry=%s err=%v", result, err)
 	}
 }
 

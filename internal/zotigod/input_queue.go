@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -22,6 +23,7 @@ type queuedInputResponse struct {
 	State                 string `json:"state"`
 	Revision              int64  `json:"revision"`
 	Editable              bool   `json:"editable"`
+	Cancellable           bool   `json:"cancellable"`
 	ImageEditingSupported bool   `json:"image_editing_supported"`
 }
 
@@ -43,6 +45,10 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 		var req submitMessageRequest
 		if err := readRequiredLimitedJSON(r, &req, maxMessageRequestBytes); err != nil {
 			writeAPIError(w, 400, err.Error())
+			return
+		}
+		if strings.HasPrefix(strings.TrimSpace(req.ClientMessageID), "session_tool:") {
+			writeAPIError(w, 400, "client_message_id prefix session_tool: is reserved for delegated messages")
 			return
 		}
 		if strings.HasPrefix(strings.TrimSpace(req.ClientMessageID), "completion:") {
@@ -163,7 +169,8 @@ func (h *handler) handleInputQueue(w http.ResponseWriter, r *http.Request, id st
 			writeAPIError(w, 500, "invalid queued input")
 			return
 		}
-		result = append(result, queuedInputResponse{publicCommandFromCommand(command), row.State, row.Revision, row.BatchID == "" && row.State != "sending", true})
+		cancellable := row.BatchID == "" && row.State != "sending"
+		result = append(result, queuedInputResponse{publicCommandResponse: publicCommandFromCommand(command), State: row.State, Revision: row.Revision, Editable: cancellable && !row.Delegated, Cancellable: cancellable, ImageEditingSupported: true})
 	}
 	writeAPIJSON(w, 200, map[string]any{"items": result})
 }
@@ -205,6 +212,10 @@ func (h *handler) handleQueuedInput(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		command.Message.Text = strings.TrimSpace(req.Text)
+		if r.Method == http.MethodPatch && row.Delegated {
+			writeAPIError(w, 409, "delegated messages have fixed content")
+			return
+		}
 		if r.Method == http.MethodPatch && strings.HasPrefix(row.ID, "completion:") {
 			writeAPIError(w, 409, "completion notifications have fixed content; cancel and send a new message instead")
 			return
@@ -301,6 +312,10 @@ func (h *handler) handleSendQueuedInput(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, 409, workspace.ErrQueueConflict.Error())
 		return
 	}
+	if row.Delegated {
+		writeAPIError(w, 409, "delegated messages must wait for the next turn")
+		return
+	}
 	if _, err = h.ensureSessionRunning(ctx, id); err == nil && !h.ensureWorkerOnline(ctx, id) {
 		err = errWorkerOffline
 	}
@@ -382,7 +397,9 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 		}
 		return nil
 	}
-	if afterTurn && !resume && !turnActive {
+	// A delegated message is queued only after a worker reported a busy turn.
+	// Any wakeup can win the race with its idle event, including an HTTP enqueue.
+	if !resume && !turnActive && (afterTurn || slices.ContainsFunc(queued, func(row workspace.QueuedInput) bool { return row.Delegated && row.BatchID == "" })) {
 		for i := len(items) - 1; i >= 0; i-- {
 			switch items[i].Type {
 			case zotigosession.DisplayItemTurnFailed, zotigosession.DisplayItemTurnInterrupted:
@@ -451,6 +468,21 @@ func (h *handler) dispatchQueuedInputs(id string, resume, afterTurn bool) (resul
 }
 
 func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []workspace.QueuedInput, startOnly bool) error {
+	if rows[0].Delegated {
+		submitted := false
+		err := h.withDelegatedInput(ctx, id, rows[0].ID, true, func(op sessionToolOperation) error {
+			submitted = true
+			return h.submitAuthorizedQueuedInputs(ctx, id, rows, true, &op)
+		})
+		if err != nil && !submitted {
+			return errors.Join(err, h.catalog.ReleaseQueuedBatch(ctx, id, rows[0].BatchID))
+		}
+		return err
+	}
+	return h.submitAuthorizedQueuedInputs(ctx, id, rows, startOnly, nil)
+}
+
+func (h *handler) submitAuthorizedQueuedInputs(ctx context.Context, id string, rows []workspace.QueuedInput, startOnly bool, delegated *sessionToolOperation) error {
 	h.updateMu.RLock()
 	defer h.updateMu.RUnlock()
 	command, err := mergeQueuedInputs(rows)
@@ -470,6 +502,21 @@ func (h *handler) submitQueuedInputs(ctx context.Context, id string, rows []work
 			err = errSessionUnavailable
 		} else {
 			request := wire.InputRequest{Command: command, StartOnly: startOnly}
+			if delegated != nil {
+				request.RequiredApprovalPolicy = delegated.ApprovalPolicy
+				request.RequiredPromptRevision = delegated.PromptConfig.Revision
+				request.RequirePromptRevision = true
+				expected := wire.Command{Message: &wire.MessageCommandPayload{Text: delegated.Input.Text, RequestContext: delegated.Origin}}
+				if delegated.Name != "send_message" || !sessionlog.SameCommandInput(command, expected) {
+					err = sessionlog.ErrCommandIDConflict
+				} else {
+					items, _, loadErr := h.items.LoadItems(ctx, id)
+					err = loadErr
+					if pending, _, ok := pendingApprovalPolicyIntent(items); err == nil && ok && pending != delegated.ApprovalPolicy {
+						err = sessionlog.ErrInputPolicyMismatch
+					}
+				}
+			}
 			if strings.HasPrefix(command.ID, "completion:") {
 				var stored *zotigosession.Session
 				stored, err = h.validateCompletionInput(ctx, id, command.ID)
@@ -589,9 +636,9 @@ func mergeQueuedInputs(rows []workspace.QueuedInput) (wire.Command, error) {
 		if input.Message == nil {
 			return command, fmt.Errorf("queued input %s has no message", row.ID)
 		}
-		if strings.HasPrefix(row.ID, "completion:") {
+		if strings.HasPrefix(row.ID, "completion:") || row.Delegated {
 			if len(rows) != 1 || row.BatchID != row.ID {
-				return command, fmt.Errorf("completion notification cannot be merged")
+				return command, fmt.Errorf("host-created input cannot be merged")
 			}
 			command.Message.RequestContext = input.Message.RequestContext.Clone()
 		}
