@@ -618,3 +618,55 @@ func TestGroupCommandsKeepEditsMadeWhileTheyRun(t *testing.T) {
 		})
 	}
 }
+
+// /unbind clears what it read, including a shared Session created or archived
+// meanwhile, but keeps a binding that was replaced meanwhile.
+func TestUnbindKeepsARebindMadeWhileItRuns(t *testing.T) {
+	sharedWith := func(session string) func(*ConversationInput) {
+		return func(input *ConversationInput) {
+			input.SessionStrategy, input.SessionID = SessionStrategyShared, session
+		}
+	}
+	for _, test := range []struct {
+		name    string
+		before  func(*ConversationInput) // the group /unbind reads
+		edit    func(*ConversationInput) // applied while it runs
+		reply   string
+		cleared bool
+	}{
+		{"topic group turned into one sharing a chosen Session", nil, sharedWith("sess_b"), "binding changed", false},
+		{"shared group switched to another Session", sharedWith("sess_a"), sharedWith("sess_b"), "binding changed", false},
+		{"shared group moved to another Workspace", sharedWith(""), func(input *ConversationInput) { input.WorkspaceID = "workspace_other" }, "binding changed", false},
+		{"shared Session created by a mention", sharedWith(""), sharedWith("sess_a"), "is unbound", true},
+		{"shared Session archived", sharedWith("sess_a"), sharedWith(""), "is unbound", true},
+		{"group disabled", nil, func(input *ConversationInput) { input.Enabled = false }, "is unbound", true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+			if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", "/bind workspace_oncall", true)); err != nil {
+				t.Fatal(err)
+			}
+			adapter.waitReply(t, 1)
+			<-dispatcher.validated
+			if test.before != nil {
+				desktopEdit(t, service, store, test.before)
+			}
+			gate := newPauseGate()
+			gate.arm()
+			service.beforeUnbindWrite = gate.wait
+			if err := adapter.callbacks.Inbound(ctx, groupMessage("unbind", "owner-1", "/unbind", true)); err != nil {
+				t.Fatal(err)
+			}
+			<-gate.entered
+			desktopEdit(t, service, store, test.edit)
+			close(gate.release)
+			if reply := adapter.waitReply(t, 2); !strings.Contains(reply, test.reply) {
+				t.Fatalf("reply = %q", reply)
+			}
+			group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+			if err != nil || (group.WorkspaceID == "" && !group.Enabled) != test.cleared {
+				t.Fatalf("group = %+v err=%v", group, err)
+			}
+		})
+	}
+}

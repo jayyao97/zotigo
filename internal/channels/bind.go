@@ -278,13 +278,12 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 		if !group.Enabled && group.WorkspaceID == "" {
 			return "This group is not bound."
 		}
+		if s.beforeUnbindWrite != nil {
+			s.beforeUnbindWrite()
+		}
 		_, err := s.updateConversation(ctx, group.ID, func(latest Conversation) (ConversationInput, error) {
-			// Unbinding a group disabled meanwhile still clears it, as does a
-			// shared Session created or archived meanwhile; a group rebound
-			// elsewhere meanwhile keeps that newer binding.
-			rebound := latest.WorkspaceID != group.WorkspaceID || (group.SessionID != "" && latest.SessionID != "" && latest.SessionID != group.SessionID)
-			if latest.WorkspaceID != "" && rebound {
-				return ConversationInput{}, errBindingChanged
+			if err := unbindConflict(group, latest); err != nil {
+				return ConversationInput{}, err
 			}
 			input := conversationInputFrom(latest)
 			input.Enabled, input.SessionID, input.WorkspaceID = false, "", ""
@@ -364,6 +363,25 @@ func bindingChangedSince(read, latest Conversation) error {
 		return errGroupUnbound
 	}
 	return errBindingChanged
+}
+
+// unbindConflict reports whether a group was rebound after /unbind read it, so
+// unbinding would remove a binding the owner never saw. A group disabled
+// meanwhile is still cleared, as is a shared Session created by a mention or
+// archived meanwhile: the strategy stays and only one side has a Session.
+// Another Workspace, another strategy (such as a topic group turned into one
+// sharing a chosen Session), another existing Session, or a disabled group
+// enabled again are rebinds.
+func unbindConflict(read, latest Conversation) error {
+	if latest.WorkspaceID == "" {
+		return nil
+	}
+	if latest.WorkspaceID != read.WorkspaceID || latest.SessionStrategy != read.SessionStrategy ||
+		(read.SessionID != "" && latest.SessionID != "" && latest.SessionID != read.SessionID) ||
+		(!read.Enabled && latest.Enabled) {
+		return errBindingChanged
+	}
+	return nil
 }
 
 func conversationInputFrom(c Conversation) ConversationInput {

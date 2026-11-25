@@ -107,6 +107,10 @@ type Service struct {
 	storeClosed         bool
 	deliveryTimeout     time.Duration
 	afterMessageClaimed func()
+
+	// beforeUnbindWrite, set only by tests, runs after /unbind read the group
+	// and before it writes, where an edit on the Channel page can land.
+	beforeUnbindWrite func()
 }
 
 type inboxLock struct {
