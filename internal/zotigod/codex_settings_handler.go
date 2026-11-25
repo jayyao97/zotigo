@@ -30,11 +30,21 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
-	request.Model = strings.TrimSpace(request.Model)
-	request.ReasoningEffort = strings.TrimSpace(request.ReasoningEffort)
-	if request.Model == "" || request.ReasoningEffort == "" {
-		writeAPIError(w, http.StatusBadRequest, "model and reasoning_effort are required")
+	session, err := h.changeSessionCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort)
+	if err != nil {
+		writeSessionRuntimeError(w, err)
 		return
+	}
+	writeAPIJSON(w, http.StatusOK, session)
+}
+
+// changeSessionCodexSettings switches a Codex Session's model and reasoning
+// effort; the next turn uses them.
+func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string) (Session, error) {
+	model = strings.TrimSpace(model)
+	reasoningEffort = strings.TrimSpace(reasoningEffort)
+	if model == "" || reasoningEffort == "" {
+		return Session{}, runtimeChangeError(http.StatusBadRequest, "model and reasoning_effort are required")
 	}
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
@@ -42,47 +52,38 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 	if !live {
 		var found bool
 		var err error
-		session, found, err = h.storedSession(r.Context(), id)
+		session, found, err = h.storedSession(ctx, id)
 		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
-			return
+			return Session{}, runtimeChangeError(http.StatusInternalServerError, "load session: %v", err)
 		}
 		if !found {
-			writeAPIError(w, http.StatusNotFound, "session not found")
-			return
+			return Session{}, runtimeChangeError(http.StatusNotFound, "session not found")
 		}
 	}
 	if zotigoruntime.AgentKind(session.Agent) != zotigoruntime.AgentCodex {
-		writeAPIError(w, http.StatusBadRequest, "codex settings require agent codex")
-		return
+		return Session{}, runtimeChangeError(http.StatusBadRequest, "codex settings require agent codex")
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
-		writeAPIError(w, http.StatusConflict, "codex settings require a resumable session")
-		return
+		return Session{}, runtimeChangeError(http.StatusConflict, "codex settings require a resumable session")
 	}
-	if err := h.validateCodexSettings(r.Context(), request.Model, request.ReasoningEffort); err != nil {
-		writeAPIError(w, http.StatusBadRequest, err.Error())
-		return
+	if err := h.validateCodexSettings(ctx, model, reasoningEffort); err != nil {
+		return Session{}, runtimeChangeError(http.StatusBadRequest, "%s", err.Error())
 	}
 	store, ok := h.store.(codexSettingsStore)
 	if !ok {
-		writeAPIError(w, http.StatusInternalServerError, "session store does not support codex settings")
-		return
+		return Session{}, runtimeChangeError(http.StatusInternalServerError, "session store does not support codex settings")
 	}
-	if err := store.UpdateCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort, time.Now().UTC()); err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("update codex settings: %v", err))
-		return
+	if err := store.UpdateCodexSettings(ctx, id, model, reasoningEffort, time.Now().UTC()); err != nil {
+		return Session{}, runtimeChangeError(http.StatusInternalServerError, "update codex settings: %v", err)
 	}
 	if live {
-		updated, err := h.registry.UpdateCodexSettings(id, request.Model, request.ReasoningEffort)
+		updated, err := h.registry.UpdateCodexSettings(id, model, reasoningEffort)
 		if err != nil {
-			writeAPIError(w, http.StatusConflict, err.Error())
-			return
+			return Session{}, runtimeChangeError(http.StatusConflict, "%s", err.Error())
 		}
-		session = updated
-	} else {
-		session.Model = request.Model
-		session.ReasoningEffort = request.ReasoningEffort
+		return updated, nil
 	}
-	writeAPIJSON(w, http.StatusOK, session)
+	session.Model = model
+	session.ReasoningEffort = reasoningEffort
+	return session, nil
 }

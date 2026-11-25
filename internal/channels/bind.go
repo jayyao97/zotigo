@@ -92,9 +92,10 @@ type CommandReplier interface {
 const (
 	commandBind   = "/bind"
 	commandUnbind = "/unbind"
+	commandModel  = "/model"
 )
 
-// parseGroupCommand recognizes /bind and /unbind. They only apply to a group
+// parseGroupCommand recognizes /bind, /unbind and /model. They only apply to a group
 // message that mentions the bot and comes from an application owner; anything
 // else is an ordinary message.
 func parseGroupCommand(connection Connection, in InboundMessage) (command, argument string, ok bool) {
@@ -114,6 +115,8 @@ func parseGroupCommand(connection Connection, in InboundMessage) (command, argum
 		return command, argument, true
 	case command == commandUnbind && len(fields) == 1:
 		return command, "", true
+	case command == commandModel && len(fields) <= 3:
+		return command, strings.Join(fields[1:], " "), true
 	}
 	return "", "", false
 }
@@ -223,6 +226,8 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 		return "Zotigo could not read this group's binding: " + err.Error()
 	}
 	switch {
+	case command == commandModel:
+		return s.runModelCommand(ctx, connectionID, in, group, strings.Fields(argument), current)
 	case command == commandBind && argument == "":
 		return describeBinding(connection, group)
 	case command == commandUnbind:

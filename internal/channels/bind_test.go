@@ -58,10 +58,32 @@ func (f replyingFactory) New(connection Connection, secret string, callbacks Ada
 	return f.adapter, nil
 }
 
-// bindingDispatcher resolves the test Workspace and Session.
+// bindingDispatcher resolves the test Workspace and Session, and records
+// model switches.
 type bindingDispatcher struct {
 	fakeDispatcher
 	validated chan Conversation
+	switched  chan string
+}
+
+func (bindingDispatcher) ChannelSessionRuntime(context.Context, string) (SessionRuntimeConfig, error) {
+	return SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: "fast"}, nil
+}
+
+func (bindingDispatcher) ChannelRuntimeChoices(context.Context, string, string) ([]string, error) {
+	return []string{"fast (model-a)", "deep (model-b)"}, nil
+}
+
+func (bindingDispatcher) ResolveChannelRuntime(_ context.Context, _ string, current SessionRuntimeConfig, choice []string) (SessionRuntimeConfig, error) {
+	if choice[0] == "missing" {
+		return current, errors.New(`profile "missing" not found`)
+	}
+	return SessionRuntimeConfig{Agent: current.Agent, ProfileName: choice[0]}, nil
+}
+
+func (d bindingDispatcher) SwitchChannelSessionRuntime(_ context.Context, sessionID string, choice []string) (SessionRuntimeConfig, bool, error) {
+	d.switched <- sessionID + "=" + strings.Join(choice, " ")
+	return SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: choice[0]}, false, nil
 }
 
 func (bindingDispatcher) ResolveChannelBindTarget(_ context.Context, id string) (ChannelBindTarget, error) {
@@ -90,7 +112,7 @@ func startBindingService(t *testing.T, aliases []BindAlias) (*Service, *Store, *
 	secrets, _ := NewSecretStore(t.TempDir())
 	adapter := &replyingAdapter{fakeAdapter: &fakeAdapter{}}
 	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: replyingFactory{adapter}})
-	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4)}
+	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4), switched: make(chan string, 4)}
 	service.SetDispatcher(dispatcher)
 	secret := "secret"
 	owners := []string{"owner-1"}
@@ -293,5 +315,87 @@ func TestGroupCommandsRunOnceInArrivalOrder(t *testing.T) {
 	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
 	if err != nil || group.Enabled {
 		t.Fatalf("the later /unbind did not win: %+v err=%v", group, err)
+	}
+}
+
+func TestModelCommandTargetsTheMessageScope(t *testing.T) {
+	_, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	send := func(in InboundMessage, count int) string {
+		t.Helper()
+		if err := adapter.callbacks.Inbound(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		return adapter.waitReply(t, count)
+	}
+	if reply := send(groupMessage("unbound", "owner-1", "/model", true), 1); !strings.Contains(reply, "not bound") {
+		t.Fatalf("unbound reply = %q", reply)
+	}
+	send(groupMessage("bind", "owner-1", "/bind workspace_oncall", true), 2)
+	<-dispatcher.validated
+
+	// A top-level message lists choices and then changes the model for new topics.
+	if reply := send(groupMessage("list", "owner-1", "/model", true), 3); !strings.Contains(reply, "new topics") || !strings.Contains(reply, "deep (model-b)") {
+		t.Fatalf("list reply = %q", reply)
+	}
+	if reply := send(groupMessage("default", "owner-1", "/model deep", true), 4); !strings.Contains(reply, "profile deep") {
+		t.Fatalf("default reply = %q", reply)
+	}
+	<-dispatcher.validated
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil || group.ProfileName != "deep" {
+		t.Fatalf("group = %+v err=%v", group, err)
+	}
+	if reply := send(groupMessage("missing", "owner-1", "/model missing", true), 5); !strings.Contains(reply, "not found") {
+		t.Fatalf("missing reply = %q", reply)
+	}
+
+	// A reply in a topic changes that topic's Session.
+	topic, err := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic.SessionID, topic.WorkspaceID, topic.Enabled = "sess_topic", "workspace_oncall", true
+	if _, err = store.PutConversation(ctx, topic); err != nil {
+		t.Fatal(err)
+	}
+	reply := groupMessage("topic", "owner-1", "/model fast", true)
+	reply.RootID = "root-1"
+	if text := send(reply, 6); !strings.Contains(text, "This topic's session now uses profile fast") {
+		t.Fatalf("topic reply = %q", text)
+	}
+	if switched := <-dispatcher.switched; switched != "sess_topic=fast" {
+		t.Fatalf("switched %q", switched)
+	}
+	orphan := groupMessage("orphan", "owner-1", "/model fast", true)
+	orphan.RootID = "root-2"
+	if text := send(orphan, 7); !strings.Contains(text, "no session yet") {
+		t.Fatalf("orphan reply = %q", text)
+	}
+
+	// A member's /model is an ordinary message.
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("member", "member-1", "/model fast", true)); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if adapter.replyCount() != 7 {
+		t.Fatalf("member command replied: %v", adapter.replies)
+	}
+}
+
+func TestModelCommandSwitchesSharedSession(t *testing.T) {
+	_, _, adapter, dispatcher, ctx := startBindingService(t, nil)
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", "/bind sess_shared", true)); err != nil {
+		t.Fatal(err)
+	}
+	adapter.waitReply(t, 1)
+	<-dispatcher.validated
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("model", "owner-1", "/model deep", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 2); !strings.Contains(reply, "shared session now uses profile deep") {
+		t.Fatalf("reply = %q", reply)
+	}
+	if switched := <-dispatcher.switched; switched != "sess_shared=deep" {
+		t.Fatalf("switched %q", switched)
 	}
 }
