@@ -152,3 +152,40 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	}
 	_ = reopened.Close()
 }
+
+// Two daemons may open an older database at once; whichever adds a column
+// second must still start.
+func TestConcurrentOpensAddOptionalColumnsOnce(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.Exec(`ALTER TABLE channel_connections DROP COLUMN progress_detail;
+ ALTER TABLE channel_connections DROP COLUMN bind_aliases;
+ ALTER TABLE channel_conversations DROP COLUMN progress_detail;`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const opens = 8
+	errs := make(chan error, opens)
+	start := make(chan struct{})
+	for range opens {
+		go func() {
+			<-start
+			opened, err := Open(root)
+			if err == nil {
+				err = opened.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	for range opens {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
+	}
+}

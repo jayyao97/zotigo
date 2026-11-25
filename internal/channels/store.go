@@ -45,7 +45,9 @@ func Open(root string) (*Store, error) {
 	// A single writer is sufficient for channel metadata and avoids competing
 	// SQLite connections surfacing SQLITE_BUSY during adapter callbacks.
 	db.SetMaxOpenConns(1)
-	if _, err = db.Exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=5000;`); err != nil {
+	// Set the busy timeout first: switching to WAL takes a lock that another
+	// process opening the database may hold.
+	if _, err = db.Exec(`PRAGMA busy_timeout=5000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("configure channels database: %w", err)
 	}
@@ -160,18 +162,30 @@ var optionalColumns = []struct{ table, column, definition string }{
 
 func (s *Store) addOptionalColumns() error {
 	for _, column := range optionalColumns {
-		var exists int
-		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, column.table, column.column).Scan(&exists); err != nil {
-			return fmt.Errorf("inspect %s.%s: %w", column.table, column.column, err)
+		exists, err := s.columnExists(column.table, column.column)
+		if err != nil {
+			return err
 		}
-		if exists != 0 {
+		if exists {
 			continue
 		}
 		if _, err := s.db.Exec(`ALTER TABLE ` + column.table + ` ADD COLUMN ` + column.column + ` ` + column.definition); err != nil {
+			// Another process opening the same database may have added it first.
+			if added, checkErr := s.columnExists(column.table, column.column); checkErr == nil && added {
+				continue
+			}
 			return fmt.Errorf("add %s.%s: %w", column.table, column.column, err)
 		}
 	}
 	return nil
+}
+
+func (s *Store) columnExists(table, column string) (bool, error) {
+	var count int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, table, column).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect %s.%s: %w", table, column, err)
+	}
+	return count != 0, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
