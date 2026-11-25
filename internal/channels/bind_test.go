@@ -731,27 +731,65 @@ func bindTopicSession(t *testing.T, store *Store) {
 	}
 }
 
-// /unbind clears what it read, including a shared Session created or archived
-// meanwhile, but keeps a binding that was replaced meanwhile.
+// /unbind clears what it read, including a group disabled or a shared Session
+// archived meanwhile, but keeps a binding that was replaced meanwhile. A shared
+// Session the group gained meanwhile is kept whether an owner chose it or a
+// mention created it; sending /unbind again then clears it.
 func TestUnbindKeepsARebindMadeWhileItRuns(t *testing.T) {
 	sharedWith := func(session string) func(*ConversationInput) {
 		return func(input *ConversationInput) {
 			input.SessionStrategy, input.SessionID = SessionStrategyShared, session
 		}
 	}
+	// The Channel page saves a chosen Session with the binding validation.
+	desktopBinds := func(session string) func(*testing.T, *Service, *Store, bindingDispatcher) {
+		return func(t *testing.T, service *Service, store *Store, dispatcher bindingDispatcher) {
+			group, err := store.GetConversationByScope(context.Background(), "connection-1", "chat-1", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			input := conversationInputFrom(group)
+			sharedWith(session)(&input)
+			if _, err := service.PutConversationValidated(context.Background(), group.ID, input, dispatcher.ValidateChannelBinding); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	// A mention records the Session it created on the group, as provisioning does.
+	mentionCreates := func(session string) func(*testing.T, *Service, *Store, bindingDispatcher) {
+		return func(t *testing.T, service *Service, store *Store, _ bindingDispatcher) {
+			service.configMu.Lock()
+			defer service.configMu.Unlock()
+			group, err := store.GetConversationByScope(context.Background(), "connection-1", "chat-1", "")
+			if err != nil {
+				t.Fatal(err)
+			}
+			group.SessionID = session
+			if _, err := store.PutConversation(context.Background(), group); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	type change = func(*testing.T, *Service, *Store, bindingDispatcher)
+	edit := func(apply func(*ConversationInput)) change {
+		return func(t *testing.T, service *Service, store *Store, _ bindingDispatcher) {
+			desktopEdit(t, service, store, apply)
+		}
+	}
 	for _, test := range []struct {
 		name    string
 		before  func(*ConversationInput) // the group /unbind reads
-		edit    func(*ConversationInput) // applied while it runs
-		reply   string
+		change  change                   // applied while it runs
+		session string                   // the group's Session afterwards
 		cleared bool
 	}{
-		{"topic group turned into one sharing a chosen Session", nil, sharedWith("sess_b"), "binding changed", false},
-		{"shared group switched to another Session", sharedWith("sess_a"), sharedWith("sess_b"), "binding changed", false},
-		{"shared group moved to another Workspace", sharedWith(""), func(input *ConversationInput) { input.WorkspaceID = "workspace_other" }, "binding changed", false},
-		{"shared Session created by a mention", sharedWith(""), sharedWith("sess_a"), "is unbound", true},
-		{"shared Session archived", sharedWith("sess_a"), sharedWith(""), "is unbound", true},
-		{"group disabled", nil, func(input *ConversationInput) { input.Enabled = false }, "is unbound", true},
+		{"topic group turned into one sharing a chosen Session", nil, edit(sharedWith("sess_b")), "sess_b", false},
+		{"shared group switched to another Session", sharedWith("sess_a"), edit(sharedWith("sess_b")), "sess_b", false},
+		{"shared group moved to another Workspace", sharedWith(""), edit(func(input *ConversationInput) { input.WorkspaceID = "workspace_other" }), "", false},
+		{"shared group given a chosen Session on the Channel page", sharedWith(""), desktopBinds("sess_b"), "sess_b", false},
+		{"shared Session created by a mention", sharedWith(""), mentionCreates("sess_b"), "sess_b", false},
+		{"shared Session archived", sharedWith("sess_a"), edit(sharedWith("")), "", true},
+		{"group disabled", nil, edit(func(input *ConversationInput) { input.Enabled = false }), "", true},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
@@ -770,14 +808,31 @@ func TestUnbindKeepsARebindMadeWhileItRuns(t *testing.T) {
 				t.Fatal(err)
 			}
 			<-gate.entered
-			desktopEdit(t, service, store, test.edit)
+			test.change(t, service, store, dispatcher)
 			close(gate.release)
-			if reply := adapter.waitReply(t, 2); !strings.Contains(reply, test.reply) {
+			want := "is unbound"
+			if !test.cleared {
+				want = "binding changed while the command ran; send it again"
+			}
+			if reply := adapter.waitReply(t, 2); !strings.Contains(reply, want) {
 				t.Fatalf("reply = %q", reply)
 			}
 			group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
-			if err != nil || (group.WorkspaceID == "" && !group.Enabled) != test.cleared {
+			if err != nil || (group.WorkspaceID == "" && !group.Enabled) != test.cleared || !test.cleared && (!group.Enabled || group.SessionID != test.session) {
 				t.Fatalf("group = %+v err=%v", group, err)
+			}
+			if test.cleared {
+				return
+			}
+			// Sent again, /unbind sees the new binding and clears it.
+			if err := adapter.callbacks.Inbound(ctx, groupMessage("unbind-again", "owner-1", "/unbind", true)); err != nil {
+				t.Fatal(err)
+			}
+			if reply := adapter.waitReply(t, 3); !strings.Contains(reply, "is unbound") {
+				t.Fatalf("retry reply = %q", reply)
+			}
+			if group, err = store.GetConversationByScope(ctx, "connection-1", "chat-1", ""); err != nil || group.Enabled || group.WorkspaceID != "" || group.SessionID != "" {
+				t.Fatalf("after retry group = %+v err=%v", group, err)
 			}
 		})
 	}

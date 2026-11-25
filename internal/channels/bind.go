@@ -366,18 +366,17 @@ func bindingChangedSince(read, latest Conversation) error {
 }
 
 // unbindConflict reports whether a group was rebound after /unbind read it, so
-// unbinding would remove a binding the owner never saw. A group disabled
-// meanwhile is still cleared, as is a shared Session created by a mention or
-// archived meanwhile: the strategy stays and only one side has a Session.
-// Another Workspace, another strategy (such as a topic group turned into one
-// sharing a chosen Session), another existing Session, or a disabled group
-// enabled again are rebinds.
+// unbinding would remove a binding the owner never saw. Any Session the group
+// gained meanwhile counts, whether chosen on the Channel page or created by a
+// mention, as do another Workspace, another strategy and a disabled group
+// enabled again; the owner can send /unbind again. A group disabled meanwhile,
+// or whose shared Session was archived, is still cleared.
 func unbindConflict(read, latest Conversation) error {
 	if latest.WorkspaceID == "" {
 		return nil
 	}
 	if latest.WorkspaceID != read.WorkspaceID || latest.SessionStrategy != read.SessionStrategy ||
-		(read.SessionID != "" && latest.SessionID != "" && latest.SessionID != read.SessionID) ||
+		(latest.SessionID != "" && latest.SessionID != read.SessionID) ||
 		(!read.Enabled && latest.Enabled) {
 		return errBindingChanged
 	}
