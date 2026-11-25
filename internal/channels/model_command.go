@@ -97,9 +97,20 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 	if err != nil {
 		return s.commandFailure(connectionID, "change the model", err)
 	}
-	input := conversationInputFrom(group)
-	input.Agent, input.ProfileName, input.Model, input.ReasoningEffort = &runtime.Agent, &runtime.ProfileName, &runtime.Model, &runtime.ReasoningEffort
-	if _, err := s.putConversation(ctx, group.ID, input, binder.ValidateChannelBinding, current); err != nil {
+	_, err = s.updateConversation(ctx, group.ID, func(latest Conversation) (ConversationInput, error) {
+		// The choice was resolved for the group as read; a group disabled,
+		// rebound or given another model meanwhile keeps that newer state.
+		if err := bindingChangedSince(group, latest); err != nil {
+			return ConversationInput{}, err
+		}
+		if conversationRuntime(latest) != conversationRuntime(group) {
+			return ConversationInput{}, errBindingChanged
+		}
+		input := conversationInputFrom(latest)
+		input.Agent, input.ProfileName, input.Model, input.ReasoningEffort = &runtime.Agent, &runtime.ProfileName, &runtime.Model, &runtime.ReasoningEffort
+		return input, nil
+	}, binder.ValidateChannelBinding, current)
+	if err != nil {
 		return s.commandFailure(connectionID, "change the model", err)
 	}
 	if group.SessionStrategy == SessionStrategyShared {

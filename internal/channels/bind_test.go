@@ -65,6 +65,34 @@ type bindingDispatcher struct {
 	fakeDispatcher
 	validated chan Conversation
 	switched  chan string
+	// Hold the next model or bind target resolution, the slow step a command
+	// takes between reading the group and writing it.
+	modelGate, bindGate *pauseGate
+}
+
+// pauseGate holds one call once armed, until the test releases it.
+type pauseGate struct {
+	mu      sync.Mutex
+	armed   bool
+	entered chan struct{}
+	release chan struct{}
+}
+
+func newPauseGate() *pauseGate {
+	return &pauseGate{entered: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *pauseGate) arm() { g.mu.Lock(); g.armed = true; g.mu.Unlock() }
+
+func (g *pauseGate) wait() {
+	g.mu.Lock()
+	armed := g.armed
+	g.armed = false
+	g.mu.Unlock()
+	if armed {
+		g.entered <- struct{}{}
+		<-g.release
+	}
 }
 
 func (bindingDispatcher) ChannelSessionRuntime(context.Context, string) (SessionRuntimeConfig, error) {
@@ -75,7 +103,8 @@ func (bindingDispatcher) ChannelRuntimeChoices(context.Context, string, string) 
 	return []string{"fast (model-a)", "deep (model-b)"}, nil
 }
 
-func (bindingDispatcher) ResolveChannelRuntime(_ context.Context, _ string, current SessionRuntimeConfig, choice []string) (SessionRuntimeConfig, error) {
+func (d bindingDispatcher) ResolveChannelRuntime(_ context.Context, _ string, current SessionRuntimeConfig, choice []string) (SessionRuntimeConfig, error) {
+	d.modelGate.wait()
 	switch choice[0] {
 	case "missing":
 		return current, NewChatError(nil, `profile "missing" not found`)
@@ -90,7 +119,8 @@ func (d bindingDispatcher) SwitchChannelSessionRuntime(_ context.Context, sessio
 	return SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: choice[0]}, false, nil
 }
 
-func (bindingDispatcher) ResolveChannelBindTarget(_ context.Context, id string) (ChannelBindTarget, error) {
+func (d bindingDispatcher) ResolveChannelBindTarget(_ context.Context, id string) (ChannelBindTarget, error) {
+	d.bindGate.wait()
 	switch id {
 	case "workspace_oncall":
 		return ChannelBindTarget{WorkspaceID: id}, nil
@@ -116,7 +146,7 @@ func startBindingService(t *testing.T, aliases []BindAlias) (*Service, *Store, *
 	secrets, _ := NewSecretStore(t.TempDir())
 	adapter := &replyingAdapter{fakeAdapter: &fakeAdapter{}}
 	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: replyingFactory{adapter}})
-	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4), switched: make(chan string, 4)}
+	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4), switched: make(chan string, 4), modelGate: newPauseGate(), bindGate: newPauseGate()}
 	service.SetDispatcher(dispatcher)
 	secret := "secret"
 	owners := []string{"owner-1"}
@@ -492,5 +522,99 @@ func TestSavedAliasNamesAreReachableFromBind(t *testing.T) {
 		if target, found := resolveBindTarget(connection, argument); !found || target != alias.Target {
 			t.Fatalf("%q resolved to %q %v", alias.Name, target, found)
 		}
+	}
+}
+
+// desktopEdit changes the group as the Channel page would while a command waits.
+func desktopEdit(t *testing.T, service *Service, store *Store, edit func(*ConversationInput)) {
+	t.Helper()
+	group, err := store.GetConversationByScope(context.Background(), "connection-1", "chat-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	input := conversationInputFrom(group)
+	edit(&input)
+	if _, err := service.PutConversation(context.Background(), group.ID, input); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// A command reads the group, waits on a slow step, then writes. Edits made on
+// the Channel page meanwhile must survive: a disabled group stays disabled and
+// tightened send permissions stay tightened.
+func TestGroupCommandsKeepEditsMadeWhileTheyRun(t *testing.T) {
+	selectedOwner := func(input *ConversationInput) {
+		policy := SenderPolicySelected
+		input.SenderPolicy, input.AllowedSenderIDs = &policy, []string{"owner-1"}
+	}
+	disable := func(input *ConversationInput) { input.Enabled = false }
+	for _, test := range []struct {
+		name    string
+		bound   bool // whether the group is bound before the command
+		command string
+		gate    func(bindingDispatcher) *pauseGate
+		edit    func(*ConversationInput)
+		reply   string
+		check   func(Conversation) bool
+	}{
+		{"model after disable", true, "/model deep", func(d bindingDispatcher) *pauseGate { return d.modelGate }, disable,
+			"unbound or disabled", func(g Conversation) bool { return !g.Enabled && g.ProfileName == "" }},
+		{"model after tightening", true, "/model deep", func(d bindingDispatcher) *pauseGate { return d.modelGate }, selectedOwner,
+			"now use profile deep", func(g Conversation) bool {
+				return g.Enabled && g.ProfileName == "deep" && g.SenderPolicy == SenderPolicySelected && strings.Join(g.AllowedSenderIDs, ",") == "owner-1"
+			}},
+		{"rebind after disable", true, "/bind sess_shared", func(d bindingDispatcher) *pauseGate { return d.bindGate }, disable,
+			"unbound or disabled", func(g Conversation) bool {
+				return !g.Enabled && g.SessionID == "" && g.WorkspaceID == "workspace_oncall"
+			}},
+		{"bind after tightening", false, "/bind workspace_oncall", func(d bindingDispatcher) *pauseGate { return d.bindGate }, selectedOwner,
+			"bound to Workspace workspace_oncall", func(g Conversation) bool {
+				return g.Enabled && g.SenderPolicy == SenderPolicySelected && strings.Join(g.AllowedSenderIDs, ",") == "owner-1"
+			}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+			replies := 0
+			send := func(id, text string) string {
+				t.Helper()
+				if err := adapter.callbacks.Inbound(ctx, groupMessage(id, "owner-1", text, true)); err != nil {
+					t.Fatal(err)
+				}
+				replies++
+				return adapter.waitReply(t, replies)
+			}
+			if test.bound {
+				send("bind", "/bind workspace_oncall")
+				<-dispatcher.validated
+				// Everyone may write before the edit, so tightening is visible.
+				desktopEdit(t, service, store, func(input *ConversationInput) {
+					policy := SenderPolicyAll
+					input.SenderPolicy = &policy
+				})
+			} else {
+				send("show", "/bind") // records the group
+				desktopEdit(t, service, store, func(input *ConversationInput) {
+					policy := SenderPolicyAll
+					input.SenderPolicy = &policy
+				})
+			}
+
+			gate := test.gate(dispatcher)
+			gate.arm()
+			if err := adapter.callbacks.Inbound(ctx, groupMessage("command", "owner-1", test.command, true)); err != nil {
+				t.Fatal(err)
+			}
+			<-gate.entered
+			desktopEdit(t, service, store, test.edit)
+			close(gate.release)
+			replies++
+			if reply := adapter.waitReply(t, replies); !strings.Contains(reply, test.reply) {
+				t.Fatalf("reply = %q", reply)
+			}
+			group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+			if err != nil || !test.check(group) {
+				t.Fatalf("group = %+v err=%v", group, err)
+			}
+		})
 	}
 }

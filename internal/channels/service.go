@@ -862,6 +862,13 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 // putConversation runs precondition, when given, once the locks are held, so
 // a chat command can confirm its connection is still current before writing.
 func (s *Service) putConversation(ctx context.Context, id string, input ConversationInput, validateBinding func(context.Context, Conversation, SessionPromptConfig, SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error), precondition func() error) (Conversation, error) {
+	return s.updateConversation(ctx, id, func(Conversation) (ConversationInput, error) { return input, nil }, validateBinding, precondition)
+}
+
+// updateConversation builds the input from the conversation as stored when the
+// write locks are held. A chat command that read the group earlier changes
+// only its own fields this way, so it cannot undo an edit made meanwhile.
+func (s *Service) updateConversation(ctx context.Context, id string, build func(latest Conversation) (ConversationInput, error), validateBinding func(context.Context, Conversation, SessionPromptConfig, SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error), precondition func() error) (Conversation, error) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.configMu.Lock()
@@ -875,6 +882,10 @@ func (s *Service) putConversation(ctx context.Context, id string, input Conversa
 		}
 	}
 	c, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		return c, err
+	}
+	input, err := build(c)
 	if err != nil {
 		return c, err
 	}

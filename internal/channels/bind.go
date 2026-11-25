@@ -278,11 +278,17 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 		if !group.Enabled && group.WorkspaceID == "" {
 			return "This group is not bound."
 		}
-		input := conversationInputFrom(group)
-		input.Enabled = false
-		input.SessionID = ""
-		input.WorkspaceID = ""
-		if _, err := s.putConversation(ctx, group.ID, input, nil, current); err != nil {
+		_, err := s.updateConversation(ctx, group.ID, func(latest Conversation) (ConversationInput, error) {
+			// Unbinding a group disabled meanwhile still clears it; one rebound
+			// elsewhere meanwhile keeps that newer binding.
+			if latest.WorkspaceID != "" && (latest.WorkspaceID != group.WorkspaceID || latest.SessionID != group.SessionID) {
+				return ConversationInput{}, errBindingChanged
+			}
+			input := conversationInputFrom(latest)
+			input.Enabled, input.SessionID, input.WorkspaceID = false, "", ""
+			return input, nil
+		}, nil, current)
+		if err != nil {
 			return s.commandFailure(connectionID, "unbind this group", err)
 		}
 		return "This group is unbound. Zotigo ignores its messages until an owner runs /bind again."
@@ -301,31 +307,61 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 	if err != nil {
 		return s.commandFailure(connectionID, "bind this group", err)
 	}
-	input := conversationInputFrom(group)
-	input.Enabled = true
-	input.WorkspaceID = target.WorkspaceID
-	input.SessionID = target.SessionID
-	input.SessionStrategy = SessionStrategyTopic
-	if target.SessionID != "" {
-		input.SessionStrategy = SessionStrategyShared
-		agent, profile, model, effort := target.Runtime.Agent, target.Runtime.ProfileName, target.Runtime.Model, target.Runtime.ReasoningEffort
-		input.Agent, input.ProfileName, input.Model, input.ReasoningEffort = &agent, &profile, &model, &effort
-	} else if group.WorkspaceID != target.WorkspaceID || group.SessionStrategy == SessionStrategyShared {
-		// Profiles belong to a Workspace, and a shared Session's profile was its
-		// own; new topics start from the target Workspace's default profile.
-		empty := ""
-		input.ProfileName = &empty
-	}
-	// A group that was never configured has no senders yet; start with the owners.
-	if group.SenderPolicy == SenderPolicySelected && len(normalizeIDs(group.AllowedSenderIDs)) == 0 {
-		owners := SenderPolicyOwners
-		input.SenderPolicy = &owners
-	}
-	bound, err := s.putConversation(ctx, group.ID, input, binder.ValidateChannelBinding, current)
+	bound, err := s.updateConversation(ctx, group.ID, func(latest Conversation) (ConversationInput, error) {
+		if err := bindingChangedSince(group, latest); err != nil {
+			return ConversationInput{}, err
+		}
+		// Everything but the binding comes from the latest record, so send
+		// permissions tightened meanwhile stay tightened.
+		input := conversationInputFrom(latest)
+		input.Enabled = true
+		input.WorkspaceID = target.WorkspaceID
+		input.SessionID = target.SessionID
+		input.SessionStrategy = SessionStrategyTopic
+		if target.SessionID != "" {
+			input.SessionStrategy = SessionStrategyShared
+			agent, profile, model, effort := target.Runtime.Agent, target.Runtime.ProfileName, target.Runtime.Model, target.Runtime.ReasoningEffort
+			input.Agent, input.ProfileName, input.Model, input.ReasoningEffort = &agent, &profile, &model, &effort
+		} else if latest.WorkspaceID != target.WorkspaceID || latest.SessionStrategy == SessionStrategyShared {
+			// Profiles belong to a Workspace, and a shared Session's profile was its
+			// own; new topics start from the target Workspace's default profile.
+			empty := ""
+			input.ProfileName = &empty
+		}
+		// A group that was never configured has no senders yet; start with the owners.
+		if latest.SenderPolicy == SenderPolicySelected && len(normalizeIDs(latest.AllowedSenderIDs)) == 0 {
+			owners := SenderPolicyOwners
+			input.SenderPolicy = &owners
+		}
+		return input, nil
+	}, binder.ValidateChannelBinding, current)
 	if err != nil {
 		return s.commandFailure(connectionID, "bind this group", err)
 	}
 	return describeBinding(connection, bound)
+}
+
+var (
+	errGroupUnbound   = NewChatError(nil, "this group was unbound or disabled while the command ran")
+	errBindingChanged = NewChatError(nil, "this group's binding changed while the command ran; send it again")
+)
+
+// bindingChangedSince reports whether the binding a command decided on, read
+// before a slow step, is no longer the group's binding. The command then must
+// not write: it would re-enable a group disabled meanwhile or replace a newer
+// binding.
+func bindingChangedSince(read, latest Conversation) error {
+	type binding struct {
+		enabled                                 bool
+		workspaceID, sessionID, sessionStrategy string
+	}
+	if (binding{read.Enabled, read.WorkspaceID, read.SessionID, read.SessionStrategy}) == (binding{latest.Enabled, latest.WorkspaceID, latest.SessionID, latest.SessionStrategy}) {
+		return nil
+	}
+	if read.Enabled && (!latest.Enabled || latest.WorkspaceID == "") {
+		return errGroupUnbound
+	}
+	return errBindingChanged
 }
 
 func conversationInputFrom(c Conversation) ConversationInput {
