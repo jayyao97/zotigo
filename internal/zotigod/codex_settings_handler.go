@@ -39,14 +39,13 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 }
 
 // changeSessionCodexSettings switches a Codex Session's model and reasoning
-// effort; the next turn uses them.
-// changeSessionCodexSettings sets a Codex Session's model. requireIdle also
-// rejects the change while the Session has work in progress or queued.
+// effort; the next turn uses them. requireIdle also rejects the change while
+// the Session has work in progress or queued.
 func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string, requireIdle bool) (Session, error) {
 	model = strings.TrimSpace(model)
 	reasoningEffort = strings.TrimSpace(reasoningEffort)
 	if model == "" || reasoningEffort == "" {
-		return Session{}, runtimeChangeError(http.StatusBadRequest, "model and reasoning_effort are required")
+		return Session{}, publicRuntimeError(http.StatusBadRequest, "model and reasoning_effort are required")
 	}
 	unlock := h.sessionOps.lock(id)
 	defer unlock()
@@ -59,14 +58,14 @@ func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, rea
 			return Session{}, runtimeChangeError(http.StatusInternalServerError, "load session: %v", err)
 		}
 		if !found {
-			return Session{}, runtimeChangeError(http.StatusNotFound, "session not found")
+			return Session{}, publicRuntimeError(http.StatusNotFound, "session not found")
 		}
 	}
 	if zotigoruntime.AgentKind(session.Agent) != zotigoruntime.AgentCodex {
-		return Session{}, runtimeChangeError(http.StatusBadRequest, "codex settings require agent codex")
+		return Session{}, publicRuntimeError(http.StatusBadRequest, "codex settings require agent codex")
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
-		return Session{}, runtimeChangeError(http.StatusConflict, "codex settings require a resumable session")
+		return Session{}, publicRuntimeError(http.StatusConflict, "codex settings require a resumable session")
 	}
 	if requireIdle {
 		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing the model"); err != nil {
@@ -74,7 +73,8 @@ func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, rea
 		}
 	}
 	if err := h.validateCodexSettings(ctx, model, reasoningEffort); err != nil {
-		return Session{}, runtimeChangeError(http.StatusBadRequest, "%s", err.Error())
+		// The cause says what a chat may show; "codex is unavailable" keeps its probe error private.
+		return Session{}, &sessionRuntimeError{status: http.StatusBadRequest, message: err.Error(), cause: err}
 	}
 	store, ok := h.store.(codexSettingsStore)
 	if !ok {

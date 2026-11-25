@@ -3,6 +3,7 @@ package channels
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"strings"
@@ -443,5 +444,30 @@ func TestModelCommandConfiguresSharedGroupWithoutSession(t *testing.T) {
 	case switched := <-dispatcher.switched:
 		t.Fatalf("switched a session: %q", switched)
 	default:
+	}
+}
+
+// Other members read command replies: they see a ChatError's public part only,
+// and the log keeps every cause.
+func TestCommandFailureShowsOnlyPublicMessages(t *testing.T) {
+	var logged strings.Builder
+	s := &Service{logger: log.New(&logged, "", 0)}
+	cause := errors.New("open /home/owner/.zotigo/config.yaml: permission denied")
+	for _, test := range []struct {
+		err       error
+		reply     string
+		logsCause bool
+	}{
+		{NewChatError(nil, "session sess_1 was not found"), "Zotigo could not bind this group: session sess_1 was not found.", false},
+		{fmt.Errorf("bind: %w", NewChatError(cause, "the Workspace has no usable default profile")), "Zotigo could not bind this group: the Workspace has no usable default profile.", true},
+		{cause, "Zotigo could not bind this group. The daemon log has the details.", true},
+	} {
+		logged.Reset()
+		if reply := s.commandFailure("connection-1", "bind this group", test.err); reply != test.reply {
+			t.Errorf("reply = %q, want %q", reply, test.reply)
+		}
+		if strings.Contains(logged.String(), "config.yaml") != test.logsCause {
+			t.Errorf("%v: log = %q", test.err, logged.String())
+		}
 	}
 }

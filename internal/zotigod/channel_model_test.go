@@ -167,3 +167,26 @@ func TestSessionRuntimeEndpointsReportStatusCodes(t *testing.T) {
 		}
 	}
 }
+
+// Only failures marked public reach the chat; a private failure wrapping a
+// ChatError shows that error's public part.
+func TestChatRuntimeErrorFollowsThePublicMark(t *testing.T) {
+	probe := errors.New("exec /opt/codex/bin/codex: no such file")
+	for _, test := range []struct {
+		err    error
+		public string
+	}{
+		{publicRuntimeError(http.StatusServiceUnavailable, "profile change requires an online worker"), "profile change requires an online worker"},
+		{runtimeChangeError(http.StatusBadRequest, "load profiles: open /home/owner/.zotigo/config.yaml"), ""},
+		{&sessionRuntimeError{status: http.StatusBadRequest, message: "codex is unavailable: " + probe.Error(), cause: channels.NewChatError(probe, "codex is unavailable")}, "codex is unavailable"},
+	} {
+		var chatErr *channels.ChatError
+		got := ""
+		if errors.As(chatRuntimeError(test.err), &chatErr) {
+			got = chatErr.Public()
+		}
+		if got != test.public {
+			t.Errorf("%v: public %q, want %q", test.err, got, test.public)
+		}
+	}
+}

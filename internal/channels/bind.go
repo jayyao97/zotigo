@@ -189,15 +189,21 @@ func (e *ChatError) Error() string {
 
 func (e *ChatError) Unwrap() error { return e.cause }
 
+// Public is the part of the error a chat may show.
+func (e *ChatError) Public() string { return e.public }
+
 // commandFailure words a failed group command for the chat. Failures without a
-// public message may name paths or internal state, so they go to the log only.
+// public message may name paths or internal state, so they go to the log only;
+// so do the causes behind a public message.
 func (s *Service) commandFailure(connectionID, action string, err error) string {
 	var chatErr *ChatError
-	if errors.As(err, &chatErr) {
-		return "Zotigo could not " + action + ": " + chatErr.public + "."
-	}
-	if s.logger != nil {
+	public := errors.As(err, &chatErr)
+	// The chat sees only the public part; the log keeps what it leaves out.
+	if s.logger != nil && (!public || chatErr.cause != nil) {
 		s.logger.Printf("channel %s: could not %s: %v", connectionID, action, err)
+	}
+	if public {
+		return "Zotigo could not " + action + ": " + chatErr.Public() + "."
 	}
 	return "Zotigo could not " + action + ". The daemon log has the details."
 }

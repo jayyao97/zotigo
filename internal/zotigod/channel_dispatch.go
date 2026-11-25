@@ -180,7 +180,10 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 		}
 		profileName, _, err = appConfig.ResolveProfile(strings.TrimSpace(runtime.ProfileName))
 		if err != nil {
-			return fmt.Errorf("resolve channel workspace profile: %w", err)
+			if runtime.ProfileName == "" {
+				return channels.NewChatError(err, "the Workspace has no usable default profile")
+			}
+			return channels.NewChatError(err, "profile %q is not usable in the Workspace", runtime.ProfileName)
 		}
 		resolved.ProfileName = profileName
 	case zotigoruntime.AgentCodex:

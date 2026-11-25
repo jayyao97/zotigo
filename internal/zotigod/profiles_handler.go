@@ -131,14 +131,19 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 }
 
 // sessionRuntimeError carries the HTTP status of a failed runtime change, so
-// the change can be shared by the HTTP API and Channel commands.
+// the change can be shared by the HTTP API and Channel commands. Public marks
+// a message that describes the request and may be shown in a chat; others can
+// name paths or internal state.
 type sessionRuntimeError struct {
 	status  int
 	code    string
 	message string
+	public  bool
+	cause   error
 }
 
 func (e *sessionRuntimeError) Error() string { return e.message }
+func (e *sessionRuntimeError) Unwrap() error { return e.cause }
 
 // requireIdleForRuntimeChange rejects a model change while the Session runs a
 // turn, has queued input or waits for a person, so queued work keeps the model
@@ -149,13 +154,17 @@ func (h *handler) requireIdleForRuntimeChange(ctx context.Context, id string, se
 		return runtimeChangeError(http.StatusInternalServerError, "load session history: %v", err)
 	}
 	if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
-		return runtimeChangeError(http.StatusConflict, "%s", busy)
+		return publicRuntimeError(http.StatusConflict, "%s", busy)
 	}
 	return nil
 }
 
 func runtimeChangeError(status int, format string, args ...any) error {
 	return &sessionRuntimeError{status: status, message: fmt.Sprintf(format, args...)}
+}
+
+func publicRuntimeError(status int, format string, args ...any) error {
+	return &sessionRuntimeError{status: status, message: fmt.Sprintf(format, args...), public: true}
 }
 
 func writeSessionRuntimeError(w http.ResponseWriter, err error) {
@@ -177,7 +186,7 @@ func writeSessionRuntimeError(w http.ResponseWriter, err error) {
 func (h *handler) changeSessionProfile(ctx context.Context, id string, target string) (changeProfileResponse, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
-		return changeProfileResponse{}, runtimeChangeError(http.StatusBadRequest, "profile is required")
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile is required")
 	}
 	channelBound := false
 	if h.channels != nil {
@@ -200,11 +209,11 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load session: %v", err)
 		}
 		if !ok {
-			return changeProfileResponse{}, runtimeChangeError(http.StatusNotFound, "session not found")
+			return changeProfileResponse{}, publicRuntimeError(http.StatusNotFound, "session not found")
 		}
 	}
 	if session.Agent == string(zotigoruntime.AgentCodex) {
-		return changeProfileResponse{}, runtimeChangeError(http.StatusBadRequest, "profile is only valid for agent zotigo")
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile is only valid for agent zotigo")
 	}
 	if channelBound {
 		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing profile"); err != nil {
@@ -220,7 +229,7 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 		return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load profiles: %v", err)
 	}
 	if !found {
-		return changeProfileResponse{}, runtimeChangeError(http.StatusBadRequest, "profile %q not found", target)
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile %q not found", target)
 	}
 	target = canonicalTarget
 
@@ -229,7 +238,7 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 	if applyWithoutWorker {
 		if err := h.applyStoredProfile(ctx, id, target); err != nil {
 			if errors.Is(err, zotigosession.ErrSessionLocked) {
-				return changeProfileResponse{}, &sessionRuntimeError{status: http.StatusConflict, code: "session_in_use", message: "session is active in another process"}
+				return changeProfileResponse{}, &sessionRuntimeError{status: http.StatusConflict, code: "session_in_use", message: "session is active in another process", public: true}
 			}
 			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "change profile: %v", err)
 		}
@@ -239,7 +248,7 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 		return changeProfileResponse{Profile: target, Status: "applied"}, nil
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
-		return changeProfileResponse{}, runtimeChangeError(http.StatusConflict, "profile change requires a resumable session")
+		return changeProfileResponse{}, publicRuntimeError(http.StatusConflict, "profile change requires a resumable session")
 	}
 	workerOnline := h.workers.Has(id)
 	if !workerOnline && session.State == SessionStateStarting {
@@ -248,7 +257,7 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 		workerOnline = h.ensureWorkerOnline(ctx, id)
 	}
 	if !workerOnline {
-		return changeProfileResponse{}, runtimeChangeError(http.StatusServiceUnavailable, "profile change requires an online worker")
+		return changeProfileResponse{}, publicRuntimeError(http.StatusServiceUnavailable, "profile change requires an online worker")
 	}
 	item, err := h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -29,7 +28,7 @@ func (h *handler) ChannelRuntimeChoices(ctx context.Context, workspaceID, agent 
 	if zotigoruntime.AgentKind(agent) == zotigoruntime.AgentCodex {
 		capabilities, err := h.codexCapabilities(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("codex is unavailable: %w", err)
+			return nil, channels.NewChatError(err, "codex is unavailable")
 		}
 		choices := make([]string, 0, len(capabilities.Models))
 		for _, model := range capabilities.Models {
@@ -119,7 +118,7 @@ func (h *handler) resolveCodexChoice(ctx context.Context, choice []string, curre
 	}
 	capabilities, err := h.codexCapabilities(ctx)
 	if err != nil {
-		return "", "", fmt.Errorf("codex is unavailable: %w", err)
+		return "", "", channels.NewChatError(err, "codex is unavailable")
 	}
 	for _, model := range capabilities.Models {
 		if !strings.EqualFold(model.ID, choice[0]) {
@@ -173,11 +172,11 @@ func (h *handler) channelWorkspaceRoot(ctx context.Context, workspaceID string) 
 	return workspace.RootPath, nil
 }
 
-// chatRuntimeError lets the chat show why a model change was refused. Client
-// errors describe the request; server errors may name paths, so they stay private.
+// chatRuntimeError lets the chat show why a model change was refused when the
+// failure is marked public. Others stay private, unless they wrap a ChatError.
 func chatRuntimeError(err error) error {
 	var runtimeErr *sessionRuntimeError
-	if errors.As(err, &runtimeErr) && runtimeErr.status < http.StatusInternalServerError {
+	if errors.As(err, &runtimeErr) && runtimeErr.public {
 		return channels.NewChatError(nil, "%s", runtimeErr.message)
 	}
 	return err

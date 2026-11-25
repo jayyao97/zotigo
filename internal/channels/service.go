@@ -973,7 +973,7 @@ func (s *Service) putConversation(ctx context.Context, id string, input Conversa
 	if c.SessionID != "" {
 		bound, bindErr := s.store.GetConversationBySession(ctx, c.SessionID)
 		if bindErr == nil && bound.ID != c.ID {
-			return c, errors.New("session is already bound to another channel conversation")
+			return c, NewChatError(nil, "session is already bound to another channel conversation")
 		}
 		if bindErr != nil && !errors.Is(bindErr, ErrNotFound) {
 			return c, bindErr
@@ -984,7 +984,7 @@ func (s *Service) putConversation(ctx context.Context, id string, input Conversa
 		return c, err
 	}
 	if c.RootID == "" && c.Enabled && c.SenderPolicy == SenderPolicyOwners && len(connection.OwnerSenderIDs) == 0 {
-		return c, errors.New("application owner has not been resolved")
+		return c, NewChatError(nil, "application owner has not been resolved")
 	}
 	effectiveApproval := connection.ApprovalInstructions
 	if c.ApprovalInstructionsMode == OverrideReplace {
