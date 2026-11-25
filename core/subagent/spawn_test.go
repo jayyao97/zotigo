@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/agent"
@@ -21,6 +22,22 @@ import (
 	"github.com/jayyao97/zotigo/core/tools/builtin"
 	"github.com/jayyao97/zotigo/core/transport"
 )
+
+func TestSpawnTimeout(t *testing.T) {
+	for _, tc := range []struct {
+		ms   int
+		want time.Duration
+	}{
+		{0, 30 * time.Minute},
+		{2700000, 45 * time.Minute},
+		{3600000, time.Hour},
+		{7200000, time.Hour},
+	} {
+		if got := spawnTimeout(tc.ms); got != tc.want {
+			t.Errorf("spawnTimeout(%d) = %v, want %v", tc.ms, got, tc.want)
+		}
+	}
+}
 
 type spawnApprovalRequesterFunc func(context.Context, SpawnApprovalRequest) ([]transport.ApprovalResult, error)
 

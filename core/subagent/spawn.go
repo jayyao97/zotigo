@@ -24,8 +24,8 @@ import (
 )
 
 const (
-	defaultSpawnTimeout = 10 * time.Minute
-	maxSpawnTimeout     = 30 * time.Minute
+	defaultSpawnTimeout = 30 * time.Minute
+	maxSpawnTimeout     = 60 * time.Minute
 
 	spawnAgentGeneral = "general-purpose"
 	spawnAgentExplore = "explore"
@@ -132,6 +132,13 @@ Agent types:
 All subagent types run serially by default. For independent tasks, issue the spawn calls together in one tool batch and set allow_parallel=true on each. Use false when tasks depend on one another or may edit the same files.`
 }
 
+func spawnTimeout(milliseconds int) time.Duration {
+	if milliseconds <= 0 {
+		return defaultSpawnTimeout
+	}
+	return time.Duration(min(int64(milliseconds), maxSpawnTimeout.Milliseconds())) * time.Millisecond
+}
+
 func (t *SpawnTool) Schema() any {
 	return map[string]any{
 		"type": "object",
@@ -164,7 +171,8 @@ func (t *SpawnTool) Schema() any {
 			},
 			"timeout_ms": map[string]any{
 				"type":        "integer",
-				"description": "Optional timeout in milliseconds (default: 600000, max: 1800000)",
+				"description": fmt.Sprintf("Optional timeout in milliseconds. Defaults to %.0f minutes; request up to %.0f minutes for longer tasks (%d ms).", defaultSpawnTimeout.Minutes(), maxSpawnTimeout.Minutes(), maxSpawnTimeout.Milliseconds()),
+				"default":     defaultSpawnTimeout.Milliseconds(),
 				"minimum":     1,
 			},
 		},
@@ -234,15 +242,7 @@ func (t *SpawnTool) Execute(ctx context.Context, exec executor.Executor, argsJSO
 		args.Name = slugifySpawnName(args.Description)
 	}
 
-	timeout := defaultSpawnTimeout
-	if args.TimeoutMs > 0 {
-		timeout = time.Duration(args.TimeoutMs) * time.Millisecond
-		if timeout > maxSpawnTimeout {
-			timeout = maxSpawnTimeout
-		}
-	}
-
-	ctx, cancel := context.WithTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, spawnTimeout(args.TimeoutMs))
 	defer cancel()
 
 	childWorkDir := resolveSpawnWorkDir(exec.WorkDir(), args.WorkDir)
