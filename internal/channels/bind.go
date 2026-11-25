@@ -279,9 +279,11 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 			return "This group is not bound."
 		}
 		_, err := s.updateConversation(ctx, group.ID, func(latest Conversation) (ConversationInput, error) {
-			// Unbinding a group disabled meanwhile still clears it; one rebound
+			// Unbinding a group disabled meanwhile still clears it, as does a
+			// shared Session created or archived meanwhile; a group rebound
 			// elsewhere meanwhile keeps that newer binding.
-			if latest.WorkspaceID != "" && (latest.WorkspaceID != group.WorkspaceID || latest.SessionID != group.SessionID) {
+			rebound := latest.WorkspaceID != group.WorkspaceID || (group.SessionID != "" && latest.SessionID != "" && latest.SessionID != group.SessionID)
+			if latest.WorkspaceID != "" && rebound {
 				return ConversationInput{}, errBindingChanged
 			}
 			input := conversationInputFrom(latest)
