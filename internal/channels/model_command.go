@@ -17,8 +17,11 @@ type ChannelModelSwitcher interface {
 	// ResolveChannelRuntime turns /model arguments into a runtime for new Sessions.
 	ResolveChannelRuntime(ctx context.Context, workspaceID string, current SessionRuntimeConfig, choice []string) (SessionRuntimeConfig, error)
 	// SwitchChannelSessionRuntime changes an idle Session's runtime. Pending
-	// reports that a running worker applies it before the next turn.
-	SwitchChannelSessionRuntime(ctx context.Context, sessionID string, choice []string) (runtime SessionRuntimeConfig, pending bool, err error)
+	// reports that a running worker applies it before the next turn. It
+	// resolves the choice first, then calls hold before taking the Session's
+	// operation lock and changes the Session only while hold's release is
+	// pending. An error from hold is returned as is.
+	SwitchChannelSessionRuntime(ctx context.Context, sessionID string, choice []string, hold func() (release func(), err error)) (runtime SessionRuntimeConfig, pending bool, err error)
 }
 
 const maxModelChoices = 20
@@ -37,10 +40,11 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 	if !ok || binder == nil {
 		return "Changing models from the chat is unavailable on this daemon."
 	}
-	sessionID, scope := "", "new topics in this group"
+	// owner is the conversation the Session is bound to.
+	sessionID, owner, scope := "", "", "new topics in this group"
 	switch {
 	case group.SessionStrategy == SessionStrategyShared:
-		sessionID, scope = group.SessionID, "this group's shared session"
+		sessionID, owner, scope = group.SessionID, group.ID, "this group's shared session"
 		if sessionID == "" {
 			scope = "this group's shared session, created on the next mention"
 		}
@@ -54,7 +58,7 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 		if topic.SessionID == "" {
 			return "This topic has no session yet. Mention me with a request first, or send /model as a new message to change the model for new topics."
 		}
-		sessionID, scope = topic.SessionID, "this topic's session"
+		sessionID, owner, scope = topic.SessionID, topic.ID, "this topic's session"
 	}
 
 	if len(choice) == 0 {
@@ -84,7 +88,20 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 		return s.commandFailure(connectionID, "change the model", err)
 	}
 	if sessionID != "" {
-		runtime, pending, err := switcher.SwitchChannelSessionRuntime(ctx, sessionID, choice)
+		// Resolving the choice can take a while, and the group may be disabled
+		// or rebound meanwhile. hold rechecks the binding under the configuration
+		// read lock and keeps it until the switch is done. Channel page edits take
+		// the write lock, so they land wholly before the recheck or after the
+		// switch. The order, configuration then Session lock, matches admission.
+		hold := func() (func(), error) {
+			s.configMu.RLock()
+			if err := s.sessionStillBound(ctx, group, owner, sessionID, current); err != nil {
+				s.configMu.RUnlock()
+				return nil, err
+			}
+			return s.configMu.RUnlock, nil
+		}
+		runtime, pending, err := switcher.SwitchChannelSessionRuntime(ctx, sessionID, choice, hold)
 		if err != nil {
 			return s.commandFailure(connectionID, "change the model", err)
 		}
@@ -117,6 +134,30 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 		return fmt.Sprintf("The shared session will use %s when the next mention creates it.", describeRuntime(runtime))
 	}
 	return fmt.Sprintf("New topics in this group now use %s. Existing topics keep their model.", describeRuntime(runtime))
+}
+
+// sessionStillBound reports whether the group still has the binding the
+// command read and the Session still belongs to owner. The caller holds
+// configMu.
+func (s *Service) sessionStillBound(ctx context.Context, group Conversation, owner, sessionID string, current func() error) error {
+	if s.closed {
+		return errors.New("channel service is closed")
+	}
+	if err := current(); err != nil {
+		return err
+	}
+	latest, err := s.store.GetConversation(ctx, group.ID)
+	if err != nil {
+		return err
+	}
+	if err := bindingChangedSince(group, latest); err != nil {
+		return err
+	}
+	bound, err := s.store.GetConversationBySession(ctx, sessionID)
+	if errors.Is(err, ErrNotFound) || err == nil && (bound.ID != owner || !bound.Enabled) {
+		return errBindingChanged
+	}
+	return err
 }
 
 func describeRuntime(runtime SessionRuntimeConfig) string {

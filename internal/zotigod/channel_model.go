@@ -80,8 +80,10 @@ func (h *handler) ResolveChannelRuntime(ctx context.Context, workspaceID string,
 }
 
 // SwitchChannelSessionRuntime changes a bound Session's model through the same
-// path as the HTTP API. The Session must be idle so a running turn keeps its model.
-func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID string, choice []string) (channels.SessionRuntimeConfig, bool, error) {
+// path as the HTTP API. The Session must be idle so a running turn keeps its
+// model. hold keeps the Channel binding stable from before the Session lock
+// until the change is recorded, in place of the HTTP path's guard.
+func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID string, choice []string, hold func() (func(), error)) (channels.SessionRuntimeConfig, bool, error) {
 	session, err := h.channelSession(ctx, sessionID)
 	if err != nil {
 		return channels.SessionRuntimeConfig{}, false, err
@@ -92,6 +94,11 @@ func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID str
 		if err != nil {
 			return runtime, false, err
 		}
+		release, err := hold()
+		if err != nil {
+			return runtime, false, err
+		}
+		defer release()
 		updated, err := h.changeSessionCodexSettings(ctx, sessionID, model, effort, true)
 		if err != nil {
 			return runtime, false, chatRuntimeError(err)
@@ -102,7 +109,10 @@ func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID str
 	if len(choice) != 1 {
 		return runtime, false, channels.NewChatError(nil, "use /model <profile>")
 	}
-	response, err := h.changeSessionProfile(ctx, sessionID, choice[0])
+	response, err := h.changeSessionProfileGuarded(ctx, sessionID, choice[0], func() (bool, func(), error) {
+		release, err := hold()
+		return true, release, err
+	})
 	if err != nil {
 		return runtime, false, chatRuntimeError(err)
 	}

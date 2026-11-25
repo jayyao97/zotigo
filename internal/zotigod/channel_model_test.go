@@ -116,7 +116,7 @@ func TestChannelModelSwitchRequiresAnIdleSession(t *testing.T) {
 		}},
 	} {
 		source.Items[test.id] = []zotigosession.DisplayItem{{Type: zotigosession.DisplayItemTurnStarted, Turn: &zotigosession.DisplayTurn{ID: "active"}}}
-		_, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.choice)
+		_, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.choice, holdNothing)
 		var chatErr *channels.ChatError
 		if !errors.As(err, &chatErr) || !strings.Contains(err.Error(), "turn to finish") {
 			t.Fatalf("%s busy switch: %v", test.id, err)
@@ -126,11 +126,56 @@ func TestChannelModelSwitchRequiresAnIdleSession(t *testing.T) {
 		}
 
 		source.Items[test.id] = nil
-		if _, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.choice); err != nil {
+		if _, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.choice, holdNothing); err != nil {
 			t.Fatalf("%s idle switch: %v", test.id, err)
 		}
 		if stored, _ := sessionStore.Get(ctx, test.id); !test.want(stored) {
 			t.Fatalf("%s after switch: %+v", test.id, stored.Metadata)
+		}
+	}
+}
+
+func holdNothing() (func(), error) { return func() {}, nil }
+
+// /model holds the Channel binding through the change: hold runs once the
+// choice is resolved and before the Session lock, and a refusal leaves the
+// Session as it was.
+func TestChannelModelSwitchHoldsTheBinding(t *testing.T) {
+	h, _, sessionStore, _ := newChannelModelFixture(t)
+	ctx := context.Background()
+	refused := channels.NewChatError(nil, "this group was unbound or disabled while the command ran")
+	for _, test := range []struct {
+		id     string
+		choice []string
+		bad    []string
+	}{
+		{"channel-zotigo", []string{"new"}, []string{"a", "b"}},
+		{"channel-codex", []string{"gpt-5.6-luna"}, []string{"no-such-model"}},
+	} {
+		before, _ := sessionStore.Get(ctx, test.id)
+		held := 0
+		hold := func() (func(), error) {
+			held++
+			// The Session lock must still be free, or hold would invert the
+			// configuration -> Session lock order.
+			acquired := make(chan struct{})
+			go func() { unlock := h.sessionOps.lock(test.id); unlock(); close(acquired) }()
+			select {
+			case <-acquired:
+			case <-time.After(5 * time.Second):
+				t.Errorf("%s: hold ran under the Session lock", test.id)
+			}
+			return nil, refused
+		}
+		if _, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.bad, hold); err == nil || held != 0 {
+			t.Fatalf("%s: invalid choice err=%v held=%d", test.id, err, held)
+		}
+		if _, _, err := h.SwitchChannelSessionRuntime(ctx, test.id, test.choice, hold); !errors.Is(err, refused) || held != 1 {
+			t.Fatalf("%s: refused hold err=%v held=%d", test.id, err, held)
+		}
+		after, _ := sessionStore.Get(ctx, test.id)
+		if after.ProfileName != before.ProfileName || after.Model != before.Model || after.ReasoningEffort != before.ReasoningEffort {
+			t.Fatalf("%s changed although hold refused: %+v", test.id, after.Metadata)
 		}
 	}
 }

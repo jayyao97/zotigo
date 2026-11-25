@@ -184,15 +184,33 @@ func writeSessionRuntimeError(w http.ResponseWriter, err error) {
 // when no worker runs; otherwise the worker applies it before the next turn.
 // A Channel-bound Session must be idle.
 func (h *handler) changeSessionProfile(ctx context.Context, id string, target string) (changeProfileResponse, error) {
+	var guard func() (bool, func(), error)
+	if h.channels != nil {
+		guard = func() (bool, func(), error) {
+			bound, release, err := h.channels.GuardSessionProfileChange(ctx, id)
+			if err != nil {
+				return false, nil, runtimeChangeError(http.StatusInternalServerError, "load channel binding: %v", err)
+			}
+			return bound, release, nil
+		}
+	}
+	return h.changeSessionProfileGuarded(ctx, id, target, guard)
+}
+
+// changeSessionProfileGuarded runs guard, when given, before the Session's
+// operation lock and holds it through the change. Guard reports whether the
+// Session is Channel-bound and keeps that binding stable; its error is
+// returned as is.
+func (h *handler) changeSessionProfileGuarded(ctx context.Context, id string, target string, guard func() (bound bool, release func(), err error)) (changeProfileResponse, error) {
 	target = strings.TrimSpace(target)
 	if target == "" {
 		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile is required")
 	}
 	channelBound := false
-	if h.channels != nil {
-		bound, release, err := h.channels.GuardSessionProfileChange(ctx, id)
+	if guard != nil {
+		bound, release, err := guard()
 		if err != nil {
-			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load channel binding: %v", err)
+			return changeProfileResponse{}, err
 		}
 		defer release()
 		channelBound = bound

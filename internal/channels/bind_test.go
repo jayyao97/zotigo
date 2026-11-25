@@ -66,8 +66,9 @@ type bindingDispatcher struct {
 	validated chan Conversation
 	switched  chan string
 	// Hold the next model or bind target resolution, the slow step a command
-	// takes between reading the group and writing it.
-	modelGate, bindGate *pauseGate
+	// takes between reading the group and writing it; switchGate holds a
+	// Session switch after the binding is held.
+	modelGate, bindGate, switchGate *pauseGate
 }
 
 // pauseGate holds one call once armed, until the test releases it.
@@ -114,7 +115,14 @@ func (d bindingDispatcher) ResolveChannelRuntime(_ context.Context, _ string, cu
 	return SessionRuntimeConfig{Agent: current.Agent, ProfileName: choice[0]}, nil
 }
 
-func (d bindingDispatcher) SwitchChannelSessionRuntime(_ context.Context, sessionID string, choice []string) (SessionRuntimeConfig, bool, error) {
+func (d bindingDispatcher) SwitchChannelSessionRuntime(_ context.Context, sessionID string, choice []string, hold func() (func(), error)) (SessionRuntimeConfig, bool, error) {
+	d.modelGate.wait()
+	release, err := hold()
+	if err != nil {
+		return SessionRuntimeConfig{}, false, err
+	}
+	defer release()
+	d.switchGate.wait()
 	d.switched <- sessionID + "=" + strings.Join(choice, " ")
 	return SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: choice[0]}, false, nil
 }
@@ -146,7 +154,7 @@ func startBindingService(t *testing.T, aliases []BindAlias) (*Service, *Store, *
 	secrets, _ := NewSecretStore(t.TempDir())
 	adapter := &replyingAdapter{fakeAdapter: &fakeAdapter{}}
 	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: replyingFactory{adapter}})
-	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4), switched: make(chan string, 4), modelGate: newPauseGate(), bindGate: newPauseGate()}
+	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4), switched: make(chan string, 4), modelGate: newPauseGate(), bindGate: newPauseGate(), switchGate: newPauseGate()}
 	service.SetDispatcher(dispatcher)
 	secret := "secret"
 	owners := []string{"owner-1"}
@@ -616,6 +624,110 @@ func TestGroupCommandsKeepEditsMadeWhileTheyRun(t *testing.T) {
 				t.Fatalf("group = %+v err=%v", group, err)
 			}
 		})
+	}
+}
+
+// /model on a Session rechecks the binding once the choice is resolved and
+// holds it through the switch, as the group-runtime path does through its write.
+func TestModelOnSessionKeepsEditsMadeWhileItRuns(t *testing.T) {
+	type setup struct {
+		bind    string // command that binds the group
+		message func() InboundMessage
+		session string
+	}
+	shared := setup{"/bind sess_shared", func() InboundMessage { return groupMessage("model", "owner-1", "/model deep", true) }, "sess_shared"}
+	topic := setup{"/bind workspace_oncall", func() InboundMessage {
+		in := groupMessage("model", "owner-1", "/model deep", true)
+		in.RootID = "root-1"
+		return in
+	}, "sess_topic"}
+	for _, test := range []struct {
+		name  string
+		setup setup
+		edit  func(*ConversationInput)
+		reply string
+	}{
+		{"shared session after disable", shared, func(input *ConversationInput) { input.Enabled = false }, "unbound or disabled"},
+		{"shared session after rebinding to another", shared, func(input *ConversationInput) { input.SessionID = "sess_other" }, "binding changed"},
+		{"topic session after the group is disabled", topic, func(input *ConversationInput) { input.Enabled = false }, "unbound or disabled"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+			if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", test.setup.bind, true)); err != nil {
+				t.Fatal(err)
+			}
+			adapter.waitReply(t, 1)
+			<-dispatcher.validated
+			if test.setup.session == "sess_topic" {
+				bindTopicSession(t, store)
+			}
+			dispatcher.modelGate.arm()
+			if err := adapter.callbacks.Inbound(ctx, test.setup.message()); err != nil {
+				t.Fatal(err)
+			}
+			<-dispatcher.modelGate.entered
+			desktopEdit(t, service, store, test.edit)
+			close(dispatcher.modelGate.release)
+			if reply := adapter.waitReply(t, 2); !strings.Contains(reply, test.reply) {
+				t.Fatalf("reply = %q", reply)
+			}
+			select {
+			case switched := <-dispatcher.switched:
+				t.Fatalf("switched %q after the edit", switched)
+			default:
+			}
+		})
+	}
+
+	// An edit that arrives while the switch runs waits for it, then applies.
+	service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", "/bind sess_shared", true)); err != nil {
+		t.Fatal(err)
+	}
+	adapter.waitReply(t, 1)
+	<-dispatcher.validated
+	dispatcher.switchGate.arm()
+	if err := adapter.callbacks.Inbound(ctx, shared.message()); err != nil {
+		t.Fatal(err)
+	}
+	<-dispatcher.switchGate.entered
+	if service.configMu.TryLock() {
+		service.configMu.Unlock()
+		t.Fatal("the binding is not held during the switch")
+	}
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disabled := conversationInputFrom(group)
+	disabled.Enabled = false
+	edited := make(chan error, 1)
+	go func() {
+		_, err := service.PutConversation(context.Background(), group.ID, disabled)
+		edited <- err
+	}()
+	close(dispatcher.switchGate.release)
+	if switched := <-dispatcher.switched; switched != "sess_shared=deep" {
+		t.Fatalf("switched %q", switched)
+	}
+	if err := <-edited; err != nil {
+		t.Fatal(err)
+	}
+	if group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", ""); err != nil || group.Enabled {
+		t.Fatalf("group = %+v err=%v", group, err)
+	}
+}
+
+func bindTopicSession(t *testing.T, store *Store) {
+	t.Helper()
+	ctx := context.Background()
+	topic, err := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	topic.SessionID, topic.WorkspaceID, topic.Enabled = "sess_topic", "workspace_oncall", true
+	if _, err = store.PutConversation(ctx, topic); err != nil {
+		t.Fatal(err)
 	}
 }
 
