@@ -99,7 +99,9 @@ func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID str
 			return runtime, false, err
 		}
 		defer release()
-		updated, err := h.changeSessionCodexSettings(ctx, sessionID, model, effort, true)
+		// resolveCodexChoice checked the choice; probing Codex again here would
+		// keep the Channel binding held across a slow round trip.
+		updated, err := h.changeSessionCodexSettings(ctx, sessionID, model, effort, codexSettingsOptions{requireIdle: true, resolved: true})
 		if err != nil {
 			return runtime, false, chatRuntimeError(err)
 		}

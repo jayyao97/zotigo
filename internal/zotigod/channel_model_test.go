@@ -178,6 +178,20 @@ func TestChannelModelSwitchHoldsTheBinding(t *testing.T) {
 			t.Fatalf("%s changed although hold refused: %+v", test.id, after.Metadata)
 		}
 	}
+
+	// Codex is probed before hold, not again while the binding is held: a probe
+	// that would fail once hold returns does not stop the switch.
+	defer func() { h.codexUnavailable = nil }()
+	hold := func() (func(), error) {
+		h.codexUnavailable = errors.New("probed while the binding was held")
+		return func() {}, nil
+	}
+	if _, _, err := h.SwitchChannelSessionRuntime(ctx, "channel-codex", []string{"gpt-5.6-luna"}, hold); err != nil {
+		t.Fatalf("switch probed Codex under hold: %v", err)
+	}
+	if stored, _ := sessionStore.Get(ctx, "channel-codex"); stored.Model != "gpt-5.6-luna" {
+		t.Fatalf("after switch: %+v", stored.Metadata)
+	}
 }
 
 // The HTTP endpoints share their logic with /model; their status codes must
@@ -237,7 +251,7 @@ func TestChatRuntimeErrorFollowsThePublicMark(t *testing.T) {
 	// A failed Codex probe keeps its error for the API and shows a summary in chat.
 	h, _, _, _ := newChannelModelFixture(t)
 	h.codexUnavailable = probe
-	_, err := h.changeSessionCodexSettings(context.Background(), "channel-codex", "gpt-5.6-luna", "medium", true)
+	_, err := h.changeSessionCodexSettings(context.Background(), "channel-codex", "gpt-5.6-luna", "medium", codexSettingsOptions{requireIdle: true})
 	if err == nil || err.Error() != "codex is unavailable: "+probe.Error() {
 		t.Fatalf("API error = %v", err)
 	}

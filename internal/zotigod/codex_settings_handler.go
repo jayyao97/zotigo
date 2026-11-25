@@ -30,7 +30,7 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
-	session, err := h.changeSessionCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort, false)
+	session, err := h.changeSessionCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort, codexSettingsOptions{})
 	if err != nil {
 		writeSessionRuntimeError(w, err)
 		return
@@ -38,10 +38,17 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 	writeAPIJSON(w, http.StatusOK, session)
 }
 
+type codexSettingsOptions struct {
+	// requireIdle rejects the change while the Session has work in progress or queued.
+	requireIdle bool
+	// resolved means the caller has just checked the choice against the Codex
+	// runtime, so the change skips that slow check while it holds its locks.
+	resolved bool
+}
+
 // changeSessionCodexSettings switches a Codex Session's model and reasoning
-// effort; the next turn uses them. requireIdle also rejects the change while
-// the Session has work in progress or queued.
-func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string, requireIdle bool) (Session, error) {
+// effort; the next turn uses them.
+func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string, options codexSettingsOptions) (Session, error) {
 	model = strings.TrimSpace(model)
 	reasoningEffort = strings.TrimSpace(reasoningEffort)
 	if model == "" || reasoningEffort == "" {
@@ -67,14 +74,16 @@ func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, rea
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
 		return Session{}, publicRuntimeError(http.StatusConflict, "codex settings require a resumable session")
 	}
-	if requireIdle {
+	if options.requireIdle {
 		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing the model"); err != nil {
 			return Session{}, err
 		}
 	}
-	if err := h.validateCodexSettings(ctx, model, reasoningEffort); err != nil {
-		// The cause says what a chat may show; "codex is unavailable" keeps its probe error private.
-		return Session{}, &sessionRuntimeError{status: http.StatusBadRequest, message: err.Error(), cause: err}
+	if !options.resolved {
+		if err := h.validateCodexSettings(ctx, model, reasoningEffort); err != nil {
+			// The cause says what a chat may show; "codex is unavailable" keeps its probe error private.
+			return Session{}, &sessionRuntimeError{status: http.StatusBadRequest, message: err.Error(), cause: err}
+		}
 	}
 	store, ok := h.store.(codexSettingsStore)
 	if !ok {
