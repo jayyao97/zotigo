@@ -19,7 +19,7 @@ import (
 var ErrNotFound = errors.New("channel resource not found")
 var ErrConnectionBound = errors.New("connection has bound sessions; unbind or archive them before deleting")
 
-const channelSchemaVersion = 3
+const channelSchemaVersion = 2
 
 type Store struct {
 	db        *sql.DB
@@ -62,6 +62,13 @@ func Open(root string) (*Store, error) {
 }
 
 func (s *Store) initializeSchema() error {
+	if err := s.initializeVersionedSchema(); err != nil {
+		return err
+	}
+	return s.addOptionalColumns()
+}
+
+func (s *Store) initializeVersionedSchema() error {
 	var version int
 	if err := s.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("read channels schema version: %w", err)
@@ -69,8 +76,18 @@ func (s *Store) initializeSchema() error {
 	if version == channelSchemaVersion {
 		return nil
 	}
-	if version == 1 || version == 2 {
-		return s.migrateSchema(version)
+	if version == 1 {
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		if _, err = tx.Exec(`ALTER TABLE channel_connections ADD COLUMN approval_policy TEXT NOT NULL DEFAULT 'auto';
+ ALTER TABLE channel_conversations ADD COLUMN approval_policy TEXT NOT NULL DEFAULT '';
+ PRAGMA user_version = 2;`); err != nil {
+			return fmt.Errorf("migrate channel approval policy: %w", err)
+		}
+		return tx.Commit()
 	}
 	if version != 0 {
 		return fmt.Errorf("unsupported channels schema version %d", version)
@@ -129,29 +146,29 @@ CREATE INDEX IF NOT EXISTS channel_messages_by_conversation ON channel_messages(
 	if err = tx.Commit(); err != nil {
 		return fmt.Errorf("commit channels schema initialization: %w", err)
 	}
-	return s.migrateSchema(2)
+	return nil
 }
 
-// migrateSchema upgrades a database from the given version to the current one.
-func (s *Store) migrateSchema(version int) error {
-	steps := map[int]string{
-		1: `ALTER TABLE channel_connections ADD COLUMN approval_policy TEXT NOT NULL DEFAULT 'auto';
- ALTER TABLE channel_conversations ADD COLUMN approval_policy TEXT NOT NULL DEFAULT '';`,
-		2: `ALTER TABLE channel_connections ADD COLUMN progress_detail TEXT NOT NULL DEFAULT 'brief';
- ALTER TABLE channel_connections ADD COLUMN bind_aliases TEXT NOT NULL DEFAULT '[]';
- ALTER TABLE channel_conversations ADD COLUMN progress_detail TEXT NOT NULL DEFAULT '';`,
-	}
-	for ; version < channelSchemaVersion; version++ {
-		tx, err := s.db.Begin()
-		if err != nil {
-			return err
+// optionalColumns are additive settings with defaults. They do not raise the
+// schema version: an older daemon names the columns it reads and writes, so it
+// still opens the database and leaves these values in place.
+var optionalColumns = []struct{ table, column, definition string }{
+	{"channel_connections", "progress_detail", `TEXT NOT NULL DEFAULT 'brief'`},
+	{"channel_connections", "bind_aliases", `TEXT NOT NULL DEFAULT '[]'`},
+	{"channel_conversations", "progress_detail", `TEXT NOT NULL DEFAULT ''`},
+}
+
+func (s *Store) addOptionalColumns() error {
+	for _, column := range optionalColumns {
+		var exists int
+		if err := s.db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info(?) WHERE name=?`, column.table, column.column).Scan(&exists); err != nil {
+			return fmt.Errorf("inspect %s.%s: %w", column.table, column.column, err)
 		}
-		if _, err = tx.Exec(steps[version] + fmt.Sprintf("\nPRAGMA user_version = %d;", version+1)); err != nil {
-			_ = tx.Rollback()
-			return fmt.Errorf("migrate channels schema to version %d: %w", version+1, err)
+		if exists != 0 {
+			continue
 		}
-		if err = tx.Commit(); err != nil {
-			return fmt.Errorf("commit channels schema version %d: %w", version+1, err)
+		if _, err := s.db.Exec(`ALTER TABLE ` + column.table + ` ADD COLUMN ` + column.column + ` ` + column.definition); err != nil {
+			return fmt.Errorf("add %s.%s: %w", column.table, column.column, err)
 		}
 	}
 	return nil

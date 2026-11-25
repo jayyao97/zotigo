@@ -118,7 +118,7 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	if _, err = store.PutConnection(context.Background(), Connection{ID: "legacy", Provider: ProviderFeishu}); err != nil {
 		t.Fatal(err)
 	}
-	// Recreate the version 1 shape: neither the approval policy nor later columns.
+	// Recreate the version 1 shape: neither the approval policy nor the optional columns.
 	if _, err = store.db.Exec(`ALTER TABLE channel_connections DROP COLUMN approval_policy;
  ALTER TABLE channel_conversations DROP COLUMN approval_policy;
  ALTER TABLE channel_connections DROP COLUMN progress_detail;
@@ -139,7 +139,16 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 		t.Fatalf("migrated=%+v err=%v", connection, err)
 	}
 	var version int
-	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != channelSchemaVersion {
-		t.Fatalf("version=%d err=%v", version, err)
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
+		t.Fatalf("optional columns changed the schema version: %d err=%v", version, err)
 	}
+	// Reopening an up-to-date database leaves it unchanged.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
 }
