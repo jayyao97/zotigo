@@ -30,7 +30,7 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
-	session, err := h.changeSessionCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort)
+	session, err := h.changeSessionCodexSettings(r.Context(), id, request.Model, request.ReasoningEffort, false)
 	if err != nil {
 		writeSessionRuntimeError(w, err)
 		return
@@ -40,7 +40,9 @@ func (h *handler) handleSessionCodexSettings(w http.ResponseWriter, r *http.Requ
 
 // changeSessionCodexSettings switches a Codex Session's model and reasoning
 // effort; the next turn uses them.
-func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string) (Session, error) {
+// changeSessionCodexSettings sets a Codex Session's model. requireIdle also
+// rejects the change while the Session has work in progress or queued.
+func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, reasoningEffort string, requireIdle bool) (Session, error) {
 	model = strings.TrimSpace(model)
 	reasoningEffort = strings.TrimSpace(reasoningEffort)
 	if model == "" || reasoningEffort == "" {
@@ -65,6 +67,11 @@ func (h *handler) changeSessionCodexSettings(ctx context.Context, id, model, rea
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
 		return Session{}, runtimeChangeError(http.StatusConflict, "codex settings require a resumable session")
+	}
+	if requireIdle {
+		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing the model"); err != nil {
+			return Session{}, err
+		}
 	}
 	if err := h.validateCodexSettings(ctx, model, reasoningEffort); err != nil {
 		return Session{}, runtimeChangeError(http.StatusBadRequest, "%s", err.Error())

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"slices"
 	"sort"
 	"strings"
@@ -63,7 +64,7 @@ func (h *handler) ResolveChannelRuntime(ctx context.Context, workspaceID string,
 		return channels.SessionRuntimeConfig{Agent: current.Agent, Model: model, ReasoningEffort: effort}, nil
 	}
 	if len(choice) != 1 {
-		return current, errors.New("use /model <profile>")
+		return current, channels.NewChatError(nil, "use /model <profile>")
 	}
 	root, err := h.channelWorkspaceRoot(ctx, workspaceID)
 	if err != nil {
@@ -74,7 +75,7 @@ func (h *handler) ResolveChannelRuntime(ctx context.Context, workspaceID string,
 		return current, fmt.Errorf("load profiles: %w", err)
 	}
 	if !found {
-		return current, fmt.Errorf("profile %q not found", choice[0])
+		return current, channels.NewChatError(nil, "profile %q not found", choice[0])
 	}
 	return channels.SessionRuntimeConfig{Agent: current.Agent, ProfileName: profile}, nil
 }
@@ -88,26 +89,23 @@ func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID str
 	}
 	runtime := channels.SessionRuntimeConfig{Agent: session.Agent}
 	if zotigoruntime.AgentKind(session.Agent) == zotigoruntime.AgentCodex {
-		if live, ok := h.registry.Get(sessionID); ok && live.Working {
-			return runtime, false, errors.New("wait for the current task to finish before changing the model")
-		}
 		model, effort, err := h.resolveCodexChoice(ctx, choice, session.ReasoningEffort)
 		if err != nil {
 			return runtime, false, err
 		}
-		updated, err := h.changeSessionCodexSettings(ctx, sessionID, model, effort)
+		updated, err := h.changeSessionCodexSettings(ctx, sessionID, model, effort, true)
 		if err != nil {
-			return runtime, false, err
+			return runtime, false, chatRuntimeError(err)
 		}
 		runtime.Model, runtime.ReasoningEffort = updated.Model, updated.ReasoningEffort
 		return runtime, false, nil
 	}
 	if len(choice) != 1 {
-		return runtime, false, errors.New("use /model <profile>")
+		return runtime, false, channels.NewChatError(nil, "use /model <profile>")
 	}
 	response, err := h.changeSessionProfile(ctx, sessionID, choice[0])
 	if err != nil {
-		return runtime, false, err
+		return runtime, false, chatRuntimeError(err)
 	}
 	runtime.ProfileName = response.Profile
 	return runtime, response.Status == "pending", nil
@@ -117,7 +115,7 @@ func (h *handler) SwitchChannelSessionRuntime(ctx context.Context, sessionID str
 // current one when the model supports it, else prefers medium.
 func (h *handler) resolveCodexChoice(ctx context.Context, choice []string, currentEffort string) (string, string, error) {
 	if len(choice) == 0 || len(choice) > 2 {
-		return "", "", errors.New("use /model <model> [reasoning effort]")
+		return "", "", channels.NewChatError(nil, "use /model <model> [reasoning effort]")
 	}
 	capabilities, err := h.codexCapabilities(ctx)
 	if err != nil {
@@ -128,7 +126,7 @@ func (h *handler) resolveCodexChoice(ctx context.Context, choice []string, curre
 			continue
 		}
 		if len(model.SupportedReasoningEfforts) == 0 {
-			return "", "", fmt.Errorf("model %q reports no reasoning efforts", model.ID)
+			return "", "", channels.NewChatError(nil, "model %q reports no reasoning efforts", model.ID)
 		}
 		efforts := model.SupportedReasoningEfforts
 		switch {
@@ -138,7 +136,7 @@ func (h *handler) resolveCodexChoice(ctx context.Context, choice []string, curre
 					return model.ID, effort, nil
 				}
 			}
-			return "", "", fmt.Errorf("model %q supports reasoning effort %s", model.ID, strings.Join(efforts, ", "))
+			return "", "", channels.NewChatError(nil, "model %q supports reasoning effort %s", model.ID, strings.Join(efforts, ", "))
 		case slices.Contains(efforts, currentEffort):
 			return model.ID, currentEffort, nil
 		case slices.Contains(efforts, "medium"):
@@ -147,7 +145,7 @@ func (h *handler) resolveCodexChoice(ctx context.Context, choice []string, curre
 			return model.ID, efforts[0], nil
 		}
 	}
-	return "", "", fmt.Errorf("unknown codex model %q", choice[0])
+	return "", "", channels.NewChatError(nil, "unknown codex model %q", choice[0])
 }
 
 func (h *handler) channelSession(ctx context.Context, sessionID string) (Session, error) {
@@ -159,7 +157,7 @@ func (h *handler) channelSession(ctx context.Context, sessionID string) (Session
 		return Session{}, fmt.Errorf("load session: %w", err)
 	}
 	if !found {
-		return Session{}, fmt.Errorf("session %s was not found", sessionID)
+		return Session{}, channels.NewChatError(nil, "session %s was not found", sessionID)
 	}
 	return session, nil
 }
@@ -173,6 +171,16 @@ func (h *handler) channelWorkspaceRoot(ctx context.Context, workspaceID string) 
 		return "", fmt.Errorf("load workspace: %w", err)
 	}
 	return workspace.RootPath, nil
+}
+
+// chatRuntimeError lets the chat show why a model change was refused. Client
+// errors describe the request; server errors may name paths, so they stay private.
+func chatRuntimeError(err error) error {
+	var runtimeErr *sessionRuntimeError
+	if errors.As(err, &runtimeErr) && runtimeErr.status < http.StatusInternalServerError {
+		return channels.NewChatError(nil, "%s", runtimeErr.message)
+	}
+	return err
 }
 
 var (

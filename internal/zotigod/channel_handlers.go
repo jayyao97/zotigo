@@ -198,7 +198,7 @@ func (h *handler) ValidateChannelBinding(ctx context.Context, conversation chann
 	}
 	session, err := h.store.Get(ctx, conversation.SessionID)
 	if err != nil || session == nil {
-		return prompt, runtime, errors.New("bound session is unavailable")
+		return prompt, runtime, channels.NewChatError(nil, "bound session is unavailable")
 	}
 	if conversation.RootID == "" {
 		if h.catalog == nil {
@@ -206,7 +206,7 @@ func (h *handler) ValidateChannelBinding(ctx context.Context, conversation chann
 		}
 		organization, organizationErr := h.catalog.GetSessionOrganization(ctx, conversation.SessionID)
 		if organizationErr != nil || organization.WorkspaceID == nil || *organization.WorkspaceID != conversation.WorkspaceID {
-			return prompt, runtime, errors.New("shared session must belong to the selected workspace")
+			return prompt, runtime, channels.NewChatError(nil, "shared session must belong to the selected workspace")
 		}
 	}
 	canonicalPrompt := channels.SessionPromptConfig{
@@ -225,7 +225,7 @@ func (h *handler) ResolveChannelBindTarget(ctx context.Context, id string) (chan
 	}
 	if strings.HasPrefix(id, "workspace_") {
 		if _, err := h.catalog.GetWorkspace(ctx, id); err != nil {
-			return channels.ChannelBindTarget{}, fmt.Errorf("workspace %s was not found", id)
+			return channels.ChannelBindTarget{}, channels.NewChatError(nil, "workspace %s was not found", id)
 		}
 		return channels.ChannelBindTarget{WorkspaceID: id}, nil
 	}
@@ -234,11 +234,11 @@ func (h *handler) ResolveChannelBindTarget(ctx context.Context, id string) (chan
 	}
 	stored, err := h.store.Get(ctx, id)
 	if err != nil || stored == nil {
-		return channels.ChannelBindTarget{}, fmt.Errorf("session %s was not found", id)
+		return channels.ChannelBindTarget{}, channels.NewChatError(nil, "session %s was not found", id)
 	}
 	organization, err := h.catalog.GetSessionOrganization(ctx, id)
 	if err != nil || organization.WorkspaceID == nil || *organization.WorkspaceID == "" {
-		return channels.ChannelBindTarget{}, fmt.Errorf("session %s does not belong to a workspace", id)
+		return channels.ChannelBindTarget{}, channels.NewChatError(nil, "session %s does not belong to a workspace", id)
 	}
 	target := channels.ChannelBindTarget{SessionID: id, WorkspaceID: *organization.WorkspaceID, Runtime: channels.SessionRuntimeConfig{Agent: stored.Agent}}
 	switch zotigoruntime.AgentKind(stored.Agent) {
@@ -263,7 +263,7 @@ func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspace
 		return fmt.Errorf("load channel workspace: %w", err)
 	}
 	if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
-		return errors.New("channel workspace is not ready")
+		return channels.NewChatError(nil, "channel workspace is not ready")
 	}
 	switch zotigoruntime.AgentKind(runtime.Agent) {
 	case zotigoruntime.AgentZotigo:
@@ -272,10 +272,11 @@ func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspace
 			return fmt.Errorf("load channel workspace profiles: %w", err)
 		}
 		if _, _, err := appConfig.ResolveProfile(runtime.ProfileName); err != nil {
+			// The cause can name configuration paths; the chat sees the summary.
 			if runtime.ProfileName == "" {
-				return fmt.Errorf("resolve channel workspace default profile: %w", err)
+				return channels.NewChatError(err, "the Workspace has no usable default profile")
 			}
-			return fmt.Errorf("resolve channel workspace profile: %w", err)
+			return channels.NewChatError(err, "profile %q is not usable in the Workspace", runtime.ProfileName)
 		}
 	case zotigoruntime.AgentCodex:
 		if _, err := h.runtimes.adapter(zotigoruntime.AgentCodex); err != nil {
@@ -305,7 +306,7 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 		return runtime, fmt.Errorf("load bound session: %w", err)
 	}
 	if stored == nil {
-		return runtime, errors.New("bound session not found")
+		return runtime, channels.NewChatError(nil, "bound session not found")
 	}
 	canonicalRuntime := channels.SessionRuntimeConfig{Agent: stored.Agent}
 	switch zotigoruntime.AgentKind(stored.Agent) {
@@ -316,7 +317,7 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 		canonicalRuntime.ReasoningEffort = stored.ReasoningEffort
 	}
 	if zotigoruntime.AgentKind(stored.Agent) != zotigoruntime.AgentKind(runtime.Agent) {
-		return runtime, errors.New("bound session agent does not match the channel runtime")
+		return runtime, channels.NewChatError(nil, "bound session agent does not match the channel runtime")
 	}
 	if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentZotigo && runtime.ProfileName != "" && stored.ProfileName != runtime.ProfileName {
 		return runtime, errors.New("bound session profile does not match the channel runtime")

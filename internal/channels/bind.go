@@ -165,7 +165,42 @@ func (s *Service) enqueueGroupCommand(connectionID string, in InboundMessage, ru
 	}()
 }
 
-var errConnectionChanged = errors.New("the connection was reconfigured; send the command again")
+var errConnectionChanged = NewChatError(nil, "the connection was reconfigured; send the command again")
+
+// ChatError is a failure that a group command can report in the chat. Group
+// members other than owners read those replies, so only the public part is
+// shown; Error keeps the cause for logs and API responses.
+type ChatError struct {
+	public string
+	cause  error
+}
+
+// NewChatError makes an error whose formatted message may be shown in the chat.
+func NewChatError(cause error, format string, args ...any) error {
+	return &ChatError{public: fmt.Sprintf(format, args...), cause: cause}
+}
+
+func (e *ChatError) Error() string {
+	if e.cause == nil {
+		return e.public
+	}
+	return e.public + ": " + e.cause.Error()
+}
+
+func (e *ChatError) Unwrap() error { return e.cause }
+
+// commandFailure words a failed group command for the chat. Failures without a
+// public message may name paths or internal state, so they go to the log only.
+func (s *Service) commandFailure(connectionID, action string, err error) string {
+	var chatErr *ChatError
+	if errors.As(err, &chatErr) {
+		return "Zotigo could not " + action + ": " + chatErr.public + "."
+	}
+	if s.logger != nil {
+		s.logger.Printf("channel %s: could not %s: %v", connectionID, action, err)
+	}
+	return "Zotigo could not " + action + ". The daemon log has the details."
+}
 
 // handleGroupCommand runs an owner's /bind or /unbind and replies in the chat.
 // It runs without the configuration lock, because binding takes the lifecycle
@@ -223,7 +258,7 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 	}
 	s.configMu.Unlock()
 	if err != nil {
-		return "Zotigo could not read this group's binding: " + err.Error()
+		return s.commandFailure(connectionID, "read this group's binding", err)
 	}
 	switch {
 	case command == commandModel:
@@ -239,7 +274,7 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 		input.SessionID = ""
 		input.WorkspaceID = ""
 		if _, err := s.putConversation(ctx, group.ID, input, nil, current); err != nil {
-			return "Zotigo could not unbind this group: " + err.Error()
+			return s.commandFailure(connectionID, "unbind this group", err)
 		}
 		return "This group is unbound. Zotigo ignores its messages until an owner runs /bind again."
 	}
@@ -255,7 +290,7 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 	}
 	target, err := binder.ResolveChannelBindTarget(ctx, targetID)
 	if err != nil {
-		return "Zotigo could not bind this group: " + err.Error()
+		return s.commandFailure(connectionID, "bind this group", err)
 	}
 	input := conversationInputFrom(group)
 	input.Enabled = true
@@ -279,7 +314,7 @@ func (s *Service) runGroupCommand(ctx context.Context, connectionID string, gene
 	}
 	bound, err := s.putConversation(ctx, group.ID, input, binder.ValidateChannelBinding, current)
 	if err != nil {
-		return "Zotigo could not bind this group: " + err.Error()
+		return s.commandFailure(connectionID, "bind this group", err)
 	}
 	return describeBinding(connection, bound)
 }

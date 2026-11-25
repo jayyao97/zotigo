@@ -49,7 +49,7 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 		topic, err := s.store.GetConversationByScope(ctx, connectionID, in.ChatID, in.RootID)
 		s.configMu.RUnlock()
 		if err != nil && !errors.Is(err, ErrNotFound) {
-			return "Zotigo could not read this topic: " + err.Error()
+			return s.commandFailure(connectionID, "read this topic", err)
 		}
 		if topic.SessionID == "" {
 			return "This topic has no session yet. Mention me with a request first, or send /model as a new message to change the model for new topics."
@@ -62,13 +62,13 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 		if sessionID != "" {
 			var err error
 			if runtime, err = switcher.ChannelSessionRuntime(ctx, sessionID); err != nil {
-				return "Zotigo could not read the session: " + err.Error()
+				return s.commandFailure(connectionID, "read the session", err)
 			}
 		}
 		reply := fmt.Sprintf("Model for %s: %s.", scope, describeRuntime(runtime))
 		choices, err := switcher.ChannelRuntimeChoices(ctx, group.WorkspaceID, runtime.Agent)
 		if err != nil {
-			return reply + " Zotigo could not list the choices: " + err.Error()
+			return reply + " " + s.commandFailure(connectionID, "list the choices", err)
 		}
 		if len(choices) > maxModelChoices {
 			choices = append(choices[:maxModelChoices], "…")
@@ -81,12 +81,12 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 	}
 
 	if err := current(); err != nil {
-		return "Zotigo could not change the model: " + err.Error()
+		return s.commandFailure(connectionID, "change the model", err)
 	}
 	if sessionID != "" {
 		runtime, pending, err := switcher.SwitchChannelSessionRuntime(ctx, sessionID, choice)
 		if err != nil {
-			return "Zotigo could not change the model: " + err.Error()
+			return s.commandFailure(connectionID, "change the model", err)
 		}
 		if pending {
 			return fmt.Sprintf("Switching %s to %s before its next turn.", scope, describeRuntime(runtime))
@@ -95,12 +95,12 @@ func (s *Service) runModelCommand(ctx context.Context, connectionID string, in I
 	}
 	runtime, err := switcher.ResolveChannelRuntime(ctx, group.WorkspaceID, conversationRuntime(group), choice)
 	if err != nil {
-		return "Zotigo could not change the model: " + err.Error()
+		return s.commandFailure(connectionID, "change the model", err)
 	}
 	input := conversationInputFrom(group)
 	input.Agent, input.ProfileName, input.Model, input.ReasoningEffort = &runtime.Agent, &runtime.ProfileName, &runtime.Model, &runtime.ReasoningEffort
 	if _, err := s.putConversation(ctx, group.ID, input, binder.ValidateChannelBinding, current); err != nil {
-		return "Zotigo could not change the model: " + err.Error()
+		return s.commandFailure(connectionID, "change the model", err)
 	}
 	if group.SessionStrategy == SessionStrategyShared {
 		return fmt.Sprintf("The shared session will use %s when the next mention creates it.", describeRuntime(runtime))

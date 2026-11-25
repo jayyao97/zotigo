@@ -140,6 +140,20 @@ type sessionRuntimeError struct {
 
 func (e *sessionRuntimeError) Error() string { return e.message }
 
+// requireIdleForRuntimeChange rejects a model change while the Session runs a
+// turn, has queued input or waits for a person, so queued work keeps the model
+// it was sent with. Callers hold the Session operation lock.
+func (h *handler) requireIdleForRuntimeChange(ctx context.Context, id string, session Session, busy string) error {
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return runtimeChangeError(http.StatusInternalServerError, "load session history: %v", err)
+	}
+	if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
+		return runtimeChangeError(http.StatusConflict, "%s", busy)
+	}
+	return nil
+}
+
 func runtimeChangeError(status int, format string, args ...any) error {
 	return &sessionRuntimeError{status: status, message: fmt.Sprintf(format, args...)}
 }
@@ -193,12 +207,8 @@ func (h *handler) changeSessionProfile(ctx context.Context, id string, target st
 		return changeProfileResponse{}, runtimeChangeError(http.StatusBadRequest, "profile is only valid for agent zotigo")
 	}
 	if channelBound {
-		items, _, err := h.items.LoadItems(ctx, id)
-		if err != nil {
-			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load session history: %v", err)
-		}
-		if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
-			return changeProfileResponse{}, runtimeChangeError(http.StatusConflict, "wait for the current Channel turn to finish before changing profile")
+		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing profile"); err != nil {
+			return changeProfileResponse{}, err
 		}
 	}
 	workingDirectory := session.WorkingDirectory

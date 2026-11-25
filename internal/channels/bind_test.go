@@ -75,8 +75,11 @@ func (bindingDispatcher) ChannelRuntimeChoices(context.Context, string, string) 
 }
 
 func (bindingDispatcher) ResolveChannelRuntime(_ context.Context, _ string, current SessionRuntimeConfig, choice []string) (SessionRuntimeConfig, error) {
-	if choice[0] == "missing" {
-		return current, errors.New(`profile "missing" not found`)
+	switch choice[0] {
+	case "missing":
+		return current, NewChatError(nil, `profile "missing" not found`)
+	case "broken":
+		return current, errors.New("open /home/owner/.zotigo/config.yaml: permission denied")
 	}
 	return SessionRuntimeConfig{Agent: current.Agent, ProfileName: choice[0]}, nil
 }
@@ -93,7 +96,7 @@ func (bindingDispatcher) ResolveChannelBindTarget(_ context.Context, id string) 
 	case "sess_shared":
 		return ChannelBindTarget{SessionID: id, WorkspaceID: "workspace_oncall", Runtime: SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: "fast"}}, nil
 	}
-	return ChannelBindTarget{}, errors.New(id + " was not found")
+	return ChannelBindTarget{}, NewChatError(nil, "%s was not found", id)
 }
 
 func (d bindingDispatcher) ValidateChannelBinding(_ context.Context, conversation Conversation, prompt SessionPromptConfig, runtime SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error) {
@@ -348,6 +351,10 @@ func TestModelCommandTargetsTheMessageScope(t *testing.T) {
 	if reply := send(groupMessage("missing", "owner-1", "/model missing", true), 5); !strings.Contains(reply, "not found") {
 		t.Fatalf("missing reply = %q", reply)
 	}
+	// Other members read the replies, so internal failures stay in the log.
+	if reply := send(groupMessage("broken", "owner-1", "/model broken", true), 6); strings.Contains(reply, "config.yaml") || !strings.Contains(reply, "daemon log") {
+		t.Fatalf("broken reply = %q", reply)
+	}
 
 	// A reply in a topic changes that topic's Session.
 	topic, err := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "", "group", time.Now())
@@ -360,7 +367,7 @@ func TestModelCommandTargetsTheMessageScope(t *testing.T) {
 	}
 	reply := groupMessage("topic", "owner-1", "/model fast", true)
 	reply.RootID = "root-1"
-	if text := send(reply, 6); !strings.Contains(text, "This topic's session now uses profile fast") {
+	if text := send(reply, 7); !strings.Contains(text, "This topic's session now uses profile fast") {
 		t.Fatalf("topic reply = %q", text)
 	}
 	if switched := <-dispatcher.switched; switched != "sess_topic=fast" {
@@ -368,7 +375,7 @@ func TestModelCommandTargetsTheMessageScope(t *testing.T) {
 	}
 	orphan := groupMessage("orphan", "owner-1", "/model fast", true)
 	orphan.RootID = "root-2"
-	if text := send(orphan, 7); !strings.Contains(text, "no session yet") {
+	if text := send(orphan, 8); !strings.Contains(text, "no session yet") {
 		t.Fatalf("orphan reply = %q", text)
 	}
 
@@ -377,7 +384,7 @@ func TestModelCommandTargetsTheMessageScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(50 * time.Millisecond)
-	if adapter.replyCount() != 7 {
+	if adapter.replyCount() != 8 {
 		t.Fatalf("member command replied: %v", adapter.replies)
 	}
 }
@@ -397,5 +404,44 @@ func TestModelCommandSwitchesSharedSession(t *testing.T) {
 	}
 	if switched := <-dispatcher.switched; switched != "sess_shared=deep" {
 		t.Fatalf("switched %q", switched)
+	}
+}
+
+// A shared group whose Session is not created yet keeps the choice for it.
+func TestModelCommandConfiguresSharedGroupWithoutSession(t *testing.T) {
+	_, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", "/bind workspace_oncall", true)); err != nil {
+		t.Fatal(err)
+	}
+	adapter.waitReply(t, 1)
+	<-dispatcher.validated
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	group.SessionStrategy = SessionStrategyShared
+	if _, err = store.PutConversation(ctx, group); err != nil {
+		t.Fatal(err)
+	}
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("list", "owner-1", "/model", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 2); !strings.Contains(reply, "created on the next mention") {
+		t.Fatalf("list reply = %q", reply)
+	}
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("model", "owner-1", "/model deep", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 3); !strings.Contains(reply, "shared session will use profile deep when the next mention creates it") {
+		t.Fatalf("reply = %q", reply)
+	}
+	<-dispatcher.validated
+	if group, err = store.GetConversationByScope(ctx, "connection-1", "chat-1", ""); err != nil || group.ProfileName != "deep" || group.SessionID != "" {
+		t.Fatalf("group = %+v err=%v", group, err)
+	}
+	select {
+	case switched := <-dispatcher.switched:
+		t.Fatalf("switched a session: %q", switched)
+	default:
 	}
 }
