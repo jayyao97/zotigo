@@ -1,0 +1,297 @@
+package channels
+
+import (
+	"context"
+	"errors"
+	"io"
+	"log"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+)
+
+// replyingAdapter records command replies.
+type replyingAdapter struct {
+	*fakeAdapter
+	replyMu sync.Mutex
+	replies []string
+}
+
+func (a *replyingAdapter) ReplyCommand(_ context.Context, _ InboundMessage, text string) error {
+	a.replyMu.Lock()
+	defer a.replyMu.Unlock()
+	a.replies = append(a.replies, text)
+	return nil
+}
+
+func (a *replyingAdapter) waitReply(t *testing.T, count int) string {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		a.replyMu.Lock()
+		if len(a.replies) >= count {
+			reply := a.replies[count-1]
+			a.replyMu.Unlock()
+			return reply
+		}
+		a.replyMu.Unlock()
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("no reply %d", count)
+	return ""
+}
+
+func (a *replyingAdapter) replyCount() int {
+	a.replyMu.Lock()
+	defer a.replyMu.Unlock()
+	return len(a.replies)
+}
+
+type replyingFactory struct{ adapter *replyingAdapter }
+
+func (replyingFactory) Capabilities() AdapterCapabilities { return fakeFactory{}.Capabilities() }
+func (f replyingFactory) New(connection Connection, secret string, callbacks AdapterCallbacks) (Adapter, error) {
+	if _, err := (fakeFactory{f.adapter.fakeAdapter}).New(connection, secret, callbacks); err != nil {
+		return nil, err
+	}
+	return f.adapter, nil
+}
+
+// bindingDispatcher resolves the test Workspace and Session.
+type bindingDispatcher struct {
+	fakeDispatcher
+	validated chan Conversation
+}
+
+func (bindingDispatcher) ResolveChannelBindTarget(_ context.Context, id string) (ChannelBindTarget, error) {
+	switch id {
+	case "workspace_oncall":
+		return ChannelBindTarget{WorkspaceID: id}, nil
+	case "sess_shared":
+		return ChannelBindTarget{SessionID: id, WorkspaceID: "workspace_oncall", Runtime: SessionRuntimeConfig{Agent: SessionAgentZotigo, ProfileName: "fast"}}, nil
+	}
+	return ChannelBindTarget{}, errors.New(id + " was not found")
+}
+
+func (d bindingDispatcher) ValidateChannelBinding(_ context.Context, conversation Conversation, prompt SessionPromptConfig, runtime SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error) {
+	d.validated <- conversation
+	return prompt, runtime, nil
+}
+
+func startBindingService(t *testing.T, aliases []BindAlias) (*Service, *Store, *replyingAdapter, bindingDispatcher, context.Context) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	store, err := Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	secrets, _ := NewSecretStore(t.TempDir())
+	adapter := &replyingAdapter{fakeAdapter: &fakeAdapter{}}
+	service := NewService(store, secrets, log.New(io.Discard, "", 0), map[string]AdapterFactory{ProviderFeishu: replyingFactory{adapter}})
+	dispatcher := bindingDispatcher{fakeDispatcher: fakeDispatcher{called: make(chan Task, 4)}, validated: make(chan Conversation, 4)}
+	service.SetDispatcher(dispatcher)
+	secret := "secret"
+	owners := []string{"owner-1"}
+	if _, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, OwnerSenderIDs: &owners, BindAliases: &aliases}); err != nil {
+		t.Fatal(err)
+	}
+	if err = service.Start(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return service, store, adapter, dispatcher, ctx
+}
+
+func groupMessage(id, sender, text string, mentioned bool) InboundMessage {
+	return InboundMessage{MessageID: id, ChatID: "chat-1", ChatType: "group", ChatName: "Oncall room", Sender: Sender{ID: sender}, Text: text, MentionedBot: mentioned, CreatedAt: time.Now()}
+}
+
+func TestOwnerBindsUnboundGroupFromChat(t *testing.T) {
+	service, store, adapter, dispatcher, ctx := startBindingService(t, []BindAlias{{Name: "Oncall", Target: "workspace_oncall"}})
+
+	// Members and unmentioned commands stay ignored in an unbound group.
+	for _, in := range []InboundMessage{
+		groupMessage("member", "member-1", "/bind oncall", true),
+		groupMessage("unmentioned", "owner-1", "/bind oncall", false),
+	} {
+		if err := adapter.callbacks.Inbound(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	time.Sleep(50 * time.Millisecond)
+	if adapter.replyCount() != 0 {
+		t.Fatalf("ignored commands replied: %v", adapter.replies)
+	}
+	if _, err := store.GetMessageByProviderID(ctx, "connection-1", "member"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("member command was stored: %v", err)
+	}
+
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("status", "owner-1", "/bind", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 1); !strings.Contains(reply, "not bound") || !strings.Contains(reply, "Oncall") {
+		t.Fatalf("status reply = %q", reply)
+	}
+
+	// Aliases match without regard to case.
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("bind", "owner-1", "/bind ONCALL", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 2); !strings.Contains(reply, "Workspace workspace_oncall") {
+		t.Fatalf("bind reply = %q", reply)
+	}
+	if validated := <-dispatcher.validated; validated.WorkspaceID != "workspace_oncall" {
+		t.Fatalf("validated %+v", validated)
+	}
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !group.Enabled || group.WorkspaceID != "workspace_oncall" || group.SessionStrategy != SessionStrategyTopic || group.SenderPolicy != SenderPolicyOwners || group.ChatName != "Oncall room" {
+		t.Fatalf("group = %+v", group)
+	}
+
+	// The bound group now admits ordinary owner messages.
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("question", "owner-1", "what broke?", true)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.GetMessageByProviderID(ctx, "connection-1", "question"); err != nil {
+		t.Fatalf("bound group message was not stored: %v", err)
+	}
+
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("unbind", "owner-1", "/unbind", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 3); !strings.Contains(reply, "unbound") {
+		t.Fatalf("unbind reply = %q", reply)
+	}
+	group, err = store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil || group.Enabled || group.WorkspaceID != "" {
+		t.Fatalf("unbound group = %+v err=%v", group, err)
+	}
+}
+
+func TestOwnerBindsGroupToSharedSession(t *testing.T) {
+	_, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("unknown", "owner-1", "/bind nowhere", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 1); !strings.Contains(reply, "not a Session ID, Workspace ID or alias") {
+		t.Fatalf("unknown target reply = %q", reply)
+	}
+	if err := adapter.callbacks.Inbound(ctx, groupMessage("shared", "owner-1", "/bind sess_shared", true)); err != nil {
+		t.Fatal(err)
+	}
+	if reply := adapter.waitReply(t, 2); !strings.Contains(reply, "shares Session sess_shared") {
+		t.Fatalf("shared reply = %q", reply)
+	}
+	<-dispatcher.validated
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if group.SessionStrategy != SessionStrategyShared || group.SessionID != "sess_shared" || group.WorkspaceID != "workspace_oncall" || group.ProfileName != "fast" {
+		t.Fatalf("group = %+v", group)
+	}
+}
+
+func TestBindAliasesAndProgressDetailAreValidated(t *testing.T) {
+	service, _, _, _, ctx := startBindingService(t, nil)
+	secret := "secret"
+	for _, aliases := range [][]BindAlias{
+		{{Name: "on call", Target: "workspace_a"}},
+		{{Name: "oncall", Target: "somewhere"}},
+		{{Name: "sess_x", Target: "workspace_a"}},
+		{{Name: "oncall", Target: "workspace_a"}, {Name: "OnCall", Target: "sess_b"}},
+	} {
+		if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, BindAliases: &aliases}); err == nil {
+			t.Fatalf("accepted aliases %+v", aliases)
+		}
+	}
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, ProgressDetail: "verbose"}); err == nil {
+		t.Fatal("accepted an unknown progress detail")
+	}
+	connection, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, ProgressDetail: ProgressDetailFull})
+	if err != nil || connection.ProgressDetail != ProgressDetailFull {
+		t.Fatalf("connection=%+v err=%v", connection, err)
+	}
+	// Omitted fields keep their saved values.
+	connection, err = service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true})
+	if err != nil || connection.ProgressDetail != ProgressDetailFull || len(connection.BindAliases) != 0 {
+		t.Fatalf("connection=%+v err=%v", connection, err)
+	}
+}
+
+func TestGroupProgressDetailOverridesConnection(t *testing.T) {
+	service, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	secret := "secret"
+	if _, err := service.PutConnection(ctx, "connection-1", ConnectionInput{Provider: ProviderFeishu, Name: "test", AppID: "app", AppSecret: &secret, Enabled: true, ProgressDetail: ProgressDetailDetailed}); err != nil {
+		t.Fatal(err)
+	}
+	group := bindTestGroup(t, store, "chat-1", "owner-1")
+	conversation, err := store.EnsureConversationRoot(ctx, "connection-1", "chat-1", "root-1", "", "group", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	conversation.SessionID, conversation.WorkspaceID, conversation.Enabled = "session-1", "workspace-1", true
+	if _, err = store.PutConversation(ctx, conversation); err != nil {
+		t.Fatal(err)
+	}
+	send := func(id string) Task {
+		t.Helper()
+		in := InboundMessage{MessageID: id, ChatID: "chat-1", ChatType: "group", RootID: "root-1", Sender: Sender{ID: "owner-1"}, Text: "hi", MentionedBot: true, CreatedAt: time.Now()}
+		if err := adapter.callbacks.Inbound(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case task := <-dispatcher.called:
+			return task
+		case <-time.After(5 * time.Second):
+			t.Fatal("task was not dispatched")
+			return Task{}
+		}
+	}
+	if task := send("first"); task.ProgressDetail != ProgressDetailDetailed {
+		t.Fatalf("inherited detail = %q", task.ProgressDetail)
+	}
+	full := ProgressDetailFull
+	input := conversationInputFrom(group)
+	input.ProgressDetail = &full
+	if _, err = service.PutConversation(ctx, group.ID, input); err != nil {
+		t.Fatal(err)
+	}
+	if task := send("second"); task.ProgressDetail != ProgressDetailFull {
+		t.Fatalf("overridden detail = %q", task.ProgressDetail)
+	}
+	invalid := "verbose"
+	input.ProgressDetail = &invalid
+	if _, err = service.PutConversation(ctx, group.ID, input); err == nil {
+		t.Fatal("accepted an unknown group progress detail")
+	}
+}
+
+func TestGroupCommandsRunOnceInArrivalOrder(t *testing.T) {
+	_, store, adapter, dispatcher, ctx := startBindingService(t, nil)
+	for _, in := range []InboundMessage{
+		groupMessage("bind", "owner-1", "/bind workspace_oncall", true),
+		groupMessage("bind", "owner-1", "/bind workspace_oncall", true),
+		groupMessage("unbind", "owner-1", "/unbind", true),
+	} {
+		if err := adapter.callbacks.Inbound(ctx, in); err != nil {
+			t.Fatal(err)
+		}
+	}
+	<-dispatcher.validated
+	if reply := adapter.waitReply(t, 2); !strings.Contains(reply, "unbound") {
+		t.Fatalf("second reply = %q", reply)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if count := adapter.replyCount(); count != 2 {
+		t.Fatalf("a redelivered command ran again: %d replies %v", count, adapter.replies)
+	}
+	group, err := store.GetConversationByScope(ctx, "connection-1", "chat-1", "")
+	if err != nil || group.Enabled {
+		t.Fatalf("the later /unbind did not win: %+v err=%v", group, err)
+	}
+}

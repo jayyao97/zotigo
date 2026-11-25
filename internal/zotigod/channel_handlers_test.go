@@ -1176,7 +1176,7 @@ func TestChannelTaskResultIgnoresTurnBeforeAcceptedCommand(t *testing.T) {
 	turnID := ""
 	approvalReported := false
 	projected := uint64(4)
-	result, done, err := handler.channelTaskResult(context.Background(), "session-1", 4, &projected, &turnID, &approvalReported, channels.RuntimeAttribution{}, func(channels.Progress) {})
+	result, done, err := handler.channelTaskResult(context.Background(), "session-1", 4, &projected, &turnID, &approvalReported, channels.RuntimeAttribution{}, channels.ProgressDetailBrief, func(channels.Progress) {})
 	if err != nil || !done {
 		t.Fatalf("done=%v err=%v", done, err)
 	}
@@ -1200,7 +1200,7 @@ func TestProjectChannelItemExposesOnlySafeToolMetadata(t *testing.T) {
 			ToolCallID: "call-1", ToolName: "shell", Text: "secret output", Metadata: map[string]any{"path": "/private/path"},
 		}}},
 	}
-	events := projectChannelItem(item, "turn-1")
+	events := projectChannelItem(item, "turn-1", channelProgressView{detail: channels.ProgressDetailBrief})
 	if len(events) != 1 || events[0].Type != channels.ExecutionToolFinished || events[0].Tool == nil {
 		t.Fatalf("events=%+v", events)
 	}
@@ -1221,7 +1221,7 @@ func TestProjectChannelItemNamesMessageHistoryTool(t *testing.T) {
 			TurnID: "turn-1", ToolCallID: "exec-1", ToolName: "read_messages",
 		},
 	}
-	events := projectChannelItem(item, "turn-1")
+	events := projectChannelItem(item, "turn-1", channelProgressView{detail: channels.ProgressDetailBrief})
 	if len(events) != 1 || events[0].Tool == nil || events[0].Tool.CallID != "exec-1" || events[0].Tool.Kind != "read_messages" || events[0].Tool.DisplayName != "Read group messages" {
 		t.Fatalf("events=%+v", events)
 	}
@@ -1230,7 +1230,7 @@ func TestProjectChannelItemNamesMessageHistoryTool(t *testing.T) {
 func TestProjectChannelApprovalUsesStableApprovalID(t *testing.T) {
 	for _, itemType := range []zotigosession.DisplayItemType{zotigosession.DisplayItemApprovalRequest, zotigosession.DisplayItemApprovalDecision} {
 		item := zotigosession.DisplayItem{ID: string(itemType), Type: itemType, Approval: &zotigosession.DisplayApproval{ID: "approval-2", TurnID: "turn-1"}}
-		events := projectChannelItem(item, "turn-1")
+		events := projectChannelItem(item, "turn-1", channelProgressView{detail: channels.ProgressDetailBrief})
 		if len(events) != 1 || events[0].CorrelationID != "approval-2" {
 			t.Fatalf("type=%s events=%+v", itemType, events)
 		}

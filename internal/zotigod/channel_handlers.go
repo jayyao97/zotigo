@@ -163,40 +163,7 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 			writeAPIError(w, 400, fmt.Sprintf("decode request: %v", err))
 			return
 		}
-		value, err := h.channels.PutConversationValidated(r.Context(), id, input, func(ctx context.Context, conversation channels.Conversation, prompt channels.SessionPromptConfig, runtime channels.SessionRuntimeConfig) (channels.SessionPromptConfig, channels.SessionRuntimeConfig, error) {
-			if conversation.RootID == "" && strings.TrimSpace(conversation.SessionID) == "" {
-				return prompt, runtime, h.validateChannelWorkspaceBinding(ctx, conversation.WorkspaceID, runtime)
-			}
-			if strings.TrimSpace(conversation.SessionID) == "" {
-				return prompt, runtime, nil
-			}
-			unlock := h.sessionOps.lock(conversation.SessionID)
-			defer unlock()
-			canonicalRuntime, err := h.validateChannelSessionBinding(ctx, conversation.SessionID, runtime)
-			if err != nil {
-				return prompt, runtime, err
-			}
-			session, err := h.store.Get(ctx, conversation.SessionID)
-			if err != nil || session == nil {
-				return prompt, runtime, errors.New("bound session is unavailable")
-			}
-			if conversation.RootID == "" {
-				if h.catalog == nil {
-					return prompt, runtime, errors.New("workspace catalog is unavailable")
-				}
-				organization, organizationErr := h.catalog.GetSessionOrganization(ctx, conversation.SessionID)
-				if organizationErr != nil || organization.WorkspaceID == nil || *organization.WorkspaceID != conversation.WorkspaceID {
-					return prompt, runtime, errors.New("shared session must belong to the selected workspace")
-				}
-			}
-			canonicalPrompt := channels.SessionPromptConfig{
-				ApprovalPolicy:       string(session.ApprovalPolicy),
-				AgentInstructions:    session.PromptConfig.AgentInstructions,
-				ApprovalInstructions: session.PromptConfig.ApprovalInstructions,
-				ReviewAllTools:       session.PromptConfig.ReviewAllTools,
-			}
-			return canonicalPrompt, canonicalRuntime, nil
-		})
+		value, err := h.channels.PutConversationValidated(r.Context(), id, input, h.ValidateChannelBinding)
 		if err != nil {
 			if errors.Is(err, channels.ErrNotFound) {
 				h.writeChannelError(w, err)
@@ -212,6 +179,75 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 		w.Header().Set("Allow", "GET, PUT")
 		writeAPIError(w, 405, "method not allowed")
 	}
+}
+
+// ValidateChannelBinding checks a group or topic binding against the Workspace
+// or Session it names and returns the Session's canonical prompt and runtime.
+func (h *handler) ValidateChannelBinding(ctx context.Context, conversation channels.Conversation, prompt channels.SessionPromptConfig, runtime channels.SessionRuntimeConfig) (channels.SessionPromptConfig, channels.SessionRuntimeConfig, error) {
+	if conversation.RootID == "" && strings.TrimSpace(conversation.SessionID) == "" {
+		return prompt, runtime, h.validateChannelWorkspaceBinding(ctx, conversation.WorkspaceID, runtime)
+	}
+	if strings.TrimSpace(conversation.SessionID) == "" {
+		return prompt, runtime, nil
+	}
+	unlock := h.sessionOps.lock(conversation.SessionID)
+	defer unlock()
+	canonicalRuntime, err := h.validateChannelSessionBinding(ctx, conversation.SessionID, runtime)
+	if err != nil {
+		return prompt, runtime, err
+	}
+	session, err := h.store.Get(ctx, conversation.SessionID)
+	if err != nil || session == nil {
+		return prompt, runtime, errors.New("bound session is unavailable")
+	}
+	if conversation.RootID == "" {
+		if h.catalog == nil {
+			return prompt, runtime, errors.New("workspace catalog is unavailable")
+		}
+		organization, organizationErr := h.catalog.GetSessionOrganization(ctx, conversation.SessionID)
+		if organizationErr != nil || organization.WorkspaceID == nil || *organization.WorkspaceID != conversation.WorkspaceID {
+			return prompt, runtime, errors.New("shared session must belong to the selected workspace")
+		}
+	}
+	canonicalPrompt := channels.SessionPromptConfig{
+		ApprovalPolicy:       string(session.ApprovalPolicy),
+		AgentInstructions:    session.PromptConfig.AgentInstructions,
+		ApprovalInstructions: session.PromptConfig.ApprovalInstructions,
+		ReviewAllTools:       session.PromptConfig.ReviewAllTools,
+	}
+	return canonicalPrompt, canonicalRuntime, nil
+}
+
+// ResolveChannelBindTarget resolves the ID in an owner's /bind command.
+func (h *handler) ResolveChannelBindTarget(ctx context.Context, id string) (channels.ChannelBindTarget, error) {
+	if h.catalog == nil {
+		return channels.ChannelBindTarget{}, errors.New("workspace catalog is unavailable")
+	}
+	if strings.HasPrefix(id, "workspace_") {
+		if _, err := h.catalog.GetWorkspace(ctx, id); err != nil {
+			return channels.ChannelBindTarget{}, fmt.Errorf("workspace %s was not found", id)
+		}
+		return channels.ChannelBindTarget{WorkspaceID: id}, nil
+	}
+	if h.store == nil {
+		return channels.ChannelBindTarget{}, errors.New("session store is unavailable")
+	}
+	stored, err := h.store.Get(ctx, id)
+	if err != nil || stored == nil {
+		return channels.ChannelBindTarget{}, fmt.Errorf("session %s was not found", id)
+	}
+	organization, err := h.catalog.GetSessionOrganization(ctx, id)
+	if err != nil || organization.WorkspaceID == nil || *organization.WorkspaceID == "" {
+		return channels.ChannelBindTarget{}, fmt.Errorf("session %s does not belong to a workspace", id)
+	}
+	target := channels.ChannelBindTarget{SessionID: id, WorkspaceID: *organization.WorkspaceID, Runtime: channels.SessionRuntimeConfig{Agent: stored.Agent}}
+	switch zotigoruntime.AgentKind(stored.Agent) {
+	case zotigoruntime.AgentCodex:
+		target.Runtime.Model, target.Runtime.ReasoningEffort = stored.Model, stored.ReasoningEffort
+	default:
+		target.Runtime.ProfileName = stored.ProfileName
+	}
+	return target, nil
 }
 
 func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspaceID string, runtime channels.SessionRuntimeConfig) error {

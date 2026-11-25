@@ -801,6 +801,8 @@ func (a *Adapter) resolveMessageDetails(ctx context.Context, messageID, senderID
 type progressHandle struct {
 	messageID string
 	patch     func(context.Context, string, string) error
+	// steps lists recent activity for detailed progress levels.
+	steps cardSteps
 }
 
 type processingReactionHandle struct {
@@ -867,6 +869,18 @@ func (a *Adapter) OpenProgress(ctx context.Context, in channels.InboundMessage) 
 	return a.withProcessingReaction(ctx, in, &progressHandle{messageID: messageID, patch: a.patch}), nil
 }
 
+// ReplyCommand answers an owner command with a plain text reply. It never
+// opens a thread, and the UUID keeps a redelivered command from replying twice.
+func (a *Adapter) ReplyCommand(ctx context.Context, in channels.InboundMessage, text string) error {
+	content, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		return err
+	}
+	body := larkim.NewReplyMessageReqBodyBuilder().MsgType("text").Content(string(content)).ReplyInThread(false).Uuid("zotigo-cmd-" + in.MessageID).Build()
+	_, err = a.reply(ctx, in.MessageID, body)
+	return err
+}
+
 func (a *Adapter) ResumeProgress(receipt channels.DeliveryReceipt) channels.ProgressHandle {
 	if receipt.Mode == channels.ProgressModeCOT && receipt.COTID != "" {
 		return &processingReactionHandle{ProgressHandle: resumeCOTProgress(a.cot, a.finalReply, receipt), receipt: receipt, originID: receipt.InboundMessageID, remove: a.removeProcessingReaction}
@@ -875,6 +889,12 @@ func (a *Adapter) ResumeProgress(receipt channels.DeliveryReceipt) channels.Prog
 }
 
 func (h *progressHandle) Update(ctx context.Context, progress channels.Progress) error {
+	if progress.Detail == channels.ProgressDetailDetailed || progress.Detail == channels.ProgressDetailFull {
+		h.steps.add(progress.Events)
+		if steps := h.steps.markdown(); steps != "" {
+			progress.Text = strings.TrimSpace(progress.Text + "\n\n" + steps)
+		}
+	}
 	card, err := renderCard(progress)
 	if err != nil {
 		return err
@@ -1028,4 +1048,86 @@ func safeAttributionPart(value string) string {
 		runes = append(runes[:120], '…')
 	}
 	return html.EscapeString(string(runes))
+}
+
+const (
+	maxCardSteps = 15
+	// Fifteen steps of this length stay within the card's 6000-rune limit.
+	maxCardStepRunes = 300
+)
+
+// cardSteps keeps the latest activity shown in a progress card. Progress
+// updates carry only new events, so the card accumulates them.
+type cardSteps struct {
+	lines  []cardStep
+	byCall map[string]int
+}
+
+type cardStep struct {
+	text   string
+	status string
+}
+
+func (s *cardSteps) add(events []channels.PublicExecutionEvent) {
+	for _, event := range events {
+		switch event.Type {
+		case channels.ExecutionToolStarted:
+			if event.Tool == nil {
+				continue
+			}
+			line := event.Tool.DisplayName
+			if event.Tool.Subject != "" {
+				line += ": `" + strings.ReplaceAll(event.Tool.Subject, "`", "'") + "`"
+			}
+			if s.byCall == nil {
+				s.byCall = map[string]int{}
+			}
+			s.byCall[event.Tool.CallID] = len(s.lines)
+			s.lines = append(s.lines, cardStep{text: "- " + line})
+		case channels.ExecutionToolFinished:
+			if event.Tool == nil {
+				continue
+			}
+			if index, ok := s.byCall[event.Tool.CallID]; ok && index < len(s.lines) {
+				s.lines[index].status = event.Tool.Status
+			}
+		case channels.ExecutionNarration, channels.ExecutionThinking:
+			text := strings.TrimSpace(event.Text)
+			if text == "" {
+				continue
+			}
+			if runes := []rune(text); len(runes) > maxCardStepRunes {
+				text = string(runes[:maxCardStepRunes]) + "…"
+			}
+			if event.Type == channels.ExecutionThinking {
+				text = "*Thinking:* " + text
+			}
+			s.lines = append(s.lines, cardStep{text: "> " + strings.ReplaceAll(text, "\n", "\n> ")})
+		}
+	}
+	if drop := len(s.lines) - maxCardSteps; drop > 0 {
+		s.lines = s.lines[drop:]
+		for id, index := range s.byCall {
+			if index -= drop; index < 0 {
+				delete(s.byCall, id)
+			} else {
+				s.byCall[id] = index
+			}
+		}
+	}
+}
+
+func (s *cardSteps) markdown() string {
+	lines := make([]string, 0, len(s.lines))
+	for _, line := range s.lines {
+		switch line.status {
+		case "completed":
+			lines = append(lines, line.text+" ✓")
+		case "failed":
+			lines = append(lines, line.text+" ✗")
+		default:
+			lines = append(lines, line.text)
+		}
+	}
+	return strings.Join(lines, "\n")
 }

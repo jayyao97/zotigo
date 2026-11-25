@@ -2,9 +2,12 @@ package zotigod
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -394,7 +397,7 @@ func (h *handler) DispatchChannelTask(parent context.Context, task channels.Task
 	turnID := ""
 	approvalReported := false
 	for {
-		result, done, waitErr := h.channelTaskResult(ctx, task.SessionID, after, &projected, &turnID, &approvalReported, fallbackRuntime, progress)
+		result, done, waitErr := h.channelTaskResult(ctx, task.SessionID, after, &projected, &turnID, &approvalReported, fallbackRuntime, task.ProgressDetail, progress)
 		if done || waitErr != nil {
 			return result, waitErr
 		}
@@ -440,7 +443,7 @@ func channelMessageImages(inputs []channels.InboundImage) ([]sessionlog.MessageI
 	return images, nil
 }
 
-func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after uint64, projected *uint64, turnID *string, approvalReported *bool, fallbackRuntime channels.RuntimeAttribution, progress func(channels.Progress)) (channels.TaskResult, bool, error) {
+func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after uint64, projected *uint64, turnID *string, approvalReported *bool, fallbackRuntime channels.RuntimeAttribution, detail string, progress func(channels.Progress)) (channels.TaskResult, bool, error) {
 	items, exists, err := h.items.LoadItems(ctx, sessionID)
 	if err != nil {
 		return channels.TaskResult{}, false, err
@@ -452,6 +455,12 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 	runtime := fallbackRuntime
 	var publicEvents []channels.PublicExecutionEvent
 	var projectedThrough uint64
+	view := channelProgressView{detail: detail, toolArgs: map[string]string{}}
+	// Assistant text without tool calls may be the final answer, which is sent
+	// separately. Hold it until later activity in the turn shows it was interim,
+	// and do not mark it projected meanwhile so the next pass reconsiders it.
+	var held []channels.PublicExecutionEvent
+	var holding bool
 	for _, item := range items {
 		if item.Sequence <= after {
 			continue
@@ -468,10 +477,19 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 		if item.Type == zotigosession.DisplayItemApprovalRequest && item.Approval != nil && item.Approval.TurnID == *turnID && !*approvalReported {
 			*approvalReported = true
 		}
+		view.recordToolCalls(item, *turnID)
 		if item.Sequence > *projected {
-			publicEvents = append(publicEvents, projectChannelItem(item, *turnID)...)
-			if item.Sequence > projectedThrough {
-				projectedThrough = item.Sequence
+			if pending := view.pendingNarration(item, *turnID); len(pending) > 0 {
+				held, holding = append(held, pending...), true
+			} else {
+				events := projectChannelItem(item, *turnID, view)
+				if holding && (len(events) > 0 || isTurnAssistantMessage(item, *turnID)) {
+					publicEvents, held, holding = append(publicEvents, held...), nil, false
+				}
+				publicEvents = append(publicEvents, events...)
+				if !holding && item.Sequence > projectedThrough {
+					projectedThrough = item.Sequence
+				}
 			}
 		}
 		if item.Type == zotigosession.DisplayItemAssistantMessage && (item.Turn == nil || item.Turn.ID == "" || item.Turn.ID == *turnID) {
@@ -488,10 +506,13 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 		if item.Turn == nil || item.Turn.ID != *turnID {
 			continue
 		}
+		if item.Type == zotigosession.DisplayItemTurnCompleted || item.Type == zotigosession.DisplayItemTurnFailed || item.Type == zotigosession.DisplayItemTurnInterrupted {
+			publicEvents = append(publicEvents, heldThinking(held)...)
+		}
 		switch item.Type {
 		case zotigosession.DisplayItemTurnCompleted:
 			if len(publicEvents) > 0 {
-				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents})
+				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents, Detail: detail})
 				*projected = projectedThrough
 			}
 			if item.Turn.LastAgentMessage != "" {
@@ -503,7 +524,7 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 			return channels.TaskResult{Text: answer, Runtime: runtime, DurationMS: item.Turn.DurationMS, Usage: item.Turn.Usage}, true, nil
 		case zotigosession.DisplayItemTurnFailed:
 			if len(publicEvents) > 0 {
-				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents})
+				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents, Detail: detail})
 				*projected = projectedThrough
 			}
 			if item.Error != "" {
@@ -512,7 +533,7 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 			return channels.TaskResult{}, true, errors.New("agent turn failed")
 		case zotigosession.DisplayItemTurnInterrupted:
 			if len(publicEvents) > 0 {
-				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents})
+				progress(channels.Progress{State: "running", Sequence: projectedThrough, Events: publicEvents, Detail: detail})
 				*projected = projectedThrough
 			}
 			return channels.TaskResult{}, true, errors.New("agent turn was interrupted")
@@ -525,7 +546,7 @@ func (h *handler) channelTaskResult(ctx context.Context, sessionID string, after
 				state, text = "approval", "Waiting for approval in Zotigo."
 			}
 		}
-		progress(channels.Progress{State: state, Text: text, Sequence: projectedThrough, Events: publicEvents})
+		progress(channels.Progress{State: state, Text: text, Sequence: projectedThrough, Events: publicEvents, Detail: detail})
 		*projected = projectedThrough
 	}
 	return channels.TaskResult{}, false, nil
@@ -541,7 +562,7 @@ func channelSessionRuntimeAttribution(session *zotigosession.Session) channels.R
 	return channels.RuntimeAttribution{Agent: session.Agent, ProfileName: session.ProfileName, Model: session.Model, ReasoningEffort: session.ReasoningEffort}
 }
 
-func projectChannelItem(item zotigosession.DisplayItem, turnID string) []channels.PublicExecutionEvent {
+func projectChannelItem(item zotigosession.DisplayItem, turnID string, view channelProgressView) []channels.PublicExecutionEvent {
 	at := item.CreatedAt
 	event := func(suffix, eventType string, tool *channels.PublicToolActivity) channels.PublicExecutionEvent {
 		return channels.PublicExecutionEvent{ID: item.ID + suffix, Type: eventType, Timestamp: at, Tool: tool}
@@ -554,6 +575,9 @@ func projectChannelItem(item zotigosession.DisplayItem, turnID string) []channel
 	case zotigosession.DisplayItemToolExecutionStarted:
 		if item.ToolExecution != nil && item.ToolExecution.TurnID == turnID && item.ToolExecution.ToolCallID != "" {
 			activity := &channels.PublicToolActivity{CallID: item.ToolExecution.ToolCallID, Kind: publicToolKind(item.ToolExecution.ToolName), DisplayName: publicToolName(item.ToolExecution.ToolName), Status: "running"}
+			if view.detailed() {
+				activity.Subject = toolSubject(view.toolArgs[item.ToolExecution.ToolCallID])
+			}
 			return []channels.PublicExecutionEvent{event("", channels.ExecutionToolStarted, activity)}
 		}
 	case zotigosession.DisplayItemApprovalRequest:
@@ -573,7 +597,24 @@ func projectChannelItem(item zotigosession.DisplayItem, turnID string) []channel
 			return nil
 		}
 		var events []channels.PublicExecutionEvent
+		hasToolCalls := slices.ContainsFunc(item.Content, func(part zotigosession.DisplayContentPart) bool { return part.ToolCall != nil })
 		for index, part := range item.Content {
+			switch {
+			case isThinkingPart(part) && view.detail == channels.ProgressDetailFull:
+				if text := publicText(part.Text); text != "" {
+					thinking := event(fmt.Sprintf(":%d", index), channels.ExecutionThinking, nil)
+					thinking.Text = text
+					events = append(events, thinking)
+				}
+				continue
+			case part.Type == "text" && hasToolCalls && view.detailed():
+				if text := publicText(part.Text); text != "" {
+					narration := event(fmt.Sprintf(":%d", index), channels.ExecutionNarration, nil)
+					narration.Text = text
+					events = append(events, narration)
+				}
+				continue
+			}
 			if part.ToolResult == nil || part.ToolResult.ToolCallID == "" {
 				continue
 			}
@@ -617,4 +658,135 @@ func publicToolKind(name string) string {
 	default:
 		return "tool"
 	}
+}
+
+// channelProgressView is what a progress detail level may reveal for a turn.
+type channelProgressView struct {
+	detail string
+	// toolArgs maps a tool call ID to its arguments, recorded from the
+	// assistant message that requested the call.
+	toolArgs map[string]string
+}
+
+func (v channelProgressView) detailed() bool {
+	return v.detail == channels.ProgressDetailDetailed || v.detail == channels.ProgressDetailFull
+}
+
+func (v channelProgressView) recordToolCalls(item zotigosession.DisplayItem, turnID string) {
+	if !v.detailed() || !isTurnAssistantMessage(item, turnID) {
+		return
+	}
+	for _, part := range item.Content {
+		if part.ToolCall != nil && part.ToolCall.ID != "" {
+			v.toolArgs[part.ToolCall.ID] = part.ToolCall.Arguments
+		}
+	}
+}
+
+// pendingNarration returns the text (and, at full, the thinking) of an
+// assistant message without tool activity, at detailed levels. Whether the
+// text is interim or the final answer is only known from what follows. A
+// message with no text returns nothing and is projected normally.
+func (v channelProgressView) pendingNarration(item zotigosession.DisplayItem, turnID string) []channels.PublicExecutionEvent {
+	if !v.detailed() || !isTurnAssistantMessage(item, turnID) {
+		return nil
+	}
+	var events []channels.PublicExecutionEvent
+	hasText := false
+	for index, part := range item.Content {
+		if part.ToolCall != nil || part.ToolResult != nil {
+			return nil
+		}
+		event := channels.PublicExecutionEvent{ID: fmt.Sprintf("%s:%d", item.ID, index), Timestamp: item.CreatedAt, Text: publicText(part.Text)}
+		switch {
+		case event.Text == "":
+			continue
+		case part.Type == "text":
+			event.Type, hasText = channels.ExecutionNarration, true
+		case isThinkingPart(part) && v.detail == channels.ProgressDetailFull:
+			event.Type = channels.ExecutionThinking
+		default:
+			continue
+		}
+		events = append(events, event)
+	}
+	if !hasText {
+		return nil
+	}
+	return events
+}
+
+// heldThinking keeps the thinking from held messages. When the turn ends, the
+// held text was the final answer, which is delivered separately, but the
+// thinking behind it still belongs in the progress.
+func heldThinking(held []channels.PublicExecutionEvent) []channels.PublicExecutionEvent {
+	var thinking []channels.PublicExecutionEvent
+	for _, event := range held {
+		if event.Type == channels.ExecutionThinking {
+			thinking = append(thinking, event)
+		}
+	}
+	return thinking
+}
+
+func isTurnAssistantMessage(item zotigosession.DisplayItem, turnID string) bool {
+	return item.Type == zotigosession.DisplayItemAssistantMessage && (item.Turn == nil || item.Turn.ID == "" || item.Turn.ID == turnID)
+}
+
+func isThinkingPart(part zotigosession.DisplayContentPart) bool {
+	return part.Type == "reasoning" || part.Type == "thinking"
+}
+
+const (
+	maxChannelTextRunes    = 1200
+	maxChannelSubjectRunes = 80
+)
+
+// publicText trims narration or thinking for a chat; the session keeps the full text.
+func publicText(text string) string {
+	text = strings.TrimSpace(text)
+	if runes := []rune(text); len(runes) > maxChannelTextRunes {
+		text = strings.TrimSpace(string(runes[:maxChannelTextRunes])) + "…"
+	}
+	return text
+}
+
+// secretPattern matches credentials that commands and URLs commonly carry:
+// an Authorization header or bearer token, and key=value or key: value pairs
+// whose key names a secret. The value is replaced, the key kept.
+var secretPattern = regexp.MustCompile(`(?i)(authorization:\s*(?:bearer\s+|basic\s+)?|bearer\s+|\b[\w-]*(?:token|secret|password|passwd|api[_-]?key|access[_-]?key)[\w-]*["']?\s*[=:]\s*["']?)[^\s"'&]+`)
+
+func redactSecrets(text string) string {
+	return secretPattern.ReplaceAllString(text, "${1}***")
+}
+
+// subjectKeys are argument fields that name what a tool acts on, in order of preference.
+var subjectKeys = []string{"command", "cmd", "file_path", "path", "pattern", "query", "url", "description"}
+
+// toolSubject summarizes a tool call's arguments as one short line, such as
+// the command it runs or the file it reads. Unknown shapes yield nothing.
+func toolSubject(arguments string) string {
+	var fields map[string]any
+	if json.Unmarshal([]byte(arguments), &fields) != nil {
+		return ""
+	}
+	for _, key := range subjectKeys {
+		var subject string
+		switch value := fields[key].(type) {
+		case string:
+			subject = value
+		case []any:
+			// Shell argv such as ["bash", "-lc", "go test ./..."]: the script is last.
+			if len(value) > 0 {
+				subject, _ = value[len(value)-1].(string)
+			}
+		}
+		if subject = redactSecrets(strings.Join(strings.Fields(subject), " ")); subject != "" {
+			if runes := []rune(subject); len(runes) > maxChannelSubjectRunes {
+				subject = string(runes[:maxChannelSubjectRunes]) + "…"
+			}
+			return subject
+		}
+	}
+	return ""
 }

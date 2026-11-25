@@ -118,8 +118,12 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	if _, err = store.PutConnection(context.Background(), Connection{ID: "legacy", Provider: ProviderFeishu}); err != nil {
 		t.Fatal(err)
 	}
+	// Recreate the version 1 shape: neither the approval policy nor later columns.
 	if _, err = store.db.Exec(`ALTER TABLE channel_connections DROP COLUMN approval_policy;
- ALTER TABLE channel_conversations DROP COLUMN approval_policy; PRAGMA user_version = 1;`); err != nil {
+ ALTER TABLE channel_conversations DROP COLUMN approval_policy;
+ ALTER TABLE channel_connections DROP COLUMN progress_detail;
+ ALTER TABLE channel_connections DROP COLUMN bind_aliases;
+ ALTER TABLE channel_conversations DROP COLUMN progress_detail; PRAGMA user_version = 1;`); err != nil {
 		t.Fatal(err)
 	}
 	if err = store.Close(); err != nil {
@@ -131,7 +135,11 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	}
 	defer store.Close()
 	connection, err := store.GetConnection(context.Background(), "legacy")
-	if err != nil || connection.ApprovalPolicy != "auto" {
+	if err != nil || connection.ApprovalPolicy != "auto" || connection.ProgressDetail != ProgressDetailBrief || connection.BindAliases == nil {
 		t.Fatalf("migrated=%+v err=%v", connection, err)
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != channelSchemaVersion {
+		t.Fatalf("version=%d err=%v", version, err)
 	}
 }
