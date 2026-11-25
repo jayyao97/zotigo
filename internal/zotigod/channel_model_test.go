@@ -178,7 +178,6 @@ func TestChatRuntimeErrorFollowsThePublicMark(t *testing.T) {
 	}{
 		{publicRuntimeError(http.StatusServiceUnavailable, "profile change requires an online worker"), "profile change requires an online worker"},
 		{runtimeChangeError(http.StatusBadRequest, "load profiles: open /home/owner/.zotigo/config.yaml"), ""},
-		{&sessionRuntimeError{status: http.StatusBadRequest, message: "codex is unavailable: " + probe.Error(), cause: channels.NewChatError(probe, "codex is unavailable")}, "codex is unavailable"},
 	} {
 		var chatErr *channels.ChatError
 		got := ""
@@ -188,5 +187,17 @@ func TestChatRuntimeErrorFollowsThePublicMark(t *testing.T) {
 		if got != test.public {
 			t.Errorf("%v: public %q, want %q", test.err, got, test.public)
 		}
+	}
+
+	// A failed Codex probe keeps its error for the API and shows a summary in chat.
+	h, _, _, _ := newChannelModelFixture(t)
+	h.codexUnavailable = probe
+	_, err := h.changeSessionCodexSettings(context.Background(), "channel-codex", "gpt-5.6-luna", "medium", true)
+	if err == nil || err.Error() != "codex is unavailable: "+probe.Error() {
+		t.Fatalf("API error = %v", err)
+	}
+	var chatErr *channels.ChatError
+	if !errors.As(chatRuntimeError(err), &chatErr) || chatErr.Public() != "codex is unavailable" {
+		t.Fatalf("chat error = %v", chatRuntimeError(err))
 	}
 }

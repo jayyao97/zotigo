@@ -466,7 +466,8 @@ func TestCommandFailureShowsOnlyPublicMessages(t *testing.T) {
 		if reply := s.commandFailure("connection-1", "bind this group", test.err); reply != test.reply {
 			t.Errorf("reply = %q, want %q", reply, test.reply)
 		}
-		if strings.Contains(logged.String(), "config.yaml") != test.logsCause {
+		// A public message without a cause has nothing more to log.
+		if (logged.Len() != 0) != test.logsCause || test.logsCause && !strings.Contains(logged.String(), "config.yaml") {
 			t.Errorf("%v: log = %q", test.err, logged.String())
 		}
 	}

@@ -272,14 +272,14 @@ func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspace
 	case zotigoruntime.AgentZotigo:
 		appConfig, err := config.NewManager().LoadForDir(workspace.RootPath)
 		if err != nil {
-			return fmt.Errorf("load channel workspace profiles: %w", err)
+			return channels.NewChatError(err, "the Workspace configuration could not be loaded")
 		}
 		if _, _, err := appConfig.ResolveProfile(runtime.ProfileName); err != nil {
 			// The cause can name configuration paths; the chat sees the summary.
-			if runtime.ProfileName == "" {
+			if strings.TrimSpace(runtime.ProfileName) == "" {
 				return channels.NewChatError(err, "the Workspace has no usable default profile")
 			}
-			return channels.NewChatError(err, "profile %q is not usable in the Workspace", runtime.ProfileName)
+			return channels.NewChatError(err, "profile %q is not usable in the Workspace", strings.TrimSpace(runtime.ProfileName))
 		}
 	case zotigoruntime.AgentCodex:
 		if _, err := h.runtimes.adapter(zotigoruntime.AgentCodex); err != nil {

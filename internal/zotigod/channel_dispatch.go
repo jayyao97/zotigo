@@ -176,14 +176,14 @@ func (h *handler) ProvisionChannelSession(ctx context.Context, workspaceID, titl
 	case zotigoruntime.AgentZotigo:
 		appConfig, configErr := config.NewManager().LoadForDir(workspace.RootPath)
 		if configErr != nil {
-			return fmt.Errorf("load channel workspace profiles: %w", configErr)
+			return channels.NewChatError(configErr, "the Workspace configuration could not be loaded")
 		}
 		profileName, _, err = appConfig.ResolveProfile(strings.TrimSpace(runtime.ProfileName))
 		if err != nil {
-			if runtime.ProfileName == "" {
+			if strings.TrimSpace(runtime.ProfileName) == "" {
 				return channels.NewChatError(err, "the Workspace has no usable default profile")
 			}
-			return channels.NewChatError(err, "profile %q is not usable in the Workspace", runtime.ProfileName)
+			return channels.NewChatError(err, "profile %q is not usable in the Workspace", strings.TrimSpace(runtime.ProfileName))
 		}
 		resolved.ProfileName = profileName
 	case zotigoruntime.AgentCodex:
