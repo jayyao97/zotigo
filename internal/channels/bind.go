@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
 )
 
 // Bind targets are referenced by ID or by an owner-defined alias.
@@ -27,7 +28,9 @@ func normalizeBindAliases(aliases []BindAlias) ([]BindAlias, error) {
 		if name == "" || target == "" {
 			return nil, errors.New("each bind alias needs a name and a target")
 		}
-		if strings.ContainsFunc(name, func(r rune) bool { return r == ' ' || r == '\t' || r == '\r' || r == '\n' }) {
+		// /bind splits its words with strings.Fields, so any Unicode space,
+		// such as an ideographic space, would make the alias unreachable.
+		if strings.ContainsFunc(name, unicode.IsSpace) {
 			return nil, errors.New("bind alias names cannot contain spaces")
 		}
 		if isBindTargetID(name) {

@@ -227,6 +227,9 @@ func TestBindAliasesAndProgressDetailAreValidated(t *testing.T) {
 	secret := "secret"
 	for _, aliases := range [][]BindAlias{
 		{{Name: "on call", Target: "workspace_a"}},
+		// /bind splits words at any Unicode space, so these could never match.
+		{{Name: "值班\u3000助手", Target: "workspace_a"}},
+		{{Name: "on\u00a0call", Target: "workspace_a"}},
 		{{Name: "oncall", Target: "somewhere"}},
 		{{Name: "sess_x", Target: "workspace_a"}},
 		{{Name: "oncall", Target: "workspace_a"}, {Name: "OnCall", Target: "sess_b"}},
@@ -469,6 +472,25 @@ func TestCommandFailureShowsOnlyPublicMessages(t *testing.T) {
 		// A public message without a cause has nothing more to log.
 		if (logged.Len() != 0) != test.logsCause || test.logsCause && !strings.Contains(logged.String(), "config.yaml") {
 			t.Errorf("%v: log = %q", test.err, logged.String())
+		}
+	}
+}
+
+// Every alias name that can be saved must reach /bind as one word.
+func TestSavedAliasNamesAreReachableFromBind(t *testing.T) {
+	aliases, err := normalizeBindAliases([]BindAlias{{Name: "值班助手", Target: "workspace_a"}, {Name: "on-call_2", Target: "sess_b"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	connection := Connection{OwnerSenderIDs: []string{"owner-1"}, BindAliases: aliases}
+	for _, alias := range aliases {
+		in := InboundMessage{ChatType: "group", MentionedBot: true, Sender: Sender{ID: "owner-1"}, Text: "/bind " + alias.Name}
+		command, argument, ok := parseGroupCommand(connection, in)
+		if !ok || command != commandBind || argument != alias.Name {
+			t.Fatalf("%q parsed as %q %q %v", alias.Name, command, argument, ok)
+		}
+		if target, found := resolveBindTarget(connection, argument); !found || target != alias.Target {
+			t.Fatalf("%q resolved to %q %v", alias.Name, target, found)
 		}
 	}
 }
