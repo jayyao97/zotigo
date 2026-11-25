@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
 	zotigoruntime "github.com/jayyao97/zotigo/internal/runtime"
 )
@@ -95,7 +96,7 @@ func (h *handler) codexCapabilities(ctx context.Context) (zotigoruntime.Capabili
 func (h *handler) validateCodexSettings(ctx context.Context, modelID string, reasoningEffort string) error {
 	capabilities, err := h.codexCapabilities(ctx)
 	if err != nil {
-		return fmt.Errorf("codex is unavailable: %w", err)
+		return channels.NewChatError(err, "codex is unavailable")
 	}
 	for _, model := range capabilities.Models {
 		if model.ID != modelID {
@@ -106,9 +107,9 @@ func (h *handler) validateCodexSettings(ctx context.Context, modelID string, rea
 				return nil
 			}
 		}
-		return fmt.Errorf("reasoning_effort %q is not supported by model %q", reasoningEffort, modelID)
+		return channels.NewChatError(nil, "reasoning_effort %q is not supported by model %q", reasoningEffort, modelID)
 	}
-	return fmt.Errorf("unknown codex model %q", modelID)
+	return channels.NewChatError(nil, "unknown codex model %q", modelID)
 }
 
 func codexCatalog(capabilities zotigoruntime.Capabilities) agentCatalog {

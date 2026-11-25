@@ -16,7 +16,10 @@ import (
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
 )
 
-var errSessionMissingChannelTools = errors.New("codex session was started without Channel tools")
+var (
+	errSessionMissingChannelTools = channels.NewChatError(nil, "codex session was started without Channel tools")
+	errChannelSessionBusy         = channels.NewChatError(nil, "a channel can only bind an idle session")
+)
 
 const maxChannelRequestBytes = 256 << 10
 
@@ -163,40 +166,7 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 			writeAPIError(w, 400, fmt.Sprintf("decode request: %v", err))
 			return
 		}
-		value, err := h.channels.PutConversationValidated(r.Context(), id, input, func(ctx context.Context, conversation channels.Conversation, prompt channels.SessionPromptConfig, runtime channels.SessionRuntimeConfig) (channels.SessionPromptConfig, channels.SessionRuntimeConfig, error) {
-			if conversation.RootID == "" && strings.TrimSpace(conversation.SessionID) == "" {
-				return prompt, runtime, h.validateChannelWorkspaceBinding(ctx, conversation.WorkspaceID, runtime)
-			}
-			if strings.TrimSpace(conversation.SessionID) == "" {
-				return prompt, runtime, nil
-			}
-			unlock := h.sessionOps.lock(conversation.SessionID)
-			defer unlock()
-			canonicalRuntime, err := h.validateChannelSessionBinding(ctx, conversation.SessionID, runtime)
-			if err != nil {
-				return prompt, runtime, err
-			}
-			session, err := h.store.Get(ctx, conversation.SessionID)
-			if err != nil || session == nil {
-				return prompt, runtime, errors.New("bound session is unavailable")
-			}
-			if conversation.RootID == "" {
-				if h.catalog == nil {
-					return prompt, runtime, errors.New("workspace catalog is unavailable")
-				}
-				organization, organizationErr := h.catalog.GetSessionOrganization(ctx, conversation.SessionID)
-				if organizationErr != nil || organization.WorkspaceID == nil || *organization.WorkspaceID != conversation.WorkspaceID {
-					return prompt, runtime, errors.New("shared session must belong to the selected workspace")
-				}
-			}
-			canonicalPrompt := channels.SessionPromptConfig{
-				ApprovalPolicy:       string(session.ApprovalPolicy),
-				AgentInstructions:    session.PromptConfig.AgentInstructions,
-				ApprovalInstructions: session.PromptConfig.ApprovalInstructions,
-				ReviewAllTools:       session.PromptConfig.ReviewAllTools,
-			}
-			return canonicalPrompt, canonicalRuntime, nil
-		})
+		value, err := h.channels.PutConversationValidated(r.Context(), id, input, h.ValidateChannelBinding)
 		if err != nil {
 			if errors.Is(err, channels.ErrNotFound) {
 				h.writeChannelError(w, err)
@@ -214,6 +184,75 @@ func (h *handler) handleChannelConversation(w http.ResponseWriter, r *http.Reque
 	}
 }
 
+// ValidateChannelBinding checks a group or topic binding against the Workspace
+// or Session it names and returns the Session's canonical prompt and runtime.
+func (h *handler) ValidateChannelBinding(ctx context.Context, conversation channels.Conversation, prompt channels.SessionPromptConfig, runtime channels.SessionRuntimeConfig) (channels.SessionPromptConfig, channels.SessionRuntimeConfig, error) {
+	if conversation.RootID == "" && strings.TrimSpace(conversation.SessionID) == "" {
+		return prompt, runtime, h.validateChannelWorkspaceBinding(ctx, conversation.WorkspaceID, runtime)
+	}
+	if strings.TrimSpace(conversation.SessionID) == "" {
+		return prompt, runtime, nil
+	}
+	unlock := h.sessionOps.lock(conversation.SessionID)
+	defer unlock()
+	canonicalRuntime, err := h.validateChannelSessionBinding(ctx, conversation.SessionID, runtime)
+	if err != nil {
+		return prompt, runtime, err
+	}
+	session, err := h.store.Get(ctx, conversation.SessionID)
+	if err != nil || session == nil {
+		return prompt, runtime, channels.NewChatError(nil, "bound session is unavailable")
+	}
+	if conversation.RootID == "" {
+		if h.catalog == nil {
+			return prompt, runtime, errors.New("workspace catalog is unavailable")
+		}
+		organization, organizationErr := h.catalog.GetSessionOrganization(ctx, conversation.SessionID)
+		if organizationErr != nil || organization.WorkspaceID == nil || *organization.WorkspaceID != conversation.WorkspaceID {
+			return prompt, runtime, channels.NewChatError(nil, "shared session must belong to the selected workspace")
+		}
+	}
+	canonicalPrompt := channels.SessionPromptConfig{
+		ApprovalPolicy:       string(session.ApprovalPolicy),
+		AgentInstructions:    session.PromptConfig.AgentInstructions,
+		ApprovalInstructions: session.PromptConfig.ApprovalInstructions,
+		ReviewAllTools:       session.PromptConfig.ReviewAllTools,
+	}
+	return canonicalPrompt, canonicalRuntime, nil
+}
+
+// ResolveChannelBindTarget resolves the ID in an owner's /bind command.
+func (h *handler) ResolveChannelBindTarget(ctx context.Context, id string) (channels.ChannelBindTarget, error) {
+	if h.catalog == nil {
+		return channels.ChannelBindTarget{}, errors.New("workspace catalog is unavailable")
+	}
+	if strings.HasPrefix(id, "workspace_") {
+		if _, err := h.catalog.GetWorkspace(ctx, id); err != nil {
+			return channels.ChannelBindTarget{}, channels.NewChatError(nil, "workspace %s was not found", id)
+		}
+		return channels.ChannelBindTarget{WorkspaceID: id}, nil
+	}
+	if h.store == nil {
+		return channels.ChannelBindTarget{}, errors.New("session store is unavailable")
+	}
+	stored, err := h.store.Get(ctx, id)
+	if err != nil || stored == nil {
+		return channels.ChannelBindTarget{}, channels.NewChatError(nil, "session %s was not found", id)
+	}
+	organization, err := h.catalog.GetSessionOrganization(ctx, id)
+	if err != nil || organization.WorkspaceID == nil || *organization.WorkspaceID == "" {
+		return channels.ChannelBindTarget{}, channels.NewChatError(nil, "session %s does not belong to a workspace", id)
+	}
+	target := channels.ChannelBindTarget{SessionID: id, WorkspaceID: *organization.WorkspaceID, Runtime: channels.SessionRuntimeConfig{Agent: stored.Agent}}
+	switch zotigoruntime.AgentKind(stored.Agent) {
+	case zotigoruntime.AgentCodex:
+		target.Runtime.Model, target.Runtime.ReasoningEffort = stored.Model, stored.ReasoningEffort
+	default:
+		target.Runtime.ProfileName = stored.ProfileName
+	}
+	return target, nil
+}
+
 func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspaceID string, runtime channels.SessionRuntimeConfig) error {
 	workspaceID = strings.TrimSpace(workspaceID)
 	if workspaceID == "" {
@@ -227,26 +266,27 @@ func (h *handler) validateChannelWorkspaceBinding(ctx context.Context, workspace
 		return fmt.Errorf("load channel workspace: %w", err)
 	}
 	if workspace.Status != zotigoworkspace.WorkspaceStatusReady {
-		return errors.New("channel workspace is not ready")
+		return channels.NewChatError(nil, "channel workspace is not ready")
 	}
 	switch zotigoruntime.AgentKind(runtime.Agent) {
 	case zotigoruntime.AgentZotigo:
 		appConfig, err := config.NewManager().LoadForDir(workspace.RootPath)
 		if err != nil {
-			return fmt.Errorf("load channel workspace profiles: %w", err)
+			return channels.NewChatError(err, "the Workspace configuration could not be loaded")
 		}
 		if _, _, err := appConfig.ResolveProfile(runtime.ProfileName); err != nil {
-			if runtime.ProfileName == "" {
-				return fmt.Errorf("resolve channel workspace default profile: %w", err)
+			// The cause can name configuration paths; the chat sees the summary.
+			if strings.TrimSpace(runtime.ProfileName) == "" {
+				return channels.NewChatError(err, "the Workspace has no usable default profile")
 			}
-			return fmt.Errorf("resolve channel workspace profile: %w", err)
+			return channels.NewChatError(err, "profile %q is not usable in the Workspace", strings.TrimSpace(runtime.ProfileName))
 		}
 	case zotigoruntime.AgentCodex:
 		if _, err := h.runtimes.adapter(zotigoruntime.AgentCodex); err != nil {
-			return err
+			return channels.NewChatError(err, "codex is unavailable")
 		}
 		if h.store == nil || h.sessionStoreRoot() == "" {
-			return errors.New("codex sessions require persistent session storage")
+			return channels.NewChatError(nil, "codex sessions require persistent session storage")
 		}
 		if err := h.validateCodexSettings(ctx, runtime.Model, runtime.ReasoningEffort); err != nil {
 			return err
@@ -269,7 +309,7 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 		return runtime, fmt.Errorf("load bound session: %w", err)
 	}
 	if stored == nil {
-		return runtime, errors.New("bound session not found")
+		return runtime, channels.NewChatError(nil, "bound session not found")
 	}
 	canonicalRuntime := channels.SessionRuntimeConfig{Agent: stored.Agent}
 	switch zotigoruntime.AgentKind(stored.Agent) {
@@ -280,20 +320,20 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 		canonicalRuntime.ReasoningEffort = stored.ReasoningEffort
 	}
 	if zotigoruntime.AgentKind(stored.Agent) != zotigoruntime.AgentKind(runtime.Agent) {
-		return runtime, errors.New("bound session agent does not match the channel runtime")
+		return runtime, channels.NewChatError(nil, "bound session agent does not match the channel runtime")
 	}
 	if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentZotigo && runtime.ProfileName != "" && stored.ProfileName != runtime.ProfileName {
-		return runtime, errors.New("bound session profile does not match the channel runtime")
+		return runtime, channels.NewChatError(nil, "bound session profile does not match the channel runtime")
 	}
 	if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentCodex && (stored.Model != runtime.Model || stored.ReasoningEffort != runtime.ReasoningEffort) {
-		return runtime, errors.New("bound session Codex settings do not match the channel runtime")
+		return runtime, channels.NewChatError(nil, "bound session Codex settings do not match the channel runtime")
 	}
 	if stored.ApprovalPolicy != agent.ApprovalPolicyAuto && stored.ApprovalPolicy != agent.ApprovalPolicyBypass {
-		return runtime, errors.New("unsupported channel approval policy")
+		return runtime, channels.NewChatError(nil, "unsupported channel approval policy")
 	}
 	if live, ok := h.registry.Get(stored.ID); ok {
 		if live.Working || (live.State != SessionStateCreated && live.State != SessionStateOffline && live.State != SessionStateRunning) {
-			return runtime, errors.New("a channel can only bind an idle session")
+			return runtime, errChannelSessionBusy
 		}
 	}
 	items, exists, err := h.items.LoadItems(ctx, stored.ID)
@@ -304,7 +344,7 @@ func (h *handler) validateChannelSessionBinding(ctx context.Context, sessionID s
 		return runtime, errors.New("bound session history not found")
 	}
 	if err := requireIdleSession(items); err != nil {
-		return runtime, errors.New("a channel can only bind an idle session")
+		return runtime, errChannelSessionBusy
 	}
 	if stored.Capabilities.ChannelToolsVersion < channels.RuntimeToolsVersion {
 		if zotigoruntime.AgentKind(stored.Agent) == zotigoruntime.AgentCodex && strings.TrimSpace(stored.ConversationID) != "" {

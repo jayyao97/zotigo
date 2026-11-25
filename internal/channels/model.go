@@ -47,6 +47,34 @@ const (
 	ProgressModeInteractiveCard = "interactive_card"
 )
 
+// Progress detail levels decide how much of a run is shown in the chat.
+// Brief shows tool kinds only; detailed adds tool argument summaries and the
+// assistant's interim text; full also adds the model's thinking.
+const (
+	ProgressDetailBrief    = "brief"
+	ProgressDetailDetailed = "detailed"
+	ProgressDetailFull     = "full"
+)
+
+// NormalizeProgressDetail maps an empty level to brief and rejects unknown ones.
+func NormalizeProgressDetail(level string) (string, error) {
+	switch level {
+	case "", ProgressDetailBrief:
+		return ProgressDetailBrief, nil
+	case ProgressDetailDetailed, ProgressDetailFull:
+		return level, nil
+	default:
+		return "", errors.New("progress_detail must be brief, detailed or full")
+	}
+}
+
+// BindAlias names a bind target, so an owner can run "/bind oncall" in a group
+// instead of pasting a Session or Workspace ID.
+type BindAlias struct {
+	Name   string `json:"name"`
+	Target string `json:"target"`
+}
+
 type OverrideMode string
 
 const (
@@ -55,26 +83,28 @@ const (
 )
 
 type Connection struct {
-	ApprovalPolicy       string    `json:"approval_policy,omitempty"`
-	ID                   string    `json:"id"`
-	Provider             string    `json:"provider"`
-	Name                 string    `json:"name"`
-	AppID                string    `json:"app_id"`
-	HasSecret            bool      `json:"has_secret"`
-	Enabled              bool      `json:"enabled"`
-	Status               string    `json:"status"`
-	LastError            string    `json:"last_error,omitempty"`
-	BotOpenID            string    `json:"bot_open_id,omitempty"`
-	BotName              string    `json:"bot_name,omitempty"`
-	AllowChatIDs         []string  `json:"allow_chat_ids"`
-	OwnerSenderIDs       []string  `json:"owner_sender_ids"`
-	AgentInstructions    string    `json:"agent_instructions"`
-	ApprovalInstructions string    `json:"approval_instructions"`
-	ReviewAllTools       bool      `json:"review_all_tools"`
-	ProgressMode         string    `json:"progress_mode"`
-	CreatedAt            time.Time `json:"created_at"`
-	UpdatedAt            time.Time `json:"updated_at"`
-	COTAvailable         bool      `json:"cot_available"`
+	ApprovalPolicy       string      `json:"approval_policy,omitempty"`
+	ID                   string      `json:"id"`
+	Provider             string      `json:"provider"`
+	Name                 string      `json:"name"`
+	AppID                string      `json:"app_id"`
+	HasSecret            bool        `json:"has_secret"`
+	Enabled              bool        `json:"enabled"`
+	Status               string      `json:"status"`
+	LastError            string      `json:"last_error,omitempty"`
+	BotOpenID            string      `json:"bot_open_id,omitempty"`
+	BotName              string      `json:"bot_name,omitempty"`
+	AllowChatIDs         []string    `json:"allow_chat_ids"`
+	OwnerSenderIDs       []string    `json:"owner_sender_ids"`
+	AgentInstructions    string      `json:"agent_instructions"`
+	ApprovalInstructions string      `json:"approval_instructions"`
+	ReviewAllTools       bool        `json:"review_all_tools"`
+	ProgressMode         string      `json:"progress_mode"`
+	ProgressDetail       string      `json:"progress_detail"`
+	BindAliases          []BindAlias `json:"bind_aliases"`
+	CreatedAt            time.Time   `json:"created_at"`
+	UpdatedAt            time.Time   `json:"updated_at"`
+	COTAvailable         bool        `json:"cot_available"`
 }
 
 type ConnectionInput struct {
@@ -91,6 +121,9 @@ type ConnectionInput struct {
 	ApprovalInstructions string    `json:"approval_instructions"`
 	ReviewAllTools       bool      `json:"review_all_tools"`
 	ProgressMode         string    `json:"progress_mode"`
+	ProgressDetail       string    `json:"progress_detail,omitempty"`
+	// Nil keeps the saved aliases.
+	BindAliases *[]BindAlias `json:"bind_aliases,omitempty"`
 }
 
 type Sender struct {
@@ -125,9 +158,11 @@ type Conversation struct {
 	ApprovalInstructionsMode OverrideMode `json:"approval_instructions_mode"`
 	ApprovalInstructions     string       `json:"approval_instructions"`
 	ReviewAllTools           *bool        `json:"review_all_tools,omitempty"`
-	LastActivityAt           time.Time    `json:"last_activity_at"`
-	CreatedAt                time.Time    `json:"created_at"`
-	UpdatedAt                time.Time    `json:"updated_at"`
+	// ProgressDetail overrides the connection level for a group; empty inherits it.
+	ProgressDetail string    `json:"progress_detail,omitempty"`
+	LastActivityAt time.Time `json:"last_activity_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
 }
 
 type ConversationInput struct {
@@ -148,6 +183,8 @@ type ConversationInput struct {
 	ApprovalInstructionsMode OverrideMode `json:"approval_instructions_mode"`
 	ApprovalInstructions     string       `json:"approval_instructions"`
 	ReviewAllTools           *bool        `json:"review_all_tools,omitempty"`
+	// Nil keeps the saved level; an empty string inherits the connection level.
+	ProgressDetail *string `json:"progress_detail,omitempty"`
 }
 
 // Group is a group chat currently visible to one channel connection. The
@@ -173,6 +210,7 @@ type Group struct {
 	Enabled          bool     `json:"enabled"`
 	SenderPolicy     string   `json:"sender_policy"`
 	AllowedSenderIDs []string `json:"allowed_sender_ids"`
+	ProgressDetail   string   `json:"progress_detail,omitempty"`
 }
 
 type Message struct {
@@ -267,6 +305,8 @@ type Task struct {
 	AgentInstructions    string
 	ApprovalInstructions string
 	ReviewAllTools       bool
+	// ProgressDetail is the resolved level for this task's progress.
+	ProgressDetail string
 }
 
 type TaskOrigin struct {
@@ -292,6 +332,8 @@ type Progress struct {
 	Text     string
 	Sequence uint64
 	Events   []PublicExecutionEvent
+	// Detail is the level the events were projected at; empty means brief.
+	Detail string
 }
 
 type PublicExecutionEvent struct {
@@ -300,6 +342,8 @@ type PublicExecutionEvent struct {
 	Type          string
 	Timestamp     time.Time
 	Tool          *PublicToolActivity
+	// Text carries narration or thinking, which only detailed levels project.
+	Text string
 }
 
 type PublicToolActivity struct {
@@ -307,6 +351,8 @@ type PublicToolActivity struct {
 	DisplayName string
 	Kind        string
 	Status      string
+	// Subject summarizes the arguments (a command, path or query) at detailed levels.
+	Subject string
 }
 
 const (
@@ -315,6 +361,10 @@ const (
 	ExecutionToolFinished = "tool_finished"
 	ExecutionApproval     = "approval_waiting"
 	ExecutionApprovalDone = "approval_finished"
+	// The assistant's interim text between tool calls (detailed and full).
+	ExecutionNarration = "narration"
+	// The model's thinking (full only).
+	ExecutionThinking = "thinking"
 )
 
 type DeliveryReceipt struct {

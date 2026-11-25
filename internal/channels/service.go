@@ -96,6 +96,9 @@ type Service struct {
 	configMu            sync.RWMutex
 	inboxLocksMu        sync.Mutex
 	inboxLocks          map[string]*inboxLock
+	commandMu           sync.Mutex
+	commandQueues       map[string][]func()
+	handledCommands     map[string]time.Time
 	dispatcher          TaskDispatcher
 	runs                map[string]*adapterRun
 	ctx                 context.Context
@@ -104,6 +107,10 @@ type Service struct {
 	storeClosed         bool
 	deliveryTimeout     time.Duration
 	afterMessageClaimed func()
+
+	// beforeUnbindWrite, set only by tests, runs after /unbind read the group
+	// and before it writes, where an edit on the Channel page can land.
+	beforeUnbindWrite func()
 }
 
 type inboxLock struct {
@@ -123,7 +130,7 @@ type adapterRun struct {
 }
 
 func NewService(store *Store, secrets *SecretStore, logger *log.Logger, factories map[string]AdapterFactory) *Service {
-	return &Service{store: store, secrets: secrets, logger: logger, factories: factories, runs: map[string]*adapterRun{}, inboxLocks: map[string]*inboxLock{}, deliveryTimeout: 15 * time.Second}
+	return &Service{store: store, secrets: secrets, logger: logger, factories: factories, runs: map[string]*adapterRun{}, inboxLocks: map[string]*inboxLock{}, commandQueues: map[string][]func(){}, handledCommands: map[string]time.Time{}, deliveryTimeout: 15 * time.Second}
 }
 
 func (s *Service) lockInbox(key string) func() {
@@ -319,12 +326,25 @@ func (s *Service) PutConnection(ctx context.Context, id string, input Connection
 	if !slices.Contains(capabilities.ProgressModes, progressMode) {
 		return Connection{}, fmt.Errorf("unsupported progress_mode %q", progressMode)
 	}
+	progressDetail := strings.TrimSpace(input.ProgressDetail)
+	if progressDetail == "" {
+		progressDetail = old.ProgressDetail
+	}
+	if progressDetail, err = NormalizeProgressDetail(progressDetail); err != nil {
+		return Connection{}, err
+	}
+	bindAliases := old.BindAliases
+	if input.BindAliases != nil {
+		if bindAliases, err = normalizeBindAliases(*input.BindAliases); err != nil {
+			return Connection{}, err
+		}
+	}
 	created := old.CreatedAt
 	ownerSenderIDs := old.OwnerSenderIDs
 	if input.OwnerSenderIDs != nil {
 		ownerSenderIDs = *input.OwnerSenderIDs
 	}
-	value := Connection{ApprovalPolicy: policy, ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, CreatedAt: created}
+	value := Connection{ApprovalPolicy: policy, ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, ProgressDetail: progressDetail, BindAliases: bindAliases, CreatedAt: created}
 	if input.ClearSecret && input.AppSecret != nil {
 		return Connection{}, errors.New("clear_secret and app_secret cannot be set together")
 	}
@@ -722,6 +742,7 @@ func (s *Service) ListGroups(ctx context.Context, connectionID string) ([]Group,
 		group.Enabled = conversation.Enabled
 		group.SenderPolicy = conversation.SenderPolicy
 		group.AllowedSenderIDs = append([]string(nil), conversation.AllowedSenderIDs...)
+		group.ProgressDetail = conversation.ProgressDetail
 		discovered[group.ChatID] = group
 	}
 	groups := make([]Group, 0, len(discovered))
@@ -839,6 +860,19 @@ func (s *Service) PutConversation(ctx context.Context, id string, input Conversa
 // Session runtime selection changes. Keeping validation inside this lock gives
 // callers a single config -> session lock order, matching inbound admission.
 func (s *Service) PutConversationValidated(ctx context.Context, id string, input ConversationInput, validateBinding func(context.Context, Conversation, SessionPromptConfig, SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error)) (Conversation, error) {
+	return s.putConversation(ctx, id, input, validateBinding, nil)
+}
+
+// putConversation runs precondition, when given, once the locks are held, so
+// a chat command can confirm its connection is still current before writing.
+func (s *Service) putConversation(ctx context.Context, id string, input ConversationInput, validateBinding func(context.Context, Conversation, SessionPromptConfig, SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error), precondition func() error) (Conversation, error) {
+	return s.updateConversation(ctx, id, func(Conversation) (ConversationInput, error) { return input, nil }, validateBinding, precondition)
+}
+
+// updateConversation builds the input from the conversation as stored when the
+// write locks are held. A chat command that read the group earlier changes
+// only its own fields this way, so it cannot undo an edit made meanwhile.
+func (s *Service) updateConversation(ctx context.Context, id string, build func(latest Conversation) (ConversationInput, error), validateBinding func(context.Context, Conversation, SessionPromptConfig, SessionRuntimeConfig) (SessionPromptConfig, SessionRuntimeConfig, error), precondition func() error) (Conversation, error) {
 	s.lifecycleMu.Lock()
 	defer s.lifecycleMu.Unlock()
 	s.configMu.Lock()
@@ -846,7 +880,16 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if s.closed {
 		return Conversation{}, errors.New("channel service is closed")
 	}
+	if precondition != nil {
+		if err := precondition(); err != nil {
+			return Conversation{}, err
+		}
+	}
 	c, err := s.store.GetConversation(ctx, id)
+	if err != nil {
+		return c, err
+	}
+	input, err := build(c)
 	if err != nil {
 		return c, err
 	}
@@ -918,6 +961,14 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	c.ApprovalInstructionsMode = input.ApprovalInstructionsMode
 	c.ApprovalInstructions = input.ApprovalInstructions
 	c.ReviewAllTools = input.ReviewAllTools
+	if input.ProgressDetail != nil {
+		c.ProgressDetail = strings.TrimSpace(*input.ProgressDetail)
+		if c.ProgressDetail != "" {
+			if _, err := NormalizeProgressDetail(c.ProgressDetail); err != nil {
+				return c, err
+			}
+		}
+	}
 	if input.ApprovalPolicy != nil {
 		c.ApprovalPolicy = *input.ApprovalPolicy
 	}
@@ -937,7 +988,7 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 	if c.SessionID != "" {
 		bound, bindErr := s.store.GetConversationBySession(ctx, c.SessionID)
 		if bindErr == nil && bound.ID != c.ID {
-			return c, errors.New("session is already bound to another channel conversation")
+			return c, NewChatError(nil, "session is already bound to another channel conversation")
 		}
 		if bindErr != nil && !errors.Is(bindErr, ErrNotFound) {
 			return c, bindErr
@@ -948,7 +999,7 @@ func (s *Service) PutConversationValidated(ctx context.Context, id string, input
 		return c, err
 	}
 	if c.RootID == "" && c.Enabled && c.SenderPolicy == SenderPolicyOwners && len(connection.OwnerSenderIDs) == 0 {
-		return c, errors.New("application owner has not been resolved")
+		return c, NewChatError(nil, "application owner has not been resolved")
 	}
 	effectiveApproval := connection.ApprovalInstructions
 	if c.ApprovalInstructionsMode == OverrideReplace {
@@ -1290,6 +1341,17 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 		s.configMu.RUnlock()
 		return nil
 	}
+	// Owners bind groups from the chat, so these commands pass the binding check below.
+	if command, argument, ok := parseGroupCommand(connection, in); ok {
+		s.configMu.RUnlock()
+		if !in.CreatedAt.IsZero() && time.Since(in.CreatedAt) > 5*time.Minute {
+			return nil
+		}
+		// Binding takes the lifecycle lock, which a reconfiguration holds while it
+		// stops this adapter, so the command must not block the inbound callback.
+		s.enqueueGroupCommand(connectionID, in, func() { s.handleGroupCommand(connectionID, generation, in, command, argument) })
+		return nil
+	}
 	group, groupErr := s.store.GetConversationByScope(ctx, connectionID, in.ChatID, "")
 	if groupErr != nil || !group.Enabled || group.WorkspaceID == "" || !senderAllowed(connection, group, in.Sender.ID) {
 		s.configMu.RUnlock()
@@ -1489,6 +1551,7 @@ func (s *Service) handleInbound(ctx context.Context, connectionID string, genera
 	task := Task{
 		ConnectionID: connectionID, ConversationID: conversation.ID, SessionID: conversation.SessionID, MessageID: in.MessageID,
 		ApprovalPolicy: prompt.ApprovalPolicy, Text: in.Text, Images: append([]InboundImage(nil), in.Images...), AgentInstructions: agentText, ApprovalInstructions: approvalText, ReviewAllTools: review,
+		ProgressDetail: resolveProgressDetail(connection, group),
 		Origin: TaskOrigin{
 			Provider: connection.Provider, ConnectionName: connection.Name, ChannelID: connection.BotOpenID, ChannelName: connection.BotName, ConversationID: conversation.ID,
 			ConversationName: conversation.DisplayName, ConversationType: conversation.ChatType,

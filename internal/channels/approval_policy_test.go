@@ -118,8 +118,12 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	if _, err = store.PutConnection(context.Background(), Connection{ID: "legacy", Provider: ProviderFeishu}); err != nil {
 		t.Fatal(err)
 	}
+	// Recreate the version 1 shape: neither the approval policy nor the optional columns.
 	if _, err = store.db.Exec(`ALTER TABLE channel_connections DROP COLUMN approval_policy;
- ALTER TABLE channel_conversations DROP COLUMN approval_policy; PRAGMA user_version = 1;`); err != nil {
+ ALTER TABLE channel_conversations DROP COLUMN approval_policy;
+ ALTER TABLE channel_connections DROP COLUMN progress_detail;
+ ALTER TABLE channel_connections DROP COLUMN bind_aliases;
+ ALTER TABLE channel_conversations DROP COLUMN progress_detail; PRAGMA user_version = 1;`); err != nil {
 		t.Fatal(err)
 	}
 	if err = store.Close(); err != nil {
@@ -131,7 +135,57 @@ func TestChannelApprovalPolicyMigratesVersionOne(t *testing.T) {
 	}
 	defer store.Close()
 	connection, err := store.GetConnection(context.Background(), "legacy")
-	if err != nil || connection.ApprovalPolicy != "auto" {
+	if err != nil || connection.ApprovalPolicy != "auto" || connection.ProgressDetail != ProgressDetailBrief || connection.BindAliases == nil {
 		t.Fatalf("migrated=%+v err=%v", connection, err)
+	}
+	var version int
+	if err := store.db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil || version != 2 {
+		t.Fatalf("optional columns changed the schema version: %d err=%v", version, err)
+	}
+	// Reopening an up-to-date database leaves it unchanged.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = reopened.Close()
+}
+
+// Two daemons may open an older database at once; whichever adds a column
+// second must still start.
+func TestConcurrentOpensAddOptionalColumnsOnce(t *testing.T) {
+	root := t.TempDir()
+	store, err := Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = store.db.Exec(`ALTER TABLE channel_connections DROP COLUMN progress_detail;
+ ALTER TABLE channel_connections DROP COLUMN bind_aliases;
+ ALTER TABLE channel_conversations DROP COLUMN progress_detail;`); err != nil {
+		t.Fatal(err)
+	}
+	if err = store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	const opens = 8
+	errs := make(chan error, opens)
+	start := make(chan struct{})
+	for range opens {
+		go func() {
+			<-start
+			opened, err := Open(root)
+			if err == nil {
+				err = opened.Close()
+			}
+			errs <- err
+		}()
+	}
+	close(start)
+	for range opens {
+		if err := <-errs; err != nil {
+			t.Fatal(err)
+		}
 	}
 }

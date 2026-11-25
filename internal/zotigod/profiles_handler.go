@@ -118,17 +118,99 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("decode request: %v", err))
 		return
 	}
-	target := strings.TrimSpace(req.Profile)
-	if target == "" {
-		writeAPIError(w, http.StatusBadRequest, "profile is required")
+	response, err := h.changeSessionProfile(r.Context(), id, req.Profile)
+	if err != nil {
+		writeSessionRuntimeError(w, err)
 		return
 	}
-	channelBound := false
+	status := http.StatusOK
+	if response.Status == "pending" {
+		status = http.StatusAccepted
+	}
+	writeAPIJSON(w, status, response)
+}
+
+// sessionRuntimeError carries the HTTP status of a failed runtime change, so
+// the change can be shared by the HTTP API and Channel commands. Public marks
+// a message that describes the request and may be shown in a chat; others can
+// name paths or internal state.
+type sessionRuntimeError struct {
+	status  int
+	code    string
+	message string
+	public  bool
+	cause   error
+}
+
+func (e *sessionRuntimeError) Error() string { return e.message }
+func (e *sessionRuntimeError) Unwrap() error { return e.cause }
+
+// requireIdleForRuntimeChange rejects a model change while the Session runs a
+// turn, has queued input or waits for a person, so queued work keeps the model
+// it was sent with. Callers hold the Session operation lock.
+func (h *handler) requireIdleForRuntimeChange(ctx context.Context, id string, session Session, busy string) error {
+	items, _, err := h.items.LoadItems(ctx, id)
+	if err != nil {
+		return runtimeChangeError(http.StatusInternalServerError, "load session history: %v", err)
+	}
+	if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
+		return publicRuntimeError(http.StatusConflict, "%s", busy)
+	}
+	return nil
+}
+
+func runtimeChangeError(status int, format string, args ...any) error {
+	return &sessionRuntimeError{status: status, message: fmt.Sprintf(format, args...)}
+}
+
+func publicRuntimeError(status int, format string, args ...any) error {
+	return &sessionRuntimeError{status: status, message: fmt.Sprintf(format, args...), public: true}
+}
+
+func writeSessionRuntimeError(w http.ResponseWriter, err error) {
+	var runtimeErr *sessionRuntimeError
+	if !errors.As(err, &runtimeErr) {
+		writeAPIError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if runtimeErr.code != "" {
+		writeAPIErrorCode(w, runtimeErr.status, runtimeErr.code, runtimeErr.message)
+		return
+	}
+	writeAPIError(w, runtimeErr.status, runtimeErr.message)
+}
+
+// changeSessionProfile switches a Zotigo Session's profile. It applies at once
+// when no worker runs; otherwise the worker applies it before the next turn.
+// A Channel-bound Session must be idle.
+func (h *handler) changeSessionProfile(ctx context.Context, id string, target string) (changeProfileResponse, error) {
+	var guard func() (bool, func(), error)
 	if h.channels != nil {
-		bound, release, err := h.channels.GuardSessionProfileChange(r.Context(), id)
+		guard = func() (bool, func(), error) {
+			bound, release, err := h.channels.GuardSessionProfileChange(ctx, id)
+			if err != nil {
+				return false, nil, runtimeChangeError(http.StatusInternalServerError, "load channel binding: %v", err)
+			}
+			return bound, release, nil
+		}
+	}
+	return h.changeSessionProfileGuarded(ctx, id, target, guard)
+}
+
+// changeSessionProfileGuarded runs guard, when given, before the Session's
+// operation lock and holds it through the change. Guard reports whether the
+// Session is Channel-bound and keeps that binding stable; its error is
+// returned as is.
+func (h *handler) changeSessionProfileGuarded(ctx context.Context, id string, target string, guard func() (bound bool, release func(), err error)) (changeProfileResponse, error) {
+	target = strings.TrimSpace(target)
+	if target == "" {
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile is required")
+	}
+	channelBound := false
+	if guard != nil {
+		bound, release, err := guard()
 		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load channel binding: %v", err))
-			return
+			return changeProfileResponse{}, err
 		}
 		defer release()
 		channelBound = bound
@@ -140,78 +222,62 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 	if !live {
 		var ok bool
 		var err error
-		session, ok, err = h.storedSession(r.Context(), id)
+		session, ok, err = h.storedSession(ctx, id)
 		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
-			return
+			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load session: %v", err)
 		}
 		if !ok {
-			writeAPIError(w, http.StatusNotFound, "session not found")
-			return
+			return changeProfileResponse{}, publicRuntimeError(http.StatusNotFound, "session not found")
 		}
 	}
 	if session.Agent == string(zotigoruntime.AgentCodex) {
-		writeAPIError(w, http.StatusBadRequest, "profile is only valid for agent zotigo")
-		return
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile is only valid for agent zotigo")
 	}
 	if channelBound {
-		items, _, err := h.items.LoadItems(r.Context(), id)
-		if err != nil {
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session history: %v", err))
-			return
-		}
-		if session.Working || requireIdleSession(items) != nil || sessionlog.HasPendingHumanRequest(items) {
-			writeAPIError(w, http.StatusConflict, "wait for the current Channel turn to finish before changing profile")
-			return
+		if err := h.requireIdleForRuntimeChange(ctx, id, session, "wait for the current Channel turn to finish before changing profile"); err != nil {
+			return changeProfileResponse{}, err
 		}
 	}
 	workingDirectory := session.WorkingDirectory
 	if workingDirectory == "" {
-		workingDirectory = h.sessionWorkingDirectory(r.Context(), id)
+		workingDirectory = h.sessionWorkingDirectory(ctx, id)
 	}
 	canonicalTarget, found, err := resolveProfileForDirectory(workingDirectory, target)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load profiles: %v", err))
-		return
+		return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "load profiles: %v", err)
 	}
 	if !found {
-		writeAPIError(w, http.StatusBadRequest, fmt.Sprintf("profile %q not found", target))
-		return
+		return changeProfileResponse{}, publicRuntimeError(http.StatusBadRequest, "profile %q not found", target)
 	}
 	target = canonicalTarget
 
 	applyWithoutWorker := !live || session.State == SessionStateCreated ||
 		(session.State == SessionStateRunning && !h.workers.Has(id))
 	if applyWithoutWorker {
-		if err := h.applyStoredProfile(r.Context(), id, target); err != nil {
+		if err := h.applyStoredProfile(ctx, id, target); err != nil {
 			if errors.Is(err, zotigosession.ErrSessionLocked) {
-				writeAPIErrorCode(w, http.StatusConflict, "session_in_use", "session is active in another process")
-				return
+				return changeProfileResponse{}, &sessionRuntimeError{status: http.StatusConflict, code: "session_in_use", message: "session is active in another process", public: true}
 			}
-			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("change profile: %v", err))
-			return
+			return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "change profile: %v", err)
 		}
 		if live {
 			_, _ = h.registry.UpdateProfile(id, target)
 		}
-		writeAPIJSON(w, http.StatusOK, changeProfileResponse{Profile: target, Status: "applied"})
-		return
+		return changeProfileResponse{Profile: target, Status: "applied"}, nil
 	}
 	if session.State == SessionStateEnded || session.State == SessionStateFailed {
-		writeAPIError(w, http.StatusConflict, "profile change requires a resumable session")
-		return
+		return changeProfileResponse{}, publicRuntimeError(http.StatusConflict, "profile change requires a resumable session")
 	}
 	workerOnline := h.workers.Has(id)
 	if !workerOnline && session.State == SessionStateStarting {
-		workerOnline = h.waitForWorker(r.Context(), id)
+		workerOnline = h.waitForWorker(ctx, id)
 	} else if !workerOnline {
-		workerOnline = h.ensureWorkerOnline(r.Context(), id)
+		workerOnline = h.ensureWorkerOnline(ctx, id)
 	}
 	if !workerOnline {
-		writeAPIError(w, http.StatusServiceUnavailable, "profile change requires an online worker")
-		return
+		return changeProfileResponse{}, publicRuntimeError(http.StatusServiceUnavailable, "profile change requires an online worker")
 	}
-	item, err := h.items.AppendItem(r.Context(), id, zotigosession.DisplayItem{
+	item, err := h.items.AppendItem(ctx, id, zotigosession.DisplayItem{
 		Type: zotigosession.DisplayItemSessionCommand,
 		Command: &zotigosession.DisplayCommand{
 			Type:        wire.CommandProfile,
@@ -220,11 +286,10 @@ func (h *handler) handleSessionProfile(w http.ResponseWriter, r *http.Request, i
 		},
 	})
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append profile command: %v", err))
-		return
+		return changeProfileResponse{}, runtimeChangeError(http.StatusInternalServerError, "append profile command: %v", err)
 	}
-	h.sendCommand(r.Context(), id, sessionlog.ProfileCommandFromItem(item))
-	writeAPIJSON(w, http.StatusAccepted, changeProfileResponse{Profile: target, Status: "pending", CommandID: item.ID})
+	h.sendCommand(ctx, id, sessionlog.ProfileCommandFromItem(item))
+	return changeProfileResponse{Profile: target, Status: "pending", CommandID: item.ID}, nil
 }
 
 func resolveProfileForDirectory(workingDirectory string, profileName string) (string, bool, error) {

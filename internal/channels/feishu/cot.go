@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -185,6 +186,11 @@ type cotProgressHandle struct {
 	originID   string
 	finalReply func(context.Context, string, channels.TaskResult, string, bool) (string, error)
 	runID      string
+	// reasoningOpen records that narration or thinking opened the reasoning
+	// section, which must be closed before the run finishes. A handle resumed
+	// after a restart only recovers the run; its RUN_FINISHED or RUN_ERROR and
+	// completion settle the whole message, open section included.
+	reasoningOpen bool
 }
 
 func openCOTProgress(ctx context.Context, api cotAPI, finalReply func(context.Context, string, channels.TaskResult, string, bool) (string, error), in channels.InboundMessage) (channels.ProgressHandle, error) {
@@ -206,7 +212,38 @@ func (h *cotProgressHandle) Update(ctx context.Context, progress channels.Progre
 	if err != nil {
 		return err
 	}
-	return h.api.Append(ctx, h.receipt, events)
+	if !h.reasoningOpen && slices.ContainsFunc(progress.Events, isReasoningEvent) {
+		start, err := newCOTEvent("REASONING_START", map[string]any{"messageId": h.reasoningID()}, time.Now().UTC())
+		if err != nil {
+			return err
+		}
+		events = append([]*larkim.MessageCot{start}, events...)
+	}
+	if err := h.api.Append(ctx, h.receipt, events); err != nil {
+		return err
+	}
+	if slices.ContainsFunc(progress.Events, isReasoningEvent) {
+		h.reasoningOpen = true
+	}
+	return nil
+}
+
+func (h *cotProgressHandle) reasoningID() string { return "reasoning-" + h.runID }
+
+// closeReasoning ends an open reasoning section ahead of a terminal event.
+func (h *cotProgressHandle) closeReasoning(events []*larkim.MessageCot) ([]*larkim.MessageCot, error) {
+	if !h.reasoningOpen {
+		return events, nil
+	}
+	end, err := newCOTEvent("REASONING_END", map[string]any{"messageId": h.reasoningID()}, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	return append([]*larkim.MessageCot{end}, events...), nil
+}
+
+func isReasoningEvent(event channels.PublicExecutionEvent) bool {
+	return (event.Type == channels.ExecutionNarration || event.Type == channels.ExecutionThinking) && strings.TrimSpace(event.Text) != ""
 }
 
 func (h *cotProgressHandle) Complete(ctx context.Context, result channels.TaskResult, persistFinal func(string) error) error {
@@ -224,7 +261,11 @@ func (h *cotProgressHandle) Complete(ctx context.Context, result channels.TaskRe
 	if err != nil {
 		return err
 	}
-	if err := h.api.Append(ctx, h.receipt, []*larkim.MessageCot{event}); err != nil {
+	events, err := h.closeReasoning([]*larkim.MessageCot{event})
+	if err != nil {
+		return err
+	}
+	if err := h.api.Append(ctx, h.receipt, events); err != nil {
 		return fmt.Errorf("finish COT: %w", err)
 	}
 	return nil
@@ -239,7 +280,11 @@ func (h *cotProgressHandle) Fail(ctx context.Context, progress channels.Progress
 	if err != nil {
 		return err
 	}
-	if err := h.api.Append(ctx, h.receipt, []*larkim.MessageCot{event}); err != nil {
+	events, err := h.closeReasoning([]*larkim.MessageCot{event})
+	if err != nil {
+		return err
+	}
+	if err := h.api.Append(ctx, h.receipt, events); err != nil {
 		return err
 	}
 	return h.api.Complete(ctx, h.receipt, "error")
@@ -273,7 +318,12 @@ func renderCOTEvents(threadID, runID string, events []channels.PublicExecutionEv
 			if event.Tool == nil {
 				continue
 			}
-			start, err := newCOTEvent("TOOL_CALL_START", map[string]any{"toolCallId": event.Tool.CallID, "toolCallName": event.Tool.Kind, "title": event.Tool.DisplayName, "icon": cotToolIcon(event.Tool.Kind)}, at)
+			// Feishu does not render TOOL_CALL_ARGS, so the subject goes in the title.
+			title := event.Tool.DisplayName
+			if event.Tool.Subject != "" {
+				title += ": " + event.Tool.Subject
+			}
+			start, err := newCOTEvent("TOOL_CALL_START", map[string]any{"toolCallId": event.Tool.CallID, "toolCallName": event.Tool.Kind, "title": title, "icon": cotToolIcon(event.Tool.Kind)}, at)
 			if err != nil {
 				return nil, err
 			}
@@ -300,6 +350,16 @@ func renderCOTEvents(threadID, runID string, events []channels.PublicExecutionEv
 			}
 			eventType = "STEP_STARTED"
 			content = map[string]any{"stepName": "Waiting for approval in Zotigo", "stepId": stepID}
+		case channels.ExecutionNarration, channels.ExecutionThinking:
+			if strings.TrimSpace(event.Text) == "" {
+				continue
+			}
+			messages, err := reasoningMessageEvents(event.ID, event.Text, at)
+			if err != nil {
+				return nil, err
+			}
+			result = append(result, messages...)
+			continue
 		case channels.ExecutionApprovalDone:
 			stepID := event.CorrelationID
 			if stepID == "" {
@@ -317,6 +377,33 @@ func renderCOTEvents(threadID, runID string, events []channels.PublicExecutionEv
 		result = append(result, cotEvent)
 	}
 	return result, nil
+}
+
+// reasoningMessageEvents renders narration or thinking as one reasoning node.
+// The text is shortened until its event fits Feishu's 4096-byte limit.
+func reasoningMessageEvents(messageID, text string, at time.Time) ([]*larkim.MessageCot, error) {
+	start, err := newCOTEvent("REASONING_MESSAGE_START", map[string]any{"messageId": messageID, "role": "reasoning"}, at)
+	if err != nil {
+		return nil, err
+	}
+	var content *larkim.MessageCot
+	for runes := []rune(text); ; runes = runes[:len(runes)*3/4] {
+		delta := string(runes)
+		if len(runes) < len([]rune(text)) {
+			delta += "…"
+		}
+		if content, err = newCOTEvent("REASONING_MESSAGE_CONTENT", map[string]any{"messageId": messageID, "delta": delta}, at); err == nil || len(runes) == 0 {
+			break
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	end, err := newCOTEvent("REASONING_MESSAGE_END", map[string]any{"messageId": messageID}, at)
+	if err != nil {
+		return nil, err
+	}
+	return []*larkim.MessageCot{start, content, end}, nil
 }
 
 func newCOTEvent(eventType string, content any, at time.Time) (*larkim.MessageCot, error) {
