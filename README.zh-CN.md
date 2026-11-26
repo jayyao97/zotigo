@@ -21,6 +21,12 @@ Zotigo 是一个用 Go 编写的编码 Agent。本地会话服务 `zotigod` 负�
 本仓库包含 Agent、daemon 和终端客户端。Desktop、Web 和 iOS 客户端位于
 [jayyao97/zotigo-ui](https://github.com/jayyao97/zotigo-ui)。
 
+<p align="center">
+  <img src="docs/images/desktop-conversation.png" alt="macOS 上的 Zotigo Desktop：侧边栏列出项目、工作区和会话；会话中显示计划、代码块、Mermaid 图和表格" width="820" />
+</p>
+
+<p align="center"><sub>图为 <a href="https://github.com/jayyao97/zotigo-ui/blob/master/README.zh-CN.md">zotigo-ui</a> 中的 Zotigo Desktop，会话运行在 zotigod 上。截图中的内容均为虚构的演示数据。</sub></p>
+
 ## 我该从哪个仓库安装？
 
 | 你需要 | 安装来源 | 安装内容 |
