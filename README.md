@@ -23,6 +23,12 @@ This repository contains the agent, the daemon and the terminal clients. The
 Desktop, Web and iOS clients live in
 [jayyao97/zotigo-ui](https://github.com/jayyao97/zotigo-ui).
 
+<p align="center">
+  <img src="docs/images/desktop-conversation.png" alt="Zotigo Desktop on macOS: the sidebar lists projects, Workspaces and sessions; the conversation shows a plan, a code block, a Mermaid diagram and a table" width="820" />
+</p>
+
+<p align="center"><sub>Zotigo Desktop from <a href="https://github.com/jayyao97/zotigo-ui">zotigo-ui</a>, running a session on zotigod. Screenshot uses invented demo data.</sub></p>
+
 ## Which repository do I install from?
 
 | You want | Install from | What gets installed |
