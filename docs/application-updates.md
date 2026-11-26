@@ -1,54 +1,56 @@
-# 应用内更新
+**English** | [简体中文](zh-CN/application-updates.md)
 
-设置中的“版本与更新”分别管理当前客户端和所连接主机的 Daemon。Desktop 更新发生在此电脑，Web 更新发生在提供页面的服务器；Daemon 更新始终在对应主机执行。关闭浏览器或断开远程连接不会取消已经提交给服务管理器的更新任务。
+# In-app updates
 
-## 首次安装与发布
+The "Versions and updates" page in settings manages the current client and the Daemon of the connected host separately. Desktop updates run on this computer, and Web updates run on the server that serves the page; Daemon updates always run on the corresponding host. Closing the browser or disconnecting a remote connection does not cancel an update task that has already been submitted to the service manager.
 
-旧版没有更新接口或独立 updater，需要先通过安装脚本手动升级一次。Daemon 的公开 API 必须配置 bearer token；内部 worker token 不具有更新接口权限。服务升级适用于安装器创建的 systemd 用户服务或 macOS LaunchAgent。源码开发进程不由更新器管理。
+## First installation and releases
 
-本版仍从官方 Git 仓库下载源码并使用固定工具链构建，因此目标主机需要能访问 GitHub 和工具链下载源。构建期间原服务继续运行，只有“应用更新”阶段停止服务。
+Older versions have no update API or standalone updater, so they must first be upgraded once manually with the install script. The Daemon's public API must be configured with a bearer token; the internal worker token has no access to the update API. Service upgrades apply to the systemd user service or macOS LaunchAgent created by the installer. Processes running from a source checkout for development are not managed by the updater.
 
-发布者需要一起维护：
+This version still downloads source code from the official Git repository and builds it with a pinned toolchain, so the target host must be able to reach GitHub and the toolchain download source. The existing service keeps running during the build; it is stopped only during the "apply update" stage.
 
-- 程序版本与根目录 `update.json` 的 `version`；它们必须一致。
-- `update_protocol`：更新器协议，当前只接受 `1`。
-- `api_epoch`：客户端与 Daemon 的兼容代际。当前应用内更新要求目标与已安装组件的代际相同。
-- `data_epoch`：持久化格式的双向兼容代际。同一代际必须允许旧版读取新版写入的数据，才允许自动回退。
-- UI 的 `daemon-version`：源码构建使用的配套 Daemon revision。
+Publishers must maintain the following together:
 
-dev.34 保持 `data_epoch: 1`，支持 dev.31 的现有应用内更新入口直接升级，不需要桥接版、手动接管更新器或 SSH。基础 `schema_meta` 和 `catalog_migrations` 保持 15；completion callback 与受管仓库作为向后兼容的扩展，由独立 `catalog_extensions` 记录进度。新增结构与进度在同一事务内提交，扩展失败不会把旧版识别的基础 schema 标记成不可读版本。
+- The program version and the `version` in the root `update.json`; they must match.
+- `update_protocol`: the updater protocol. Only `1` is currently accepted.
+- `api_epoch`: the compatibility generation between clients and the Daemon. In-app updates currently require the target and the installed component to have the same generation.
+- `data_epoch`: the bidirectional compatibility generation of the persistent format. Within the same generation, older versions must be able to read data written by newer versions; only then is automatic rollback allowed.
+- The UI's `daemon-version`: the matching Daemon revision used for source builds.
 
-先发布配套 Daemon tag，再发布需要配套变更的 UI tag。本次 Daemon 为 `v0.0.4-dev.34`，不要求 UI 改版。开发测试可用 UI 安装器的 `--daemon-source` 指向本地 checkout。代码提交本身不会成为可检测的更新；必须发布版本标签。不要重用或移动已发布标签。
+dev.34 keeps `data_epoch: 1` and can be upgraded to directly from the existing in-app update entry point in dev.31, with no bridge version, manual takeover of the updater, or SSH required. The base `schema_meta` and `catalog_migrations` stay at 15; completion callbacks and managed repositories are backward-compatible extensions whose progress is recorded separately in `catalog_extensions`. New structures and their progress are committed in the same transaction, so a failed extension does not mark the base schema recognized by older versions as an unreadable version.
 
-dev.32/33 曾发布 epoch 2/3；本次修正以已确认没有实际安装为前提，不提供这两种数据库的自动转换。新增 dev.34 标签即可成为开发渠道的最高版本，无需删除或重写历史标签。若后来发现实际 schema 16/17 安装，应停止发布并另行处理，不能仅修改其安装清单。
+Publish the matching Daemon tag first, then the UI tag that requires the matching changes. This release's Daemon is `v0.0.4-dev.34`, and no UI change is required. For development testing, the UI installer's `--daemon-source` can point to a local checkout. A code commit by itself does not become a detectable update; a version tag must be published. Do not reuse or move published tags.
 
-兼容性包括旧程序的写入与调度行为：回调队列使用 `completion_*` 状态，dev.31 不会将它们当普通消息执行；普通队列继续使用旧状态。受管仓库保留可供旧版使用的 Git 来源与工作区路径，计划保存固定提交作为基线，扩展外键不阻止旧版删除项目。升级失败时，原有更新器可以只恢复旧程序，旧程序仍能打开数据库；扩展数据保留，之后重新升级可继续使用。
+dev.32/33 were published with epoch 2/3. This fix assumes it has been confirmed that they were never actually installed, and no automatic conversion is provided for databases from those two versions. Adding the dev.34 tag is enough for it to become the highest version on the development channel; historical tags do not need to be deleted or rewritten. If actual schema 16/17 installations are discovered later, stop releasing and handle them separately; do not just change their install manifest.
 
-`data_epoch` 不随每次加表或加字段递增。保持同一 epoch 的发布必须通过“旧程序升级到新程序”和“新程序写入后回退旧程序”的真实二进制测试；只有确实无法维持旧读写兼容时才考虑变更，并先设计旧更新器可达的升级路径。
+Compatibility includes the write and scheduling behavior of the old program: the callback queue uses `completion_*` states, which dev.31 does not execute as ordinary messages; the ordinary queue keeps using the old states. Managed repositories keep the Git source and workspace path usable by older versions, plans store a pinned commit as the baseline, and extension foreign keys do not prevent older versions from deleting projects. If an upgrade fails, the existing updater can restore just the old program, and the old program can still open the database; extension data is kept and can be used again after a later upgrade.
 
-## 渠道与版本检测
+`data_epoch` is not incremented for every added table or column. A release that keeps the same epoch must pass real binary tests for "upgrade from the old program to the new program" and "roll back to the old program after the new program has written data". Consider changing it only when compatibility with old reads and writes truly cannot be kept, and first design an upgrade path that the old updater can reach.
 
-更新器读取官方仓库 tags，以数值比较 `vX.Y.Z`、`vX.Y.Z-dev.N`。正式渠道只包含正式标签，开发渠道同时包含开发和正式标签，因此开发版可以自然升级到对应正式版。annotated tag 使用剥离后的 commit，准备阶段固定 fetch 此 commit，避免检查与下载之间标签变化。
+## Channels and version detection
 
-UI 和每台 Daemon 独立保存渠道。首次从安装版本推断，后续使用保存的选择。切换渠道只检查版本；开发版切回较旧正式版时也会展示该目标，仍需点击准备和应用。自定义 dirty 构建显示独立标识，用户明确选择已发布版本后才安装。
+The updater reads tags from the official repository and compares `vX.Y.Z` and `vX.Y.Z-dev.N` numerically. The stable channel includes only stable tags; the development channel includes both development and stable tags, so a development version can upgrade to the corresponding stable version. For annotated tags the peeled commit is used, and the prepare stage fetches that pinned commit so the tag cannot change between check and download.
 
-客户端启动及每四小时做后台检查；设置页面会检查过期结果，“检查更新”立即重查。网络失败会显示错误，不会被视为“已经是最新版”。没有兼容清单或协议、API、数据代际不匹配的发布可以被检测，但准备时会拒绝安装，需要手动迁移。
+The UI and each Daemon store their channel independently. The channel is first inferred from the installed version, and the saved choice is used afterwards. Switching channels only checks versions; when a development version switches back to an older stable version, that target is also shown, and you still need to click prepare and apply. Custom dirty builds show a separate marker, and they install only after the user explicitly selects a published version.
 
-## 升级与恢复
+The client checks in the background at startup and every four hours; the settings page rechecks stale results, and checking for updates manually rechecks immediately. Network failures are shown as errors and are not treated as "already up to date". Releases without a compatible manifest, or with a mismatched protocol, API, or data generation, can be detected, but installation is refused at prepare time and manual migration is required.
 
-1. `prepare` 固定源码 commit、验证清单，在安装目录生成 `prepared`。不停止现有服务。
-2. `apply` 启动独立更新任务。Linux 使用独立 transient systemd unit，macOS 使用独立 LaunchAgent，任务不会跟随被升级 Daemon 的进程组退出。
-3. Daemon 先关闭新输入和队列派发的准入，等待当前 turn、工具调用及等待人工输入的任务结束。尚在等待阶段可取消；持久化队列中的未执行消息保留。升级完成后可能需要用户显式恢复已暂停的队列。
-4. 取得与命令行安装器相同的安装锁，停止组件，记录切换日志，激活新版并启动。保留原版本及配置。macOS Daemon 继续使用固定路径和既有签名身份。
-5. Daemon 检查健康接口、版本、服务 PID 和鉴权接口；Desktop 等待新窗口加载完成的启动回执；Web 检查 HTTP 启动状态。失败则尝试停止新版、恢复原版本并启动。
+## Upgrade and recovery
 
-状态与日志保存在 `<prefix>/updates/<component>/`，其中 `status.json` 是 UI 状态、`update.log` 是构建与切换日志。敏感 token 不写入命令行。版本归档在 `<prefix>/<component>/releases/`。
+1. `prepare` pins the source commit, validates the manifest, and generates `prepared` in the install directory. The existing service is not stopped.
+2. `apply` starts a standalone update task. Linux uses a separate transient systemd unit and macOS uses a separate LaunchAgent, so the task does not exit with the process group of the Daemon being upgraded.
+3. The Daemon first stops admitting new input and queue dispatch, and waits for the current turn, tool calls, and tasks waiting for human input to finish. The update can be canceled while it is still in this waiting stage; unexecuted messages in the persistent queue are kept. After the upgrade completes, the user may need to explicitly resume paused queues.
+4. The updater acquires the same install lock as the command-line installer, stops the component, records a switch journal, activates the new version, and starts it. The previous version and configuration are kept. The macOS Daemon keeps using its fixed path and existing signing identity.
+5. For the Daemon, the health endpoint, version, service PID, and an authenticated endpoint are checked; Desktop waits for a startup receipt after the new window finishes loading; Web checks the HTTP startup status. On failure, the updater tries to stop the new version, restore the previous version, and start it.
 
-恢复记录 `journal` 指向隔离的切换目录。服务的固定 `launch` 入口先调用独立 updater 恢复中断的切换，再启动 `current/run`。状态查询会识别没有活跃 updater 的遗留任务并清除残留准入限制；如果 `current` 缺失，则从日志中的原目录恢复。恢复失败时保留日志和目录，不覆盖未知安装。
+Status and logs are stored in `<prefix>/updates/<component>/`, where `status.json` is the UI status and `update.log` is the build and switch log. Sensitive tokens are not written to the command line. Version archives are stored in `<prefix>/<component>/releases/`.
 
-## 验证
+The recovery record `journal` points to an isolated switch directory. The service's fixed `launch` entry point first calls the standalone updater to recover an interrupted switch, then starts `current/run`. Status queries detect leftover tasks with no active updater and clear remaining admission restrictions; if `current` is missing, it is restored from the original directory recorded in the journal. If recovery fails, the logs and directories are kept, and unknown installations are not overwritten.
 
-使用隔离 prefix/HOME，禁止替换开发者正在运行的服务：
+## Verification
+
+Use an isolated prefix/HOME; do not replace services the developer is currently running:
 
 ```sh
 go test ./internal/update ./internal/zotigod
@@ -56,6 +58,6 @@ python3 scripts/update_test.py
 python3 scripts/install_test.py
 ```
 
-平台服务命令在事务测试中替换为隔离 stub，目录切换与进程检查使用真实实现。真实 macOS 签名、LaunchAgent、Desktop 启动，以及目标远端服务的完整升级仍需发布前实机验收。
+In transaction tests, platform service commands are replaced with isolated stubs, while directory switching and process checks use the real implementation. Real macOS signing, LaunchAgent, Desktop startup, and a full upgrade of the target remote service still require acceptance testing on real machines before release.
 
-受管仓库的自动转换在 daemon 启动后的后台执行，不在打开 catalog 时同步扫描。原来源在受管副本与本地未发布 refs 准备成功前保持可用；失败记录持久化并在后续维护周期重试，不阻止服务启动。已有缓存每十分钟刷新；创建工作区前最多等待十秒刷新，网络失败可使用已有成功缓存并在来源响应保留缓存时间提示。跨 epoch 安装和回滚要求不变。
+Automatic conversion of managed repositories runs in the background after the daemon starts, not as a synchronous scan when the catalog is opened. The original source stays usable until the managed copy and local unpublished refs have been prepared successfully; failures are persisted and retried in later maintenance cycles, and they do not prevent the service from starting. Existing caches are refreshed every ten minutes; before a workspace is created, the daemon waits up to ten seconds for a refresh, and on network failure it can use the last successful cache and indicate the cache age in the source response. Cross-epoch installation and rollback requirements are unchanged.

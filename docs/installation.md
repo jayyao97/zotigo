@@ -1,59 +1,40 @@
+**English** | [简体中文](zh-CN/installation.md)
+
 # Source installation (Linux and macOS)
-
-## Codex discovery in background services
-
-The installer captures an explicit `ZOTIGO_CODEX_BINARY` or an absolute `codex`
-from the caller's PATH before selecting build toolchains. It validates `--version`
-and stores discovered defaults and the launcher PATH in `config/runtime.env`,
-which survives upgrades. Existing releases' generated PATH and Codex assignments
-are migrated from their `run` script without executing that script. This preserves
-custom Codex paths when a background update worker has a minimal PATH.
-
-The launcher loads user-owned `config/daemon.env` afterward, so explicit overrides
-still win. If a saved path is removed, set `ZOTIGO_CODEX_BINARY` in `daemon.env` to
-the new absolute executable path and restart the daemon. User configuration is
-never rewritten during upgrades.
-
-For `curl ... | sh` in a logged-in terminal, the installer inherits that terminal's
-PATH; it does not load shell profiles. A non-interactive SSH command may not have
-the same PATH. Missing or unusable Codex does not prevent installation and leaves
-runtime discovery in effect. The installer retains its toolchain-adjusted PATH in
-`config/runtime.env`, including interpreter lookup for script-based Codex entry points.
-It does not make external Node/version-manager directories immutable.
-
-The daemon does not load interactive shell startup files. Codex discovery checks
-`ZOTIGO_CODEX_BINARY` first (an absolute executable path), then `codex` on the
-daemon's `PATH`, then `~/.local/bin/codex`. On macOS it also checks the existing
-user and system ChatGPT.app bundles, checking `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` before the legacy `Contents/Resources/codex` location.
-The user-bin entry may be a symlink to a standalone Codex release. Discovery does
-not modify `PATH`, install Codex, or choose among version-manager installations.
-
-For a custom location, add `export ZOTIGO_CODEX_BINARY=/absolute/path/to/codex`
-to `~/.local/share/zotigo/config/daemon.env` (or `PREFIX/config/daemon.env` for a
-custom install prefix). Explicit invalid paths fail rather than selecting another
-installation. This file is preserved during upgrades. Finish active tasks before
-restarting the daemon to reload its environment; restarting Desktop or Web alone
-does not reload daemon configuration. A script-based installation must also have
-its interpreter, such as Node, available in the daemon's environment.
 
 ## Installation
 
 No Homebrew tap, separate manager, GitHub Release, or Apple Developer account is required for this source-install path. Run as your normal user. Git, curl, tar, and a SHA-256 utility (`sha256sum` or `shasum`) are prerequisites. On macOS, install Command Line Tools if Git is unavailable; daemon builds also require a persistent code-signing identity as described below. Daemon services require a systemd user manager on Linux or a logged-in macOS GUI session.
 
-After the installer is merged and an initial stable tag is published:
+Each run installs one component:
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh | sh
-```
-
-The installer selects the numerically highest `vX.Y.Z` tag, excludes prerelease tags, and fetches the selected Git object before executing that revision's installer. It fails clearly if no stable tag exists; it never falls back to the development branch. Tags must be immutable. To select an older tag or full commit:
+| Component | Installs | Notes |
+| --- | --- | --- |
+| `cli` (default) | `zotigo` terminal client | Starts or connects to `zotigod`, so install the daemon too. |
+| `daemon` | `zotigod`, `zotigo-update`, a user service | The UI installer in [zotigo-ui](https://github.com/jayyao97/zotigo-ui) runs this step for you. |
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh |
-  sh -s -- --version v0.0.1
+  sh -s -- --component daemon
+curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh | sh
 ```
 
-The default component is the standalone `zotigo` CLI. UI installers use `--component daemon` to install `zotigod` instead. For a local checkout:
+| Option | Meaning |
+| --- | --- |
+| `--component cli\|daemon` | Component to install (default `cli`) |
+| `--version TAG\|COMMIT` | Tag or full 40-character commit to build |
+| `--source CHECKOUT` | Build a local checkout instead of fetching (cannot be combined with `--version`) |
+| `--prefix PATH` | Install prefix (default `~/.local/share/zotigo`, or `ZOTIGO_INSTALL_PREFIX`) |
+| `--no-service` | Do not register or start the daemon service |
+
+Without `--version`, the installer selects the numerically highest stable `vX.Y.Z` tag, ignoring development tags such as `v0.0.4-dev.45`, and fetches the selected Git object before executing that revision's installer. It fails clearly if no stable tag exists; it never falls back to the development branch. Tags must be immutable. To install a development build, another tag, or a full commit:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh |
+  sh -s -- --component daemon --version v0.0.4-dev.45
+```
+
+After installing, in-app updates can follow the stable or development channel; see [Application updates](application-updates.md). For a local checkout:
 
 ```sh
 sh install.sh --source "$PWD" --component daemon
@@ -107,6 +88,42 @@ launchctl bootstrap gui/$(id -u) "$HOME/Library/LaunchAgents/com.zotigo.daemon.p
 ```
 
 LaunchAgents run within the user's login session, not before login. Closing Desktop or a terminal does not stop this service. `--no-service` skips registration/start on either platform.
+
+## Codex discovery in background services
+
+The installer captures an explicit `ZOTIGO_CODEX_BINARY` or an absolute `codex`
+from the caller's PATH before selecting build toolchains. It validates `--version`
+and stores discovered defaults and the launcher PATH in `config/runtime.env`,
+which survives upgrades. Existing releases' generated PATH and Codex assignments
+are migrated from their `run` script without executing that script. This preserves
+custom Codex paths when a background update worker has a minimal PATH.
+
+The launcher loads user-owned `config/daemon.env` afterward, so explicit overrides
+still win. If a saved path is removed, set `ZOTIGO_CODEX_BINARY` in `daemon.env` to
+the new absolute executable path and restart the daemon. User configuration is
+never rewritten during upgrades.
+
+For `curl ... | sh` in a logged-in terminal, the installer inherits that terminal's
+PATH; it does not load shell profiles. A non-interactive SSH command may not have
+the same PATH. Missing or unusable Codex does not prevent installation and leaves
+runtime discovery in effect. The installer retains its toolchain-adjusted PATH in
+`config/runtime.env`, including interpreter lookup for script-based Codex entry points.
+It does not make external Node/version-manager directories immutable.
+
+The daemon does not load interactive shell startup files. Codex discovery checks
+`ZOTIGO_CODEX_BINARY` first (an absolute executable path), then `codex` on the
+daemon's `PATH`, then `~/.local/bin/codex`. On macOS it also checks the existing
+user and system ChatGPT.app bundles, checking `Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex` before the legacy `Contents/Resources/codex` location.
+The user-bin entry may be a symlink to a standalone Codex release. Discovery does
+not modify `PATH`, install Codex, or choose among version-manager installations.
+
+For a custom location, add `export ZOTIGO_CODEX_BINARY=/absolute/path/to/codex`
+to `~/.local/share/zotigo/config/daemon.env` (or `PREFIX/config/daemon.env` for a
+custom install prefix). Explicit invalid paths fail rather than selecting another
+installation. This file is preserved during upgrades. Finish active tasks before
+restarting the daemon to reload its environment; restarting Desktop or Web alone
+does not reload daemon configuration. A script-based installation must also have
+its interpreter, such as Node, available in the daemon's environment.
 
 ## Local diagnostic logs
 
