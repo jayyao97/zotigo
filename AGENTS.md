@@ -3,7 +3,7 @@
 This document guides any agent (AI coding agent, CLI assistant, etc.) working in this repository. If conflicts arise, follow system / developer / user instructions by priority. Deeper `AGENTS.md` files override this one for their subtree.
 
 ## Project Overview
-Zotigo is a Go CLI agent in the spirit of Claude Code: streaming TUI, multi‑provider LLM backend (OpenAI / Anthropic / Gemini), tool‑calling loop with safety classification, ACP server for editor integration. The codebase keeps the tool surface and `Executor` interface deliberately narrow — additions need a real reason.
+Zotigo is a Go CLI agent in the spirit of Claude Code: streaming TUI, multi‑provider LLM backend (OpenAI / Anthropic / Gemini / DeepSeek, plus Codex app-server sessions), tool‑calling loop with safety classification, ACP server for editor integration. The codebase keeps the tool surface and `Executor` interface deliberately narrow — additions need a real reason.
 
 ## Quick Commands
 Run these often; they are the canonical preflight before any change is "done".
@@ -47,7 +47,7 @@ Top‑level:
 
 Inside `core/`:
 - `agent/` — conversation loop, tool dispatch, safety classifier, approval flow; `agent/prompt/` builds system prompts and reminders
-- `providers/{openai,anthropic,gemini}/` — LLM adapters; openai has `chat_provider.go` (Chat Completions) and `response_provider.go` (Responses API for gpt‑5 / o‑series)
+- `providers/{openai,anthropic,gemini,deepseek}/` — LLM adapters (deepseek reuses the Anthropic driver); openai has `chat_provider.go` (Chat Completions) and `response_provider.go` (Responses API for gpt‑5 / o‑series)
 - `tools/` — `tools.Tool` interface and per-call context + `builtin/` leaf tools; `subagent/` — the spawn tool (runs a child agent)
 - `middleware/` — agent‑level tool‑call middleware (observability, etc.)
 - `runner/` — Agent + Transport orchestration with turn‑level listeners
@@ -105,7 +105,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - Default approval policy is **Auto**. Each tool's `Classify(call)` returns a `SafetyDecision` with a level (`Safe / Low / Medium / High / Blocked`); calls at or above `safety.classifier.review_threshold` (default `medium`) get routed to the LLM safety classifier.
 - The classifier runs on a separate (typically smaller) profile (`safety.classifier.profile`). Per‑attempt timeout 20s with one retry — see `core/agent/provider_classifier.go`.
 - File path safety helpers (`IsInWorkDir`, `IsSensitivePath`) live in `core/tools/scope.go`; every mutator's `Classify` should use them.
-- Toggle Auto vs Manual at runtime with `Shift+Tab` in the TUI.
+- Policies are `manual`, `auto` and `bypass_permissions` (Full access). `Shift+Tab` in the TUI cycles Manual → Auto → Full access while idle; ACP sessions start in Manual.
 
 ## Provider Notes
 - `core/providers/openai/factory.go` auto‑routes models whose IDs start with `gpt-5` / `o1` / `o3` / `o4` to the Responses API; everything else goes through Chat Completions.
@@ -146,6 +146,7 @@ Rule of thumb: **change what a tool does → Middleware. Record that something h
 - `gofmt -w` modified Go files before committing.
 - Use the dedicated tools (`read_file`, `edit`, `write_file`, `grep`, `glob`) over Bash for code edits.
 - Add concrete tests for new behavior; reproduce a bug in a test before fixing.
+- When a change alters user-visible behavior, update `README.md` / the guides in `docs/` in the same change. User docs are English first with a Simplified Chinese copy (`README.zh-CN.md`, `docs/zh-CN/`); keep both in sync. Developer references (architecture, API, plans) stay English only.
 
 **Ask first**
 - Adding a new builtin tool (the surface is intentionally aligned with Claude Code).

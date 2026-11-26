@@ -2,198 +2,240 @@
   <img src="docs/brand/zotigo-app.png" alt="Zotigo" width="112" height="112" />
 </p>
 
-# Zotigo
+<h1 align="center">Zotigo</h1>
 
-Zotigo is a next-generation, protocol-centric CLI Agent written in Golang. It is designed to be a universal interface for AI interaction, capable of switching seamlessly between multiple LLM providers while maintaining a unified conversation context.
+<p align="center">
+  <strong>English</strong> | <a href="README.zh-CN.md">简体中文</a>
+</p>
 
-Positioned as a competitor to tools like Claude Code, Gemini CLI, and Codex CLI, Zotigo distinguishes itself through a rigorous decoupled architecture that separates the **Presentation Layer**, **Conversation Protocol Layer**, and **Provider Layer**.
+<p align="center">
+  <strong>zotigo</strong>: agent, daemon and terminal client
+  ·
+  <a href="https://github.com/jayyao97/zotigo-ui">zotigo-ui</a>: Desktop, Web and iOS apps
+</p>
 
-## Key Philosophy
+Zotigo is a coding agent written in Go. A local session service, `zotigod`,
+runs agent turns. The terminal UI, editor integrations (ACP), Desktop, Web and
+IM channels all connect to it, so a session started in one place can be watched,
+steered or resumed from another, and keeps running when a client closes.
 
-- **Protocol First:** All interactions are normalized into a standard internal protocol before processing. Switching models doesn't break context or tools.
-- **Transparent Forwarding:** The provider layer acts as a transparent adapter, forwarding the normalized protocol to specific model APIs without leaking implementation details to the core.
-- **Human-in-the-Loop:** Deeply integrated approval mechanisms for sensitive actions (file edits, shell execution), with auto-approve for read-only tools.
-- **Persistence:** Every interaction is structured and persistable, allowing for long-running sessions and history resumption.
+This repository contains the agent, the daemon and the terminal clients. The
+Desktop, Web and iOS clients live in
+[jayyao97/zotigo-ui](https://github.com/jayyao97/zotigo-ui).
 
-## Architecture
+## Which repository do I install from?
 
-Zotigo is a session service plus thin clients:
-
-- **`zotigod`** (`internal/zotigod`) owns sessions. It runs each live session's
-  agent turn in its own worker process, persists a durable display log, and
-  serves one HTTP + SSE API.
-- **Clients** (`zotigo` TUI, `zotigo-acp`, Desktop, Web) attach to that API.
-  A turn keeps running when a client exits and can be reattached from another.
-- **`core/`** is the agent library the worker runs: turn loop, tools,
-  provider adapters, context compaction, persistence types. It does not depend
-  on the service and can be embedded on its own.
-
-[docs/architecture.md](docs/architecture.md) describes the process model, the
-package layers and why each exists, the dependency rules CI enforces, reserved
-abstractions, compatibility surfaces and known debt.
+| You want | Install from | What gets installed |
+| --- | --- | --- |
+| Desktop app or Web UI | [zotigo-ui](https://github.com/jayyao97/zotigo-ui#install) | The UI **and** a matching `zotigod`. The `zotigo` terminal command is not included. |
+| Terminal (TUI) | This repository | `zotigod` (`--component daemon`) and `zotigo` (`--component cli`), installed by two runs of the installer. |
+| Both | Both installers, with the same `--prefix` (the default) | One shared daemon used by every client. |
 
 ## Features
 
-- **Multi-Provider Support:** OpenAI, Anthropic, and Google Gemini — switch models on the fly.
-- **Built-in Tools:** file read/write, edit, image view, shell, grep/glob, LSP, web search (Tavily or DeepSeek), web fetch, subagent spawn.
-- **Skill System:** Extensible skills (builtin, user, project) auto-injected into the prompt — no manual activation needed. Use `/skills` to list, `/<skill-name>` to invoke.
-- **Safe Execution:** Tool safety policy with auto-approve for read-only tools, manual approval for mutations. Toggle auto-approve with `Shift+Tab`.
-- **Context Awareness:** Project files, git history, loop detection, and automatic context compression.
-- **Session Persistence:** Resume conversations across restarts.
+- Model providers: OpenAI, Anthropic, Google Gemini and DeepSeek, switchable per
+  session. Sessions can also run on the Codex app-server with your Codex login.
+- Durable sessions: turns run in the daemon, survive client exits and can be
+  resumed, forked, steered while running, or queued.
+- Tools: file read, write and edit, shell, grep and glob, LSP, image viewing,
+  web search (Tavily or DeepSeek) and fetch, subagents, and session tools that
+  let an agent read, message or create other sessions.
+- Approval modes: Manual, Auto (risky calls reviewed by an LLM safety
+  classifier) and Full access.
+- Skills from `~/.agents/skills` and `<project>/.agents/skills`, read on demand.
+- Projects and Workspaces that group source repositories, notes and artifacts,
+  with sessions bound to them.
+- Channels: connect a Feishu/Lark bot so a group chat or topic drives a session.
+- Hooks for session, turn and tool events.
+- In-app updates for installed daemons and clients, on a stable or development
+  channel.
 
-## Directory Structure
+## Install
 
-```
-zotigo/
-├── cmd/                  # Entrypoints: zotigo, zotigod, acp, zotigo-update
-├── cli/                  # TUI (tui/) and slash commands (commands/)
-├── internal/             # The product
-│   ├── zotigod/          # Session service: daemon, workers, HTTP API
-│   ├── zotigodclient/    # Go client + daemon discovery/start
-│   ├── wiring/           # How the product assembles an agent
-│   ├── cliapp/ acpserver/  # The TUI and ACP client applications
-│   └── channels/ hooks/ update/ diagnostics/ ...
-├── core/                 # Embeddable agent library
-│   ├── protocol/ config/ executor/ skills/ lsp/   # Foundation
-│   ├── tools/ providers/ compaction/ transport/   # Capabilities
-│   ├── agent/            # Turn loop (prompt/, loopguard/)
-│   └── runner/ subagent/ session/ middleware/ acp/  # Built around the agent
-├── tests/e2e/            # Provider end-to-end tests (build tag e2e)
-└── docs/                 # architecture.md, zotigod-api.md, ...
-```
+Linux and macOS are supported. You need Git, curl, tar and `sha256sum` or
+`shasum`. If a suitable Go is not already installed, the installer downloads a
+verified one into the install prefix. Nothing is installed system-wide and no
+`sudo` is needed.
 
-## Installation
+```sh
+# Session service (registers a systemd user service or a macOS LaunchAgent)
+curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh |
+  sh -s -- --component daemon
 
-For versioned Linux/macOS source installation and daemon services, see [source installation](docs/installation.md).
-
-```bash
-go install github.com/jayyao97/zotigo/cmd/zotigo@latest
+# Terminal client
+curl -fsSL https://raw.githubusercontent.com/jayyao97/zotigo/master/install.sh | sh
 ```
 
-## Configuration
+Then add `~/.local/share/zotigo/bin` to your `PATH`.
 
-For Tavily or DeepSeek web search configuration, see [Web search backends](docs/web-tools.md).
+By default the installer builds the newest stable `vX.Y.Z` tag. Development
+builds are tagged `vX.Y.Z-dev.N` and are installed with `--version`, for example
+`sh -s -- --version v0.0.4-dev.45`. Other options are `--prefix`, `--source`
+(build a local checkout) and `--no-service`.
 
-On first run (`go run ./cmd/zotigo`), Zotigo creates a config template at `~/.zotigo/config.yaml` if it does not exist.
+On macOS, building the daemon requires a persistent code-signing identity so
+that privacy permissions survive upgrades. [Installation](docs/installation.md)
+covers this, along with service commands, file layout, upgrades, logs and
+uninstalling.
 
-Zotigo does not inject model profiles into the effective configuration. The
-available profiles come only from the global config and the current project's
-config; project values are merged over global values.
+## Configure a model
+
+The first run of `zotigo` creates `~/.zotigo/config.yaml` and exits. Add at
+least one profile and set `default_profile`:
 
 ```yaml
-default_profile: gpt-5.6-sol
+default_profile: sonnet
 profiles:
-  gpt-5.6-sol:
-    provider: openai
-    model: gpt-5.6-sol
-    api_key: sk-...
-    thinking_level: medium
-    max_output_tokens: 65536
-    context_window: 1050000
-    safety:
-      classifier:
-        enabled: true                   # master switch; false skips the classifier entirely
-        review_threshold: medium        # safe | low | medium | high | off — calls at or above this level are routed to the LLM classifier
-        profile: gpt-5.6-luna           # which profile the classifier itself uses (typically a cheap/fast model, distinct from the main agent)
-        timeout_ms: 20000               # per-attempt request timeout; classifier calls on small reasoning models routinely take 10–20s
-        max_recent_actions: 6           # how many prior agent actions to include as context when asking the classifier to decide
-        capture_raw_audit_context: false  # store raw tool args in the audit log — enable for forensics/debugging, off by default to keep logs small
-        max_audit_context_chars: 1200   # per-entry cap applied only when capture_raw_audit_context is true
-  gpt-5.6-terra:
-    provider: openai
-    model: gpt-5.6-terra
-    api_key: sk-...
-    thinking_level: low
-    context_window: 1050000
-  gpt-5.6-luna:
-    provider: openai
-    model: gpt-5.6-luna
-    api_key: sk-...
-    thinking_level: low
-    context_window: 1050000
-  claude-sonnet-5:
-    provider: anthropic
+  sonnet:
+    provider: anthropic        # openai | anthropic | gemini | deepseek
     model: claude-sonnet-5
     api_key: sk-ant-...
-    thinking_level: medium
-    context_window: 1000000
-  claude-opus-5:
-    provider: anthropic
-    model: claude-opus-5
-    api_key: sk-ant-...
-    thinking_level: high
-    context_window: 1000000
-  gemini-pro:
-    provider: gemini
-    model: gemini-3.0-pro-latest
-    api_key: ...
-    max_output_tokens: 65536
-  deepseek:
-    provider: deepseek
-    model: deepseek-v4-flash
-    api_key: ...                   # Base URL and Anthropic-compatible driver are built in
+    thinking_level: medium     # optional: low | medium | high
+    context_window: 1000000    # optional; defaults to 200000
 ```
 
-The `safety.classifier` block is optional. If omitted, Zotigo uses built-in defaults. If `classifier.profile` is omitted, the classifier reuses the current active profile.
+A `zotigo.yaml` (or `.zotigo/config.yaml`) in a project directory is merged over
+the global file. With Desktop or Web you can manage the same profiles in
+**Settings → Models** instead.
 
-The example uses the current API IDs from the
-[OpenAI model guide](https://developers.openai.com/api/docs/guides/model-guidance?model=gpt-5.6)
-and [Claude model overview](https://platform.claude.com/docs/en/about-claude/models/overview).
-Zotigo still has no built-in model Profile; copy only the profiles you need.
+[Configuration](docs/configuration.md) covers every profile field, the safety
+classifier, skills, hooks, request size limits and observability. Search
+backends are described in [Web search](docs/web-tools.md).
 
-Native Zotigo profiles default `max_output_tokens` to `120000`; configured
-values must be positive. The setting maps to Anthropic Messages `max_tokens`,
-OpenAI Responses `max_output_tokens`, and Gemini `MaxOutputTokens`.
-`thinking_level` never changes an explicit output limit; unsupported provider
-limits fail when the profile is prepared. For compatibility, Gemini profiles
-may still read the old `params.max_tokens` value when top-level
-`max_output_tokens` is absent, but new configuration should use the top-level
-field and it takes precedence. Codex app-server sessions use Codex's own model
-settings and are not given Zotigo's 120000 default.
+## Use the terminal client
 
-Native provider requests have a separate **24 MiB serialized-body budget**,
-independent of the token context window. Override it for a particular endpoint
-with `params.max_request_bytes` (65536–67108864 bytes). Images from user messages
-and tool results are prepared on a request-only copy: previews are at most 2048
-pixels per side and 1 MiB each. Small PNGs remain lossless; larger previews may
-use JPEG. Prepared images are cached with a 32 MiB bound per provider instance.
-Older images exceeding half of the body budget are replaced with explicit text
-placeholders, retaining message/tool-result structure and any source-path text.
-Images from the current user turn are retained. Persisted history and original
-files are unchanged, so this also applies when resuming older sessions.
-
-The final SDK request body (including tools, system text and base64) is checked
-before transmission. HTTP 413 triggers at most two reduced-image retries, only
-before any response has been delivered, with strictly smaller wire limits.
-If current inputs still cannot fit, the request fails with guidance to reduce
-them; it does not erase history or retry token compaction with the oversized body.
-Remote image URLs/file IDs remain references and are not downloaded for resizing.
-
-Subagent final reports use a separate prompt budget (approximately 16,000 tokens,
-with a 64,000-byte bound) rather than the normal 2,000-token tool-output budget.
-Reports precede execution traces. The full report is saved through the parent
-executor to `artifacts/subagent-reports/<content-hash>.md` in the owning workspace (or the parent working directory for standalone sessions);
-the result includes this path so a truncated report can be read in small sections
-with `read_file` byte_offset=0 and the returned next-byte cursor (up to 4 KiB per read, including for single-line reports). These files persist for later reads and can be
-removed when no longer needed. If saving fails, the result reports that failure
-and still returns the completed report. Persisted conversation history is unchanged.
-
-Run:
-```bash
-go run ./cmd/zotigo
+```sh
+zotigo                          # new session in the current directory
+zotigo -r                       # resume a session from this directory
+zotigo --resume-all             # pick from sessions in every directory
+zotigo --workspace <id>         # bind the new session to a Workspace
+zotigo --dangerously-skip-permissions   # start in Full access
 ```
 
-To run every registered tool without classification, snapshots, or approval:
+If no daemon is listening on `127.0.0.1:8766`, `zotigo` starts the `zotigod`
+found next to its own executable, on `PATH`, or at `ZOTIGOD_BINARY`. If none is
+found it exits with an error; it never silently runs sessions in-process.
 
-```bash
-zotigo --dangerously-skip-permissions
+| Key or command | Action |
+| --- | --- |
+| Enter while a turn runs | Add the message to the running turn (steering) |
+| Esc | Interrupt the running turn; exit when idle |
+| Ctrl+C while a turn runs | Choose: stop and exit, keep it running in the background, or cancel |
+| Shift+Tab (idle) | Cycle the approval mode: Manual → Auto → Full access |
+| `/model` | List or switch profiles |
+| `/skills`, `/<skill-name>` | List skills, or invoke one |
+| `/clear` | Start a new session in the same directory |
+| `/compress` | Compact the conversation context |
+| `/cost`, `/stats` | Token usage and context estimate |
+| `/help` | All commands |
+
+Codex sessions appear in the resume list but must be opened in Desktop or Web.
+See [TUI and ACP clients](docs/terminal-and-acp-clients.md) for the details.
+
+### Editors (ACP)
+
+`zotigo-acp` speaks the [Agent Client Protocol](https://agentclientprotocol.com)
+over stdio, for editors such as Zed. The installer does not build it, so build
+it from a checkout:
+
+```sh
+go build -o ~/.local/share/zotigo/bin/zotigo-acp ./cmd/acp
 ```
 
-This mode also bypasses tool-level blocked decisions. Use it only in an
-environment where unrestricted tool execution is acceptable. The policy also
-applies to resumed pending actions and spawned subagents; unavailable tools
-remain blocked. Pressing Shift+Tab exits bypass mode and returns to normal
-approval modes.
+ACP sessions start in Manual mode. The editor's mode picker switches between
+Manual, Auto and Full access.
 
-Note:
-- `go install github.com/jayyao97/zotigo/cmd/zotigo@latest` and `go run ./cmd/zotigo` start the same interactive CLI.
+## The daemon
+
+`zotigod` listens on `127.0.0.1:8766`. The installer generates a bearer token in
+`PREFIX/config/daemon.token`, so authentication is on even for loopback. The
+listen address and other settings live in `PREFIX/config/daemon.env`. A
+non-loopback address requires a token file.
+
+```sh
+systemctl --user status zotigo-daemon.service        # Linux
+launchctl print gui/$(id -u)/com.zotigo.daemon       # macOS
+```
+
+Sessions, the project catalog and channel settings are stored in `~/.zotigo`,
+and diagnostic logs in `~/.zotigo/logs/`. The HTTP API is documented in
+[zotigod API](docs/zotigod-api.md), and updates in
+[Application updates](docs/application-updates.md).
+
+Codex sessions need a `codex` executable visible to the daemon. It checks
+`ZOTIGO_CODEX_BINARY`, then `codex` on the service's `PATH`, then
+`~/.local/bin/codex` and, on macOS, the ChatGPT app bundle. See
+[Installation](docs/installation.md#codex-discovery-in-background-services).
+
+## Build from source
+
+Requires Go 1.25 or newer (see `go.mod`).
+
+```sh
+make build                      # ./build/zotigo
+make check                      # layering, formatting, vet, lint, race tests
+make test-e2e                   # provider end-to-end tests; see E2E_TESTING.md
+
+# Run the TUI against an isolated in-process service
+go run ./cmd/zotigo --no-daemon --state-dir /tmp/zotigo-dev
+```
+
+`--no-daemon` requires a `--state-dir` other than `~/.zotigo`. Its sessions stop
+when the process exits, and Channels and Codex are unavailable. To run a local
+build as a service, use `sh install.sh --source "$PWD" --component daemon`.
+
+## Architecture
+
+```
+ zotigo (TUI)   zotigo-acp   Desktop / Web / iOS   Feishu
+      └─────────────┴──── HTTP + SSE ────┴───────────┘
+                           │
+                 zotigod (internal/zotigod)
+          sessions, catalog, approvals, queue, channels
+                           │  one worker process per live session
+            ┌──────────────┴──────────────┐
+      native worker (core/agent)     Codex worker (codex app-server)
+```
+
+| Path | Contents |
+| --- | --- |
+| `cmd/` | Entrypoints: `zotigo`, `zotigod`, `acp`, `zotigo-update` |
+| `cli/` | TUI (`tui/`) and slash commands (`commands/`) |
+| `internal/zotigod/` | Daemon, workers (`worker/`, `codexworker/`), HTTP API |
+| `internal/zotigodclient/` | Go API client, daemon discovery and start |
+| `internal/` (other) | `wiring/` agent assembly, `cliapp/` and `acpserver/` clients, `codexapp/` Codex bridge, `channels/` Feishu, `hooks/`, `update/`, `runtime/`, `diagnostics/` |
+| `core/` | Embeddable agent library: `agent/`, `providers/`, `tools/`, `compaction/`, `skills/`, `subagent/`, `session/`, `workspace/`, `config/`, `acp/` and more |
+| `scripts/` | Installer helpers, toolchain manifest, update scripts |
+| `tests/e2e/` | Provider end-to-end tests (build tag `e2e`) |
+
+`core/` does not depend on the service and can be embedded on its own.
+[Architecture](docs/architecture.md) explains the process model, the package
+layers and the dependency rules CI enforces.
+
+## Documentation
+
+| Document | Contents |
+| --- | --- |
+| [Installation](docs/installation.md) ([中文](docs/zh-CN/installation.md)) | Installer options, services, file layout, upgrades, macOS signing, logs |
+| [Configuration](docs/configuration.md) ([中文](docs/zh-CN/configuration.md)) | Profiles, approval modes, classifier, skills, hooks, limits |
+| [Application updates](docs/application-updates.md) ([中文](docs/zh-CN/application-updates.md)) | Update channels, release rules, recovery |
+| [Web search](docs/web-tools.md) | Tavily and DeepSeek search backends |
+| [TUI and ACP clients](docs/terminal-and-acp-clients.md) | Deployment modes, stop and resume semantics, ACP mapping |
+| [zotigod API](docs/zotigod-api.md) | HTTP and SSE contract, Channels, Workspaces |
+| [Session tools](docs/session-tools-time-and-fork.md) | Cross-session tools, time context, fork |
+| [Architecture](docs/architecture.md) | Process model and package layers |
+| [Extension points](docs/extension-points.md) | `agent.Middleware` and `runner.Listeners` |
+| [Catalog migrations](docs/catalog-migrations.md) | Schema change workflow |
+
+User guides are available in English and Chinese. Developer references are in
+English only.
+
+## Contributing
+
+Read [AGENTS.md](AGENTS.md) for commands, conventions and layering rules, and run
+`make check` before opening a pull request. When you change `README.md` or a
+translated guide, update the Chinese version in the same change.
+
+## License
+
+[Apache-2.0](LICENSE)
