@@ -156,6 +156,7 @@ CREATE INDEX IF NOT EXISTS channel_messages_by_conversation ON channel_messages(
 // still opens the database and leaves these values in place.
 var optionalColumns = []struct{ table, column, definition string }{
 	{"channel_connections", "progress_detail", `TEXT NOT NULL DEFAULT 'brief'`},
+	{"channel_connections", "cot_domain", `TEXT NOT NULL DEFAULT ''`},
 	{"channel_connections", "bind_aliases", `TEXT NOT NULL DEFAULT '[]'`},
 	{"channel_conversations", "progress_detail", `TEXT NOT NULL DEFAULT ''`},
 }
@@ -230,12 +231,12 @@ func (s *Store) PutConnection(ctx context.Context, value Connection) (Connection
 	value.AllowChatIDs = normalizeIDs(value.AllowChatIDs)
 	value.OwnerSenderIDs = normalizeIDs(value.OwnerSenderIDs)
 	_, err := s.db.ExecContext(ctx, `INSERT INTO channel_connections
-(id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,progress_detail,bind_aliases,created_at,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,name=excluded.name,app_id=excluded.app_id,
+(id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,progress_detail,bind_aliases,cot_domain,created_at,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET provider=excluded.provider,name=excluded.name,app_id=excluded.app_id,
 enabled=excluded.enabled,allow_chat_ids=excluded.allow_chat_ids,owner_sender_ids=excluded.owner_sender_ids,agent_instructions=excluded.agent_instructions,
 approval_instructions=excluded.approval_instructions,review_all_tools=excluded.review_all_tools,progress_mode=excluded.progress_mode,approval_policy=excluded.approval_policy,
-progress_detail=excluded.progress_detail,bind_aliases=excluded.bind_aliases,updated_at=excluded.updated_at`,
-		value.ID, value.Provider, value.Name, value.AppID, value.Enabled, value.Status, value.LastError, value.BotOpenID, value.BotName, jsonText(value.AllowChatIDs), jsonText(value.OwnerSenderIDs), value.AgentInstructions, value.ApprovalInstructions, value.ReviewAllTools, value.ProgressMode, value.ApprovalPolicy, value.ProgressDetail, jsonText(bindAliasesOrEmpty(value.BindAliases)), value.CreatedAt.Format(time.RFC3339Nano), value.UpdatedAt.Format(time.RFC3339Nano))
+progress_detail=excluded.progress_detail,bind_aliases=excluded.bind_aliases,cot_domain=excluded.cot_domain,updated_at=excluded.updated_at`,
+		value.ID, value.Provider, value.Name, value.AppID, value.Enabled, value.Status, value.LastError, value.BotOpenID, value.BotName, jsonText(value.AllowChatIDs), jsonText(value.OwnerSenderIDs), value.AgentInstructions, value.ApprovalInstructions, value.ReviewAllTools, value.ProgressMode, value.ApprovalPolicy, value.ProgressDetail, jsonText(bindAliasesOrEmpty(value.BindAliases)), value.COTDomain, value.CreatedAt.Format(time.RFC3339Nano), value.UpdatedAt.Format(time.RFC3339Nano))
 	if err != nil {
 		return Connection{}, fmt.Errorf("save channel connection: %w", err)
 	}
@@ -246,7 +247,7 @@ func scanConnection(row interface{ Scan(...any) error }) (Connection, error) {
 	var c Connection
 	var enabled, review int
 	var allow, owners, aliases, created, updated string
-	err := row.Scan(&c.ID, &c.Provider, &c.Name, &c.AppID, &enabled, &c.Status, &c.LastError, &c.BotOpenID, &c.BotName, &allow, &owners, &c.AgentInstructions, &c.ApprovalInstructions, &review, &c.ProgressMode, &c.ApprovalPolicy, &c.ProgressDetail, &aliases, &created, &updated)
+	err := row.Scan(&c.ID, &c.Provider, &c.Name, &c.AppID, &enabled, &c.Status, &c.LastError, &c.BotOpenID, &c.BotName, &allow, &owners, &c.AgentInstructions, &c.ApprovalInstructions, &review, &c.ProgressMode, &c.ApprovalPolicy, &c.ProgressDetail, &aliases, &c.COTDomain, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return c, ErrNotFound
 	}
@@ -270,7 +271,7 @@ func scanConnection(row interface{ Scan(...any) error }) (Connection, error) {
 	return c, nil
 }
 
-const connectionColumns = `id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,progress_detail,bind_aliases,created_at,updated_at`
+const connectionColumns = `id,provider,name,app_id,enabled,status,last_error,bot_open_id,bot_name,allow_chat_ids,owner_sender_ids,agent_instructions,approval_instructions,review_all_tools,progress_mode,approval_policy,progress_detail,bind_aliases,cot_domain,created_at,updated_at`
 
 func bindAliasesOrEmpty(aliases []BindAlias) []BindAlias {
 	if aliases == nil {

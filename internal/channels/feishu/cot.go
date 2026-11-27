@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +20,8 @@ import (
 )
 
 const (
-	cotEndpoint        = "https://fsopen.bytedance.net/open-apis/im/v1/message_cot"
+	defaultCOTDomain   = "fsopen.bytedance.net"
+	cotPath            = "/open-apis/im/v1/message_cot"
 	cotRequestInterval = 65 * time.Millisecond
 )
 
@@ -30,12 +32,18 @@ type cotAPI interface {
 }
 
 type cotClient struct {
-	do   func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error)
-	pace func(context.Context) error
+	endpoint string
+	do       func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error)
+	pace     func(context.Context) error
 }
 
-func newCOTClient(client *lark.Client) cotAPI {
+func newCOTClient(client *lark.Client, domain string) *cotClient {
+	if domain == "" {
+		domain = defaultCOTDomain
+	}
+
 	return &cotClient{
+		endpoint: "https://" + domain + cotPath,
 		do: func(ctx context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
 			return client.Do(ctx, req)
 		},
@@ -136,7 +144,7 @@ func (c *cotClient) Create(ctx context.Context, in channels.InboundMessage) (cha
 	}
 	resp, err := c.request(ctx, &larkcore.ApiReq{
 		HttpMethod:                http.MethodPost,
-		ApiPath:                   cotEndpoint,
+		ApiPath:                   c.endpoint,
 		Body:                      body,
 		QueryParams:               larkcore.QueryParams{"receive_id_type": []string{"chat_id"}},
 		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
@@ -158,7 +166,7 @@ func (c *cotClient) Append(ctx context.Context, receipt channels.DeliveryReceipt
 		end := min(start+50, len(events))
 		_, err := c.request(ctx, &larkcore.ApiReq{
 			HttpMethod:                http.MethodPut,
-			ApiPath:                   cotEndpoint,
+			ApiPath:                   c.endpoint,
 			Body:                      map[string]any{"events": events[start:end], "message_id": receipt.MessageID, "cot_id": receipt.COTID},
 			SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},
 		})
@@ -172,7 +180,7 @@ func (c *cotClient) Append(ctx context.Context, receipt channels.DeliveryReceipt
 func (c *cotClient) Complete(ctx context.Context, receipt channels.DeliveryReceipt, reason string) error {
 	_, err := c.request(ctx, &larkcore.ApiReq{
 		HttpMethod:                http.MethodPost,
-		ApiPath:                   cotEndpoint + "/complete/:cot_id",
+		ApiPath:                   c.endpoint + "/complete/:cot_id",
 		PathParams:                larkcore.PathParams{"cot_id": receipt.COTID},
 		QueryParams:               larkcore.QueryParams{"message_id": []string{receipt.MessageID}, "reason": []string{reason}},
 		SupportedAccessTokenTypes: []larkcore.AccessTokenType{larkcore.AccessTokenTypeTenant},

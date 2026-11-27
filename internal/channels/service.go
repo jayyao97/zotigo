@@ -333,6 +333,13 @@ func (s *Service) PutConnection(ctx context.Context, id string, input Connection
 	if progressDetail, err = NormalizeProgressDetail(progressDetail); err != nil {
 		return Connection{}, err
 	}
+	domain := old.COTDomain
+	if input.COTDomain != nil {
+		domain = strings.TrimSpace(*input.COTDomain)
+		if domain != "" && (len(domain) > 253 || !cotDomainPattern.MatchString(domain)) {
+			return Connection{}, errors.New("cot_domain must be a hostname without scheme, port or path")
+		}
+	}
 	bindAliases := old.BindAliases
 	if input.BindAliases != nil {
 		if bindAliases, err = normalizeBindAliases(*input.BindAliases); err != nil {
@@ -344,7 +351,7 @@ func (s *Service) PutConnection(ctx context.Context, id string, input Connection
 	if input.OwnerSenderIDs != nil {
 		ownerSenderIDs = *input.OwnerSenderIDs
 	}
-	value := Connection{ApprovalPolicy: policy, ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, ProgressDetail: progressDetail, BindAliases: bindAliases, CreatedAt: created}
+	value := Connection{ApprovalPolicy: policy, ID: id, Provider: provider, Name: strings.TrimSpace(input.Name), AppID: strings.TrimSpace(input.AppID), Enabled: input.Enabled, Status: "stopped", AllowChatIDs: input.AllowChatIDs, OwnerSenderIDs: ownerSenderIDs, AgentInstructions: input.AgentInstructions, ApprovalInstructions: input.ApprovalInstructions, ReviewAllTools: input.ReviewAllTools, ProgressMode: progressMode, ProgressDetail: progressDetail, COTDomain: domain, BindAliases: bindAliases, CreatedAt: created}
 	if input.ClearSecret && input.AppSecret != nil {
 		return Connection{}, errors.New("clear_secret and app_secret cannot be set together")
 	}
@@ -516,6 +523,7 @@ func connectionNeedsRestart(old, next Connection, existed, secretChanged bool) b
 		old.AppID != next.AppID ||
 		old.Enabled != next.Enabled ||
 		old.ProgressMode != next.ProgressMode ||
+		old.COTDomain != next.COTDomain ||
 		!sameIDSet(old.AllowChatIDs, next.AllowChatIDs)
 }
 

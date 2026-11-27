@@ -4,7 +4,7 @@ package buildinfo
 import "runtime/debug"
 
 // Version is the release version shared by zotigo and zotigod.
-const Version = "0.0.4"
+const Version = "0.0.5-dev.0"
 
 func Current() (string, string) {
 	commit := "unknown"

@@ -8,6 +8,7 @@ import (
 	"html"
 	"io"
 	"net/http"
+
 	"slices"
 	"strconv"
 	"strings"
@@ -46,7 +47,7 @@ func (Factory) New(connection channels.Connection, secret string, callbacks chan
 	discoveryClient := lark.NewClient(connection.AppID, secret, lark.WithReqTimeout(15*time.Second))
 	wsClient := larkws.NewClient(connection.AppID, secret, larkws.WithEventHandler(events))
 	channelClient := channel.NewChannel(apiClient, wsClient)
-	adapter := &Adapter{connection: connection, callbacks: callbacks, channel: channelClient, resolveBotIdentity: channelClient.GetBotIdentity, cot: newCOTClient(apiClient), senderNames: make(map[string]string), chatNames: make(map[string]chatNameCacheEntry)}
+	adapter := &Adapter{connection: connection, callbacks: callbacks, channel: channelClient, resolveBotIdentity: channelClient.GetBotIdentity, cot: newCOTClient(apiClient, connection.COTDomain), senderNames: make(map[string]string), chatNames: make(map[string]chatNameCacheEntry)}
 	adapter.resolveOwnerIDs = func(ctx context.Context) ([]string, error) {
 		resp, err := apiClient.Application.Application.Get(ctx, larkapplication.NewGetApplicationReqBuilder().AppId(connection.AppID).Lang("zh_cn").UserIdType("open_id").Build())
 		if err != nil {
