@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestModelSettingsPreservesSecretsAndUneditedYAML(t *testing.T) {
@@ -544,4 +546,175 @@ func TestSearchSettingsNormalizesGeneratedAnchorsAndKeepsKeysPrivate(t *testing.
 		t.Fatalf("explicit clear failed: %v", err)
 	}
 
+}
+
+// Saved profiles read like hand-written ones: one field per line in the usual
+// order. A profile an earlier version saved on one line unfolds when edited.
+func TestModelSettingsWritesBlockYAMLInProfileOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := `default_profile: manual
+profiles:
+  manual:
+    provider: openai
+    model: gpt-manual
+    params:
+      mode: response
+  folded: {thinking_level: medium, provider: gemini, model: gemini-old, base_url: 'https://example.com/'}
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "secret-key"
+	created := ModelSettingsProfile{Name: "created", Provider: "gemini", Model: "gemini-new", BaseURL: "https://example.com/", ThinkingLevel: "medium", ContextWindow: 512000}
+	if s, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "create", Profile: created, APIKey: &key}); err != nil {
+		t.Fatal(err)
+	}
+	folded := ModelSettingsProfile{Name: "folded", Provider: "gemini", Model: "gemini-next", BaseURL: "https://example.com/", ThinkingLevel: "medium"}
+	if s, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: folded}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "web_search", Search: &SearchSettingsChange{Provider: "tavily", TavilyKey: &key}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `default_profile: manual
+profiles:
+  manual:
+    provider: openai
+    model: gpt-manual
+    params:
+      mode: response
+  folded:
+    thinking_level: medium
+    provider: gemini
+    model: gemini-next
+    base_url: 'https://example.com/'
+  created:
+    provider: gemini
+    model: gemini-new
+    api_key: secret-key
+    base_url: https://example.com/
+    thinking_level: medium
+    context_window: 512000
+tools:
+  web:
+    search_provider: tavily
+    tavily_api_key: secret-key
+`
+	if string(data) != want {
+		t.Fatalf("config.yaml =\n%s\nwant\n%s", data, want)
+	}
+}
+
+// A configuration written entirely in flow style unfolds when saved, keeping
+// its other values and comments.
+func TestModelSettingsUnfoldsAFlowStyleDocument(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := "# Managed by hand\n{default_profile: demo, profiles: {demo: {provider: openai, model: old, api_key: keep-me}}, ui: {theme: light}} # trailing\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ModelSettingsProfile{Name: "demo", Provider: "openai", Model: "new"}
+	if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: profile}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `# Managed by hand
+default_profile: demo
+profiles:
+  demo:
+    provider: openai
+    model: new
+    api_key: keep-me
+ui: {theme: light}
+
+# trailing
+`
+	if string(data) != want {
+		t.Fatalf("config.yaml =\n%s\nwant\n%s", data, want)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profiles["demo"].Model != "new" || cfg.Profiles["demo"].APIKey != "keep-me" || cfg.UI.Theme != "light" {
+		t.Fatalf("loaded %+v", cfg)
+	}
+}
+
+// Unfolding a one-line mapping keeps the comment after it: a value's comment
+// stays on its key's line, and the root's stays ahead of the lines below it.
+func TestModelSettingsUnfoldingKeepsCommentsInPlace(t *testing.T) {
+	for _, test := range []struct{ name, original, want string }{
+		{"profile", "profiles:\n  demo: {provider: openai, model: old} # 保留这条备注\n", `profiles:
+  demo: # 保留这条备注
+    provider: openai
+    model: new
+`},
+		{"profiles", "profiles: {demo: {provider: openai, model: old}} # 备注\n", `profiles: # 备注
+  demo:
+    provider: openai
+    model: new
+`},
+		{"root", "{default_profile: demo, profiles: {demo: {provider: openai, model: old}}} # A\n# B\n", `default_profile: demo
+profiles:
+  demo:
+    provider: openai
+    model: new
+
+# A
+# B
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			m := NewManager()
+			path, _ := m.GetConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := m.ReadModelSettings()
+			if err != nil {
+				t.Fatal(err)
+			}
+			profile := ModelSettingsProfile{Name: "demo", Provider: "openai", Model: "new"}
+			if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: profile}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != test.want {
+				t.Fatalf("config.yaml =\n%s\nwant\n%s", data, test.want)
+			}
+		})
+	}
 }

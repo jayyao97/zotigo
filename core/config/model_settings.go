@@ -159,8 +159,10 @@ func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
 				return nil, fmt.Errorf("%s is inherited from a YAML merge without its own anchor; edit the shared definition in the configuration file", key)
 			}
 			parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, node)
-		} else if err := setModelNode(parent, key, map[string]any{}); err != nil {
-			return nil, err
+		} else {
+			// Not setModelNode(parent, key, map[string]any{}): an encoded empty
+			// map is flow style, and every field added later stayed on its line.
+			parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"})
 		}
 		node = modelNode(parent, key)
 	}
@@ -176,7 +178,33 @@ func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
 	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
+	// Written mappings use block style like a hand-edited file, which also
+	// unfolds profiles that earlier versions saved on a single line.
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i+1] == node {
+			keyNode := parent.Content[i]
+			unfoldMapping(node, func(comment string) { keyNode.LineComment = joinComments(keyNode.LineComment, comment) })
+		}
+	}
 	return node, nil
+}
+
+// unfoldMapping switches a flow mapping to block style. A comment after its
+// closing brace has no line of its own in block style; keep moves it where it
+// still reads in its place rather than dropping it.
+func unfoldMapping(node *yaml.Node, keep func(comment string)) {
+	if node.Style&yaml.FlowStyle == 0 {
+		return
+	}
+	node.Style &^= yaml.FlowStyle
+	if node.LineComment != "" {
+		keep(node.LineComment)
+		node.LineComment = ""
+	}
+}
+
+func joinComments(first, second string) string {
+	return strings.TrimSpace(first + "\n" + second)
 }
 
 // A shared anchor may be used outside the profile, including in unknown fields.
@@ -395,6 +423,10 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 		return ModelSettings{}, err
 	}
 	root := doc.Content[0]
+	// A flow-style root keeps everything inside it on one line, however its
+	// children are styled. Its trailing comment moves to the end of the
+	// document, ahead of the comments that followed it there.
+	unfoldMapping(root, func(comment string) { doc.FootComment = joinComments(comment, doc.FootComment) })
 	var profiles *yaml.Node
 	if change.Action != "web_search" {
 		profiles, err = localModelMapping(root, "profiles")
@@ -472,17 +504,28 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 		}
 		p := change.Profile
 		previous := cfg.Profiles[name]
-		previousValues := map[string]any{"provider": previous.Provider, "model": previous.Model, "base_url": previous.BaseURL, "thinking_level": previous.ThinkingLevel, "context_window": previous.ContextWindow, "max_output_tokens": previous.MaxOutputTokens}
-		for key, value := range map[string]any{"provider": p.Provider, "model": p.Model, "base_url": p.BaseURL, "thinking_level": p.ThinkingLevel, "context_window": p.ContextWindow, "max_output_tokens": p.MaxOutputTokens} {
-			if reflect.DeepEqual(previousValues[key], value) {
+		apiKey := previous.APIKey
+		if change.APIKey != nil {
+			apiKey = *change.APIKey
+		}
+		// New fields are appended in the order people write profiles by hand;
+		// existing fields keep their place.
+		for _, field := range []struct {
+			key             string
+			value, previous any
+		}{
+			{"provider", p.Provider, previous.Provider},
+			{"model", p.Model, previous.Model},
+			{"api_key", apiKey, previous.APIKey},
+			{"base_url", p.BaseURL, previous.BaseURL},
+			{"thinking_level", p.ThinkingLevel, previous.ThinkingLevel},
+			{"context_window", p.ContextWindow, previous.ContextWindow},
+			{"max_output_tokens", p.MaxOutputTokens, previous.MaxOutputTokens},
+		} {
+			if reflect.DeepEqual(field.previous, field.value) {
 				continue
 			}
-			if err = setModelNode(old, key, value); err != nil {
-				return ModelSettings{}, err
-			}
-		}
-		if change.APIKey != nil && *change.APIKey != previous.APIKey {
-			if err = setModelNode(old, "api_key", *change.APIKey); err != nil {
+			if err = setModelNode(old, field.key, field.value); err != nil {
 				return ModelSettings{}, err
 			}
 		}
