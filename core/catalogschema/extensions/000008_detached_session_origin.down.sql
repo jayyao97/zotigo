@@ -1,0 +1,2 @@
+DROP TRIGGER record_deleted_session_workspace;
+ALTER TABLE session_organization DROP COLUMN deleted_workspace_id;

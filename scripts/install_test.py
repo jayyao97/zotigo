@@ -69,9 +69,25 @@ publish_macos_daemon
                               env={**self.env, "prefix": str(self.prefix), "component": "daemon", **env},
                               text=True, capture_output=True)
 
+    def test_legacy_ui_cleanup_trap_preserves_status_and_releases_lock(self):
+        script = '''set -eu
+. "$1"
+install_init
+trap 'install_cleanup; :' EXIT
+exit "$2"
+'''
+        for component in ("desktop", "web"):
+            for status in (0, 17):
+                result = subprocess.run(["sh", "-c", script, "test", str(self.source / "scripts/install-common.sh"), str(status)],
+                                        env={**self.env, "prefix": str(self.prefix), "component": component},
+                                        text=True, capture_output=True)
+                self.assertEqual(result.returncode, status, result.stderr)
+                self.assertFalse((self.prefix / component / "install.lock").exists())
+                self.assertFalse(list((self.prefix / component / "releases").iterdir()))
+
     def test_macos_publication_keeps_fixed_real_path_and_archives(self):
         current = self.prefix / "daemon/current"
-        for _ in range(2):
+        for _ in range(3):
             result = self.publish_fixed_daemon()
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertTrue(current.is_dir())
@@ -79,7 +95,8 @@ publish_macos_daemon
             self.assertEqual((current / "zotigod").resolve(), current / "zotigod")
             release = Path((current / "RELEASE").read_text().strip())
             self.assertEqual((release / "zotigod").read_text(), "new binary")
-        self.assertTrue((current.parent / "previous").is_symlink())
+        previous = current.parent / "previous"
+        self.assertEqual(set((current.parent / "releases").iterdir()), {previous.resolve(), release})
 
     def test_macos_publication_migrates_symlink_and_restores_on_failure(self):
         root = self.prefix / "daemon"

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	zotigosession "github.com/jayyao97/zotigo/core/session"
 	zotigoworkspace "github.com/jayyao97/zotigo/core/workspace"
 	"github.com/jayyao97/zotigo/internal/zotigod/codexworker"
 	"github.com/jayyao97/zotigo/internal/zotigod/sessionlog"
@@ -439,15 +440,30 @@ func (h *handler) sessionProjection(ctx context.Context, id string) (sessionProj
 }
 
 func (h *handler) catalogRuntime(ctx context.Context, id string) (*Session, bool, error) {
-	if runtime, ok := h.registry.Get(id); ok {
-		runtime.Live = true
-		return &runtime, true, nil
+	if h.store != nil {
+		metadata, err := h.store.List(ctx, zotigosession.ListFilter{IDs: []string{id}})
+		if err != nil {
+			return nil, false, err
+		}
+		if len(metadata) > 0 {
+			runtime := h.catalogRuntimeFromMetadata(metadata[0])
+			return &runtime, true, nil
+		}
 	}
-	runtime, found, err := h.storedSession(ctx, id)
-	if err != nil || !found {
-		return nil, found, err
+	runtime, live := h.registry.Get(id)
+	if !live {
+		return nil, false, nil
 	}
+	runtime.Live = true
 	return &runtime, true, nil
+}
+
+func (h *handler) catalogRuntimeFromMetadata(meta zotigosession.Metadata) Session {
+	if runtime, live := h.registry.Get(meta.ID); live {
+		runtime.Live = true
+		return withSessionMetadata(runtime, meta)
+	}
+	return sessionFromMetadata(meta, SessionStateOffline, false)
 }
 
 func (h *handler) sessionAvailability(ctx context.Context, runtime *Session, organization *zotigoworkspace.SessionOrganization) (string, error) {

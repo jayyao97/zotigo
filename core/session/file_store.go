@@ -430,6 +430,7 @@ func (s *FileStore) appendDisplayItems(ctx context.Context, id string, expectedS
 	stored := append([]DisplayItem(nil), items...)
 	var data bytes.Buffer
 	for index := range stored {
+		stored[index].ActivityTimeKnown = stored[index].isDialogue()
 		stored[index].Sequence = lastSequence + uint64(index) + 1
 		if stored[index].ID == "" {
 			stored[index].ID = fmt.Sprintf("item_%s_%d", id, stored[index].Sequence)
@@ -548,6 +549,7 @@ func (s *FileStore) appendDisplayItemDataLocked(id string, item DisplayItem) (Di
 		}
 	}
 	sequence := lastSequence + 1
+	item.ActivityTimeKnown = item.isDialogue()
 	item.Sequence = sequence
 	if item.ID == "" {
 		item.ID = fmt.Sprintf("item_%s_%d", id, sequence)

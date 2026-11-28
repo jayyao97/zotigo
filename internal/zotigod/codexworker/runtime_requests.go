@@ -119,6 +119,57 @@ func (r *Runtime) executeCodexRuntimeTool(ctx context.Context, message codexapp.
 	return nil
 }
 
+// Preserve the assistant's prose and fill in structured question text that the
+// app-server omitted from it. History readers use this searchable transcript.
+func (item ThreadItem) questionText() string {
+	if len(item.Questions) == 0 {
+		return item.Text
+	}
+	var lines []string
+	if item.Text != "" {
+		lines = append(lines, item.Text)
+	}
+	for _, q := range item.Questions {
+		if strings.TrimSpace(q.Title) == "" {
+			continue
+		}
+		if !strings.Contains(item.Text, q.Title) {
+			lines = append(lines, q.Title)
+		}
+		for _, label := range q.Options {
+			if strings.TrimSpace(label) != "" && !strings.Contains(item.Text, label) {
+				lines = append(lines, "- "+label)
+			}
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// Async questions arrive as completed assistant messages. Codex has already acknowledged
+// the tool call, so their answers must be submitted as ordinary conversation input.
+func (item ThreadItem) questionCard(turnID string) *zotigosession.DisplayItem {
+	if len(item.Questions) == 0 {
+		return nil
+	}
+	interaction := zotigosession.DisplayInteraction{ID: sessionlog.FollowupQuestionPrefix + item.ID, ItemID: item.ID, TurnID: turnID, ReplyAsMessage: true, Kind: sessionlog.InteractionKindUserInput, Status: sessionlog.InteractionStatusPending}
+	for i, q := range item.Questions {
+		if strings.TrimSpace(q.Title) == "" {
+			continue
+		}
+		question := zotigosession.DisplayInteractionQuestion{ID: fmt.Sprintf("q%d", i+1), Question: q.Title, IsOther: true}
+		for _, label := range q.Options {
+			if strings.TrimSpace(label) != "" {
+				question.Options = append(question.Options, zotigosession.DisplayInteractionOption{Label: label})
+			}
+		}
+		interaction.Questions = append(interaction.Questions, question)
+	}
+	if len(interaction.Questions) == 0 {
+		return nil
+	}
+	return &zotigosession.DisplayItem{ID: interaction.ID, Type: zotigosession.DisplayItemInteractionRequest, Turn: &zotigosession.DisplayTurn{ID: turnID}, Interaction: &interaction}
+}
+
 func (r *Runtime) registerCodexUserInput(ctx context.Context, message codexapp.Message) error {
 	type question struct {
 		ID       string                   `json:"id"`

@@ -278,11 +278,20 @@ continues to return the effective model selector catalog.
 }
 ```
 
-Actions are `create`, `save`, `delete`, and `default`. Create rejects an existing
+Profile actions are `create`, `save`, `delete`, and `default`. Create rejects an existing
 name; save requires an existing profile. Names cannot be renamed through this
 API. Delete/default identify the profile by `profile.name`. Omit `api_key` to
 retain the stored value; send an empty string to clear it. Environment-based
 provider credentials can still apply after clearing the file's key.
+
+The GET response also includes `web_search` with `provider`, `has_tavily_key`,
+and `has_deepseek_key`. To update search settings, send the current `revision`,
+`action: "web_search"`, and a `web_search` object with `provider` set to
+`"tavily"`, `"deepseek"`, or `""` for the default. Omit `tavily_key` or
+`deepseek_key` to keep the stored credential, or send an empty string to clear
+it. Whitespace-only input also retains the stored key. Line breaks are invalid.
+Selecting a provider explicitly requires a stored key or its host
+environment variable. A missing key returns HTTP 400 with code `search_api_key_required`.
 
 The first profile becomes the default. Deleting the current default requires
 choosing another first, except when deleting the last profile. References from
@@ -1342,12 +1351,36 @@ admission and returns a boolean indicating whether existing turns and human requ
 It rejects calls without a waiting job. See [application updates](application-updates.md) for
 release metadata, compatibility, host ownership and recovery details.
 
+## Codex question responses
+
+`POST /sessions/{id}/interactions/{interaction_id}` accepts `{"answers":{"q1":["option label"]}}`. For Codex async questions the daemon emits a non-blocking `interaction_request` with `kind: "user_input"` and `reply_as_message: true`. Its assistant text is indexed for history and search and carries the card's `followup_question_id` so clients can suppress duplicate prose. A live worker accepts answers only while the originating turn is active. Submitting steers that turn with the selected answers or free text, then emits an `interaction_response`. Repeating the same submission is idempotent.
+
+## Session discovery and delegated creation
+
+A trusted local user turn can read retained archived sessions after their
+workspace is deleted. Include `include_archived: true` in `list_sessions`
+to discover them. Archiving an unassigned session keeps it outside the
+session tools' read scope. For deletions predating this feature, recovery
+requires a retained workspace deletion record matching both the organization
+update time and the session directory. Deleted workspaces cannot accept new tasks. Channel reads
+continue to require the original workspace and sender authorization.
+
+`create_session` takes an initial message and defaults to the caller's
+workspace, agent and model settings. A local caller may pass another ready
+`workspace_id`. Use `list_runtimes` with that workspace to list its native
+profiles and Codex models and reasoning efforts. For a native session pass
+`agent: "zotigo"` and a profile name. For Codex pass `agent: "codex"`, a
+model ID and optionally a supported reasoning effort. The destination uses its
+own working directory and inherits the caller's approval and prompt settings.
+Forks keep their existing workspace/runtime requirements. Use `send_message`
+to continue an existing session in the caller's workspace.
+
 ## One-shot completion callbacks
 
 `zotigo.create_completion_trigger` is a resident session tool in native workers
 and newly created Codex threads. Existing Codex threads retain their original
 dynamic tool definitions; start a new session to receive the added tool. Embedded
-hosts without a callback URL cannot create triggers. Channel and delegated or
+hosts without a callback URL support internal session watches only. Channel and delegated or
 callback-initiated turns cannot create triggers.
 
 Arguments: `title` (1–200 bytes), `on_fire` (1–8192 bytes), and optional
@@ -1356,6 +1389,18 @@ default, or `steer`). The daemon derives the target
 session/workspace from the active host turn. The result contains `trigger_id`,
 `callback_url`, `callback_token`, `expires_at`, `state`, and `delivery_mode`. Repeating the same tool
 call returns the same receipt; at most 16 unexpired pending triggers per session.
+
+To receive the end signal for work sent to another session, pass its
+`session_id` as `watch_session_id` and the returned `command_id` as
+`watch_command_id`. A queued message fires after its own root turn ends.
+The daemon also checks already completed, failed and interrupted turns on
+registration and reconciles pending watches after restart. A watch with only a
+session ID binds the latest submitted input, including a message still in the
+queue, or the first input of an empty session. Queued messages retain their
+original submission order when dispatched as a batch or sent as steering.
+Its receipt identifies the watched session and has no callback URL
+or credential. The notification carries the session ID, turn ID and terminal
+status. A turn started by a session watch may call `read_session` on the watched session while the source policy still permits it. HTTP callback turns and delegated tasks receive no such grant. The same expiry, cancellation and queue rules apply.
 
 The background script sends `POST /completion-triggers/{trigger_id}/fire` with
 `Authorization: Bearer <callback_token>` and an empty body, `{}`, or a JSON object
@@ -1606,7 +1651,14 @@ Parameters:
 - `limit`: 1–200, default 50.
 - `project_id`, `workspace_id`, `ungrouped=true`, `pinned=true`, `include_archived=true`.
 - `unread=true|false`; omitted includes both. Read state is shared with existing clients.
-- `since`: inclusive RFC3339 metadata activity timestamp.
+- `since`: inclusive RFC3339 timestamp. A catalog session's `runtime.updated_at`
+  includes the latest persisted user, steering, or assistant message. The same
+  timestamp drives the activity filter, ordering, and pagination.
+  When a Codex history import lacks a turn start time, it uses the turn end
+  time or, if both are absent, the thread's recorded update time.
+  On upgrade, existing Codex sessions retain their saved activity date because
+  older display logs could use the local import time for historical messages.
+  Subsequent messages and backend syncs advance that date.
 - `channel=all|pinned|none`: defaults to all. `pinned` includes non-Channel sessions
   plus Channel-bound sessions pinned individually or through their workspace/project.
   Disabled Channel bindings still count; no message history or Channel configuration

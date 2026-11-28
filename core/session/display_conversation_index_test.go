@@ -36,6 +36,7 @@ func TestConversationIndexFiltersBeforePagination(t *testing.T) {
 	end := stamp.Add(time.Hour)
 	window := DisplayTimeWindow{Since: &stamp, Until: &end}
 	for _, query := range []DisplayPageQuery{
+		{Limit: 3, ExcludeTools: true, HasAfter: true, After: 1},
 		{Limit: 2, ContentKind: DisplayContentConversation},
 		{Limit: 3, ContentKind: DisplayContentConversation, IncludeTools: true},
 		{Limit: 3, ContentKind: DisplayContentConversation, IncludeTools: true, HasAfter: true, After: 1},

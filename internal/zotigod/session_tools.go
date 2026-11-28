@@ -17,6 +17,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/jayyao97/zotigo/core/agent"
+	"github.com/jayyao97/zotigo/core/config"
 	"github.com/jayyao97/zotigo/core/protocol"
 	session "github.com/jayyao97/zotigo/core/session"
 	workspace "github.com/jayyao97/zotigo/core/workspace"
@@ -36,10 +37,10 @@ type sessionToolCaller struct {
 // Resolve authority from durable host input, never from model arguments or the
 // worker's echoed RequestContext. A generation identifies a worker incarnation.
 func (h *handler) resolveSessionToolCaller(ctx context.Context, id, generation, turnID string) (sessionToolCaller, error) {
-	return h.resolveRuntimeToolCaller(ctx, id, generation, turnID, true)
+	return h.resolveRuntimeToolCaller(ctx, id, generation, turnID, true, "")
 }
 
-func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, turnID string, sessionScope bool) (sessionToolCaller, error) {
+func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, turnID string, sessionScope bool, watchReadID string) (sessionToolCaller, error) {
 	caller := sessionToolCaller{SessionID: id, TurnID: turnID, Generation: generation}
 	if h.workers == nil || !h.workers.Matches(id, generation) || turnID == "" {
 		return caller, errors.New("runtime tool caller is not the active worker")
@@ -98,10 +99,30 @@ func (h *handler) resolveRuntimeToolCaller(ctx context.Context, id, generation, 
 	if input == nil || input.Command == nil {
 		return caller, errors.New("runtime tool caller has no durable host input")
 	}
-	if sessionScope && (strings.HasPrefix(input.ID, "session_tool:") || strings.HasPrefix(input.ID, "completion:")) {
+	if sessionScope && strings.HasPrefix(input.ID, "session_tool:") {
 		return caller, errors.New("delegated tasks cannot invoke session tools again")
 	}
-	caller.Origin = input.Command.RequestContext.Clone()
+	if sessionScope && strings.HasPrefix(input.ID, "completion:") {
+		if watchReadID == "" || h.catalog == nil {
+			return caller, errors.New("delegated tasks cannot invoke session tools again")
+		}
+		trigger, err := h.catalog.CompletionTrigger(ctx, strings.TrimPrefix(input.ID, "completion:"))
+		if err != nil {
+			return caller, err
+		}
+		if trigger.WatchSessionID != watchReadID || trigger.SessionID != id || trigger.State != "fired" ||
+			input.Command.Text != completionPrompt(trigger.OnFire, trigger.CallbackText) ||
+			!sessionlog.SameRequestContext(input.Command.RequestContext, completionOrigin(trigger)) {
+			return caller, errors.New("completion input has no matching watch receipt for the requested session")
+		}
+		// A verified session watch originated from a local user. Its receipt
+		// grants one target for read_session while that user's policy still holds.
+		if _, err := h.validateCompletionTarget(ctx, trigger); err != nil {
+			return caller, err
+		}
+	} else {
+		caller.Origin = input.Command.RequestContext.Clone()
+	}
 	if caller.Origin == nil && strings.HasPrefix(input.ID, "channel:") {
 		return caller, errors.New("channel input has no trusted origin")
 	}
@@ -149,7 +170,7 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 			}
 			turnID = sessionlog.LastOpenTurnID(items)
 		}
-		caller, err := h.resolveRuntimeToolCaller(ctx, id, generation, turnID, false)
+		caller, err := h.resolveRuntimeToolCaller(ctx, id, generation, turnID, false, "")
 		if err != nil {
 			return "", err
 		}
@@ -170,7 +191,15 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 	if spec == nil {
 		return "", errors.New("unknown session tool")
 	}
-	caller, err := h.resolveSessionToolCaller(ctx, id, generation, request.TurnID)
+	var readTarget struct {
+		SessionID string `json:"session_id"`
+	}
+	if request.Name == "read_session" {
+		if err := json.Unmarshal(request.Arguments, &readTarget); err != nil {
+			return "", err
+		}
+	}
+	caller, err := h.resolveRuntimeToolCaller(ctx, id, generation, request.TurnID, true, readTarget.SessionID)
 	if err != nil {
 		return "", err
 	}
@@ -178,12 +207,27 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 		return "", errors.New("session tools were not installed for this session")
 	}
 	// Queue operations acquire this lock before Channel and workspace authorization.
-	if request.Name == "send_message" {
+	var queueTarget string
+	switch request.Name {
+	case "send_message":
 		var input sessionToolWriteInput
 		if err := decodeSessionToolArguments(request.Arguments, &input); err != nil {
 			return "", err
 		}
-		unlock := h.queueOps.lock(input.SessionID)
+		queueTarget = input.SessionID
+	case "create_completion_trigger":
+		var input struct {
+			WatchSessionID string `json:"watch_session_id"`
+		}
+		if err := json.Unmarshal(request.Arguments, &input); err != nil {
+			return "", err
+		}
+		if caller.Origin == nil && caller.Stored.Capabilities.ChannelToolsVersion == 0 {
+			queueTarget = input.WatchSessionID
+		}
+	}
+	if queueTarget != "" {
+		unlock := h.queueOps.lock(queueTarget)
 		defer unlock()
 	}
 	var result any
@@ -193,15 +237,30 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 		if !h.workers.Matches(id, generation) {
 			return errors.New("stale runtime tool worker")
 		}
-		boundWorkspace, release, err := h.lockWorkspaceForUse(ctx, caller.WorkspaceID)
+		destination := caller.WorkspaceID
+		if request.Name == "create_session" || request.Name == "list_runtimes" {
+			var routing struct {
+				WorkspaceID string `json:"workspace_id"`
+			}
+			if err := json.Unmarshal(request.Arguments, &routing); err != nil {
+				return err
+			}
+			if routing.WorkspaceID != "" {
+				destination = routing.WorkspaceID
+			}
+			if caller.Origin != nil && destination != caller.WorkspaceID {
+				return errors.New("channel tasks must stay in the authorized workspace")
+			}
+		}
+		spaces, release, err := h.lockSessionWorkspaces(ctx, caller.WorkspaceID, destination)
 		if err != nil {
 			return err
 		}
 		defer release()
-		if boundWorkspace.Status != workspace.WorkspaceStatusReady {
+		if spaces[caller.WorkspaceID].Status != workspace.WorkspaceStatusReady || spaces[destination].Status != workspace.WorkspaceStatusReady {
 			return errors.New("source workspace is not ready")
 		}
-		fresh, err := h.resolveSessionToolCaller(ctx, id, generation, request.TurnID)
+		fresh, err := h.resolveRuntimeToolCaller(ctx, id, generation, request.TurnID, true, readTarget.SessionID)
 		if err != nil {
 			return err
 		}
@@ -211,6 +270,12 @@ func (h *handler) executeRuntimeTool(ctx context.Context, id, generation string,
 		switch request.Name {
 		case "create_completion_trigger":
 			result, err = h.createCompletionTrigger(ctx, fresh, request)
+		case "list_runtimes":
+			dir := fresh.Stored.WorkingDirectory
+			if destination != fresh.WorkspaceID {
+				dir = spaces[destination].RootPath
+			}
+			result, err = h.listToolRuntimes(ctx, dir, request.Arguments)
 		case "list_sessions":
 			result, err = h.listToolSessions(ctx, caller, request.Arguments)
 		case "read_session":
@@ -280,7 +345,14 @@ func (h *handler) authorizeToolTarget(ctx context.Context, caller sessionToolCal
 	// Local UI input may read across the daemon's catalog. Channel authority and
 	// all mutations remain tied to the source workspace.
 	workspaceScoped := !read || caller.Origin != nil
-	if organization.WorkspaceID == nil || (!read && organization.EffectiveArchived()) || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
+	if organization.WorkspaceID == nil {
+		// Workspace deletion archives its sessions and clears their workspace FK.
+		if !workspaceScoped && organization.SelfArchivedAt != nil && organization.DeletedWorkspaceID != "" {
+			return nil
+		}
+		return errors.New("target session is outside the authorized workspace")
+	}
+	if (!read && organization.EffectiveArchived()) || (workspaceScoped && *organization.WorkspaceID != caller.WorkspaceID) {
 		return errors.New("target session is outside the authorized workspace")
 	}
 	return nil
@@ -453,12 +525,16 @@ func (h *handler) readToolSession(ctx context.Context, caller sessionToolCaller,
 }
 
 type sessionToolWriteInput struct {
-	ForkFrom       *session.ForkOrigin `json:"fork_from,omitempty"`
-	SessionID      string              `json:"session_id,omitempty"`
-	WorkspaceID    string              `json:"workspace_id,omitempty"`
-	Text           string              `json:"text,omitempty"`
-	InitialMessage string              `json:"initial_message,omitempty"`
-	Title          string              `json:"title,omitempty"`
+	Agent           string              `json:"agent,omitempty"`
+	Model           string              `json:"model,omitempty"`
+	Profile         string              `json:"profile,omitempty"`
+	ReasoningEffort string              `json:"reasoning_effort,omitempty"`
+	ForkFrom        *session.ForkOrigin `json:"fork_from,omitempty"`
+	SessionID       string              `json:"session_id,omitempty"`
+	WorkspaceID     string              `json:"workspace_id,omitempty"`
+	Text            string              `json:"text,omitempty"`
+	InitialMessage  string              `json:"initial_message,omitempty"`
+	Title           string              `json:"title,omitempty"`
 }
 
 type sessionToolOperation struct {
@@ -489,11 +565,14 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 	}
 	text := input.Text
 	if request.Name == "create_session" {
-		if input.WorkspaceID != caller.WorkspaceID || input.SessionID != "" || input.Text != "" {
-			return nil, errors.New("create requires the source workspace and no session_id or text")
+		if input.WorkspaceID == "" {
+			input.WorkspaceID = caller.WorkspaceID
+		}
+		if (caller.Origin != nil && input.WorkspaceID != caller.WorkspaceID) || input.SessionID != "" || input.Text != "" {
+			return nil, errors.New("create requires initial_message and an authorized destination workspace")
 		}
 		text = input.InitialMessage
-	} else if input.SessionID == "" || input.WorkspaceID != "" || input.InitialMessage != "" || input.Title != "" || input.ForkFrom != nil {
+	} else if input.Agent != "" || input.Model != "" || input.ReasoningEffort != "" || input.Profile != "" || input.SessionID == "" || input.WorkspaceID != "" || input.InitialMessage != "" || input.Title != "" || input.ForkFrom != nil {
 		return nil, errors.New("send requires session_id and text only")
 	}
 	if strings.TrimSpace(text) == "" || len(text) > 8192 || len(input.Title) > 200 {
@@ -503,6 +582,9 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 		return nil, errors.New("self-send is not allowed")
 	}
 	if input.ForkFrom != nil {
+		if input.WorkspaceID != caller.WorkspaceID || input.Agent != "" || input.Model != "" || input.Profile != "" || input.ReasoningEffort != "" {
+			return nil, errors.New("fork uses the source workspace and runtime")
+		}
 		if input.ForkFrom.ThroughTurnID == "" {
 			return nil, errors.New("fork_from requires through_turn_id")
 		}
@@ -574,7 +656,11 @@ func (h *handler) writeToolSession(ctx context.Context, caller sessionToolCaller
 			return nil, err
 		}
 	}
-	if err = h.authorizeToolTarget(ctx, caller, operation.TargetID, false); err != nil {
+	targetScope := caller
+	if operation.Name == "create_session" {
+		targetScope.WorkspaceID = input.WorkspaceID
+	}
+	if err = h.authorizeToolTarget(ctx, targetScope, operation.TargetID, false); err != nil {
 		return nil, err
 	}
 	target, err := h.store.Get(ctx, operation.TargetID)
@@ -732,11 +818,26 @@ func (h *handler) createToolSession(ctx context.Context, caller sessionToolCalle
 		return err
 	}
 	if stored == nil {
-		created := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+		wsID := operation.Input.WorkspaceID
+		if wsID == "" {
+			wsID = caller.WorkspaceID
+		}
+		ws, err := h.catalog.GetWorkspace(ctx, wsID)
+		if err != nil {
+			return err
+		}
+		dir := caller.Stored.WorkingDirectory
+		if wsID != caller.WorkspaceID {
+			dir = ws.RootPath
+		}
+		created := newSession(dir, caller.Stored.ProfileName)
 		created.ID = operation.TargetID
 		created.Agent = caller.Stored.Agent
 		created.Model = caller.Stored.Model
 		created.ReasoningEffort = caller.Stored.ReasoningEffort
+		if err = h.selectToolRuntime(ctx, &created, operation.Input, caller.Stored.WorkingDirectory); err != nil {
+			return err
+		}
 		created.ApprovalPolicy = caller.Stored.ApprovalPolicy
 		if err = h.persistSession(ctx, created); err != nil {
 			return err
@@ -757,7 +858,11 @@ func (h *handler) createToolSession(ctx context.Context, caller sessionToolCalle
 		if err = h.store.Put(ctx, stored); err != nil {
 			return err
 		}
-		if _, err = h.catalog.AssignSession(ctx, operation.TargetID, caller.WorkspaceID); err != nil {
+		targetWorkspace := operation.Input.WorkspaceID
+		if targetWorkspace == "" {
+			targetWorkspace = caller.WorkspaceID
+		}
+		if _, err = h.catalog.AssignSession(ctx, operation.TargetID, targetWorkspace); err != nil {
 			return err
 		}
 	}
@@ -767,4 +872,84 @@ func (h *handler) createToolSession(ctx context.Context, caller sessionToolCalle
 		}
 	}
 	return nil
+}
+
+func (h *handler) selectToolRuntime(ctx context.Context, child *Session, in sessionToolWriteInput, sourceDir string) error {
+	if in.Agent == "" && in.Profile == "" && in.Model == "" && in.ReasoningEffort == "" && child.WorkingDirectory == sourceDir {
+		return nil
+	}
+	inheritProfile := child.Agent == "zotigo" && (in.Agent == "" || in.Agent == child.Agent) && in.Profile == ""
+	if in.Agent != "" && in.Agent != child.Agent {
+		child.Agent, child.ProfileName, child.Model, child.ReasoningEffort = in.Agent, "", "", ""
+	}
+	switch child.Agent {
+	case "zotigo":
+		if in.Model != "" || in.ReasoningEffort != "" {
+			return errors.New("use profile to select a Zotigo API model")
+		}
+		cfg, err := config.NewManager().LoadForDir(child.WorkingDirectory)
+		if err != nil {
+			return err
+		}
+		if in.Profile != "" {
+			child.ProfileName = in.Profile
+		}
+		name, profile, err := cfg.ResolveProfile(child.ProfileName)
+		if err != nil {
+			return err
+		}
+		if inheritProfile && sourceDir != child.WorkingDirectory {
+			source, err := config.NewManager().LoadForDir(sourceDir)
+			if err != nil {
+				return err
+			}
+			_, original, err := source.ResolveProfile(child.ProfileName)
+			if err != nil {
+				return err
+			}
+			if profile.Provider != original.Provider || profile.Model != original.Model {
+				return errors.New("the inherited profile selects a different model in the destination workspace; choose a destination profile explicitly")
+			}
+		}
+		child.ProfileName = name
+		return nil
+	case "codex":
+		if in.Profile != "" {
+			return errors.New("profile is only valid for Zotigo")
+		}
+		if in.Model != "" && in.Model != child.Model {
+			child.ReasoningEffort = ""
+			child.Model = in.Model
+		}
+		if in.ReasoningEffort != "" {
+			child.ReasoningEffort = in.ReasoningEffort
+		}
+		var err error
+		child.Model, child.ReasoningEffort, err = h.resolveCodexSettings(ctx, child.Model, child.ReasoningEffort, true)
+		return err
+	default:
+		return errors.New("unknown session runtime")
+	}
+}
+
+func (h *handler) listToolRuntimes(ctx context.Context, dir string, raw json.RawMessage) (any, error) {
+	var input struct {
+		WorkspaceID string `json:"workspace_id"`
+	}
+	if err := decodeSessionToolArguments(raw, &input); err != nil {
+		return nil, err
+	}
+	cfg, err := config.NewManager().LoadForDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	profiles := make(map[string]string, len(cfg.Profiles))
+	for name, profile := range cfg.Profiles {
+		profiles[name] = profile.Model
+	}
+	result := map[string]any{"zotigo": map[string]any{"profiles": profiles, "default_profile": cfg.DefaultProfile}}
+	if caps, err := h.codexCapabilities(ctx); err == nil {
+		result["codex"] = codexCatalog(caps)
+	}
+	return result, nil
 }

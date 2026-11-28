@@ -332,6 +332,9 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 				// queue preparation runs asynchronously.
 				handler.events.Retire(sessionID, wire.PreviewRetirement{Terminal: true})
 				handler.registry.MarkIdle(sessionID)
+				if handler.catalog != nil {
+					go handler.reconcileSessionWatches(context.Background(), sessionID)
+				}
 				go func() {
 					// Drain before scheduling idle eviction. Admission advances the
 					// command sequence, making this old idle notification harmless.
@@ -341,6 +344,9 @@ func newHandler(registry *sessionRegistry, items sessionlog.ItemSource, opts ...
 			}
 		}
 	})
+	if options.serviceContext != nil && handler.catalog != nil {
+		go handler.maintainSessionWatches(options.serviceContext)
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/health", handler.handleHealth)
 	mux.HandleFunc("/updates", handler.handleUpdates)

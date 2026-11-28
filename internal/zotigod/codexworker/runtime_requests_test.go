@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	zotigosession "github.com/jayyao97/zotigo/core/session"
 	"github.com/jayyao97/zotigo/internal/codexapp"
@@ -250,4 +251,68 @@ func (s *failTerminalAppendStore) AppendDisplayItem(ctx context.Context, id stri
 		return zotigosession.DisplayItem{}, errors.New("append terminal state")
 	}
 	return s.Store.AppendDisplayItem(ctx, id, item)
+}
+
+func TestAsyncQuestionTextRemainsSearchableAfterCompletionAndHistorySync(t *testing.T) {
+	const id = "session-async"
+	runtime, store := newCodexInputTestRuntime(t, id, &codexWorkerRPC{})
+	runtime.activeTurnID = "turn-1"
+	raw := json.RawMessage(`{"threadId":"thread-1","turnId":"turn-1","item":{"type":"agentMessage","id":"call-question","text":"Choose:\n- Sea\n- Mountain","questions":[{"title":"Choose","options":["Sea","Mountain"]},{"title":"Why?"}]}}`)
+	if err := runtime.HandleNotification(t.Context(), codexapp.Message{Method: "item/completed", Params: raw}); err != nil {
+		t.Fatal(err)
+	}
+	items, _, err := store.ListDisplayItems(t.Context(), id)
+	if err != nil || len(items) != 2 || items[1].Interaction == nil || items[0].FollowupQuestionID != items[1].Interaction.ID || items[1].Interaction.ItemID != items[0].ID {
+		t.Fatalf("expected interactive card, got %+v, err=%v", items, err)
+	}
+	q := items[1].Interaction
+	if q.IsBlocking || len(q.Questions) != 2 || q.Questions[0].Options[1].Label != "Mountain" || !q.Questions[0].IsOther {
+		t.Fatalf("question = %+v", q)
+	}
+	var notification codexItemNotification
+	if err := json.Unmarshal(raw, &notification); err != nil {
+		t.Fatal(err)
+	}
+	source := sessionlog.StoredItemSource{Store: store}
+	turns := []Turn{{ID: "turn-1", Status: "completed", Items: []ThreadItem{notification.Item}}}
+	for range 2 {
+		if err := SyncCompletedTurns(t.Context(), source, id, time.Unix(100, 0), turns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _, err = store.ListDisplayItems(t.Context(), id)
+	if err != nil || len(items) != 4 {
+		t.Fatalf("duplicate after sync: %+v err=%v", items, err)
+	}
+	hits, err := store.SearchDisplayMessages(t.Context(), id, "Why?", 10)
+	if err != nil || len(hits.Hits) != 1 || hits.Hits[0].ID != "call-question" {
+		t.Fatalf("search hits: %+v, err=%v", hits, err)
+	}
+	page, _, err := store.ReadDisplayPage(t.Context(), id, zotigosession.DisplayPageQuery{Limit: 10, ContentKind: zotigosession.DisplayContentConversation}, zotigosession.DisplayTimeWindow{})
+	if err != nil || len(page.Items) != 1 || page.Items[0].Content[0].Text != notification.Item.Text+"\nWhy?" {
+		t.Fatalf("dialogue page: %+v, err=%v", page, err)
+	}
+}
+
+func TestSyncKeepsHistoricalQuestionAsText(t *testing.T) {
+	const id = "session-legacy-question"
+	_, store := newCodexInputTestRuntime(t, id, &codexWorkerRPC{})
+	source := sessionlog.StoredItemSource{Store: store}
+	_, err := source.AppendItem(t.Context(), id, zotigosession.DisplayItem{ID: "old-call", Type: zotigosession.DisplayItemAssistantMessage})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turns := []Turn{{ID: "turn-1", Status: "completed", Items: []ThreadItem{
+		{ID: "old-call", Type: "agentMessage", Text: "Where?", Questions: []asyncUserInputQuestion{{Title: "Where?"}}},
+		{ID: "imported-call", Type: "agentMessage", Questions: []asyncUserInputQuestion{{Title: "When?"}}},
+	}}}
+	for range 2 {
+		if err := SyncCompletedTurns(t.Context(), source, id, time.Unix(100, 0), turns); err != nil {
+			t.Fatal(err)
+		}
+	}
+	items, _, err := source.LoadItems(t.Context(), id)
+	if err != nil || len(items) != 4 || items[0].Type != zotigosession.DisplayItemAssistantMessage || items[2].FollowupQuestionID == "" || items[2].Content[0].Text != "When?" {
+		t.Fatalf("history=%+v err=%v", items, err)
+	}
 }

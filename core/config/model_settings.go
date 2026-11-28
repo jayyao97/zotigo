@@ -18,6 +18,7 @@ import (
 )
 
 var ErrModelSettingsConflict = errors.New("configuration changed; reload before saving")
+var ErrSearchAPIKeyRequired = errors.New("search requires an API key")
 
 // ModelSettingsProfile is a redacted projection of fields editable by clients.
 // Provider-specific fields not represented here remain untouched in YAML.
@@ -39,7 +40,20 @@ type ModelSettingsDefaults struct {
 	MaxOutputTokens int64 `json:"max_output_tokens"`
 }
 
+type SearchSettings struct {
+	Provider       string `json:"provider"`
+	HasTavilyKey   bool   `json:"has_tavily_key"`
+	HasDeepSeekKey bool   `json:"has_deepseek_key"`
+}
+
+type SearchSettingsChange struct {
+	Provider    string  `json:"provider"`
+	TavilyKey   *string `json:"tavily_key,omitempty"`
+	DeepSeekKey *string `json:"deepseek_key,omitempty"`
+}
+
 type ModelSettings struct {
+	Search         SearchSettings         `json:"web_search"`
 	Defaults       ModelSettingsDefaults  `json:"defaults"`
 	Revision       string                 `json:"revision"`
 	DefaultProfile string                 `json:"default_profile"`
@@ -47,10 +61,11 @@ type ModelSettings struct {
 }
 
 type ModelSettingsChange struct {
-	Revision string               `json:"revision"`
-	Action   string               `json:"action"` // save, delete, default
-	Profile  ModelSettingsProfile `json:"profile"`
-	APIKey   *string              `json:"api_key,omitempty"` // omitted: keep; empty: explicitly clear
+	Search   *SearchSettingsChange `json:"web_search,omitempty"`
+	Revision string                `json:"revision"`
+	Action   string                `json:"action"` // save, delete, default
+	Profile  ModelSettingsProfile  `json:"profile"`
+	APIKey   *string               `json:"api_key,omitempty"` // omitted: keep; empty: explicitly clear
 }
 
 func modelSettingsRevision(data []byte) string {
@@ -179,6 +194,24 @@ func validateModelEdit(before, after []byte, change ModelSettingsChange) error {
 		return errors.New("this edit would break a YAML anchor reference; edit the shared definition in the configuration file")
 	}
 	strip := func(doc map[string]any) {
+		if change.Action == "web_search" {
+			tools, _ := doc["tools"].(map[string]any)
+			web, _ := tools["web"].(map[string]any)
+			delete(web, "search_provider")
+			if change.Search.TavilyKey != nil {
+				delete(web, "tavily_api_key")
+			}
+			if change.Search.DeepSeekKey != nil {
+				delete(web, "deepseek_api_key")
+			}
+			if len(web) == 0 {
+				delete(tools, "web")
+			}
+			if len(tools) == 0 {
+				delete(doc, "tools")
+			}
+			return
+		}
 		delete(doc, "default_profile")
 		if profiles, ok := doc["profiles"].(map[string]any); ok {
 			switch change.Action {
@@ -229,7 +262,7 @@ func projectModelSettings(document *yaml.Node, data []byte) (ModelSettings, erro
 	if err := document.Decode(&cfg); err != nil {
 		return ModelSettings{}, errors.New("invalid model configuration")
 	}
-	out := ModelSettings{Defaults: ModelSettingsDefaults{ContextWindow: DefaultContextWindow, MaxOutputTokens: DefaultMaxOutputTokens}, Revision: modelSettingsRevision(data), DefaultProfile: cfg.DefaultProfile, Profiles: []ModelSettingsProfile{}}
+	out := ModelSettings{Search: SearchSettings{Provider: cfg.Tools.Web.SearchProvider, HasTavilyKey: cfg.Tools.Web.TavilyAPIKey != "", HasDeepSeekKey: cfg.Tools.Web.DeepSeekAPIKey != ""}, Defaults: ModelSettingsDefaults{ContextWindow: DefaultContextWindow, MaxOutputTokens: DefaultMaxOutputTokens}, Revision: modelSettingsRevision(data), DefaultProfile: cfg.DefaultProfile, Profiles: []ModelSettingsProfile{}}
 	for name, p := range cfg.Profiles {
 		mode, _ := p.Params["mode"].(string)
 		fallback := p
@@ -358,16 +391,66 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 	if change.Revision == "" || change.Revision != modelSettingsRevision(data) {
 		return ModelSettings{}, ErrModelSettingsConflict
 	}
-	root := doc.Content[0]
-	profiles, err := localModelMapping(root, "profiles")
-	if err != nil {
+	if err := expandGeneratedAnchors(doc); err != nil {
 		return ModelSettings{}, err
+	}
+	root := doc.Content[0]
+	var profiles *yaml.Node
+	if change.Action != "web_search" {
+		profiles, err = localModelMapping(root, "profiles")
+		if err != nil {
+			return ModelSettings{}, err
+		}
 	}
 	name := change.Profile.Name
 	var cfg Config
 	_ = doc.Decode(&cfg)
 	_, exists := cfg.Profiles[name]
 	switch change.Action {
+	case "web_search":
+		search := change.Search
+		if search == nil || (search.Provider != "" && search.Provider != "tavily" && search.Provider != "deepseek") {
+			return ModelSettings{}, errors.New("invalid web search provider")
+		}
+		tools, err := localModelMapping(root, "tools")
+		if err != nil {
+			return ModelSettings{}, err
+		}
+		web, err := localModelMapping(tools, "web")
+		if err != nil {
+			return ModelSettings{}, err
+		}
+		if err = setModelNode(web, "search_provider", search.Provider); err != nil {
+			return ModelSettings{}, err
+		}
+		for _, key := range []struct {
+			name  string
+			value *string
+		}{{"tavily_api_key", search.TavilyKey}, {"deepseek_api_key", search.DeepSeekKey}} {
+			if key.value == nil {
+				continue
+			}
+			if len(*key.value) > 8192 || strings.ContainsAny(*key.value, "\r\n") {
+				return ModelSettings{}, errors.New("invalid search API key")
+			}
+			value := strings.TrimSpace(*key.value)
+			if value == "" && *key.value != "" {
+				continue
+			}
+			if err = setModelNode(web, key.name, value); err != nil {
+				return ModelSettings{}, err
+			}
+		}
+		var effective WebToolsConfig
+		if err := web.Decode(&effective); err != nil {
+			return ModelSettings{}, errors.New("invalid web search configuration")
+		}
+		if effective.SearchProvider == "deepseek" && strings.TrimSpace(effective.DeepSeekAPIKey) == "" && strings.TrimSpace(os.Getenv("DEEPSEEK_API_KEY")) == "" {
+			return ModelSettings{}, fmt.Errorf("deepseek %w or DEEPSEEK_API_KEY", ErrSearchAPIKeyRequired)
+		}
+		if effective.SearchProvider == "tavily" && strings.TrimSpace(effective.TavilyAPIKey) == "" && strings.TrimSpace(os.Getenv("TAVILY_API_KEY")) == "" {
+			return ModelSettings{}, fmt.Errorf("tavily %w or TAVILY_API_KEY", ErrSearchAPIKeyRequired)
+		}
 	case "save", "create":
 		if change.Action == "create" && exists {
 			return ModelSettings{}, errors.New("profile already exists; choose another name")
@@ -449,9 +532,9 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 			return ModelSettings{}, err
 		}
 	default:
-		return ModelSettings{}, errors.New("action must be create, save, delete or default")
+		return ModelSettings{}, errors.New("unknown configuration action")
 	}
-	updated, err := yaml.Marshal(doc)
+	updated, err := encodeConfigYAML(doc)
 	if err != nil {
 		return ModelSettings{}, err
 	}

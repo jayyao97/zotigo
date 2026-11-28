@@ -186,7 +186,7 @@ func TestNavigationMigrationPreservesExistingSessionPins(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Recreate a pre-SQL-migration catalog, including its absent journal/marker.
-	if _, err := store.db.Exec("DROP TABLE catalog_extensions; DROP TABLE repository_preparations; DROP TABLE source_repository_migrations; ALTER TABLE workspace_checkouts DROP COLUMN used_cached_base; ALTER TABLE workspace_checkouts DROP COLUMN base_synced_at; DROP TABLE source_repositories; DROP TABLE repositories; DROP TABLE catalog_migrations; DROP TABLE navigation_migration; DROP TABLE sessions; DROP TABLE session_images; DROP TABLE metadata; DROP TABLE display_items; DROP TABLE display_index_files; DROP TABLE session_input_queue; DROP TABLE session_read_state; DROP TABLE completion_triggers; DROP TABLE turn_usage; DROP TABLE turn_usage_buckets"); err != nil {
+	if _, err := store.db.Exec("DROP TRIGGER record_deleted_session_workspace; ALTER TABLE session_organization DROP COLUMN deleted_workspace_id; DROP TABLE catalog_extensions; DROP TABLE repository_preparations; DROP TABLE source_repository_migrations; ALTER TABLE workspace_checkouts DROP COLUMN used_cached_base; ALTER TABLE workspace_checkouts DROP COLUMN base_synced_at; DROP TABLE source_repositories; DROP TABLE repositories; DROP TABLE catalog_migrations; DROP TABLE navigation_migration; DROP TABLE sessions; DROP TABLE session_images; DROP TABLE metadata; DROP TABLE display_items; DROP TABLE display_index_files; DROP TABLE session_input_queue; DROP TABLE session_read_state; DROP TABLE completion_triggers; DROP TABLE turn_usage; DROP TABLE turn_usage_buckets"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.migrate(ctx); err != nil {

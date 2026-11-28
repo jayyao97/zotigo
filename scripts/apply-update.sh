@@ -6,10 +6,10 @@ root="$prefix/$component"
 . "$(dirname "$0")/install-common.sh"
 platform=$(uname -s)
 service=yes
-stage=$(mktemp -d "$prefix/updates/$component/apply.XXXXXX")
 switched=no stopped=no
 desktop_unit=
 mkdir "$root/install.lock" || fail 'Another installation is running.'
+stage=$(mktemp -d "$prefix/updates/$component/apply.XXXXXX") || { rmdir "$root/install.lock"; exit 1; }
 printf '%s\n' "$stage" > "$root/install.lock/update-owner"
 printf '%s\n' "$stage" > "$prefix/updates/$component/journal.new"
 mv "$prefix/updates/$component/journal.new" "$prefix/updates/$component/journal"
@@ -17,6 +17,7 @@ check_host=
 cleanup() {
   code=$?
   trap - EXIT
+  if [ "$code" != 0 ]; then touch "$stage/activation-failed" || :; fi
   if [ ! -e "$root/current" ] && [ ! -L "$root/current" ] && { [ -e "$stage/old-current" ] || [ -L "$stage/old-current" ]; }; then
     mv "$stage/old-current" "$root/current" || exit 1
   fi
@@ -49,6 +50,10 @@ cleanup() {
   fi
   if [ "$component" = daemon ]; then rm -f "$prefix/updates/daemon/draining"; fi
   rm -f "$root/install.lock/update-owner" "$prefix/updates/$component/journal"
+  if [ "$code" = 0 ]; then
+    rm -rf "$stage"
+    prune_install_history || printf 'Could not clean up all installation history.\n' >&2
+  fi
   rmdir "$root/install.lock"
   # Preserve failed binaries and diagnostics for recovery; no user data lives here.
   exit "$code"

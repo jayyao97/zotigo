@@ -101,6 +101,14 @@ INSERT INTO display_index_files VALUES('s',96,1234,96);`)
 	for _, table := range sessionTables {
 		got := tableRows(t, db, table)
 		want := before[table]
+		if table == "sessions" {
+			for i, row := range got {
+				if len(row) != 17 || row[16] != int64(0) {
+					t.Fatalf("legacy Codex dialogue has no verified activity time: %v", row)
+				}
+				got[i] = row[:16]
+			}
+		}
 		if table == "display_items" {
 			for i, row := range got {
 				if len(row) != 9 || row[6] != "unknown" || row[7] != "" || row[8] != "" {

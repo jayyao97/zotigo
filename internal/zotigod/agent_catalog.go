@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"slices"
 
 	"github.com/jayyao97/zotigo/internal/channels"
 	"github.com/jayyao97/zotigo/internal/codexapp"
@@ -94,22 +95,32 @@ func (h *handler) codexCapabilities(ctx context.Context) (zotigoruntime.Capabili
 }
 
 func (h *handler) validateCodexSettings(ctx context.Context, modelID string, reasoningEffort string) error {
+	_, _, err := h.resolveCodexSettings(ctx, modelID, reasoningEffort, false)
+	return err
+}
+
+func (h *handler) resolveCodexSettings(ctx context.Context, modelID, effort string, defaults bool) (string, string, error) {
 	capabilities, err := h.codexCapabilities(ctx)
 	if err != nil {
-		return channels.NewChatError(err, "codex is unavailable")
+		return "", "", channels.NewChatError(err, "codex is unavailable")
 	}
 	for _, model := range capabilities.Models {
-		if model.ID != modelID {
+		useDefault := defaults && modelID == "" && model.Default
+		if model.ID != modelID && !useDefault {
 			continue
 		}
-		for _, effort := range model.SupportedReasoningEfforts {
-			if effort == reasoningEffort {
-				return nil
+		if defaults && effort == "" && len(model.SupportedReasoningEfforts) > 0 {
+			effort = "medium"
+			if !slices.Contains(model.SupportedReasoningEfforts, effort) {
+				effort = model.SupportedReasoningEfforts[0]
 			}
 		}
-		return channels.NewChatError(nil, "reasoning_effort %q is not supported by model %q", reasoningEffort, modelID)
+		if slices.Contains(model.SupportedReasoningEfforts, effort) {
+			return model.ID, effort, nil
+		}
+		return "", "", channels.NewChatError(nil, "reasoning_effort %q is not supported by model %q", effort, model.ID)
 	}
-	return channels.NewChatError(nil, "unknown codex model %q", modelID)
+	return "", "", channels.NewChatError(nil, "unknown codex model %q", modelID)
 }
 
 func codexCatalog(capabilities zotigoruntime.Capabilities) agentCatalog {

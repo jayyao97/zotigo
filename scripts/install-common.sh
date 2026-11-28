@@ -17,17 +17,54 @@ install_init() {
   mkdir "$root/install.lock" 2>/dev/null || fail "Another $component installation holds $root/install.lock; remove it only if that installer is no longer running."
   stage=$(mktemp -d "$root/releases/build.XXXXXX")
   if [ "${ZOTIGO_PREPARE_UPDATE:-}" = 1 ]; then printf 'prepare\n' > "$root/install.lock/update-owner"; fi
-  trap 'install_cleanup' EXIT
+  trap 'install_cleanup $?' EXIT
   trap 'exit 130' INT
   trap 'exit 143' TERM
 }
 
+# Called under the component's install.lock after successful verification.
+prune_install_history() (
+  [ ! -L "$root/releases" ] || return 0
+  updates="$prefix/updates/$component"
+  [ ! -e "$updates/journal" ] && [ ! -L "$updates/journal" ] || return 0
+  if [ -L "$root/current" ]; then
+    active="$root/current"
+  elif [ -f "$root/current/RELEASE" ]; then
+    active=$(cat "$root/current/RELEASE") || return 1
+  else
+    return 0
+  fi
+  [ -d "$active" ] || return 0
+  if [ -L "$root/previous" ] && [ ! -d "$root/previous" ]; then return 0; fi
+  for dir in "$root/releases/"*; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] && [ -f "$dir/INSTALLATION" ] || continue
+    [ "$dir" -ef "$active" ] || [ "$dir" -ef "$root/previous" ] || rm -rf "$dir" || return 1
+  done
+  [ ! -L "$prefix/updates" ] && [ ! -L "$updates" ] || return 0
+  for dir in "$updates"/apply.??????; do
+    [ -d "$dir" ] && [ ! -L "$dir" ] || continue
+    [ ! -e "$dir/activation-failed" ] && [ ! -e "$dir/failed-current" ] && [ ! -L "$dir/failed-current" ] || continue
+    # Legacy symlink activations left the same links after rollback. Keep
+    # their diagnostics when the outcome cannot be established.
+    if [ -L "$dir/old-current" ] && [ -e "$dir/stop-check" ]; then continue; fi
+    # Older successful activations retained the previous installation here.
+    if [ -L "$dir/old-current" ] || [ -f "$dir/old-current/INSTALLATION" ]; then
+      rm -rf "$dir" || return 1
+    fi
+  done
+)
+
 install_cleanup() {
+  # Older Desktop/Web installers invoke this trap without an argument.
+  install_status=${1:-$?}
   # Restore the active directory if publication was interrupted between renames.
   if [ -e "$stage/old-current" ] || [ -L "$stage/old-current" ]; then
     if [ ! -e "$root/current" ] && [ ! -L "$root/current" ]; then
       mv "$stage/old-current" "$root/current" || return 1
     fi
+  fi
+  if [ "$install_status" = 0 ] && [ "${ZOTIGO_PREPARE_UPDATE:-}" != 1 ]; then
+    prune_install_history || printf 'Could not clean up all installation history.\n' >&2
   fi
   rm -rf "$stage"
   if [ "${ZOTIGO_PREPARE_UPDATE:-}" = 1 ]; then rm -f "$root/install.lock/update-owner"; fi

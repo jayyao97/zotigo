@@ -130,28 +130,34 @@ type codexApprovalRequestParams struct {
 	Permissions            json.RawMessage   `json:"permissions"`
 }
 
+type asyncUserInputQuestion struct {
+	Title   string   `json:"title"`
+	Options []string `json:"options"`
+}
+
 type ThreadItem struct {
-	ID               string          `json:"id"`
-	ClientID         *string         `json:"clientId,omitempty"`
-	Type             string          `json:"type"`
-	Text             string          `json:"text,omitempty"`
-	Summary          []string        `json:"summary,omitempty"`
-	Content          any             `json:"content,omitempty"`
-	Command          string          `json:"command,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	CommandActions   []CommandAction `json:"commandActions,omitempty"`
-	AggregatedOutput *string         `json:"aggregatedOutput,omitempty"`
-	ExitCode         *int            `json:"exitCode,omitempty"`
-	DurationMS       *int64          `json:"durationMs,omitempty"`
-	Changes          any             `json:"changes,omitempty"`
-	Status           string          `json:"status,omitempty"`
-	Server           string          `json:"server,omitempty"`
-	Namespace        *string         `json:"namespace,omitempty"`
-	Tool             string          `json:"tool,omitempty"`
-	Arguments        any             `json:"arguments,omitempty"`
-	Result           any             `json:"result,omitempty"`
-	RevisedPrompt    *string         `json:"revisedPrompt,omitempty"`
-	SavedPath        *string         `json:"savedPath,omitempty"`
+	Questions        []asyncUserInputQuestion `json:"questions,omitempty"`
+	ID               string                   `json:"id"`
+	ClientID         *string                  `json:"clientId,omitempty"`
+	Type             string                   `json:"type"`
+	Text             string                   `json:"text,omitempty"`
+	Summary          []string                 `json:"summary,omitempty"`
+	Content          any                      `json:"content,omitempty"`
+	Command          string                   `json:"command,omitempty"`
+	CWD              string                   `json:"cwd,omitempty"`
+	CommandActions   []CommandAction          `json:"commandActions,omitempty"`
+	AggregatedOutput *string                  `json:"aggregatedOutput,omitempty"`
+	ExitCode         *int                     `json:"exitCode,omitempty"`
+	DurationMS       *int64                   `json:"durationMs,omitempty"`
+	Changes          any                      `json:"changes,omitempty"`
+	Status           string                   `json:"status,omitempty"`
+	Server           string                   `json:"server,omitempty"`
+	Namespace        *string                  `json:"namespace,omitempty"`
+	Tool             string                   `json:"tool,omitempty"`
+	Arguments        any                      `json:"arguments,omitempty"`
+	Result           any                      `json:"result,omitempty"`
+	RevisedPrompt    *string                  `json:"revisedPrompt,omitempty"`
+	SavedPath        *string                  `json:"savedPath,omitempty"`
 	Error            *struct {
 		Message string `json:"message"`
 	} `json:"error,omitempty"`

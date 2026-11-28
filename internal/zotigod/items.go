@@ -21,24 +21,25 @@ const (
 )
 
 type itemResponse struct {
-	ContextUsage      *zotigosession.DisplayContextUsage `json:"context_usage,omitempty"`
-	Retry             *protocol.RequestRetry             `json:"retry,omitempty"`
-	BeforeInputID     string                             `json:"before_input_id,omitempty"`
-	ID                string                             `json:"id"`
-	Sequence          uint64                             `json:"sequence"`
-	Type              string                             `json:"type"`
-	Role              string                             `json:"role,omitempty"`
-	Content           []itemContentResponse              `json:"content,omitempty"`
-	Subagent          *itemSubagentEventResponse         `json:"subagent,omitempty"`
-	Turn              *itemTurnResponse                  `json:"turn,omitempty"`
-	Approval          *itemApprovalResponse              `json:"approval,omitempty"`
-	Interaction       *zotigosession.DisplayInteraction  `json:"interaction,omitempty"`
-	Command           *itemCommandResponse               `json:"command,omitempty"`
-	Profile           *itemProfileResponse               `json:"profile,omitempty"`
-	ApprovalPolicy    *itemApprovalPolicyResponse        `json:"approval_policy,omitempty"`
-	ContextCompaction *itemContextCompactionResponse     `json:"context_compaction,omitempty"`
-	Error             string                             `json:"error,omitempty"`
-	CreatedAt         time.Time                          `json:"created_at"`
+	ContextUsage       *zotigosession.DisplayContextUsage `json:"context_usage,omitempty"`
+	Retry              *protocol.RequestRetry             `json:"retry,omitempty"`
+	BeforeInputID      string                             `json:"before_input_id,omitempty"`
+	FollowupQuestionID string                             `json:"followup_question_id,omitempty"`
+	ID                 string                             `json:"id"`
+	Sequence           uint64                             `json:"sequence"`
+	Type               string                             `json:"type"`
+	Role               string                             `json:"role,omitempty"`
+	Content            []itemContentResponse              `json:"content,omitempty"`
+	Subagent           *itemSubagentEventResponse         `json:"subagent,omitempty"`
+	Turn               *itemTurnResponse                  `json:"turn,omitempty"`
+	Approval           *itemApprovalResponse              `json:"approval,omitempty"`
+	Interaction        *zotigosession.DisplayInteraction  `json:"interaction,omitempty"`
+	Command            *itemCommandResponse               `json:"command,omitempty"`
+	Profile            *itemProfileResponse               `json:"profile,omitempty"`
+	ApprovalPolicy     *itemApprovalPolicyResponse        `json:"approval_policy,omitempty"`
+	ContextCompaction  *itemContextCompactionResponse     `json:"context_compaction,omitempty"`
+	Error              string                             `json:"error,omitempty"`
+	CreatedAt          time.Time                          `json:"created_at"`
 }
 
 type itemContentResponse struct {
@@ -236,24 +237,25 @@ func buildItemsResponse(items []zotigosession.DisplayItem, query zotigosession.D
 
 func publicDisplayItem(item zotigosession.DisplayItem) itemResponse {
 	return itemResponse{
-		ContextUsage:      item.ContextUsage,
-		Retry:             item.Retry,
-		BeforeInputID:     item.BeforeInputID,
-		ID:                item.ID,
-		Sequence:          item.Sequence,
-		Type:              string(item.Type),
-		Role:              item.Role,
-		Content:           publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
-		Subagent:          publicDisplaySubagent(item.Subagent),
-		Turn:              publicDisplayTurn(item.Turn),
-		Approval:          publicDisplayApproval(item.Approval),
-		Interaction:       item.Interaction,
-		Command:           publicDisplayCommand(item.Command),
-		Profile:           publicDisplayProfile(item.Profile),
-		ApprovalPolicy:    publicDisplayApprovalPolicy(item.ApprovalPolicy),
-		ContextCompaction: publicDisplayContextCompaction(item.ContextCompaction),
-		Error:             item.Error,
-		CreatedAt:         item.CreatedAt,
+		ContextUsage:       item.ContextUsage,
+		Retry:              item.Retry,
+		BeforeInputID:      item.BeforeInputID,
+		FollowupQuestionID: item.FollowupQuestionID,
+		ID:                 item.ID,
+		Sequence:           item.Sequence,
+		Type:               string(item.Type),
+		Role:               item.Role,
+		Content:            publicDisplayContent(item.Content, displayCommandImagesForContent(item.Command)),
+		Subagent:           publicDisplaySubagent(item.Subagent),
+		Turn:               publicDisplayTurn(item.Turn),
+		Approval:           publicDisplayApproval(item.Approval),
+		Interaction:        item.Interaction,
+		Command:            publicDisplayCommand(item.Command),
+		Profile:            publicDisplayProfile(item.Profile),
+		ApprovalPolicy:     publicDisplayApprovalPolicy(item.ApprovalPolicy),
+		ContextCompaction:  publicDisplayContextCompaction(item.ContextCompaction),
+		Error:              item.Error,
+		CreatedAt:          item.CreatedAt,
 	}
 }
 

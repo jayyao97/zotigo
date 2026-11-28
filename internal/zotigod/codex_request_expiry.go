@@ -33,7 +33,7 @@ func (h *handler) expireDisconnectedCodexRequests(ctx context.Context, sessionID
 			switch item.Type {
 			case zotigosession.DisplayItemInteractionRequest:
 				req := sessionlog.InteractionRequestFromItem(sessionID, item)
-				if req.Requester.Agent == "codex" {
+				if req.Requester.Agent == "codex" && !req.ReplyAsMessage {
 					pendingInteractions[req.ID] = req
 				}
 			case zotigosession.DisplayItemInteractionResponse:

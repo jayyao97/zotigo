@@ -86,13 +86,20 @@ func (h *handler) withDelegatedInput(ctx context.Context, targetID, commandID st
 		return errors.New("delegated operation does not match the target")
 	}
 	validate := func() error {
+		destination := operation.WorkspaceID
+		if operation.Name == "create_session" && operation.Input.WorkspaceID != "" {
+			destination = operation.Input.WorkspaceID
+			if operation.Origin != nil && destination != operation.WorkspaceID {
+				return errors.New("channel workspace changed")
+			}
+		}
 		if forAdmission {
-			ws, release, err := h.lockWorkspaceForUse(ctx, operation.WorkspaceID)
+			spaces, release, err := h.lockSessionWorkspaces(ctx, operation.WorkspaceID, destination)
 			if err != nil {
 				return err
 			}
 			defer release()
-			if ws.Status != workspace.WorkspaceStatusReady {
+			if spaces[destination].Status != workspace.WorkspaceStatusReady || spaces[operation.WorkspaceID].Status != workspace.WorkspaceStatusReady {
 				return errors.New("delegated workspace is not ready")
 			}
 		}
@@ -115,6 +122,7 @@ func (h *handler) withDelegatedInput(ctx context.Context, targetID, commandID st
 		if err := h.authorizeToolTarget(ctx, caller, source.ID, false); err != nil {
 			return err
 		}
+		caller.WorkspaceID = destination
 		if err := h.authorizeToolTarget(ctx, caller, targetID, false); err != nil {
 			return err
 		}

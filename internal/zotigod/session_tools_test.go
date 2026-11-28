@@ -240,6 +240,41 @@ func TestSessionToolsReadAcrossProjects(t *testing.T) {
 		}
 	}
 
+	if err := h.catalog.DeleteWorkspace(ctx, workspace.ID, workspace.Title); err != nil {
+		t.Fatal(err)
+	}
+	// An ordinary ungrouped archive can even share the deleted workspace's
+	// directory. Only the session actually detached by deletion is readable.
+	ungrouped := newSession(workspace.RootPath, "channel-default")
+	if err := h.persistSession(ctx, ungrouped); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.EnsureSessionOrganization(ctx, ungrouped.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.SetSessionArchived(ctx, ungrouped.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	ungroupedArgs, _ := json.Marshal(map[string]string{"session_id": ungrouped.ID})
+	if _, err := invoke("read_session", ungroupedArgs); err == nil {
+		t.Fatal("never-assigned archive readable")
+	}
+	read, err = invoke("read_session", args)
+	if err != nil || !strings.Contains(read, "Other project result") {
+		t.Fatalf("deleted workspace history: %s, %v", read, err)
+	}
+	listed, err = invoke("list_sessions", json.RawMessage(`{"include_archived":true}`))
+	if err != nil || !strings.Contains(listed, target.ID) || strings.Contains(listed, ungrouped.ID) {
+		t.Fatalf("detached archive missing: %s, %v", listed, err)
+	}
+	if err := h.authorizeToolTarget(ctx, caller, target.ID, false); err == nil {
+		t.Fatal("detached archive writable")
+	}
+	caller.Origin = &protocol.RequestContext{Source: "feishu"}
+	caller.CanReadWorkspaceSessions = true
+	if _, err := h.readToolSession(ctx, caller, args); err == nil {
+		t.Fatal("channel owner read detached history")
+	}
 }
 
 func TestSessionToolsRejectDelegatedAndMissingOrigin(t *testing.T) {
@@ -810,5 +845,89 @@ func TestSessionToolsSelfArchivedHistoryScope(t *testing.T) {
 	caller.CanReadWorkspaceSessions = false
 	if _, err := h.readToolSession(ctx, caller, raw); err == nil {
 		t.Fatal("non-owner escaped bound session")
+	}
+}
+
+func TestToolRuntimeAndWorkspaceSelection(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	p, err := h.catalog.CreateProject(ctx, "Other")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err := h.catalog.CreateWorkspace(ctx, p.ID, "Target")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws, err = h.catalog.ProvisionWorkspace(ctx, ws.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(ws.RootPath, "zotigo.yaml"), []byte("default_profile: remote\nprofiles:\n  remote:\n    provider: openai\n    model: remote-model\n    api_key: private-value\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	h.runtimes = newRuntimeRegistry(&fakeCodexRuntime{})
+	args, _ := json.Marshal(map[string]string{"workspace_id": ws.ID})
+	catalog, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, wire.RuntimeToolRequest{Namespace: "zotigo", Name: "list_runtimes", TurnID: caller.TurnID, CallID: "discover", Arguments: args})
+	if err != nil || !strings.Contains(catalog, "remote-model") || strings.Contains(catalog, "private-value") {
+		t.Fatalf("catalog=%s err=%v", catalog, err)
+	}
+	request := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "create_session", TurnID: caller.TurnID, CallID: "create-remote"}
+	input := sessionToolWriteInput{WorkspaceID: ws.ID, Agent: "zotigo", Profile: "remote", InitialMessage: "investigate"}
+	request.Arguments, _ = json.Marshal(input)
+	target := newSession(ws.RootPath, "remote")
+	target.ID = "sess_tool_" + toolDigest(toolDigest(caller.SessionID, caller.TurnID), toolDigest(request.CallID))
+	target.State = SessionStateRunning
+	h.registry.Add(target)
+	worker := newWorkerConnection(target.ID, "remote-worker", nil, h.workers)
+	h.workers.workers[target.ID] = worker
+	go func() {
+		select {
+		case <-ctx.Done():
+			return
+		case message := <-worker.sendCh:
+			req := message.InputRequest
+			accepted, appendErr := sessionlog.AppendAcceptedInput(ctx, h.items, target.ID, req.Command)
+			if appendErr != nil {
+				worker.resolveInput(wire.InputResult{RequestID: req.RequestID, Error: appendErr.Error()})
+				return
+			}
+			worker.resolveInput(wire.InputResult{RequestID: req.RequestID, Command: &accepted})
+		}
+	}()
+	result, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, request)
+	var receipt struct {
+		SessionID string `json:"session_id"`
+		CommandID string `json:"command_id"`
+		Status    string `json:"status"`
+	}
+	if err != nil || json.Unmarshal([]byte(result), &receipt) != nil || receipt.Status != "accepted" || receipt.SessionID != target.ID {
+		t.Fatalf("create receipt %s err=%v", result, err)
+	}
+	replayArgs, _ := json.Marshal(map[string]string{"command_id": receipt.CommandID})
+	if _, err = h.authorizeDelegatedReplay(ctx, target.ID, replayArgs); err != nil {
+		t.Fatal(err)
+	}
+	child, err := h.store.Get(ctx, target.ID)
+	if err != nil || child.WorkingDirectory != ws.RootPath || child.ProfileName != "remote" || child.Agent != "zotigo" {
+		t.Fatalf("child %+v err=%v", child, err)
+	}
+	org, err := h.catalog.GetSessionOrganization(ctx, child.ID)
+	if err != nil || org.WorkspaceID == nil || *org.WorkspaceID != ws.ID {
+		t.Fatalf("org %+v err=%v", org, err)
+	}
+	op := sessionToolOperation{TargetID: "sess_codex_child", Input: sessionToolWriteInput{Agent: "codex", Model: "gpt-5.6-luna"}}
+	if err = h.createToolSession(ctx, caller, op); err != nil {
+		t.Fatal(err)
+	}
+	codex, err := h.store.Get(ctx, op.TargetID)
+	if err != nil || codex.Agent != "codex" || codex.Model != op.Input.Model || codex.ReasoningEffort != "medium" || !strings.Contains(catalog, codex.Model) {
+		t.Fatalf("codex %+v err=%v", codex, err)
+	}
+	for _, input := range []sessionToolWriteInput{{Agent: "unknown"}, {Profile: "absent"}, {Agent: "codex", Profile: "remote"}, {Model: "x"}} {
+		created := newSession(ws.RootPath, "remote")
+		if err := h.selectToolRuntime(ctx, &created, input, ws.RootPath); err == nil {
+			t.Fatalf("invalid input accepted %+v", input)
+		}
 	}
 }

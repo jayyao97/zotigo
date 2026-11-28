@@ -261,7 +261,7 @@ func (s *Store) updateOrganization(ctx context.Context, sessionID string, assign
 const organizationSelect = `
 	SELECT session_id, project_id, workspace_id, title, pinned_at,
 	       pinned_position, workspace_position, self_archived_at,
-	       workspace_archived_at, revision, created_at, activity_at, updated_at
+	       workspace_archived_at, revision, created_at, activity_at, updated_at, COALESCE(deleted_workspace_id,'')
 	FROM session_organization`
 
 func scanOrganization(row scanner) (SessionOrganization, error) {
@@ -272,7 +272,7 @@ func scanOrganization(row scanner) (SessionOrganization, error) {
 	var createdAt, activityAt, updatedAt int64
 	if err := row.Scan(&organization.SessionID, &projectID, &workspaceID, &title,
 		&pinnedAt, &pinnedPosition, &workspacePosition, &selfArchivedAt,
-		&workspaceArchivedAt, &organization.Revision, &createdAt, &activityAt, &updatedAt); err != nil {
+		&workspaceArchivedAt, &organization.Revision, &createdAt, &activityAt, &updatedAt, &organization.DeletedWorkspaceID); err != nil {
 		return SessionOrganization{}, scanError("session organization", err)
 	}
 	organization.ProjectID = nullStringPointer(projectID)
