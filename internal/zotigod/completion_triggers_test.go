@@ -357,3 +357,352 @@ func testCompletionCallbackDelivery(t *testing.T, callbackText, mode string, act
 		t.Fatalf("durable replay: %v", err)
 	}
 }
+
+func TestWatchCommandCompletion(t *testing.T) {
+	ctx := t.Context()
+	h, caller := newSessionToolFixture(t)
+	target := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.AssignSession(ctx, target.ID, caller.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	appendItem := func(item session.DisplayItem) {
+		t.Helper()
+		if _, err := h.store.AppendDisplayItem(ctx, target.ID, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	begin := func(command, turn string) {
+		appendItem(session.DisplayItem{Type: session.DisplayItemUserMessage, ID: command, Command: &session.DisplayCommand{Type: wire.CommandMessage}})
+		appendItem(session.DisplayItem{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: turn}})
+	}
+	end := func(turn string, kind session.DisplayItemType) {
+		appendItem(session.DisplayItem{Type: kind, Turn: &session.DisplayTurn{ID: turn}})
+	}
+	begin("first", "a")
+	reg := func(call, cmd string) string {
+		t.Helper()
+		args, _ := json.Marshal(map[string]string{"watch_session_id": target.ID, "watch_command_id": cmd, "title": "test", "on_fire": "report status"})
+		out, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, wire.RuntimeToolRequest{Namespace: "zotigo", Name: "create_completion_trigger", TurnID: caller.TurnID, CallID: call, Arguments: args})
+		if err != nil {
+			t.Fatal(err)
+		}
+		var receipt map[string]any
+		if err = json.Unmarshal([]byte(out), &receipt); err != nil || receipt["callback_token"] != nil || receipt["callback_url"] != nil || receipt["watch_session_id"] != target.ID {
+			t.Fatalf("receipt=%v err=%v", receipt, err)
+		}
+		return receipt["trigger_id"].(string)
+	}
+	// The second command has not reached the log yet. Finishing the first must not wake this watch.
+	const second = "session_tool:queued:second"
+	payload, _ := json.Marshal(wire.Command{ID: second, CreatedAt: time.Now(), Message: &wire.MessageCommandPayload{Text: "next"}})
+	if err := h.catalog.QueueInput(ctx, target.ID, second, payload); err != nil {
+		t.Fatal(err)
+	}
+	id := reg("before", second)
+	implicit := reg("before-implicit", "")
+	end("a", session.DisplayItemTurnCompleted)
+	h.reconcileSessionWatches(ctx, target.ID)
+	for _, key := range []string{id, implicit} {
+		if got, err := h.catalog.CompletionTrigger(ctx, key); err != nil || got.State != "pending" || got.BoundCommandID != second {
+			t.Fatalf("queued watch: %+v %v", got, err)
+		}
+	}
+	if _, err := h.catalog.ClaimQueuedInputs(ctx, target.ID, "batch", false); err != nil {
+		t.Fatal(err)
+	}
+	begin(second, "b")
+	if err := h.catalog.FinishQueuedBatch(ctx, target.ID, second, true); err != nil {
+		t.Fatal(err)
+	}
+	appendItem(session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "b"}, Subagent: &session.DisplaySubagent{}})
+	h.reconcileSessionWatches(ctx, target.ID)
+	if got, _ := h.catalog.CompletionTrigger(ctx, id); got.State != "pending" {
+		t.Fatal("subagent fired root watch")
+	}
+	end("b", session.DisplayItemTurnFailed)
+	late := reg("after", "")
+	h.reconcileSessionWatches(ctx, "")
+	for _, key := range []string{id, implicit, late} {
+		got, err := h.catalog.CompletionTrigger(ctx, key)
+		if err != nil || got.State != "fired" || got.BoundCommandID != second || !strings.Contains(got.CallbackText, "turn b: turn_failed") {
+			t.Fatalf("receipt=%+v err=%v", got, err)
+		}
+		if _, err = h.catalog.AuthenticateCompletionTrigger(ctx, key, ""); err == nil {
+			t.Fatal("internal watch accepted external callback")
+		}
+	}
+	end("b", session.DisplayItemTurnCompleted) // A later correction cannot redeliver a fired watch.
+	begin("third", "c")
+	if replay := reg("after", ""); replay != late {
+		t.Fatal("replay changed trigger")
+	}
+	h.reconcileSessionWatches(ctx, target.ID)
+	if got, err := h.catalog.CompletionTrigger(ctx, late); err != nil || !strings.Contains(got.CallbackText, "turn b: turn_failed") {
+		t.Fatalf("correction changed fired watch: %+v, %v", got, err)
+	}
+	rows, err := h.catalog.QueuedInputs(ctx, caller.SessionID)
+	if err != nil || len(rows) != 3 {
+		t.Fatalf("duplicate delivery: rows=%d err=%v", len(rows), err)
+	}
+}
+
+func TestWatchBindsAcceptedSteeringBeforeItIsApplied(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx, id := t.Context(), caller.SessionID
+	queued := wire.Command{ID: "queued", Type: wire.CommandMessage, CreatedAt: time.Now().UTC(), Message: &wire.MessageCommandPayload{Text: "next turn"}}
+	payload, err := json.Marshal(queued)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := h.catalog.QueueInput(ctx, id, queued.ID, payload); err != nil {
+		t.Fatal(err)
+	}
+	steer := wire.Command{ID: "latest-steer", Type: wire.CommandSteering, CreatedAt: queued.CreatedAt.Add(time.Millisecond), Steering: &wire.SteeringCommandPayload{TurnID: caller.TurnID, Text: "change course"}}
+	if _, err := sessionlog.AppendAcceptedInput(ctx, h.items, id, steer); err != nil {
+		t.Fatal(err)
+	}
+	bound, err := h.submittedWatchCommand(ctx, id, false)
+	if err != nil || bound != steer.ID {
+		t.Fatalf("latest accepted input = %q, want %q: %v", bound, steer.ID, err)
+	}
+	interrupted := session.DisplayItem{Type: session.DisplayItemTurnInterrupted, Turn: &session.DisplayTurn{ID: caller.TurnID}}
+	if _, err := h.store.AppendDisplayItem(ctx, id, interrupted); err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := h.watchTerminal(ctx, id, bound)
+	if err != nil || terminal == nil || terminal.Turn.ID != caller.TurnID || terminal.Type != interrupted.Type {
+		t.Fatalf("steered turn terminal = %+v: %v", terminal, err)
+	}
+}
+
+func TestWatchQueuedMessageAfterBatchAdmission(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx, id := t.Context(), caller.SessionID
+	at := time.Now().Add(time.Second)
+	for _, row := range []string{"earlier", "latest"} {
+		command := wire.Command{ID: row, CreatedAt: at, Message: &wire.MessageCommandPayload{Text: row}}
+		payload, err := json.Marshal(command)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := h.catalog.QueueInput(ctx, id, row, payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if latest, err := h.submittedWatchCommand(ctx, id, false); err != nil || latest != "latest" {
+		t.Fatalf("latest queued input = %q, %v", latest, err)
+	}
+	rows, err := h.catalog.ClaimQueuedInputs(ctx, id, "queue_batch", false)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("claim = %v, %v", rows, err)
+	}
+	appendItem := func(item session.DisplayItem) {
+		t.Helper()
+		if _, err := h.store.AppendDisplayItem(ctx, id, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendItem(session.DisplayItem{ID: "direct", Type: session.DisplayItemUserMessage, CreatedAt: at.Add(time.Second), Command: &session.DisplayCommand{Type: wire.CommandMessage}})
+	appendItem(session.DisplayItem{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "direct-turn"}})
+	appendItem(session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "direct-turn"}})
+	appendItem(session.DisplayItem{ID: "queue_batch", Type: session.DisplayItemUserMessage, CreatedAt: at.Add(2 * time.Second), Command: &session.DisplayCommand{Type: wire.CommandMessage}})
+	appendItem(session.DisplayItem{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "batched-turn"}})
+	appendItem(session.DisplayItem{Type: session.DisplayItemTurnInterrupted, Turn: &session.DisplayTurn{ID: "batched-turn"}})
+	if err := h.catalog.FinishQueuedBatch(ctx, id, "queue_batch", true); err != nil {
+		t.Fatal(err)
+	}
+	if latest, err := h.submittedWatchCommand(ctx, id, false); err != nil || latest != "direct" {
+		t.Fatalf("later direct submission = %q, %v", latest, err)
+	}
+	terminal, err := h.watchTerminal(ctx, id, "latest")
+	if err != nil || terminal == nil || terminal.Turn.ID != "batched-turn" {
+		t.Fatalf("queued submission terminal = %+v, %v", terminal, err)
+	}
+}
+
+func TestImportedCodexSessionWatch(t *testing.T) {
+	for _, mixed := range []bool{false, true} {
+		h, caller := newSessionToolFixture(t)
+		ctx := t.Context()
+		id := caller.SessionID
+		appendItem := func(item session.DisplayItem) {
+			t.Helper()
+			if _, err := h.store.AppendDisplayItem(ctx, id, item); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if !mixed {
+			target := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+			if err := h.persistSession(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+			id = target.ID
+		}
+		appendItem(session.DisplayItem{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "imported"}})
+		appendItem(session.DisplayItem{ID: "imported-user", Type: session.DisplayItemUserMessage, Turn: &session.DisplayTurn{ID: "imported"}})
+		appendItem(session.DisplayItem{Type: session.DisplayItemTurnFailed, Turn: &session.DisplayTurn{ID: "imported"}})
+		cmd, err := h.submittedWatchCommand(ctx, id, false)
+		if err != nil || cmd != "imported-user" {
+			t.Fatalf("mixed=%v latest=%q: %v", mixed, cmd, err)
+		}
+		for _, bound := range []string{cmd, ""} {
+			if mixed && bound == "" {
+				continue
+			} // An initially empty watch binds its first input.
+			got, err := h.watchTerminal(ctx, id, bound)
+			if err != nil || got == nil || got.Turn.ID != "imported" {
+				t.Fatalf("mixed=%v bound=%q terminal=%v: %v", mixed, bound, got, err)
+			}
+		}
+	}
+}
+
+func TestWatchReadsCorrectedCodexTerminal(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	items := []session.DisplayItem{
+		{ID: "original", Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage}},
+		{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: "imported"}},
+		{Type: session.DisplayItemTurnInterrupted, Turn: &session.DisplayTurn{ID: "imported"}},
+	}
+	// Separate the two terminal records across indexed pages.
+	for range 35 {
+		items = append(items, session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "other"}, Subagent: &session.DisplaySubagent{}})
+	}
+	items = append(items,
+		session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "imported"}},
+		session.DisplayItem{ID: "backfilled", Type: session.DisplayItemUserMessage, Turn: &session.DisplayTurn{ID: "imported"}},
+	)
+	for _, item := range items {
+		if _, err := h.store.AppendDisplayItem(ctx, caller.SessionID, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, command := range []string{"original", "backfilled"} {
+		t.Run(command, func(t *testing.T) {
+			terminal, err := h.watchTerminal(ctx, caller.SessionID, command)
+			if err != nil || terminal == nil || terminal.Type != session.DisplayItemTurnCompleted || terminal.Turn.ID != "imported" {
+				t.Fatalf("watch terminal = %+v: %v", terminal, err)
+			}
+		})
+	}
+}
+
+func TestWatchSubmissionTimeWithLateHistory(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	target := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().Add(-time.Hour)
+	appendItem := func(id string, at time.Time) {
+		t.Helper()
+		item := session.DisplayItem{ID: id, Type: session.DisplayItemUserMessage, Turn: &session.DisplayTurn{ID: id}, CreatedAt: at}
+		if _, err := h.store.AppendDisplayItem(ctx, target.ID, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendItem("direct", start.Add(3*time.Minute))
+	for i := 0; i < 33; i++ {
+		appendItem(fmt.Sprintf("import-%d", i), start.Add(time.Minute))
+	}
+	check := func(earliest bool, want string) {
+		t.Helper()
+		got, err := h.submittedWatchCommand(ctx, target.ID, earliest)
+		if err != nil || got != want {
+			t.Fatalf("earliest=%t input=%q, want %q: %v", earliest, got, want, err)
+		}
+	}
+	check(false, "direct")
+	command := wire.Command{ID: "queued", CreatedAt: start.Add(2 * time.Minute), Message: &wire.MessageCommandPayload{Text: "queued"}}
+	data, _ := json.Marshal(command)
+	if err := h.catalog.QueueInput(ctx, target.ID, command.ID, data); err != nil {
+		t.Fatal(err)
+	}
+	check(false, "direct")
+	check(true, "import-0")
+}
+
+func TestWatchCallbackTurnScopedRead(t *testing.T) {
+	h, caller := newSessionToolFixture(t)
+	ctx := t.Context()
+	target := newSession(caller.Stored.WorkingDirectory, caller.Stored.ProfileName)
+	if err := h.persistSession(ctx, target); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.catalog.AssignSession(ctx, target.ID, caller.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	request := wire.RuntimeToolRequest{Namespace: "zotigo", Name: "create_completion_trigger", TurnID: caller.TurnID, CallID: "watch"}
+	request.Arguments, _ = json.Marshal(map[string]string{"watch_session_id": target.ID, "title": "check", "on_fire": "read the result"})
+	raw, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var receipt struct {
+		ID string `json:"trigger_id"`
+	}
+	if err = json.Unmarshal([]byte(raw), &receipt); err != nil {
+		t.Fatal(err)
+	}
+	appendItem := func(id string, item session.DisplayItem) {
+		t.Helper()
+		if _, err := h.store.AppendDisplayItem(ctx, id, item); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendItem(target.ID, session.DisplayItem{ID: "import", Type: session.DisplayItemUserMessage, Turn: &session.DisplayTurn{ID: "watched-turn"}})
+	appendItem(target.ID, session.DisplayItem{Type: session.DisplayItemAssistantMessage, Content: []session.DisplayContentPart{{Type: "text", Text: "verified result"}}})
+	appendItem(target.ID, session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: "watched-turn"}})
+	h.reconcileSessionWatches(ctx, target.ID)
+	trigger, err := h.catalog.CompletionTrigger(ctx, receipt.ID)
+	if err != nil || trigger.State != "fired" {
+		t.Fatalf("trigger=%+v %v", trigger, err)
+	}
+	begin := func(turn string, text string) {
+		appendItem(caller.SessionID, session.DisplayItem{Type: session.DisplayItemTurnCompleted, Turn: &session.DisplayTurn{ID: request.TurnID}})
+		appendItem(caller.SessionID, session.DisplayItem{ID: "completion:" + trigger.ID, Type: session.DisplayItemUserMessage, Command: &session.DisplayCommand{Type: wire.CommandMessage, Text: text, RequestContext: completionOrigin(trigger)}})
+		appendItem(caller.SessionID, session.DisplayItem{Type: session.DisplayItemTurnStarted, Turn: &session.DisplayTurn{ID: turn}})
+		request.TurnID = turn
+	}
+	begin("watch-callback", completionPrompt(trigger.OnFire, trigger.CallbackText))
+	invoke := func(name, targetID string) error {
+		request.Name = name
+		request.Arguments, _ = json.Marshal(map[string]string{"session_id": targetID})
+		body, err := h.executeRuntimeTool(ctx, caller.SessionID, caller.Generation, request)
+		if err == nil && name == "read_session" && !strings.Contains(body, "verified result") {
+			t.Fatalf("missing watched answer: %s", body)
+		}
+		return err
+	}
+	if err = invoke("read_session", target.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err = invoke("read_session", caller.SessionID); err == nil {
+		t.Fatal("read outside watch")
+	}
+	for _, name := range []string{"send_message", "create_completion_trigger", "create_session", "list_sessions", "list_runtimes"} {
+		if err = invoke(name, target.ID); err == nil || !strings.Contains(err.Error(), "delegated tasks") {
+			t.Fatalf("%s crossed callback fence: %v", name, err)
+		}
+	}
+	caller.Stored.PromptConfig.Revision++
+	if err = h.store.Put(ctx, caller.Stored); err != nil {
+		t.Fatal(err)
+	}
+	if err = invoke("read_session", target.ID); err == nil {
+		t.Fatal("read after policy changed")
+	}
+	caller.Stored.PromptConfig.Revision--
+	if err = h.store.Put(ctx, caller.Stored); err != nil {
+		t.Fatal(err)
+	}
+	begin("forged-callback", "a different instruction")
+	if err = invoke("read_session", target.ID); err == nil {
+		t.Fatal("read with mismatched receipt text")
+	}
+}

@@ -38,7 +38,7 @@ func openSessionDiscovery(ctx context.Context, root string) (*sql.DB, error) {
 }
 
 func sessionDiscoveryScope(caller sessionToolCaller, req sessionDiscoveryQuery) (string, []any) {
-	where := `o.session_id > ? AND o.workspace_id IS NOT NULL`
+	where := `o.session_id > ? AND (o.workspace_id IS NOT NULL OR (o.self_archived_at IS NOT NULL AND o.deleted_workspace_id IS NOT NULL))`
 	args := []any{req.AfterID}
 	if !req.IncludeArchived {
 		where += ` AND o.self_archived_at IS NULL AND o.workspace_archived_at IS NULL`
@@ -84,7 +84,7 @@ func sessionDiscoverySQL(where string, args []any, window session.DisplayTimeWin
 	params = append(params, args...)
 	params = append(params, timeArgs...)
 	params = append(params, limit+1)
-	return `SELECT o.session_id, COALESCE(o.title,''), o.workspace_id, COALESCE(o.project_id,''), s.agent, (o.self_archived_at IS NOT NULL OR o.workspace_archived_at IS NOT NULL), ` + matched + discoveryFrom + ` WHERE ` + where + ` ORDER BY o.session_id LIMIT ?`, params
+	return `SELECT o.session_id, COALESCE(o.title,''), COALESCE(o.workspace_id,''), COALESCE(o.project_id,''), s.agent, (o.self_archived_at IS NOT NULL OR o.workspace_archived_at IS NOT NULL), ` + matched + discoveryFrom + ` WHERE ` + where + ` ORDER BY o.session_id LIMIT ?`, params
 }
 
 // A time filter must not silently omit a log whose derived index is pending.

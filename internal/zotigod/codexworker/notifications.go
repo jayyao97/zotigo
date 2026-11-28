@@ -195,7 +195,8 @@ func (r *Runtime) HandleNotification(ctx context.Context, message codexapp.Messa
 			if text == "" {
 				text = r.messages[completed.Item.ID]
 			}
-			return r.persistAgentMessage(completed.Item.ID, text)
+			completed.Item.Text = text
+			return r.persistAgentMessage(completed.TurnID, completed.Item)
 		case "reasoning":
 			text := codexReasoningText(completed.Item)
 			if text == "" {
@@ -366,7 +367,8 @@ func (r *Runtime) matchesActiveItem(threadID, turnID, itemID string) bool {
 	return threadID == r.threadID && turnID == r.activeTurnID && itemID != ""
 }
 
-func (r *Runtime) persistAgentMessage(itemID, text string) error {
+func (r *Runtime) persistAgentMessage(turnID string, message ThreadItem) error {
+	itemID := message.ID
 	delete(r.messages, itemID)
 	for index, id := range r.messageOrder {
 		if id == itemID {
@@ -374,13 +376,33 @@ func (r *Runtime) persistAgentMessage(itemID, text string) error {
 			break
 		}
 	}
+	text := message.questionText()
 	if text == "" {
 		return nil
 	}
-	return r.Append(zotigosession.DisplayItem{
+	prose := zotigosession.DisplayItem{
 		ID: itemID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
 		Content: []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: text}},
-	})
+	}
+	card := message.questionCard(turnID)
+	if card == nil {
+		return r.Append(prose)
+	}
+	prose.Turn = card.Turn
+	prose.FollowupQuestionID = card.Interaction.ID
+	prose.BeforeInputID = r.displayItems[itemID].beforeInputID
+	card.BeforeInputID = prose.BeforeInputID
+	source := sessionlog.StoredItemSource{Store: r.store}
+	items, err := source.AppendItems(context.Background(), r.cfg.SessionID, []zotigosession.DisplayItem{prose, *card})
+	if err != nil {
+		return err
+	}
+	if r.writer != nil {
+		for _, item := range items {
+			r.writer.SendDisplayItem(item)
+		}
+	}
+	return nil
 }
 
 func (r *Runtime) forgetTool(itemID string) {

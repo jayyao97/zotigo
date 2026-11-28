@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 )
 
 var ErrQueueConflict = errors.New("queued input changed or is already being sent")
@@ -19,6 +20,32 @@ type QueuedInput struct {
 	State     string          `json:"state"`
 	BatchID   string          `json:"-"`
 	Revision  int64           `json:"revision"`
+}
+
+// QueuedSubmissionBoundary includes dispatched batches because admission gives
+// a batch a new timestamp. The retained row holds the original submission time.
+func (s *Store) QueuedSubmissionBoundary(ctx context.Context, sessionID string, earliest bool) (string, time.Time, error) {
+	order := " DESC"
+	if earliest {
+		order = " ASC"
+	}
+	var id, stamp string
+	err := s.db.QueryRowContext(ctx, `SELECT id,coalesce(json_extract(payload,'$.created_at'),'') FROM session_input_queue
+		WHERE session_id=? AND state NOT IN ('cancelled','delegated_cancelled','completion_cancelled') ORDER BY sequence`+order+` LIMIT 1`, sessionID).Scan(&id, &stamp)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", time.Time{}, nil
+	}
+	if err != nil || stamp == "" {
+		return id, time.Time{}, err
+	}
+	at, err := time.Parse(time.RFC3339Nano, stamp)
+	return id, at, err
+}
+
+func (s *Store) IsQueuedBatch(ctx context.Context, sessionID, batchID string) (bool, error) {
+	var exists bool
+	err := s.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM session_input_queue WHERE session_id=? AND batch_id=?)`, sessionID, batchID).Scan(&exists)
+	return exists, err
 }
 
 func (s *Store) QueuedInputByID(ctx context.Context, sessionID, id string) (*QueuedInput, error) {

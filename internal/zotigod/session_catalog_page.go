@@ -63,11 +63,11 @@ func (h *handler) handleCatalogSessionPage(w http.ResponseWriter, r *http.Reques
 	}
 	if q.Has("since") {
 		value, err := time.Parse(time.RFC3339Nano, q.Get("since"))
-		if err != nil {
+		if err != nil || !time.Unix(0, value.UnixNano()).Equal(value) {
 			invalid()
 			return
 		}
-		filter.Since = value.UnixMilli()
+		filter.Since = value.UnixNano()
 	}
 	if q.Has("cursor") {
 		raw, err := base64.RawURLEncoding.DecodeString(q.Get("cursor"))
@@ -131,12 +131,7 @@ func (h *handler) handleCatalogSessionPage(w http.ResponseWriter, r *http.Reques
 			if !ok {
 				continue
 			}
-			runtime := sessionFromMetadata(meta, SessionStateOffline, false)
-			if live, ok := h.registry.Get(row.ID); ok {
-				runtime = live
-				runtime.Live = true
-				runtime = withSessionMetadata(runtime, meta)
-			}
+			runtime := h.catalogRuntimeFromMetadata(meta)
 			if store, ok := h.store.(sessionReadStore); ok {
 				state, err := store.SessionReadState(r.Context(), row.ID)
 				if err != nil {

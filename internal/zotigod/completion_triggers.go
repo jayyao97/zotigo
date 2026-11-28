@@ -46,16 +46,16 @@ func completionPrompt(instruction, callbackText string) string {
 
 func (h *handler) createCompletionTrigger(ctx context.Context, caller sessionToolCaller, request wire.RuntimeToolRequest) (any, error) {
 	if caller.Origin != nil || caller.Stored.Capabilities.ChannelToolsVersion != 0 {
-		return nil, errors.New("completion triggers require a Desktop/Web user turn")
+		return nil, errors.New("completion triggers require a Desktop/Web/mobile user turn")
 	}
-	if h.callbackBaseURL == "" {
-		return nil, errors.New("completion callbacks are unavailable in this host")
-	}
+
 	var input struct {
-		Title        string `json:"title"`
-		OnFire       string `json:"on_fire"`
-		TTL          int    `json:"expires_in_seconds"`
-		DeliveryMode string `json:"delivery_mode"`
+		WatchSessionID string `json:"watch_session_id"`
+		WatchCommandID string `json:"watch_command_id"`
+		Title          string `json:"title"`
+		OnFire         string `json:"on_fire"`
+		TTL            int    `json:"expires_in_seconds"`
+		DeliveryMode   string `json:"delivery_mode"`
 	}
 	if err := decodeSessionToolArguments(request.Arguments, &input); err != nil {
 		return nil, err
@@ -73,14 +73,45 @@ func (h *handler) createCompletionTrigger(ctx context.Context, caller sessionToo
 	if input.Title == "" || len(input.Title) > 200 || input.OnFire == "" || len(input.OnFire) > 8192 || input.TTL < 60 || input.TTL > 604800 {
 		return nil, errors.New("require title (1–200 bytes), on_fire (1–8192 bytes), and expiry between 60 and 604800 seconds")
 	}
+	var bound string
+	if input.WatchSessionID != "" {
+		if input.WatchSessionID == caller.SessionID {
+			return nil, errors.New("cannot watch the caller session")
+		}
+		if err := h.authorizeToolTarget(ctx, caller, input.WatchSessionID, true); err != nil {
+			return nil, err
+		}
+		bound = input.WatchCommandID
+		if bound != "" {
+			if err := h.validateWatchCommand(ctx, input.WatchSessionID, bound); err != nil {
+				return nil, err
+			}
+		} else {
+			var err error
+			bound, err = h.submittedWatchCommand(ctx, input.WatchSessionID, false)
+			if err != nil {
+				return nil, err
+			}
+		}
+	} else if input.WatchCommandID != "" {
+		return nil, errors.New("watch_command_id requires watch_session_id")
+	} else if h.callbackBaseURL == "" {
+		return nil, errors.New("completion callbacks are unavailable in this host")
+	}
 	value, token, err := h.catalog.CreateCompletionTrigger(ctx, workspace.CompletionTrigger{
 		ID: "cb_" + toolDigest(caller.SessionID, caller.TurnID, request.CallID), SessionID: caller.SessionID,
 		WorkspaceID: caller.WorkspaceID, Title: input.Title, OnFire: input.OnFire, TTL: input.TTL,
-		DeliveryMode: input.DeliveryMode,
-		Policy:       completionPolicy(caller.Stored), ExpiresAt: time.Now().UTC().Add(time.Duration(input.TTL) * time.Second),
+		DeliveryMode: input.DeliveryMode, WatchSessionID: input.WatchSessionID, WatchCommandID: input.WatchCommandID, BoundCommandID: bound,
+		Policy: completionPolicy(caller.Stored), ExpiresAt: time.Now().UTC().Add(time.Duration(input.TTL) * time.Second),
 	})
 	if err != nil {
 		return nil, err
+	}
+	if value.WatchSessionID != "" {
+		if value.State == "pending" {
+			go h.reconcileSessionWatches(context.Background(), value.WatchSessionID)
+		}
+		return map[string]any{"trigger_id": value.ID, "watch_session_id": value.WatchSessionID, "watch_command_id": value.BoundCommandID, "expires_at": value.ExpiresAt, "state": value.State, "delivery_mode": value.DeliveryMode}, nil
 	}
 	return map[string]any{"trigger_id": value.ID, "callback_url": h.callbackBaseURL + "/completion-triggers/" + value.ID + "/fire", "callback_token": token, "expires_at": value.ExpiresAt, "state": value.State, "delivery_mode": value.DeliveryMode}, nil
 }
@@ -186,32 +217,35 @@ func (h *handler) handleFireCompletionTrigger(w http.ResponseWriter, r *http.Req
 		writeAPIError(w, 410, workspace.ErrTriggerUnavailable.Error())
 		return
 	}
-	if _, err := h.validateCompletionTarget(r.Context(), value); err != nil {
-		writeAPIError(w, 409, err.Error())
-		return
-	}
-	text := completionPrompt(value.OnFire, input.Text)
-	rows, err := h.catalog.QueuedInputs(r.Context(), value.SessionID)
-	if err == nil {
-		err = validateQueueCapacity(rows, text, nil)
-	}
-	if err != nil {
-		writeAPIError(w, 409, err.Error())
-		return
-	}
-	command := wire.Command{ID: "completion:" + value.ID, Type: wire.CommandMessage, CreatedAt: time.Now().UTC(), Message: &wire.MessageCommandPayload{
-		Text: text, RequestContext: completionOrigin(value),
-	}}
-	payload, err := json.Marshal(command)
-	if err == nil {
-		_, err = h.catalog.FireCompletionTrigger(r.Context(), value.ID, input.Text, payload)
-	}
-	if err != nil {
+	if _, err = h.enqueueCompletion(r.Context(), value, input.Text); err != nil {
 		writeAPIError(w, 409, err.Error())
 		return
 	}
 	writeAPIJSON(w, 202, map[string]string{"state": "accepted"})
 	go func() { _ = h.dispatchQueuedInputs(value.SessionID, false, false) }()
+}
+
+// The caller holds the destination session queue lock.
+func (h *handler) enqueueCompletion(ctx context.Context, value workspace.CompletionTrigger, callbackText string) (bool, error) {
+	if _, err := h.validateCompletionTarget(ctx, value); err != nil {
+		return false, err
+	}
+	text := completionPrompt(value.OnFire, callbackText)
+	rows, err := h.catalog.QueuedInputs(ctx, value.SessionID)
+	if err == nil {
+		err = validateQueueCapacity(rows, text, nil)
+	}
+	if err != nil {
+		return false, err
+	}
+	command := wire.Command{ID: "completion:" + value.ID, Type: wire.CommandMessage, CreatedAt: time.Now().UTC(), Message: &wire.MessageCommandPayload{
+		Text: text, RequestContext: completionOrigin(value),
+	}}
+	payload, err := json.Marshal(command)
+	if err != nil {
+		return false, err
+	}
+	return h.catalog.FireCompletionTrigger(ctx, value.ID, callbackText, payload)
 }
 
 func (h *handler) handleCompletionTriggers(w http.ResponseWriter, r *http.Request) {
@@ -240,10 +274,14 @@ func (h *handler) handleCompletionTriggers(w http.ResponseWriter, r *http.Reques
 	}
 	items := make([]map[string]any, 0, len(values))
 	for _, value := range values {
-		items = append(items, map[string]any{
+		item := map[string]any{
 			"id": value.ID, "title": value.Title, "on_fire": value.OnFire,
 			"expires_at": value.ExpiresAt, "state": value.State,
-		})
+		}
+		if value.WatchSessionID != "" {
+			item["watch_session_id"] = value.WatchSessionID
+		}
+		items = append(items, item)
 	}
 	writeAPIJSON(w, 200, map[string]any{"items": items})
 }

@@ -30,6 +30,10 @@ func decodeModelChange(w http.ResponseWriter, r *http.Request) (config.ModelSett
 }
 
 func writeModelSettingsError(w http.ResponseWriter, err error) {
+	if errors.Is(err, config.ErrSearchAPIKeyRequired) {
+		writeAPIErrorCode(w, http.StatusBadRequest, "search_api_key_required", err.Error())
+		return
+	}
 	status := http.StatusBadRequest
 	if errors.Is(err, config.ErrModelSettingsConflict) {
 		status = http.StatusConflict

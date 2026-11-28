@@ -11,7 +11,8 @@ import (
 )
 
 const (
-	interactionKindUserInput  = "user_input"
+	InteractionKindUserInput  = "user_input"
+	FollowupQuestionPrefix    = "codex-question-"
 	InteractionStatusPending  = "pending"
 	InteractionStatusResolved = "resolved"
 	InteractionStatusExpired  = "expired"
@@ -23,7 +24,7 @@ func NewUserInputInteraction(sessionID, turnID, itemID string, requester wire.In
 	req := wire.InteractionRequest{
 		ID: NewID("interaction"), SessionID: strings.TrimSpace(sessionID),
 		TurnID: strings.TrimSpace(turnID), ItemID: strings.TrimSpace(itemID),
-		Kind: interactionKindUserInput, Status: InteractionStatusPending,
+		Kind: InteractionKindUserInput, Status: InteractionStatusPending,
 		Requester: requester, Questions: questions, IsBlocking: blocking,
 		AutoResolveMS: autoResolveMS, CreatedAt: time.Now().UTC(),
 	}
@@ -37,7 +38,7 @@ func validateInteraction(req wire.InteractionRequest) error {
 	if req.SessionID == "" || req.TurnID == "" || req.ID == "" {
 		return fmt.Errorf("%w: id, session_id, and turn_id are required", errInvalidInteraction)
 	}
-	if req.Kind != interactionKindUserInput || len(req.Questions) == 0 {
+	if req.Kind != InteractionKindUserInput || len(req.Questions) == 0 {
 		return fmt.Errorf("%w: user input questions are required", errInvalidInteraction)
 	}
 	seen := make(map[string]struct{}, len(req.Questions))
@@ -128,8 +129,8 @@ func InteractionItem(req wire.InteractionRequest, resolved bool) zotigosession.D
 		Turn: &zotigosession.DisplayTurn{ID: req.TurnID},
 		Interaction: &zotigosession.DisplayInteraction{
 			ID: req.ID, Kind: req.Kind, Status: req.Status, TurnID: req.TurnID, ItemID: req.ItemID,
-			Requester: &zotigosession.DisplayInteractionRequester{Agent: req.Requester.Agent, ThreadID: req.Requester.ThreadID, Name: req.Requester.Name},
-			Questions: questions, Answers: DisplayInteractionAnswers(req), IsBlocking: req.IsBlocking, AutoResolveMS: req.AutoResolveMS,
+			Requester:      &zotigosession.DisplayInteractionRequester{Agent: req.Requester.Agent, ThreadID: req.Requester.ThreadID, Name: req.Requester.Name},
+			ReplyAsMessage: req.ReplyAsMessage, Questions: questions, Answers: DisplayInteractionAnswers(req), IsBlocking: req.IsBlocking, AutoResolveMS: req.AutoResolveMS,
 		},
 	}
 }
@@ -190,5 +191,5 @@ func InteractionRequestFromItem(sessionID string, item zotigosession.DisplayItem
 	if value.Requester != nil {
 		requester = wire.InteractionRequester{Agent: value.Requester.Agent, ThreadID: value.Requester.ThreadID, Name: value.Requester.Name}
 	}
-	return wire.InteractionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, Kind: value.Kind, Status: InteractionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
+	return wire.InteractionRequest{ID: value.ID, SessionID: sessionID, TurnID: value.TurnID, ItemID: value.ItemID, ReplyAsMessage: value.ReplyAsMessage, Kind: value.Kind, Status: InteractionStatusPending, Requester: requester, Questions: questions, IsBlocking: value.IsBlocking, AutoResolveMS: value.AutoResolveMS, CreatedAt: item.CreatedAt}
 }

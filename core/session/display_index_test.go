@@ -40,6 +40,51 @@ func TestDisplayIndexWindowAndPagination(t *testing.T) {
 	}
 }
 
+func TestCodexActivityIgnoresLegacyImportTimeAfterRebuild(t *testing.T) {
+	ctx := t.Context()
+	store, err := NewFileStore(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	start := time.Date(2025, 1, 1, 12, 0, 0, 0, time.UTC)
+	sess := &Session{Metadata: Metadata{ID: "codex", Agent: "codex", WorkingDirectory: t.TempDir(), CreatedAt: start, UpdatedAt: start}}
+	if err := store.Put(ctx, sess); err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"id":"remote-message","sequence":1,"type":"assistant_message","created_at":"2025-11-01T12:00:00Z"}` + "\n")
+	if err := os.WriteFile(store.displayLogPath(sess.ID), legacy, 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := func(want time.Time) {
+		t.Helper()
+		if err := store.InvalidateDisplayIndex(ctx, sess.ID); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.RebuildDisplayIndex(ctx); err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Put(ctx, sess); err != nil {
+			t.Fatal(err)
+		}
+		got, err := store.List(ctx, ListFilter{IDs: []string{sess.ID}})
+		if err != nil || len(got) != 1 || !got[0].UpdatedAt.Equal(want) {
+			t.Fatalf("catalog activity: %+v, want %s, err=%v", got, want, err)
+		}
+	}
+	check(start)
+	next := start.AddDate(0, 1, 0)
+	if _, err := store.AppendDisplayItem(ctx, sess.ID, DisplayItem{Type: DisplayItemSteeringMessage, CreatedAt: next}); err != nil {
+		t.Fatal(err)
+	}
+	check(next)
+	next = next.Add(time.Hour)
+	if _, err := store.AppendDisplayItems(ctx, sess.ID, []DisplayItem{{Type: DisplayItemAssistantMessage, CreatedAt: next}}); err != nil {
+		t.Fatal(err)
+	}
+	check(next)
+}
+
 func TestDisplayIndexBackfillRepairAndBoundedRead(t *testing.T) {
 	ctx := context.Background()
 	store, err := NewFileStore(t.TempDir())

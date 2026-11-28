@@ -18,17 +18,21 @@ var ErrTriggerUnavailable = errors.New("completion trigger expired, cancelled, o
 var ErrTriggerContentConflict = errors.New("completion trigger already accepted different callback text")
 
 type CompletionTrigger struct {
-	ID           string    `json:"id"`
-	SessionID    string    `json:"session_id"`
-	WorkspaceID  string    `json:"workspace_id"`
-	Title        string    `json:"title"`
-	OnFire       string    `json:"on_fire"`
-	Policy       string    `json:"policy"`
-	TTL          int       `json:"ttl"`
-	ExpiresAt    time.Time `json:"expires_at"`
-	State        string    `json:"state"`
-	CallbackText string    `json:"callback_text,omitempty"`
-	DeliveryMode string    `json:"delivery_mode,omitempty"`
+	ID             string    `json:"id"`
+	SessionID      string    `json:"session_id"`
+	WorkspaceID    string    `json:"workspace_id"`
+	Title          string    `json:"title"`
+	OnFire         string    `json:"on_fire"`
+	Policy         string    `json:"policy"`
+	TTL            int       `json:"ttl"`
+	ExpiresAt      time.Time `json:"expires_at"`
+	State          string    `json:"state"`
+	CallbackText   string    `json:"callback_text,omitempty"`
+	DeliveryMode   string    `json:"delivery_mode,omitempty"`
+	WatchSessionID string    `json:"watch_session_id,omitempty"`
+	WatchCommandID string    `json:"watch_command_id,omitempty"`
+	// BoundCommandID pins the latest input at registration when no command was supplied.
+	BoundCommandID string `json:"bound_command_id,omitempty"`
 }
 
 // The signing key remains in the private catalog. Returned per-trigger tokens
@@ -81,10 +85,10 @@ func (s *Store) CreateCompletionTrigger(ctx context.Context, value CompletionTri
 	defer s.operationMu.Unlock()
 	existing, err := s.CompletionTrigger(ctx, value.ID)
 	if err == nil {
-		if existing.SessionID != value.SessionID || existing.WorkspaceID != value.WorkspaceID || existing.Title != value.Title || existing.OnFire != value.OnFire || existing.Policy != value.Policy || existing.TTL != value.TTL || existing.DeliveryMode != value.DeliveryMode {
+		if existing.SessionID != value.SessionID || existing.WorkspaceID != value.WorkspaceID || existing.Title != value.Title || existing.OnFire != value.OnFire || existing.Policy != value.Policy || existing.TTL != value.TTL || existing.DeliveryMode != value.DeliveryMode || existing.WatchSessionID != value.WatchSessionID || existing.WatchCommandID != value.WatchCommandID {
 			return value, "", fmt.Errorf("completion trigger call ID conflict")
 		}
-		token, err := s.completionToken(ctx, value.ID)
+		token, err := s.callbackCredential(ctx, value)
 		return existing, token, err
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
@@ -107,7 +111,7 @@ func (s *Store) CreateCompletionTrigger(ctx context.Context, value CompletionTri
 	if err != nil {
 		return value, "", err
 	}
-	token, err := s.completionToken(ctx, value.ID)
+	token, err := s.callbackCredential(ctx, value)
 	if err != nil {
 		return value, "", err
 	}
@@ -115,9 +119,43 @@ func (s *Store) CreateCompletionTrigger(ctx context.Context, value CompletionTri
 	return value, token, err
 }
 
+func (s *Store) callbackCredential(ctx context.Context, value CompletionTrigger) (string, error) {
+	if value.WatchSessionID != "" {
+		return "", nil
+	}
+	return s.completionToken(ctx, value.ID)
+}
+
+func (s *Store) PendingSessionWatches(ctx context.Context, target string) ([]CompletionTrigger, error) {
+	query := `SELECT payload FROM completion_triggers WHERE state='pending' AND expires_at>? AND json_extract(payload,'$.watch_session_id') IS NOT NULL`
+	args := []any{time.Now().Unix()}
+	if target != "" {
+		query += " AND json_extract(payload,'$.watch_session_id')=?"
+		args = append(args, target)
+	}
+	rows, err := s.db.QueryContext(ctx, query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	var values []CompletionTrigger
+	for rows.Next() {
+		var data string
+		var value CompletionTrigger
+		if err = rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		if err = json.Unmarshal([]byte(data), &value); err != nil {
+			return nil, err
+		}
+		values = append(values, value)
+	}
+	return values, rows.Err()
+}
+
 func (s *Store) AuthenticateCompletionTrigger(ctx context.Context, id, token string) (CompletionTrigger, error) {
 	value, err := s.CompletionTrigger(ctx, id)
-	if err != nil {
+	if err != nil || value.WatchSessionID != "" {
 		return value, ErrTriggerUnavailable
 	}
 	expected, err := s.completionToken(ctx, id)

@@ -33,6 +33,16 @@ func TestModelSettingsAPI(t *testing.T) {
 		t.Fatal(err)
 	}
 	snapshot := response.Data
+	for _, provider := range []string{"deepseek", "tavily"} {
+		t.Setenv(strings.ToUpper(provider)+"_API_KEY", "")
+		change := config.ModelSettingsChange{Revision: snapshot.Revision, Action: "web_search", Search: &config.SearchSettingsChange{Provider: provider}}
+		body, _ := json.Marshal(change)
+		put := httptest.NewRecorder()
+		h.ServeHTTP(put, httptest.NewRequest("PUT", "/config/models", bytes.NewReader(body)))
+		if put.Code != http.StatusBadRequest || !strings.Contains(put.Body.String(), `"code":"search_api_key_required"`) {
+			t.Fatalf("missing %s key: %d %s", provider, put.Code, put.Body)
+		}
+	}
 	key := "test-secret"
 	change := config.ModelSettingsChange{Revision: snapshot.Revision, Action: "create", Profile: config.ModelSettingsProfile{Name: "test", Provider: "openai", Model: "test-model"}, APIKey: &key}
 	body, _ := json.Marshal(change)

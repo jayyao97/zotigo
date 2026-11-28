@@ -206,7 +206,7 @@ func TestSessionForkCodexLatestIgnoresBackfillAndProjectsChild(t *testing.T) {
 	if answers != 1 {
 		t.Fatalf("missing late answer: %#v", items)
 	}
-	if err := codexworker.SyncCompletedTurns(ctx, h.items, child.ID, []codexworker.Turn{turn}); err != nil {
+	if err := codexworker.SyncCompletedTurns(ctx, h.items, child.ID, time.Unix(100, 0), []codexworker.Turn{turn}); err != nil {
 		t.Fatal(err)
 	}
 	after, _, _ := h.items.LoadItems(ctx, child.ID)

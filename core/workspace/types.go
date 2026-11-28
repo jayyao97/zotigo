@@ -187,6 +187,7 @@ type ProjectDeleteImpact struct {
 }
 
 type SessionOrganization struct {
+	DeletedWorkspaceID  string     `json:"-"`
 	SessionID           string     `json:"session_id"`
 	ProjectID           *string    `json:"project_id"`
 	WorkspaceID         *string    `json:"workspace_id"`

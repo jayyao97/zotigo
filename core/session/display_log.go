@@ -144,16 +144,17 @@ type DisplayApprovalDecision struct {
 }
 
 type DisplayInteraction struct {
-	ID            string                       `json:"id,omitempty"`
-	Kind          string                       `json:"kind,omitempty"`
-	Status        string                       `json:"status,omitempty"`
-	TurnID        string                       `json:"turn_id,omitempty"`
-	ItemID        string                       `json:"item_id,omitempty"`
-	Requester     *DisplayInteractionRequester `json:"requester,omitempty"`
-	Questions     []DisplayInteractionQuestion `json:"questions,omitempty"`
-	Answers       map[string][]string          `json:"answers,omitempty"`
-	IsBlocking    bool                         `json:"is_blocking,omitempty"`
-	AutoResolveMS *uint64                      `json:"auto_resolve_ms,omitempty"`
+	ReplyAsMessage bool                         `json:"reply_as_message,omitempty"`
+	ID             string                       `json:"id,omitempty"`
+	Kind           string                       `json:"kind,omitempty"`
+	Status         string                       `json:"status,omitempty"`
+	TurnID         string                       `json:"turn_id,omitempty"`
+	ItemID         string                       `json:"item_id,omitempty"`
+	Requester      *DisplayInteractionRequester `json:"requester,omitempty"`
+	Questions      []DisplayInteractionQuestion `json:"questions,omitempty"`
+	Answers        map[string][]string          `json:"answers,omitempty"`
+	IsBlocking     bool                         `json:"is_blocking,omitempty"`
+	AutoResolveMS  *uint64                      `json:"auto_resolve_ms,omitempty"`
 }
 
 type DisplayInteractionRequester struct {
@@ -218,33 +219,42 @@ type DisplayContextCompaction struct {
 }
 
 type DisplayItem struct {
+	// Legacy Codex imports could date old messages at the instant of import.
+	// New writers preserve historical dates, including during index rebuilds.
+	ActivityTimeKnown bool `json:"activity_time_known,omitempty"`
 	// BeforeInputID keeps output from the interrupted generation before the
 	// steering input even when that output becomes durable after admission.
-	BeforeInputID     string                       `json:"before_input_id,omitempty"`
-	ID                string                       `json:"id"`
-	Sequence          uint64                       `json:"sequence"`
-	Type              DisplayItemType              `json:"type"`
-	Role              string                       `json:"role,omitempty"`
-	Content           []DisplayContentPart         `json:"content,omitempty"`
-	Subagent          *DisplaySubagent             `json:"subagent,omitempty"`
-	Turn              *DisplayTurn                 `json:"turn,omitempty"`
-	Approval          *DisplayApproval             `json:"approval,omitempty"`
-	Interaction       *DisplayInteraction          `json:"interaction,omitempty"`
-	Command           *DisplayCommand              `json:"command,omitempty"`
-	Profile           *DisplayProfileChange        `json:"profile,omitempty"`
-	ApprovalPolicy    *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
-	ToolExecution     *DisplayToolExecution        `json:"tool_execution,omitempty"`
-	ContextUsage      *DisplayContextUsage         `json:"context_usage,omitempty"`
-	Retry             *protocol.RequestRetry       `json:"retry,omitempty"`
-	ContextCompaction *DisplayContextCompaction    `json:"context_compaction,omitempty"`
-	Error             string                       `json:"error,omitempty"`
-	CreatedAt         time.Time                    `json:"created_at"`
-	LogOffset         int64                        `json:"-"`
+	BeforeInputID      string                       `json:"before_input_id,omitempty"`
+	FollowupQuestionID string                       `json:"followup_question_id,omitempty"`
+	ID                 string                       `json:"id"`
+	Sequence           uint64                       `json:"sequence"`
+	Type               DisplayItemType              `json:"type"`
+	Role               string                       `json:"role,omitempty"`
+	Content            []DisplayContentPart         `json:"content,omitempty"`
+	Subagent           *DisplaySubagent             `json:"subagent,omitempty"`
+	Turn               *DisplayTurn                 `json:"turn,omitempty"`
+	Approval           *DisplayApproval             `json:"approval,omitempty"`
+	Interaction        *DisplayInteraction          `json:"interaction,omitempty"`
+	Command            *DisplayCommand              `json:"command,omitempty"`
+	Profile            *DisplayProfileChange        `json:"profile,omitempty"`
+	ApprovalPolicy     *DisplayApprovalPolicyChange `json:"approval_policy,omitempty"`
+	ToolExecution      *DisplayToolExecution        `json:"tool_execution,omitempty"`
+	ContextUsage       *DisplayContextUsage         `json:"context_usage,omitempty"`
+	Retry              *protocol.RequestRetry       `json:"retry,omitempty"`
+	ContextCompaction  *DisplayContextCompaction    `json:"context_compaction,omitempty"`
+	Error              string                       `json:"error,omitempty"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	LogOffset          int64                        `json:"-"`
+}
+
+func (item DisplayItem) isDialogue() bool {
+	return item.Type == DisplayItemUserMessage || item.Type == DisplayItemAssistantMessage || item.Type == DisplayItemSteeringMessage
 }
 
 type DisplayPageQuery struct {
 	ContentKind  DisplayContentKind
 	IncludeTools bool
+	ExcludeTools bool
 	Limit        int
 	After        uint64
 	Before       uint64
@@ -260,10 +270,14 @@ type DisplayPage struct {
 }
 
 func PageDisplayItems(items []DisplayItem, query DisplayPageQuery) DisplayPage {
-	if query.ContentKind != "" {
+	if query.ContentKind != "" || query.ExcludeTools {
 		filtered := make([]DisplayItem, 0, len(items))
 		for _, item := range items {
-			if item.ContentKind() == query.ContentKind || query.IncludeTools && item.ContentKind() == DisplayContentTool {
+			kind := item.ContentKind()
+			if query.ExcludeTools && kind == DisplayContentTool {
+				continue
+			}
+			if query.ContentKind == "" || kind == query.ContentKind || query.IncludeTools && kind == DisplayContentTool {
 				filtered = append(filtered, item)
 			}
 		}

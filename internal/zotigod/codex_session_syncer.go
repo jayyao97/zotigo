@@ -140,7 +140,7 @@ func (s *codexSessionSyncer) syncSession(ctx context.Context, rpc codexapp.RPC, 
 	if err != nil {
 		return err
 	}
-	if err := codexworker.SyncCompletedTurns(ctx, s.items, meta.ID, turns); err != nil {
+	if err := codexworker.SyncCompletedTurns(ctx, s.items, meta.ID, snapshotUpdatedAt, turns); err != nil {
 		return err
 	}
 	updater, ok := s.store.(backendActivityUpdater)

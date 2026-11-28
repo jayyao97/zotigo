@@ -205,7 +205,7 @@ func (h *handler) forkSessionInWorkspace(ctx context.Context, targetID, sourceID
 		if readErr != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, readErr)
 		}
-		if err := codexworker.SyncCompletedTurns(ctx, h.items, targetID, turns); err != nil {
+		if err := codexworker.SyncCompletedTurns(ctx, h.items, targetID, source.UpdatedAt, turns); err != nil {
 			return nil, fmt.Errorf("%w: %v", errForkOutcomeUnknown, err)
 		}
 	} else {

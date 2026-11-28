@@ -479,3 +479,69 @@ profiles:
 		t.Fatal("failed edit changed file")
 	}
 }
+
+func TestSearchSettingsNormalizesGeneratedAnchorsAndKeepsKeysPrivate(t *testing.T) {
+	t.Setenv("TAVILY_API_KEY", "")
+	t.Setenv("DEEPSEEK_API_KEY", "")
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _, err := m.EnsureGlobalConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := "profiles:\n  first:\n    params: &id001 {mode: chat}\n  second:\n    params: *id001\ntools:\n  web:\n    timeout_sec: 17\n"
+	if err = os.WriteFile(path, []byte(data), 0600); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "fixture-search-secret"
+	change := ModelSettingsChange{Revision: snapshot.Revision, Action: "web_search", Search: &SearchSettingsChange{Provider: "deepseek", DeepSeekKey: &secret}}
+	saved, err := m.UpdateModelSettings(change)
+	if err != nil {
+		t.Fatal(err)
+	}
+	redacted, _ := json.Marshal(saved)
+	if !saved.Search.HasDeepSeekKey || strings.Contains(string(redacted), secret) {
+		t.Fatal("incorrect credential projection")
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil || strings.Contains(string(raw), "id001") || !strings.Contains(string(raw), "timeout_sec: 17") {
+		t.Fatal("unexpected search config serialization")
+	}
+	if _, err = m.UpdateModelSettings(change); !errors.Is(err, ErrModelSettingsConflict) {
+		t.Fatal("stale update accepted")
+	}
+	change.Revision = saved.Revision
+	change.Search = &SearchSettingsChange{Provider: "tavily"}
+	if _, err = m.UpdateModelSettings(change); err == nil {
+		t.Fatal("accepted explicit provider with no effective key")
+	}
+	clear := ""
+	change.Search = &SearchSettingsChange{Provider: "deepseek", DeepSeekKey: &clear}
+	if _, err = m.UpdateModelSettings(change); err == nil {
+		t.Fatal("cleared key for selected provider")
+	}
+	t.Setenv("TAVILY_API_KEY", "fixture-env-key")
+	change.Search = &SearchSettingsChange{Provider: "tavily"}
+	saved, err = m.UpdateModelSettings(change)
+	if err != nil || !saved.Search.HasDeepSeekKey {
+		t.Fatalf("omitted key was lost: %v", err)
+	}
+	change.Revision = saved.Revision
+	blank := " \t "
+	change.Search.DeepSeekKey = &blank
+	saved, err = m.UpdateModelSettings(change)
+	if err != nil || !saved.Search.HasDeepSeekKey {
+		t.Fatalf("whitespace-only input cleared stored key: %v", err)
+	}
+	change.Revision = saved.Revision
+	change.Search.DeepSeekKey = &clear
+	saved, err = m.UpdateModelSettings(change)
+	if err != nil || saved.Search.HasDeepSeekKey {
+		t.Fatalf("explicit clear failed: %v", err)
+	}
+
+}

@@ -53,6 +53,67 @@ func TestCompatibleExtensionsPreserveDev31MetadataAndQueueSequence(t *testing.T)
 	}
 }
 
+func TestBackfillSessionDialogueActivity(t *testing.T) {
+	ctx, root := t.Context(), t.TempDir()
+	db := testDatabase(t, root)
+	if err := Migrate(ctx, db, 15); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateExtensions(ctx, db, 6); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, db, `INSERT INTO sessions(id,working_directory,created_at,updated_at)
+		VALUES ('resumed','/',1,1),('newer','/',1,5),('empty','/',1,1);
+		INSERT INTO sessions(id,working_directory,agent,created_at,updated_at,backend_updated_at)
+		VALUES ('imported','/','codex',1,2,2);
+		INSERT INTO display_items(session_id,sequence,message_at,dialogue,offset,length)
+		VALUES ('resumed',1,3,1,0,10),('resumed',2,4,0,10,10),('newer',1,2,1,0,10),
+		('imported',1,9,1,0,10)`)
+	if err := ensureExtensions(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	for id, want := range map[string]int{"resumed": 3, "newer": 5, "empty": 1, "imported": 2} {
+		var got int
+		if err := db.QueryRow("SELECT updated_at FROM sessions WHERE id=?", id).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s updated_at=%d, want %d: %v", id, got, want, err)
+		}
+	}
+}
+
+func TestDetachedSessionProvenance(t *testing.T) {
+	ctx, root := t.Context(), t.TempDir()
+	db := testDatabase(t, root)
+	if err := Migrate(ctx, db, 15); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateExtensions(ctx, db, 7); err != nil {
+		t.Fatal(err)
+	}
+	execSQL(t, db, `INSERT INTO projects(id,name,storage_name,created_at,updated_at) VALUES('p','p','p',1,1);
+		INSERT INTO workspaces(id,project_id,title,storage_name,root_path,owner_nonce,status,deleted_at,created_at,updated_at)
+		VALUES('w','p','w','w','/work','nonce','deleted',10,1,10);
+		INSERT INTO sessions(id,working_directory,created_at,updated_at)
+		VALUES ('inside','/work/code',1,1),('unrelated','/work-other',1,1),('different-time','/work',1,1);
+		INSERT INTO session_organization(session_id,self_archived_at,created_at,updated_at,activity_at)
+		VALUES ('inside',3,1,10,1),('unrelated',10,1,10,1),('different-time',11,1,11,1)`)
+	if err := ensureExtensions(ctx, db); err != nil {
+		t.Fatal(err)
+	}
+	// Older daemons use this same delete transaction, irrespective of cwd.
+	execSQL(t, db, `INSERT INTO workspaces(id,project_id,title,storage_name,root_path,owner_nonce,status,created_at,updated_at)
+		VALUES('future','p','future','future','/future','nonce','deleting',1,20);
+		INSERT INTO sessions(id,working_directory,created_at,updated_at) VALUES('assigned','/elsewhere',1,1);
+		INSERT INTO session_organization(session_id,project_id,workspace_id,created_at,updated_at,activity_at)
+		VALUES ('assigned','p','future',1,1,1);
+		UPDATE session_organization SET workspace_id=NULL,project_id=NULL,self_archived_at=20,updated_at=20 WHERE session_id='assigned';`)
+	for id, want := range map[string]string{"inside": "w", "unrelated": "", "different-time": "", "assigned": "future"} {
+		var got string
+		if err := db.QueryRow("SELECT coalesce(deleted_workspace_id,'') FROM session_organization WHERE session_id=?", id).Scan(&got); err != nil || got != want {
+			t.Fatalf("origin of %s = %q, want %q: %v", id, got, want, err)
+		}
+	}
+}
+
 func TestExtensionFailureRollsBackOnlyTheIncompleteAddition(t *testing.T) {
 	ctx, root := context.Background(), t.TempDir()
 	db := testDatabase(t, root)

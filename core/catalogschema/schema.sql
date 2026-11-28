@@ -110,9 +110,17 @@ CREATE TABLE session_organization (
   created_at INTEGER NOT NULL,
   activity_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
+  deleted_workspace_id TEXT,
   CHECK((project_id IS NULL) = (workspace_id IS NULL)),
   CHECK((pinned_at IS NULL) = (pinned_position IS NULL))
 );
+
+CREATE TRIGGER record_deleted_session_workspace AFTER UPDATE OF workspace_id ON session_organization
+WHEN NEW.workspace_id IS NULL AND NEW.self_archived_at IS NOT NULL
+  AND EXISTS (SELECT 1 FROM workspaces WHERE id = OLD.workspace_id AND status = 'deleting')
+BEGIN
+  UPDATE session_organization SET deleted_workspace_id = OLD.workspace_id WHERE session_id = NEW.session_id;
+END;
 
 CREATE TABLE runtime_workspace_bindings (
   workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
@@ -158,7 +166,8 @@ CREATE TABLE sessions (
   capabilities TEXT NOT NULL DEFAULT '{}',
   last_prompt TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  dialogue_updated_at INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX idx_sessions_updated_at ON sessions(updated_at);
 CREATE INDEX idx_sessions_working_directory_updated_at ON sessions(working_directory, updated_at);
@@ -221,6 +230,7 @@ CREATE INDEX idx_session_input_queue ON session_input_queue(session_id, state, s
 
 CREATE TABLE completion_triggers (id TEXT PRIMARY KEY, session_id TEXT NOT NULL, payload TEXT NOT NULL, expires_at INTEGER NOT NULL, state TEXT NOT NULL CHECK(state IN ('pending','fired','cancelled')));
 CREATE INDEX completion_triggers_session ON completion_triggers(session_id,state,expires_at);
+CREATE INDEX completion_triggers_watch ON completion_triggers(json_extract(payload,'$.watch_session_id'),expires_at) WHERE state='pending' AND json_extract(payload,'$.watch_session_id') IS NOT NULL;
 
 CREATE TABLE turn_usage (
   session_id TEXT NOT NULL,
@@ -287,3 +297,8 @@ CREATE TABLE source_repository_migrations (
   next_attempt_at INTEGER NOT NULL DEFAULT 0,
   failure_count INTEGER NOT NULL DEFAULT 0
 );
+
+CREATE INDEX idx_sessions_activity_page ON sessions(updated_at DESC, id ASC);
+CREATE INDEX idx_session_organization_workspace_page ON session_organization(workspace_id, workspace_position, session_id);
+CREATE INDEX idx_session_read_state_unread ON session_read_state(session_id) WHERE version > read_version;
+CREATE INDEX idx_session_organization_workspace_seek ON session_organization(workspace_id, session_id);

@@ -1,7 +1,7 @@
 # Web search backends
 
 `web_search` supports Tavily and DeepSeek independently of the model profile.
-Configure the backend in `~/.zotigo/config.yaml` or the project's `zotigo.yaml`:
+Desktop, Web and mobile expose the host setting under **Settings → Models → Web search**. Saved keys appear as configured flags. An empty input keeps the stored key until you explicitly clear it. You can also configure the backend in `~/.zotigo/config.yaml` or the project's `zotigo.yaml`:
 
 ```yaml
 tools:

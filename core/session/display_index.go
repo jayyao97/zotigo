@@ -120,6 +120,7 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 	}
 	defer func() { _ = stmt.Close() }()
 	complete := false
+	var latestDialogue, latestKnownDialogue int64
 	for count := 0; count < 256; count++ {
 		line, readErr := reader.ReadBytes('\n')
 		if errors.Is(readErr, io.EOF) {
@@ -137,7 +138,13 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 		if err = json.Unmarshal(line, &item); err != nil {
 			return false, err
 		}
-		dialogue := item.Type == DisplayItemUserMessage || item.Type == DisplayItemAssistantMessage || item.Type == DisplayItemSteeringMessage
+		dialogue := item.isDialogue()
+		if dialogue {
+			latestDialogue = max(latestDialogue, item.CreatedAt.UnixNano())
+			if item.ActivityTimeKnown {
+				latestKnownDialogue = max(latestKnownDialogue, item.CreatedAt.UnixNano())
+			}
+		}
 		if _, err = stmt.ExecContext(ctx, id, item.Sequence, item.CreatedAt.UnixNano(), dialogue, offset, len(line), item.ContentKind(), item.ID, displaySearchText(item)); err != nil {
 			return false, err
 		}
@@ -154,6 +161,21 @@ func (s *FileStore) syncDisplayIndexBatch(ctx context.Context, id string) (bool,
 		offset += int64(len(line))
 	}
 	observedSize := int64(-1)
+	if latestDialogue > latestKnownDialogue {
+		var codex bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM sessions WHERE id=? AND agent='codex')`, id).Scan(&codex); err != nil {
+			return false, err
+		}
+		if codex {
+			latestDialogue = latestKnownDialogue
+		}
+	}
+	if latestDialogue != 0 {
+		if _, err = tx.ExecContext(ctx, `UPDATE sessions SET updated_at=max(updated_at,?), dialogue_updated_at=?
+			WHERE id=? AND dialogue_updated_at<?`, latestDialogue, latestDialogue, id, latestDialogue); err != nil {
+			return false, err
+		}
+	}
 	if complete || offset == info.Size() {
 		observedSize = info.Size()
 	}
@@ -221,6 +243,10 @@ func (s *FileStore) ReadDisplayPage(ctx context.Context, id string, query Displa
 	where, args := displayTimeSQL(window)
 	base := "session_id=?" + where
 	args = append([]any{id}, args...)
+	if query.ExcludeTools {
+		base += " AND content_kind<>?"
+		args = append(args, DisplayContentTool)
+	}
 	if query.ContentKind != "" {
 		if query.IncludeTools {
 			base += " AND content_kind IN (?,?)"

@@ -219,6 +219,20 @@ esac
 version=$(sed -n 's/^version=//p' "$FIXTURE_ROOT/current/INSTALLATION")
 printf '{"version":"%s","pid":%s}\n' "$version" "$FIXTURE_PID" > "$FIXTURE_RECEIPT"
 ''')
+        legacy = self.work / "apply.abc123"
+        legacy.mkdir()
+        (legacy / "old-current").symlink_to(self.root / "releases" / "old")
+        retained = []
+        for name, evidence in (("apply.fail01", "activation-failed"), ("apply.legacy", "stop-check")):
+            entry = self.work / name
+            entry.mkdir()
+            (entry / "old-current").symlink_to(self.root / "releases" / "old")
+            (entry / evidence).write_text("diagnostic")
+            retained.append(entry)
+        external = self.base / "unmanaged"
+        external.mkdir()
+        (external / "INSTALLATION").touch()
+        (self.root / "releases" / "external-link").symlink_to(external)
         for version in ("1.0.1", "1.0.2"):
             prepared = self.root / "prepared"
             prepared.mkdir(exist_ok=True)
@@ -227,6 +241,10 @@ printf '{"version":"%s","pid":%s}\n' "$version" "$FIXTURE_PID" > "$FIXTURE_RECEI
             self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
             self.assertIn("Update activated: desktop " + version, result.stdout)
             self.assertIn(version, (self.work / "started.json").read_text())
+            self.assertEqual({p for p in self.work.glob("apply.*") if p.is_dir()}, set(retained))
+            remaining = {entry for entry in (self.root / "releases").iterdir() if not entry.is_symlink()}
+            self.assertEqual(remaining, {(self.root / "current").resolve(), (self.root / "previous").resolve()})
+            self.assertTrue((external / "INSTALLATION").exists())
 
     def test_macos_waits_for_exit_and_retries_bootstrap(self):
         self.delayed_macos()
@@ -239,6 +257,7 @@ printf '{"version":"%s","pid":%s}\n' "$version" "$FIXTURE_PID" > "$FIXTURE_RECEI
     def test_macos_failed_activation_waits_and_verifies_rollback(self):
         self.delayed_macos()
         result = self.apply(FAIL_NEW_VERIFY="1")
+        self.assertEqual(len(list(self.work.glob("apply.*/activation-failed"))), 1)
         self.assertNotEqual(result.returncode, 0)
         self.assertEqual((self.root / "current" / "INSTALLATION").read_text(), "version=1.0.0\n")
         self.assertTrue(self.running.exists())

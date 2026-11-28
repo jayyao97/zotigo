@@ -82,7 +82,7 @@ func (i *sessionIndex) upsert(ctx context.Context, meta Metadata) error {
 			capabilities = excluded.capabilities,
 			last_prompt = excluded.last_prompt,
 			created_at = excluded.created_at,
-			updated_at = excluded.updated_at
+			updated_at = max(excluded.updated_at, sessions.dialogue_updated_at)
 	`, meta.ID, meta.WorkingDirectory, meta.Agent, meta.ProfileName, meta.Model, meta.ReasoningEffort,
 		meta.ConversationID, meta.BackendVersion, formatOptionalIndexTime(meta.BackendUpdatedAt), meta.BackendSyncVersion, meta.ApprovalPolicy, string(promptConfig), string(capabilities), meta.LastPrompt,
 		formatIndexTime(meta.CreatedAt), formatIndexTime(meta.UpdatedAt))

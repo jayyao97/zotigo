@@ -249,7 +249,7 @@ func (s codexTerminalState) matches(desired codexTerminalState) bool {
 	return !desired.hasCompletedAt || s.completedAt == desired.completedAt
 }
 
-func SyncCompletedTurns(ctx context.Context, items sessionlog.ItemSource, sessionID string, turns []Turn) error {
+func SyncCompletedTurns(ctx context.Context, items sessionlog.ItemSource, sessionID string, historyUpdatedAt time.Time, turns []Turn) error {
 	existing, _, err := items.LoadItems(ctx, sessionID)
 	if err != nil {
 		return fmt.Errorf("load display items: %w", err)
@@ -266,6 +266,18 @@ func SyncCompletedTurns(ctx context.Context, items sessionlog.ItemSource, sessio
 		}
 		buffer := &codexSyncBuffer{source: items, expectedSequence: expectedSequence}
 		createdAt := codexUnixTime(turn.StartedAt)
+		completedAt := codexUnixTime(turn.CompletedAt)
+		if createdAt.IsZero() {
+			createdAt = completedAt
+		}
+		if createdAt.IsZero() {
+			// Older threads can omit turn timestamps. Keep imported dialogue
+			// anchored to the history rather than the local time of import.
+			createdAt = historyUpdatedAt
+		}
+		if completedAt.IsZero() {
+			completedAt = createdAt
+		}
 		if !seen.startedTurns[turn.ID] {
 			if err := appendSyncedCodexItem(ctx, buffer, sessionID, zotigosession.DisplayItem{
 				ID: "codex-turn-started-" + turn.ID, Type: zotigosession.DisplayItemTurnStarted,
@@ -312,7 +324,7 @@ func SyncCompletedTurns(ctx context.Context, items sessionlog.ItemSource, sessio
 			if err := appendSyncedCodexItem(ctx, buffer, sessionID, zotigosession.DisplayItem{
 				ID: terminalID, Type: itemType, Error: errorText,
 				Turn:      &zotigosession.DisplayTurn{ID: turn.ID, Status: strings.ToLower(turn.Status), DurationMS: duration},
-				CreatedAt: codexUnixTime(turn.CompletedAt),
+				CreatedAt: completedAt,
 			}); err != nil {
 				buffer.cleanup()
 				return err
@@ -434,14 +446,21 @@ func syncCompletedCodexItem(ctx context.Context, items sessionlog.ItemSource, se
 			Content: content, Turn: &zotigosession.DisplayTurn{ID: turnID}, CreatedAt: createdAt,
 		}, seen)
 	case "agentMessage":
+		item.Text = item.questionText()
 		if seen.itemIDs[item.ID] || item.Text == "" {
 			return nil
 		}
+		var questionID string
+		if card := item.questionCard(turnID); card != nil {
+			// Keep completed questions searchable without recreating an input card.
+			questionID = card.Interaction.ID
+		}
 		return appendIndexedCodexItem(ctx, items, sessionID, zotigosession.DisplayItem{
 			ID: item.ID, Type: zotigosession.DisplayItemAssistantMessage, Role: string(protocol.RoleAssistant),
-			Content:   []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: item.Text}},
-			Turn:      &zotigosession.DisplayTurn{ID: turnID},
-			CreatedAt: createdAt,
+			FollowupQuestionID: questionID,
+			Content:            []zotigosession.DisplayContentPart{{Type: string(protocol.ContentTypeText), Text: item.Text}},
+			Turn:               &zotigosession.DisplayTurn{ID: turnID},
+			CreatedAt:          createdAt,
 		}, seen)
 	case "reasoning":
 		text := codexReasoningText(item)

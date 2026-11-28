@@ -202,24 +202,30 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 	if expectedTurnID == "" {
 		expectedTurnID = legacyTurnID
 	}
+	if command, ok := h.submitSteering(w, r, id, strings.TrimSpace(req.ClientMessageID), expectedTurnID, text, images); ok {
+		writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
+	}
+}
+
+func (h *handler) submitSteering(w http.ResponseWriter, r *http.Request, id, commandID, expectedTurnID, text string, images []sessionlog.MessageImage) (wire.Command, bool) {
 	if _, live := h.registry.Get(id); !live {
 		_, stored, err := h.storedSession(r.Context(), id)
 		if err != nil {
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("load session: %v", err))
-			return
+			return wire.Command{}, false
 		}
 		if !stored {
 			writeAPIError(w, http.StatusNotFound, "session not found")
-			return
+			return wire.Command{}, false
 		}
 		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
-		return
+		return wire.Command{}, false
 	}
 	if !h.workers.Has(id) {
 		writeAPIErrorCode(w, http.StatusConflict, "no_active_turn", "steering requires an active turn")
-		return
+		return wire.Command{}, false
 	}
-	command, err := h.acceptSessionInputCommand(r.Context(), id, strings.TrimSpace(req.ClientMessageID), text, images, nil, expectedTurnID, true, false, nil)
+	command, err := h.acceptSessionInputCommand(r.Context(), id, commandID, text, images, nil, expectedTurnID, true, false, nil)
 	if err != nil {
 		switch {
 		case errors.Is(err, errWorkerInputStopping):
@@ -243,9 +249,9 @@ func (h *handler) handleSessionSteering(w http.ResponseWriter, r *http.Request, 
 		default:
 			writeAPIError(w, http.StatusInternalServerError, fmt.Sprintf("append steering command: %v", err))
 		}
-		return
+		return wire.Command{}, false
 	}
-	writeAPIJSON(w, http.StatusCreated, publicCommandFromCommand(command))
+	return command, true
 }
 
 func (h *handler) writeSessionNotLiveOrMissing(w http.ResponseWriter, ctx context.Context, id string, message string) {

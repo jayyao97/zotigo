@@ -52,7 +52,7 @@ func TestSyncCompletedCodexTurnsDoesNotExposePartialTurnOnAppendFailure(t *testi
 	}
 	completedAt := time.Now().Unix()
 	startedAt := completedAt - 1
-	err := SyncCompletedTurns(context.Background(), source, "session-atomic", []Turn{{
+	err := SyncCompletedTurns(context.Background(), source, "session-atomic", time.Unix(100, 0), []Turn{{
 		ID: "turn-atomic", Status: "completed", StartedAt: &startedAt, CompletedAt: &completedAt,
 		Items: []ThreadItem{{ID: "message-atomic", Type: "agentMessage", Text: "must stay hidden"}},
 	}})
@@ -62,6 +62,31 @@ func TestSyncCompletedCodexTurnsDoesNotExposePartialTurnOnAppendFailure(t *testi
 	items, _, loadErr := source.LoadItems(context.Background(), "session-atomic")
 	if loadErr != nil || len(items) != 0 {
 		t.Fatalf("partial turn became visible: %#v, err=%v", items, loadErr)
+	}
+}
+
+func TestHistorySyncUsesHistoricalDatesWhenTurnStartIsMissing(t *testing.T) {
+	historyUpdated := time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC)
+	ended := historyUpdated.Add(-24 * time.Hour).Unix()
+	for _, end := range []*int64{&ended, nil} {
+		source := &sessionlogtest.ItemSource{Items: map[string][]zotigosession.DisplayItem{}}
+		turn := Turn{ID: "turn", Status: "completed", CompletedAt: end, Items: []ThreadItem{{ID: "input", Type: "agentMessage", Text: "old answer"}}}
+		if err := SyncCompletedTurns(t.Context(), source, "session", historyUpdated, []Turn{turn}); err != nil {
+			t.Fatal(err)
+		}
+		want := historyUpdated
+		if end != nil {
+			want = time.Unix(*end, 0)
+		}
+		items := source.Items["session"]
+		if len(items) != 3 {
+			t.Fatalf("got %d items", len(items))
+		}
+		for _, item := range items {
+			if !item.CreatedAt.Equal(want) {
+				t.Fatalf("%s time=%s want=%s", item.Type, item.CreatedAt, want)
+			}
+		}
 	}
 }
 
@@ -81,7 +106,7 @@ func TestSyncCompletedCodexTurnsRejectsConcurrentLiveAppend(t *testing.T) {
 		return nil
 	}
 	completedAt := time.Now().Unix()
-	err := SyncCompletedTurns(context.Background(), source, "session-race", []Turn{{
+	err := SyncCompletedTurns(context.Background(), source, "session-race", time.Unix(100, 0), []Turn{{
 		ID: "turn-race", Status: "completed", CompletedAt: &completedAt,
 		Items: []ThreadItem{{ID: "synced-item", Type: "agentMessage", Text: "history"}},
 	}})
@@ -113,10 +138,10 @@ func TestSyncCompletedCodexTurnsIsIdempotent(t *testing.T) {
 		Items: []ThreadItem{{ID: "assistant-1", Type: "agentMessage", Text: "Done."}},
 	}}
 	source := sessionlog.StoredItemSource{Store: store}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -137,10 +162,10 @@ func TestSyncCompletedCodexTurnsIsIdempotentWithoutCompletedAt(t *testing.T) {
 	}
 	turns := []Turn{{ID: "turn-1", Status: "interrupted"}}
 	source := sessionlog.StoredItemSource{Store: store}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -180,10 +205,10 @@ func TestSyncCompletedCodexTurnsBackfillsItemsAfterInterruptedTerminal(t *testin
 			{ID: "assistant-1", Type: "agentMessage", Text: "Late answer."},
 		},
 	}}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -225,7 +250,7 @@ func TestSyncCompletedCodexTurnsUsesClientIDForLocalSteering(t *testing.T) {
 		ID: "turn-1", Status: "completed", CompletedAt: &completedAt,
 		Items: []ThreadItem{{ID: "remote-steering", ClientID: &clientID, Type: "userMessage", Content: []any{map[string]any{"type": "text", "text": "more"}}}},
 	}}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -259,7 +284,7 @@ func TestSyncCompletedCodexTurnsMatchesPendingLocalUserWithoutClientID(t *testin
 		ID: "turn-1", Status: "completed", CompletedAt: &completedAt,
 		Items: []ThreadItem{{ID: "remote-user", Type: "userMessage", Content: []any{map[string]any{"type": "text", "text": "question"}}}},
 	}}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -374,7 +399,7 @@ func TestSyncCompletedCodexTurnsDoesNotDuplicateLocalUserPrompt(t *testing.T) {
 			{ID: "assistant-1", Type: "agentMessage", Text: "answer"},
 		},
 	}}
-	if err := SyncCompletedTurns(context.Background(), source, "session-1", turns); err != nil {
+	if err := SyncCompletedTurns(context.Background(), source, "session-1", time.Unix(100, 0), turns); err != nil {
 		t.Fatal(err)
 	}
 	items, _, err := store.ListDisplayItems(context.Background(), "session-1")
@@ -405,7 +430,7 @@ func TestSyncCompletedCodexTurnsPersistsGeneratedImage(t *testing.T) {
 		Items: []ThreadItem{{ID: "image-sync-1", Type: "imageGeneration", Status: "completed", Result: tinyPNGBase64()}},
 	}}
 	for range 2 {
-		if err := SyncCompletedTurns(context.Background(), source, "session-image-sync", turns); err != nil {
+		if err := SyncCompletedTurns(context.Background(), source, "session-image-sync", time.Unix(100, 0), turns); err != nil {
 			t.Fatal(err)
 		}
 	}

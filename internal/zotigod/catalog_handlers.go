@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -556,34 +557,55 @@ func projectOperationLockKey(projectID string) string {
 }
 
 func (h *handler) lockWorkspaceForUse(ctx context.Context, workspaceID string) (zotigoworkspace.Workspace, func(), error) {
-	workspace, err := h.catalog.GetWorkspace(ctx, workspaceID)
-	if err != nil {
-		return zotigoworkspace.Workspace{}, func() {}, err
+	spaces, release, err := h.lockSessionWorkspaces(ctx, workspaceID)
+	return spaces[workspaceID], release, err
+}
+
+// Acquire every project lock before its workspace locks. Sorting and deduplicating
+// keeps simultaneous A→B and B→A creates compatible with project lifecycle operations.
+func (h *handler) lockSessionWorkspaces(ctx context.Context, ids ...string) (map[string]zotigoworkspace.Workspace, func(), error) {
+	sort.Strings(ids)
+	ids = slices.Compact(ids)
+	var projects []string
+	for _, id := range ids {
+		ws, err := h.catalog.GetWorkspace(ctx, id)
+		if err != nil {
+			return nil, func() {}, err
+		}
+		projects = append(projects, ws.ProjectID)
 	}
-	unlocks := []func(){
-		h.workspaceOps.lock(projectOperationLockKey(workspace.ProjectID)),
-		h.workspaceOps.lock(workspace.ID),
+	sort.Strings(projects)
+	var unlocks []func()
+	for _, project := range slices.Compact(projects) {
+		unlocks = append(unlocks, h.workspaceOps.lock(projectOperationLockKey(project)))
+	}
+	for _, id := range ids {
+		unlocks = append(unlocks, h.workspaceOps.lock(id))
 	}
 	release := func() {
-		for index := len(unlocks) - 1; index >= 0; index-- {
-			unlocks[index]()
+		for i := len(unlocks) - 1; i >= 0; i-- {
+			unlocks[i]()
 		}
 	}
-	workspace, err = h.catalog.GetWorkspace(ctx, workspaceID)
-	if err != nil {
-		release()
-		return zotigoworkspace.Workspace{}, func() {}, err
+	spaces := make(map[string]zotigoworkspace.Workspace, len(ids))
+	for _, id := range ids {
+		ws, err := h.catalog.GetWorkspace(ctx, id)
+		if err != nil {
+			release()
+			return nil, func() {}, err
+		}
+		project, err := h.catalog.GetProject(ctx, ws.ProjectID)
+		if err != nil {
+			release()
+			return nil, func() {}, err
+		}
+		if project.Status != zotigoworkspace.ProjectStatusActive {
+			release()
+			return nil, func() {}, fmt.Errorf("%w: project is %s", zotigoworkspace.ErrConflict, project.Status)
+		}
+		spaces[id] = ws
 	}
-	project, err := h.catalog.GetProject(ctx, workspace.ProjectID)
-	if err != nil {
-		release()
-		return zotigoworkspace.Workspace{}, func() {}, err
-	}
-	if project.Status != zotigoworkspace.ProjectStatusActive {
-		release()
-		return zotigoworkspace.Workspace{}, func() {}, fmt.Errorf("%w: project is %s", zotigoworkspace.ErrConflict, project.Status)
-	}
-	return workspace, release, nil
+	return spaces, release, nil
 }
 
 func (h *handler) lockProjectLifecycle(ctx context.Context, projectID string) (func(), bool, error) {

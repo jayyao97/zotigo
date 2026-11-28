@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -8,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/spf13/viper"
+	"gopkg.in/yaml.v3"
 )
 
 const (
@@ -147,26 +149,44 @@ func (m *Manager) EnsureGlobalConfig() (path string, created bool, err error) {
 		return path, false, fmt.Errorf("failed to create config directory: %w", err)
 	}
 
-	err = configWriter(DefaultConfig()).SafeWriteConfigAs(path)
-	if err == nil {
-		return path, true, nil
-	}
-	var alreadyExists viper.ConfigFileAlreadyExistsError
-	if errors.As(err, &alreadyExists) || os.IsExist(err) {
+	if _, err = os.Lstat(path); err == nil {
 		return path, false, nil
+	} else if !os.IsNotExist(err) {
+		return path, false, err
 	}
-	return path, false, fmt.Errorf("failed to write config file: %w", err)
+	data, err := encodeConfigYAML(DefaultConfig())
+	if err != nil {
+		return path, false, err
+	}
+	file, err := os.CreateTemp(filepath.Dir(path), ".config-*")
+	if err != nil {
+		return path, false, err
+	}
+	defer func() { _ = os.Remove(file.Name()) }()
+	_, err = file.Write(data)
+	if err = errors.Join(err, file.Close()); err != nil {
+		return path, false, err
+	}
+	// Publish a fully written template only if the destination is still absent.
+	if err = os.Link(file.Name(), path); os.IsExist(err) {
+		return path, false, nil
+	} else if err != nil {
+		return path, false, err
+	}
+	return path, true, nil
 }
 
-func configWriter(cfg *Config) *viper.Viper {
-	writer := viper.NewWithOptions(viper.KeyDelimiter("::"))
-	writer.SetConfigType("yaml")
-	writer.Set("default_profile", cfg.DefaultProfile)
-	writer.Set("profiles", cfg.Profiles)
-	writer.Set("security", cfg.Security)
-	writer.Set("ui", cfg.UI)
-	writer.Set("tools", cfg.Tools)
-	return writer
+func encodeConfigYAML(value any) ([]byte, error) {
+	var output bytes.Buffer
+	encoder := yaml.NewEncoder(&output)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(value); err != nil {
+		return nil, err
+	}
+	if err := encoder.Close(); err != nil {
+		return nil, err
+	}
+	return output.Bytes(), nil
 }
 
 func (m *Manager) GetConfigPath() (string, error) {
