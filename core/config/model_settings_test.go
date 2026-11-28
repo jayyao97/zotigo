@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"gopkg.in/yaml.v3"
 )
 
 func TestModelSettingsPreservesSecretsAndUneditedYAML(t *testing.T) {
@@ -613,5 +615,53 @@ tools:
 `
 	if string(data) != want {
 		t.Fatalf("config.yaml =\n%s\nwant\n%s", data, want)
+	}
+}
+
+// A configuration written entirely in flow style unfolds when saved, keeping
+// its other values and comments.
+func TestModelSettingsUnfoldsAFlowStyleDocument(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := "# Managed by hand\n{default_profile: demo, profiles: {demo: {provider: openai, model: old, api_key: keep-me}}, ui: {theme: light}} # trailing\n"
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	profile := ModelSettingsProfile{Name: "demo", Provider: "openai", Model: "new"}
+	if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: profile}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `# Managed by hand
+default_profile: demo
+profiles:
+  demo:
+    provider: openai
+    model: new
+    api_key: keep-me
+ui: {theme: light}
+
+# trailing
+`
+	if string(data) != want {
+		t.Fatalf("config.yaml =\n%s\nwant\n%s", data, want)
+	}
+	var cfg Config
+	if err := yaml.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Profiles["demo"].Model != "new" || cfg.Profiles["demo"].APIKey != "keep-me" || cfg.UI.Theme != "light" {
+		t.Fatalf("loaded %+v", cfg)
 	}
 }

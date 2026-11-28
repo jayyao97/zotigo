@@ -400,6 +400,17 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 		return ModelSettings{}, err
 	}
 	root := doc.Content[0]
+	// A flow-style root keeps everything inside it on one line, however its
+	// children are styled; written documents use block style throughout. A
+	// comment after the closing brace has no line of its own in block style,
+	// so it moves to the end of the document instead of being dropped.
+	if root.Style&yaml.FlowStyle != 0 {
+		root.Style &^= yaml.FlowStyle
+		if root.LineComment != "" {
+			root.FootComment = strings.TrimSpace(root.FootComment + "\n" + root.LineComment)
+			root.LineComment = ""
+		}
+	}
 	var profiles *yaml.Node
 	if change.Action != "web_search" {
 		profiles, err = localModelMapping(root, "profiles")
