@@ -545,3 +545,73 @@ func TestSearchSettingsNormalizesGeneratedAnchorsAndKeepsKeysPrivate(t *testing.
 	}
 
 }
+
+// Saved profiles read like hand-written ones: one field per line in the usual
+// order. A profile an earlier version saved on one line unfolds when edited.
+func TestModelSettingsWritesBlockYAMLInProfileOrder(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	m := NewManager()
+	path, _ := m.GetConfigPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		t.Fatal(err)
+	}
+	original := `default_profile: manual
+profiles:
+  manual:
+    provider: openai
+    model: gpt-manual
+    params:
+      mode: response
+  folded: {thinking_level: medium, provider: gemini, model: gemini-old, base_url: 'https://example.com/'}
+`
+	if err := os.WriteFile(path, []byte(original), 0600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := m.ReadModelSettings()
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := "secret-key"
+	created := ModelSettingsProfile{Name: "created", Provider: "gemini", Model: "gemini-new", BaseURL: "https://example.com/", ThinkingLevel: "medium", ContextWindow: 512000}
+	if s, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "create", Profile: created, APIKey: &key}); err != nil {
+		t.Fatal(err)
+	}
+	folded := ModelSettingsProfile{Name: "folded", Provider: "gemini", Model: "gemini-next", BaseURL: "https://example.com/", ThinkingLevel: "medium"}
+	if s, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: folded}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "web_search", Search: &SearchSettingsChange{Provider: "tavily", TavilyKey: &key}}); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `default_profile: manual
+profiles:
+  manual:
+    provider: openai
+    model: gpt-manual
+    params:
+      mode: response
+  folded:
+    thinking_level: medium
+    provider: gemini
+    model: gemini-next
+    base_url: 'https://example.com/'
+  created:
+    provider: gemini
+    model: gemini-new
+    api_key: secret-key
+    base_url: https://example.com/
+    thinking_level: medium
+    context_window: 512000
+tools:
+  web:
+    search_provider: tavily
+    tavily_api_key: secret-key
+`
+	if string(data) != want {
+		t.Fatalf("config.yaml =\n%s\nwant\n%s", data, want)
+	}
+}

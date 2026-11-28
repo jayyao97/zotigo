@@ -159,8 +159,10 @@ func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
 				return nil, fmt.Errorf("%s is inherited from a YAML merge without its own anchor; edit the shared definition in the configuration file", key)
 			}
 			parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, node)
-		} else if err := setModelNode(parent, key, map[string]any{}); err != nil {
-			return nil, err
+		} else {
+			// Not setModelNode(parent, key, map[string]any{}): an encoded empty
+			// map is flow style, and every field added later stayed on its line.
+			parent.Content = append(parent.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Value: key}, &yaml.Node{Kind: yaml.MappingNode, Tag: "!!map"})
 		}
 		node = modelNode(parent, key)
 	}
@@ -176,6 +178,9 @@ func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
 	if node.Kind != yaml.MappingNode {
 		return nil, fmt.Errorf("%s must be a mapping", key)
 	}
+	// Written mappings use block style like a hand-edited file, which also
+	// unfolds profiles that earlier versions saved on a single line.
+	node.Style &^= yaml.FlowStyle
 	return node, nil
 }
 
@@ -472,17 +477,28 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 		}
 		p := change.Profile
 		previous := cfg.Profiles[name]
-		previousValues := map[string]any{"provider": previous.Provider, "model": previous.Model, "base_url": previous.BaseURL, "thinking_level": previous.ThinkingLevel, "context_window": previous.ContextWindow, "max_output_tokens": previous.MaxOutputTokens}
-		for key, value := range map[string]any{"provider": p.Provider, "model": p.Model, "base_url": p.BaseURL, "thinking_level": p.ThinkingLevel, "context_window": p.ContextWindow, "max_output_tokens": p.MaxOutputTokens} {
-			if reflect.DeepEqual(previousValues[key], value) {
+		apiKey := previous.APIKey
+		if change.APIKey != nil {
+			apiKey = *change.APIKey
+		}
+		// New fields are appended in the order people write profiles by hand;
+		// existing fields keep their place.
+		for _, field := range []struct {
+			key             string
+			value, previous any
+		}{
+			{"provider", p.Provider, previous.Provider},
+			{"model", p.Model, previous.Model},
+			{"api_key", apiKey, previous.APIKey},
+			{"base_url", p.BaseURL, previous.BaseURL},
+			{"thinking_level", p.ThinkingLevel, previous.ThinkingLevel},
+			{"context_window", p.ContextWindow, previous.ContextWindow},
+			{"max_output_tokens", p.MaxOutputTokens, previous.MaxOutputTokens},
+		} {
+			if reflect.DeepEqual(field.previous, field.value) {
 				continue
 			}
-			if err = setModelNode(old, key, value); err != nil {
-				return ModelSettings{}, err
-			}
-		}
-		if change.APIKey != nil && *change.APIKey != previous.APIKey {
-			if err = setModelNode(old, "api_key", *change.APIKey); err != nil {
+			if err = setModelNode(old, field.key, field.value); err != nil {
 				return ModelSettings{}, err
 			}
 		}
