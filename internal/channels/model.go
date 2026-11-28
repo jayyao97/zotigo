@@ -3,10 +3,13 @@ package channels
 import (
 	"context"
 	"errors"
+	"regexp"
 	"time"
 
 	"github.com/jayyao97/zotigo/core/protocol"
 )
+
+var cotDomainPattern = regexp.MustCompile(`(?i)^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$`)
 
 const ProviderFeishu = "feishu"
 
@@ -101,6 +104,7 @@ type Connection struct {
 	ReviewAllTools       bool        `json:"review_all_tools"`
 	ProgressMode         string      `json:"progress_mode"`
 	ProgressDetail       string      `json:"progress_detail"`
+	COTDomain            string      `json:"cot_domain"`
 	BindAliases          []BindAlias `json:"bind_aliases"`
 	CreatedAt            time.Time   `json:"created_at"`
 	UpdatedAt            time.Time   `json:"updated_at"`
@@ -123,6 +127,7 @@ type ConnectionInput struct {
 	ProgressMode         string    `json:"progress_mode"`
 	ProgressDetail       string    `json:"progress_detail,omitempty"`
 	// Nil keeps the saved aliases.
+	COTDomain   *string      `json:"cot_domain,omitempty"`
 	BindAliases *[]BindAlias `json:"bind_aliases,omitempty"`
 }
 

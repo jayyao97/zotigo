@@ -260,6 +260,27 @@ func TestOwnerBindsGroupToSharedSession(t *testing.T) {
 	}
 }
 
+func TestConnectionCOTDomain(t *testing.T) {
+	service, _, _, _, ctx := startBindingService(t, nil)
+	domain := "cot.example.org"
+	input := ConnectionInput{Provider: ProviderFeishu, Name: "Bot", AppID: "app", COTDomain: &domain}
+	for _, step := range []struct {
+		value *string
+		want  string
+	}{{&domain, domain}, {nil, domain}, {new(string), ""}} {
+		input.COTDomain = step.value
+		saved, err := service.PutConnection(ctx, "connection-1", input)
+		if err != nil || saved.COTDomain != step.want {
+			t.Fatalf("domain %q: got %q, err %v", step.want, saved.COTDomain, err)
+		}
+	}
+	domain = "https://cot.example.org/path"
+	input.COTDomain = &domain
+	if _, err := service.PutConnection(ctx, "connection-1", input); err == nil {
+		t.Fatal("accepted URL instead of hostname")
+	}
+}
+
 func TestBindAliasesAndProgressDetailAreValidated(t *testing.T) {
 	service, _, _, _, ctx := startBindingService(t, nil)
 	secret := "secret"

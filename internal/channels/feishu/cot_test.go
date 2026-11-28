@@ -33,9 +33,21 @@ func (f *fakeCOTAPI) Complete(_ context.Context, _ channels.DeliveryReceipt, rea
 	return nil
 }
 
+func TestCOTDomain(t *testing.T) {
+	for domain, want := range map[string]string{"": "fsopen.bytedance.net", "cot.example.org": "cot.example.org"} {
+		client := newCOTClient(nil, domain)
+		if client.endpoint != "https://"+want+"/open-apis/im/v1/message_cot" {
+			t.Fatalf("unexpected endpoint %q", client.endpoint)
+		}
+	}
+
+}
+
+const testCOTEndpoint = "https://cot.example.org/open-apis/im/v1/message_cot"
+
 func TestCOTClientUsesDocumentedCreateContract(t *testing.T) {
-	client := &cotClient{do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
-		if req.HttpMethod != http.MethodPost || req.ApiPath != cotEndpoint || req.QueryParams.Get("receive_id_type") != "chat_id" {
+	client := &cotClient{endpoint: testCOTEndpoint, do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+		if req.HttpMethod != http.MethodPost || req.ApiPath != testCOTEndpoint || req.QueryParams.Get("receive_id_type") != "chat_id" {
 			t.Fatalf("request=%+v", req)
 		}
 		body := req.Body.(map[string]any)
@@ -54,7 +66,7 @@ func TestCOTClientUsesDocumentedCreateContract(t *testing.T) {
 }
 
 func TestCOTClientCreatesDirectCarrierOutsideThread(t *testing.T) {
-	client := &cotClient{do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+	client := &cotClient{endpoint: testCOTEndpoint, do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
 		body := req.Body.(map[string]any)
 		if body["origin_message_id"] != "om_test" || body["reply_in_thread"] != false {
 			t.Fatalf("body=%+v", body)
@@ -72,11 +84,11 @@ func TestCOTClientCreatesDirectCarrierOutsideThread(t *testing.T) {
 
 func TestCOTClientBatchesAppendAndUsesDocumentedCompleteContract(t *testing.T) {
 	calls := 0
-	client := &cotClient{do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+	client := &cotClient{endpoint: testCOTEndpoint, do: func(_ context.Context, req *larkcore.ApiReq) (*larkcore.ApiResp, error) {
 		calls++
 		switch calls {
 		case 1, 2:
-			if req.HttpMethod != http.MethodPut || req.ApiPath != cotEndpoint {
+			if req.HttpMethod != http.MethodPut || req.ApiPath != testCOTEndpoint {
 				t.Fatalf("append request=%+v", req)
 			}
 			body := req.Body.(map[string]any)
@@ -89,7 +101,7 @@ func TestCOTClientBatchesAppendAndUsesDocumentedCompleteContract(t *testing.T) {
 				t.Fatalf("append body=%+v", body)
 			}
 		case 3:
-			if req.HttpMethod != http.MethodPost || req.ApiPath != cotEndpoint+"/complete/:cot_id" || req.PathParams.Get("cot_id") != "cot-1" || req.QueryParams.Get("message_id") != "om-cot" || req.QueryParams.Get("reason") != "error" {
+			if req.HttpMethod != http.MethodPost || req.ApiPath != testCOTEndpoint+"/complete/:cot_id" || req.PathParams.Get("cot_id") != "cot-1" || req.QueryParams.Get("message_id") != "om-cot" || req.QueryParams.Get("reason") != "error" {
 				t.Fatalf("complete request=%+v", req)
 			}
 		default:
@@ -162,7 +174,7 @@ func TestAutoFallsBackOnlyOnDefiniteCOTRejection(t *testing.T) {
 
 func TestAutoDoesNotFallbackOnStructuredServerError(t *testing.T) {
 	replies := 0
-	api := &cotClient{do: func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+	api := &cotClient{endpoint: testCOTEndpoint, do: func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error) {
 		return &larkcore.ApiResp{StatusCode: http.StatusServiceUnavailable, RawBody: []byte(`{"code":230001,"msg":"temporarily unavailable"}`)}, nil
 	}}
 	adapter := &Adapter{
@@ -184,7 +196,7 @@ func TestAutoDoesNotFallbackOnStructuredServerError(t *testing.T) {
 
 func TestAutoDoesNotFallbackOnSuccessfulHTTPBusinessError(t *testing.T) {
 	replies := 0
-	api := &cotClient{do: func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error) {
+	api := &cotClient{endpoint: testCOTEndpoint, do: func(context.Context, *larkcore.ApiReq) (*larkcore.ApiResp, error) {
 		return &larkcore.ApiResp{StatusCode: http.StatusOK, RawBody: []byte(`{"code":230001,"msg":"not enabled"}`)}, nil
 	}}
 	adapter := &Adapter{
