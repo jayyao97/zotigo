@@ -180,8 +180,31 @@ func localModelMapping(parent *yaml.Node, key string) (*yaml.Node, error) {
 	}
 	// Written mappings use block style like a hand-edited file, which also
 	// unfolds profiles that earlier versions saved on a single line.
-	node.Style &^= yaml.FlowStyle
+	for i := 0; i+1 < len(parent.Content); i += 2 {
+		if parent.Content[i+1] == node {
+			keyNode := parent.Content[i]
+			unfoldMapping(node, func(comment string) { keyNode.LineComment = joinComments(keyNode.LineComment, comment) })
+		}
+	}
 	return node, nil
+}
+
+// unfoldMapping switches a flow mapping to block style. A comment after its
+// closing brace has no line of its own in block style; keep moves it where it
+// still reads in its place rather than dropping it.
+func unfoldMapping(node *yaml.Node, keep func(comment string)) {
+	if node.Style&yaml.FlowStyle == 0 {
+		return
+	}
+	node.Style &^= yaml.FlowStyle
+	if node.LineComment != "" {
+		keep(node.LineComment)
+		node.LineComment = ""
+	}
+}
+
+func joinComments(first, second string) string {
+	return strings.TrimSpace(first + "\n" + second)
 }
 
 // A shared anchor may be used outside the profile, including in unknown fields.
@@ -401,16 +424,9 @@ func (m *Manager) UpdateModelSettings(change ModelSettingsChange) (ModelSettings
 	}
 	root := doc.Content[0]
 	// A flow-style root keeps everything inside it on one line, however its
-	// children are styled; written documents use block style throughout. A
-	// comment after the closing brace has no line of its own in block style,
-	// so it moves to the end of the document instead of being dropped.
-	if root.Style&yaml.FlowStyle != 0 {
-		root.Style &^= yaml.FlowStyle
-		if root.LineComment != "" {
-			root.FootComment = strings.TrimSpace(root.FootComment + "\n" + root.LineComment)
-			root.LineComment = ""
-		}
-	}
+	// children are styled. Its trailing comment moves to the end of the
+	// document, ahead of the comments that followed it there.
+	unfoldMapping(root, func(comment string) { doc.FootComment = joinComments(comment, doc.FootComment) })
 	var profiles *yaml.Node
 	if change.Action != "web_search" {
 		profiles, err = localModelMapping(root, "profiles")

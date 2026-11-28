@@ -665,3 +665,56 @@ ui: {theme: light}
 		t.Fatalf("loaded %+v", cfg)
 	}
 }
+
+// Unfolding a one-line mapping keeps the comment after it: a value's comment
+// stays on its key's line, and the root's stays ahead of the lines below it.
+func TestModelSettingsUnfoldingKeepsCommentsInPlace(t *testing.T) {
+	for _, test := range []struct{ name, original, want string }{
+		{"profile", "profiles:\n  demo: {provider: openai, model: old} # 保留这条备注\n", `profiles:
+  demo: # 保留这条备注
+    provider: openai
+    model: new
+`},
+		{"profiles", "profiles: {demo: {provider: openai, model: old}} # 备注\n", `profiles: # 备注
+  demo:
+    provider: openai
+    model: new
+`},
+		{"root", "{default_profile: demo, profiles: {demo: {provider: openai, model: old}}} # A\n# B\n", `default_profile: demo
+profiles:
+  demo:
+    provider: openai
+    model: new
+
+# A
+# B
+`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			m := NewManager()
+			path, _ := m.GetConfigPath()
+			if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(path, []byte(test.original), 0600); err != nil {
+				t.Fatal(err)
+			}
+			s, err := m.ReadModelSettings()
+			if err != nil {
+				t.Fatal(err)
+			}
+			profile := ModelSettingsProfile{Name: "demo", Provider: "openai", Model: "new"}
+			if _, err = m.UpdateModelSettings(ModelSettingsChange{Revision: s.Revision, Action: "save", Profile: profile}); err != nil {
+				t.Fatal(err)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(data) != test.want {
+				t.Fatalf("config.yaml =\n%s\nwant\n%s", data, test.want)
+			}
+		})
+	}
+}
